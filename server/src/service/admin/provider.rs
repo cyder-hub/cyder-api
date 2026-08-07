@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::controller::BaseError;
+use crate::database::model::Model;
 use crate::database::provider::{
     BootstrapProviderInput, BootstrapProviderResult, NewProvider, NewProviderApiKey, Provider,
     ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
@@ -13,8 +15,11 @@ use crate::database::upstream_source::{
     NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource,
 };
 use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+use crate::service::admin::model::load_cache_model_snapshots;
+use crate::service::cache::types::{CacheModel, CacheProvider};
 use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
+use crate::service::source_selector::{select_source, select_source_with_sources};
 use crate::service::vertex::invalidate_vertex_token;
 use crate::utils::ID_GENERATOR;
 
@@ -52,6 +57,41 @@ pub struct UpstreamSourceUpdateInput {
     pub use_proxy: Option<bool>,
     pub is_enabled: Option<bool>,
     pub is_default: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SourceImpactAction {
+    Disable,
+    Delete,
+    SetDefault,
+    UnsetDefault,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceImpactProtocolSummary {
+    pub downstream_protocol: crate::schema::enum_def::DownstreamProtocol,
+    pub selection_changed_count: usize,
+    pub would_become_unselectable_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceImpactReport {
+    pub action: SourceImpactAction,
+    pub provider_id: i64,
+    pub source_id: i64,
+    pub inherit_all_model_count: usize,
+    pub explicit_binding_model_count: usize,
+    pub explicit_default_model_count: usize,
+    pub protocols: Vec<SourceImpactProtocolSummary>,
+}
+
+fn remove_simulated_source_bindings(snapshots: &mut HashMap<i64, CacheModel>, source_id: i64) {
+    for snapshot in snapshots.values_mut() {
+        snapshot
+            .source_bindings
+            .retain(|binding| binding.source_id != source_id);
+    }
 }
 
 #[derive(Clone)]
@@ -290,6 +330,125 @@ impl ProviderAdminService {
         ])
         .await?;
         Ok(())
+    }
+
+    pub fn preview_source_impact(
+        &self,
+        provider_id: i64,
+        source_id: i64,
+        action: SourceImpactAction,
+    ) -> Result<SourceImpactReport, BaseError> {
+        let provider = Provider::get_by_id(provider_id)?;
+        if !provider
+            .upstream_sources
+            .iter()
+            .any(|source| source.id == source_id)
+        {
+            return Err(BaseError::NotFound(Some(format!(
+                "upstream source {source_id} not found for provider {provider_id}"
+            ))));
+        }
+
+        let models = Model::list_by_provider_id(provider_id)?;
+        let snapshots = load_cache_model_snapshots(&models)?;
+        let cache_provider = CacheProvider::from(provider.clone());
+        let mut simulated_sources = cache_provider.upstream_sources.clone();
+        let mut simulated_snapshots = snapshots.clone();
+        match action {
+            SourceImpactAction::Disable => {
+                let source = simulated_sources
+                    .iter_mut()
+                    .find(|source| source.id == source_id)
+                    .expect("validated source should exist in simulation");
+                source.is_enabled = false;
+                source.is_default = false;
+            }
+            SourceImpactAction::Delete => {
+                simulated_sources.retain(|source| source.id != source_id);
+                remove_simulated_source_bindings(&mut simulated_snapshots, source_id);
+            }
+            SourceImpactAction::SetDefault => {
+                for source in &mut simulated_sources {
+                    source.is_default = source.id == source_id;
+                    if source.id == source_id {
+                        source.is_enabled = true;
+                    }
+                }
+            }
+            SourceImpactAction::UnsetDefault => {
+                let source = simulated_sources
+                    .iter_mut()
+                    .find(|source| source.id == source_id)
+                    .expect("validated source should exist in simulation");
+                source.is_default = false;
+            }
+        }
+
+        let mut inherit_all_model_count = 0;
+        let mut explicit_binding_model_count = 0;
+        let mut explicit_default_model_count = 0;
+        for model in &models {
+            if model.source_selection_mode == "INHERIT_ALL" {
+                inherit_all_model_count += 1;
+            } else if model.source_selection_mode == "EXPLICIT" {
+                explicit_binding_model_count += 1;
+                if snapshots.get(&model.id).is_some_and(|snapshot| {
+                    snapshot
+                        .source_bindings
+                        .iter()
+                        .any(|binding| binding.is_default)
+                }) {
+                    explicit_default_model_count += 1;
+                }
+            }
+        }
+
+        let protocols = crate::schema::enum_def::DownstreamProtocol::ALL
+            .into_iter()
+            .map(|downstream_protocol| {
+                let mut selection_changed_count = 0;
+                let mut would_become_unselectable_count = 0;
+                for model in &models {
+                    let Some(cache_model) = snapshots.get(&model.id) else {
+                        continue;
+                    };
+                    let before = select_source(&cache_provider, cache_model, downstream_protocol)
+                        .ok()
+                        .map(|selection| selection.source.id);
+                    let after = select_source_with_sources(
+                        &cache_provider,
+                        simulated_snapshots
+                            .get(&model.id)
+                            .expect("simulated snapshot should exist for loaded model"),
+                        downstream_protocol,
+                        &simulated_sources,
+                    )
+                    .ok()
+                    .map(|selection| selection.source.id);
+                    if before != after {
+                        selection_changed_count += 1;
+                    }
+                    if before.is_some() && after.is_none() {
+                        would_become_unselectable_count += 1;
+                    }
+                }
+                SourceImpactProtocolSummary {
+                    downstream_protocol,
+                    selection_changed_count,
+                    would_become_unselectable_count,
+                }
+            })
+            .collect();
+
+        Ok(SourceImpactReport {
+            action,
+            provider_id,
+            source_id,
+            inherit_all_model_count,
+            explicit_binding_model_count,
+            explicit_default_model_count,
+            protocols,
+        })
     }
 
     pub async fn create_provider_api_key(
@@ -775,5 +934,32 @@ mod tests {
                     .expect("non-empty provider credentials should remain opaque");
             assert!(!secret.expose().is_empty());
         }
+    }
+
+    #[test]
+    fn deleting_a_source_removes_its_bindings_from_the_simulated_snapshots() {
+        let mut snapshots = HashMap::from([(
+            1,
+            CacheModel {
+                id: 1,
+                provider_id: 2,
+                model_name: "model".to_string(),
+                real_model_name: None,
+                cost_catalog_id: None,
+                source_selection_mode: "EXPLICIT".to_string(),
+                source_bindings: vec![
+                    crate::service::source_selector::source_binding(10, true),
+                    crate::service::source_selector::source_binding(20, false),
+                ],
+                is_enabled: true,
+            },
+        )]);
+
+        remove_simulated_source_bindings(&mut snapshots, 10);
+
+        assert_eq!(
+            snapshots[&1].source_bindings,
+            vec![crate::service::source_selector::source_binding(20, false)]
+        );
     }
 }

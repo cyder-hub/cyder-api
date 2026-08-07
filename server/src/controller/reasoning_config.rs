@@ -274,7 +274,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     use crate::database::TestDbContext;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
     use crate::database::upstream_source::NewUpstreamSource;
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
@@ -317,16 +317,7 @@ mod tests {
     }
 
     fn seed_model(provider_id: i64, model_name: &str) -> Model {
-        seed_model_with_capabilities(provider_id, model_name, ModelCapabilityFlags::default())
-    }
-
-    fn seed_model_with_capabilities(
-        provider_id: i64,
-        model_name: &str,
-        capabilities: ModelCapabilityFlags,
-    ) -> Model {
-        Model::create(provider_id, model_name, None, true, capabilities)
-            .expect("model seed should succeed")
+        Model::create(provider_id, model_name, None, true).expect("model seed should succeed")
     }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
@@ -688,17 +679,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_reasoning_config_preview_uses_model_reasoning_capability() {
-        let test_db_context = TestDbContext::new_sqlite(
-            "controller-reasoning-config-model-preview-capability.sqlite",
-        );
+    async fn model_reasoning_config_preview_does_not_gate_on_model_capability_flags() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-reasoning-config-model-preview-runtime.sqlite");
 
         test_db_context
             .run_async(async {
-                let provider = seed_provider(50301, "model-preview-capability");
-                let mut capabilities = ModelCapabilityFlags::default();
-                capabilities.supports_reasoning = false;
-                let model = seed_model_with_capabilities(provider.id, "plain-model", capabilities);
+                let provider = seed_provider(50301, "model-preview-runtime");
+                let model = seed_model(provider.id, "plain-model");
                 let app_state = create_test_app_state(test_db_context.clone()).await;
 
                 let provider_response = send(
@@ -739,14 +727,9 @@ mod tests {
                 assert_eq!(preview_body["data"]["upstream_protocol"], "OPENAI");
                 assert!(preview_body["data"].get("target_api_type").is_none());
                 assert_eq!(high["enabled"], true);
-                assert_eq!(high["runtime_supported"], false);
-                assert!(high["generated_patches"].as_array().unwrap().is_empty());
-                assert!(
-                    high["unsupported_reason"]
-                        .as_str()
-                        .unwrap()
-                        .contains("capability")
-                );
+                assert_eq!(high["runtime_supported"], true);
+                assert!(!high["generated_patches"].as_array().unwrap().is_empty());
+                assert!(high["unsupported_reason"].is_null());
             })
             .await;
     }

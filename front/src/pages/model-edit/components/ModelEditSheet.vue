@@ -37,6 +37,7 @@ import CostEditorSheet from "@/pages/cost/CostEditorSheet.vue";
 import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
 import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./ModelBaseInfoForm.vue";
+import ModelSourceConfigEditor from "@/components/model-source-config/ModelSourceConfigEditor.vue";
 import ModelRequestPatchPanel from "./ModelRequestPatchPanel.vue";
 import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
@@ -66,14 +67,22 @@ const {
   isSaving,
   modelDetail,
   editingData,
+  providerSources,
+  sourceConfigSummary,
+  sourceConfigDraft,
+  isSourceConfigDirty,
+  isSourceConfigSaving,
+  sourceConfigError,
+  sourceConfigExplain,
   costManager,
-  capabilityItems,
   currentProvider,
   selectedCatalog,
   selectedCatalogVersions,
   reasoningActions,
   fetchData,
   handleSaveModel,
+  handleSaveSourceConfig,
+  handleExplainSourceConfig,
   handleReasoningConfigSaved,
   handleRuntimeFeatureConfigSaved,
   handleOpenSelectedCostCatalog,
@@ -96,8 +105,27 @@ const onSaveAndClose = async () => {
   const saved = await handleSaveModel();
   if (!saved || !editingData.value) return;
 
-  emit("saved", { ...editingData.value });
+  // The footer is the aggregate Save action for this drawer. Persist the
+  // independently editable Source Config before closing so its draft cannot
+  // be replaced by fetchData() on the next open.
+  const sourceConfigSaved = await handleSaveSourceConfig();
+  if (!sourceConfigSaved || !editingData.value) return;
+
+  emit("saved", {
+    ...editingData.value,
+    source_config: sourceConfigSummary.value ?? undefined,
+  });
   isOpen.value = false;
+};
+
+const onSaveSourceConfig = async () => {
+  const saved = await handleSaveSourceConfig();
+  if (!saved || !editingData.value) return;
+
+  emit("saved", {
+    ...editingData.value,
+    source_config: sourceConfigSummary.value ?? undefined,
+  });
 };
 </script>
 
@@ -148,7 +176,19 @@ const onSaveAndClose = async () => {
             </div>
           </section>
 
-          <ModelBaseInfoForm v-model:editingData="editingData" :capability-items="capabilityItems" />
+          <ModelBaseInfoForm v-model:editingData="editingData" />
+
+          <ModelSourceConfigEditor
+            v-model="sourceConfigDraft"
+            :sources="providerSources"
+            :summary="sourceConfigSummary"
+            :explain="sourceConfigExplain"
+            :dirty="isSourceConfigDirty"
+            :saving="isSourceConfigSaving"
+            :error="sourceConfigError"
+            @save="onSaveSourceConfig"
+            @explain="handleExplainSourceConfig"
+          />
 
           <div class="border-t border-gray-200 pt-5">
             <ReasoningConfigPanel
@@ -156,7 +196,6 @@ const onSaveAndClose = async () => {
               :owner-id="editingData.id"
               :actions="reasoningActions"
               :title="t('modelEditPage.advancedConfig.title')"
-              :model-supports-reasoning="editingData.supports_reasoning"
               @saved="handleReasoningConfigSaved"
             >
               <template #runtime-feature>

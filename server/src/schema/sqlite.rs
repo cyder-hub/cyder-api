@@ -238,14 +238,21 @@ diesel::table! {
         cost_catalog_id -> Nullable<BigInt>,
         model_name -> Text,
         real_model_name -> Nullable<Text>,
-        supports_streaming -> Bool,
-        supports_tools -> Bool,
-        supports_reasoning -> Bool,
-        supports_image_input -> Bool,
-        supports_embeddings -> Bool,
-        supports_rerank -> Bool,
+        source_selection_mode -> Text,
         is_enabled -> Bool,
         deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Bool};
+
+    model_source_binding (model_id, source_id) {
+        model_id -> BigInt,
+        source_id -> BigInt,
+        is_default -> Bool,
         created_at -> BigInt,
         updated_at -> BigInt,
     }
@@ -336,6 +343,7 @@ diesel::table! {
         provider_api_key_id -> Nullable<BigInt>,
         model_id -> Nullable<BigInt>,
         source_id -> Nullable<BigInt>,
+        source_selection_reason -> Nullable<Text>,
         provider_key_snapshot -> Nullable<Text>,
         provider_name_snapshot -> Nullable<Text>,
         model_name_snapshot -> Nullable<Text>,
@@ -465,6 +473,8 @@ diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
+diesel::joinable!(model_source_binding -> model (model_id));
+diesel::joinable!(model_source_binding -> upstream_source (source_id));
 diesel::joinable!(manager_totp_recovery_code -> manager_credential (manager_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
 diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
@@ -497,6 +507,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     metric_ingested_request_log,
     metric_request_rollup_minute,
     model,
+    model_source_binding,
     provider,
     provider_api_key,
     reasoning_config,

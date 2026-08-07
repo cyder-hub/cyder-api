@@ -37,6 +37,7 @@ pub mod manager_credential;
 pub mod manager_totp_recovery_code;
 pub mod metrics;
 pub mod model;
+pub mod model_source_binding;
 pub mod provider;
 pub mod provider_runtime;
 pub mod reasoning_config;

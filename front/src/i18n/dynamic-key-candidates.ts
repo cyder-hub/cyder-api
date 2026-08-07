@@ -145,11 +145,29 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
     valueSource: "front/src/pages/api-key/components/ApiKeyEditDialog.vue",
   },
   {
-    id: "model-capabilities",
-    keyTemplates: ["{capability.labelKey}"],
-    values: [],
+    id: "model-source-config-warnings",
+    keyTemplates: [
+      "modelSourceConfig.warnings.{warning}",
+      "modelSourceConfig.warnings.{warning}Description",
+    ],
+    values: [
+      "invalid_mode_binding_state",
+      "explicit_empty",
+      "no_visible_source",
+      "no_enabled_source",
+      "model_default_unavailable",
+    ],
+    placeholders: {
+      warning: [
+        "invalid_mode_binding_state",
+        "explicit_empty",
+        "no_visible_source",
+        "no_enabled_source",
+        "model_default_unavailable",
+      ],
+    },
     valueSource:
-      "MODEL_CAPABILITY_ITEMS and provider edit capability item labelKey values",
+      "front/src/components/model-source-config/ModelSourceConfigEditor.vue warning summary",
   },
   {
     id: "cost-options",

@@ -12,9 +12,12 @@ use crate::{
             CacheModel, CacheModelsCatalog, CacheProvider, CacheReasoningConfig,
             CacheUpstreamSource,
         },
+        source_selector::select_source as select_model_source,
     },
 };
 use cyder_tools::log::error;
+
+pub use crate::service::source_selector::SourceSelectionReason;
 
 use super::super::{
     reasoning_suffix::{ReasoningPatchContext, generate_reasoning_patches},
@@ -41,21 +44,6 @@ pub struct ExecutionTarget {
     pub reasoning_preset: Option<ReasoningPreset>,
     pub reasoning_suffix: Option<String>,
     pub runtime_features: TargetRuntimeFeatures,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceSelectionReason {
-    ProtocolMatch,
-    DefaultTransform,
-}
-
-impl SourceSelectionReason {
-    pub fn as_key(self) -> &'static str {
-        match self {
-            Self::ProtocolMatch => "protocol_match",
-            Self::DefaultTransform => "default_transform",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +244,15 @@ fn build_direct_execution_plan(
                 requested_name
             ))
         })?;
-    let (selected_source, selection_reason) = select_source(&provider, downstream_protocol)?;
+    let selection =
+        select_model_source(&provider, &model, downstream_protocol).map_err(|error| {
+            ExecutionPlanBuildError::ProviderConfiguration(format!(
+                "source selection failed: {}",
+                error.failure.as_key()
+            ))
+        })?;
+    let selected_source = selection.source;
+    let selection_reason = selection.reason;
     // Freeze the selected source before resolving Provider/Model-scoped runtime
     // configuration so every later stage observes the same execution entry.
     let upstream_source = Arc::new(selected_source);
@@ -285,72 +281,6 @@ fn build_direct_execution_plan(
             runtime_features,
         },
     })
-}
-
-fn downstream_wire_family(protocol: DownstreamProtocol) -> UpstreamProtocol {
-    match protocol {
-        DownstreamProtocol::Openai => UpstreamProtocol::Openai,
-        DownstreamProtocol::Responses => UpstreamProtocol::Responses,
-        DownstreamProtocol::Anthropic => UpstreamProtocol::Anthropic,
-        DownstreamProtocol::Gemini => UpstreamProtocol::Gemini,
-    }
-}
-
-fn select_source(
-    provider: &CacheProvider,
-    downstream_protocol: DownstreamProtocol,
-) -> Result<(CacheUpstreamSource, SourceSelectionReason), ExecutionPlanBuildError> {
-    let mut family_counts = std::collections::HashMap::<UpstreamProtocol, usize>::new();
-    let mut default_count = 0usize;
-    for source in &provider.upstream_sources {
-        let family = determine_upstream_protocol(source);
-        *family_counts.entry(family).or_default() += 1;
-        if source.is_default {
-            default_count += 1;
-        }
-    }
-    if family_counts.values().any(|count| *count > 1) || default_count > 1 {
-        return Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
-            "Provider '{}' has duplicate active Source family/default state",
-            provider.provider_key
-        )));
-    }
-
-    let desired_family = downstream_wire_family(downstream_protocol);
-    let exact = provider
-        .upstream_sources
-        .iter()
-        .filter(|source| source.is_enabled && determine_upstream_protocol(source) == desired_family)
-        .cloned()
-        .collect::<Vec<_>>();
-    match exact.as_slice() {
-        [source] => return Ok((source.clone(), SourceSelectionReason::ProtocolMatch)),
-        [] => {}
-        _ => {
-            return Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
-                "Provider '{}' has multiple enabled Sources for downstream protocol {:?}",
-                provider.provider_key, downstream_protocol
-            )));
-        }
-    }
-
-    let defaults = provider
-        .upstream_sources
-        .iter()
-        .filter(|source| source.is_enabled && source.is_default)
-        .cloned()
-        .collect::<Vec<_>>();
-    match defaults.as_slice() {
-        [source] => Ok((source.clone(), SourceSelectionReason::DefaultTransform)),
-        [] => Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
-            "Provider '{}' has no enabled Source matching downstream protocol {:?} and no enabled default Source",
-            provider.provider_key, downstream_protocol
-        ))),
-        _ => Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
-            "Provider '{}' has multiple enabled default Sources",
-            provider.provider_key
-        ))),
-    }
 }
 
 pub(crate) fn target_supports_reasoning_preset(
@@ -556,6 +486,28 @@ pub(crate) async fn build_execution_plan(
 }
 
 #[cfg(test)]
+fn select_source(
+    provider: &CacheProvider,
+    downstream_protocol: DownstreamProtocol,
+) -> Result<(CacheUpstreamSource, SourceSelectionReason), ExecutionPlanBuildError> {
+    let model = CacheModel {
+        id: 1,
+        provider_id: provider.id,
+        model_name: "test-model".to_string(),
+        real_model_name: None,
+        cost_catalog_id: None,
+        source_selection_mode: "INHERIT_ALL".to_string(),
+        source_bindings: Vec::new(),
+        is_enabled: true,
+    };
+    let selection =
+        select_model_source(provider, &model, downstream_protocol).map_err(|error| {
+            ExecutionPlanBuildError::ProviderConfiguration(error.failure.as_key().to_string())
+        })?;
+    Ok((selection.source, selection.reason))
+}
+
+#[cfg(test)]
 mod execution_plan_error_tests {
     use super::{
         ExecutionPlanBuildError, SourceSelectionReason, build_execution_plan_from_catalog,
@@ -602,12 +554,8 @@ mod execution_plan_error_tests {
             model_name: "gemini-2.5-flash".to_string(),
             real_model_name: None,
             cost_catalog_id: None,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_reasoning: true,
-            supports_image_input: true,
-            supports_embeddings: false,
-            supports_rerank: false,
+            source_selection_mode: "INHERIT_ALL".to_string(),
+            source_bindings: vec![],
             is_enabled: true,
         });
         catalog
@@ -737,7 +685,7 @@ mod execution_plan_error_tests {
         let (selected, reason) =
             select_source(&provider, DownstreamProtocol::Openai).expect("default should apply");
         assert_eq!(selected.id, 42);
-        assert_eq!(reason, SourceSelectionReason::DefaultTransform);
+        assert_eq!(reason, SourceSelectionReason::ProviderDefaultTransform);
     }
 
     #[test]

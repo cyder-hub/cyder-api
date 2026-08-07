@@ -151,7 +151,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     use crate::database::TestDbContext;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::upstream_source::NewUpstreamSource;
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
@@ -190,14 +190,7 @@ mod tests {
     }
 
     fn seed_model(provider_id: i64, model_name: &str) -> Model {
-        Model::create(
-            provider_id,
-            model_name,
-            None,
-            true,
-            ModelCapabilityFlags::default(),
-        )
-        .expect("model seed should succeed")
+        Model::create(provider_id, model_name, None, true).expect("model seed should succeed")
     }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {

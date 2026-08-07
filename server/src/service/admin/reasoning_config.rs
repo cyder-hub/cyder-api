@@ -288,7 +288,6 @@ impl ReasoningConfigAdminService {
                 upstream_protocol,
                 model_id: None,
                 model_name: None,
-                supports_reasoning: true,
             },
         ))
     }
@@ -314,7 +313,6 @@ impl ReasoningConfigAdminService {
                 upstream_protocol,
                 model_id: None,
                 model_name: None,
-                supports_reasoning: true,
             },
         ))
     }
@@ -417,7 +415,8 @@ impl ReasoningConfigAdminService {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
         let upstream_protocol = preview_protocol_for_provider(&provider)?;
-        let cache_model = CacheModel::from(model);
+        let cache_model =
+            CacheModel::from_db(model).map_err(|error| BaseError::DatabaseFatal(Some(error)))?;
         let config = model_config_response(model_id)?;
         Ok(build_preview_response(
             config,
@@ -434,7 +433,8 @@ impl ReasoningConfigAdminService {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
         let upstream_protocol = preview_protocol_for_provider(&provider)?;
-        let cache_model = CacheModel::from(model);
+        let cache_model =
+            CacheModel::from_db(model).map_err(|error| BaseError::DatabaseFatal(Some(error)))?;
         let config = model_draft_config_response(&cache_model, input)?;
         Ok(build_preview_response(
             config,
@@ -969,7 +969,7 @@ fn reasoning_config_audit_event(
 mod tests {
     use crate::controller::BaseError;
     use crate::database::TestDbContext;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
     use crate::database::reasoning_config::ReasoningConfig;
     use crate::database::upstream_source::{NewUpstreamSource, UpstreamSource};
@@ -1009,14 +1009,7 @@ mod tests {
     }
 
     fn seed_model(provider_id: i64, model_name: &str) -> Model {
-        Model::create(
-            provider_id,
-            model_name,
-            None,
-            true,
-            ModelCapabilityFlags::default(),
-        )
-        .expect("model seed should succeed")
+        Model::create(provider_id, model_name, None, true).expect("model seed should succeed")
     }
 
     fn preset(preset_key: &str) -> ReasoningConfigPresetAdminInput {

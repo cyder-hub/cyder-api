@@ -463,10 +463,16 @@
         "source": "Executed Source",
         "sourceId": "Source ID",
         "sourceEndpoint": "Source Endpoint",
+        "selectionReason": "Source Selection Reason",
+        "selectionReasonUnknown": "Unknown (legacy record or no selected Source)",
         "model": "Model",
         "realModel": "Real Model",
         "downstreamProtocol": "Downstream Protocol",
         "upstreamProtocol": "Upstream Protocol",
+        "transform": "Transform",
+        "transformDirect": "Direct wire family",
+        "transformRequired": "Gateway transform required",
+        "transformUnknown": "Unknown",
         "clientIp": "Client IP",
         "clientRequestId": "Client Request ID (caller-provided)",
         "stream": "Stream",
@@ -762,17 +768,74 @@
       "provider": "Provider",
       "model": "Model",
       "realModel": "Real Model",
-      "capabilities": "Capabilities",
+      "sourceConfig": "Source Config",
       "enabled": "Enabled"
-    }
+    },
+    "sourceWarnings": "{count} warning(s)"
   },
-  "modelCapabilities": {
-    "streaming": "Streaming",
-    "tools": "Tools",
-    "reasoning": "Reasoning",
-    "imageInput": "Image Input",
-    "embeddings": "Embeddings",
-    "rerank": "Rerank"
+  "modelSourceConfig": {
+    "title": "Source Config",
+    "helpLabel": "Source Config help",
+    "description": "Choose whether this model follows every visible Source or an explicit, closed Source set. Source selection is deterministic and does not retry another Source after execution starts.",
+    "modeLabel": "Selection mode",
+    "modePlaceholder": "Select a Source selection mode",
+    "modes": {
+      "inheritAll": { "label": "Inherit all Sources" },
+      "explicit": { "label": "Explicit Source set" }
+    },
+    "modeHint": {
+      "inheritAll": "New visible Sources become available automatically. The Provider default is the only fallback after an exact protocol match is unavailable.",
+      "explicit": "Only the checked Sources are available. The model default is the only fallback; an empty set is a valid fail-closed state."
+    },
+    "inheritAllFutureSources": "INHERIT_ALL keeps future non-deleted Sources in scope. Disabled Sources remain visible for governance but are ignored by runtime selection until enabled.",
+    "explicitSourcesTitle": "Declared Sources",
+    "explicitSourcesDescription": "Select Sources and optionally mark one selected Source as the model default. Disabled Sources may remain declared and will be ignored until re-enabled.",
+    "sourceCount": "{count} declared",
+    "selectSource": "Select Source {id}",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "selected": "Declared for this model",
+    "notSelected": "Not declared",
+    "default": "Model default",
+    "makeDefault": "Make default",
+    "clearDefault": "Clear default",
+    "noSources": "No visible Sources are available for this Provider.",
+    "actions": {
+      "explain": "Explain selection"
+    },
+    "warnings": {
+      "invalid_mode_binding_state": "Invalid config",
+      "invalid_mode_binding_stateDescription": "The saved mode and binding state disagree. Review and save a complete Source Config.",
+      "explicit_empty": "Explicit empty",
+      "explicit_emptyDescription": "No Source is declared. Requests for this model fail closed before credentials or network access.",
+      "no_visible_source": "No visible Source",
+      "no_visible_sourceDescription": "The Provider currently has no non-deleted Source visible to this model.",
+      "no_enabled_source": "No enabled Source",
+      "no_enabled_sourceDescription": "Declared Sources exist, but none are enabled for runtime selection.",
+      "model_default_unavailable": "Default unavailable",
+      "model_default_unavailableDescription": "The model default is declared but currently disabled. It will become usable if the Source is enabled again."
+    },
+    "explain": {
+      "title": "Selection explain",
+      "selected": "Selected before runtime validation",
+      "unselectable": "No Source can be selected",
+      "transformRequired": "Transform required",
+      "executionStatus": "Execution diagnostic",
+      "executionReason": "Execution diagnostic reason",
+      "yes": "yes",
+      "no": "no"
+    },
+    "modeConfirm": {
+      "title": "Change Source selection mode?",
+      "toExplicit": "The current visible Sources will be copied into the explicit draft. Future Sources will not be included automatically.",
+      "toInheritAll": "The explicit bindings will be cleared from the draft. All future visible Sources will be included after saving.",
+      "confirm": "Apply mode change"
+    },
+    "alert": {
+      "saveSuccess": "Source Config saved successfully.",
+      "saveFailed": "Failed to save Source Config: {error}",
+      "explainFailed": "Failed to explain Source selection: {error}"
+    }
   },
   "reasoningConfigPanel": {
     "titles": {
@@ -1179,17 +1242,9 @@
       "providerNotSavedForModelDelete": "Provider not saved, cannot delete model from backend.",
       "deleteModelFailed": "Failed to delete model: {error}",
       "deleteApiKeyFailed": "Failed to delete API Key: {error}",
-      "fetchRemoteModelsFailed": "Failed to fetch remote models: {error}",
-      "noRemoteModels": "Could not get models from remote, or the list is empty.",
-      "newModelsAdded": "{count} new models added from {source}.",
-      "noNewModels": "No new models to add. All remote models may already exist.",
-      "noNewModelsFromSource": "No new models from {source}. All discovered models may already exist.",
-      "uncommittedCleared": "Uncommitted models have been cleared.",
-      "noUncommittedToClear": "No uncommitted models to clear.",
       "noModels": "No models available.",
       "noApiKeys": "No API Keys available.",
       "apiKeySaveSuccess": "API Key saved successfully.",
-      "modelSaveSuccess": "Model saved successfully.",
       "modelDeleteSuccess": "Model deleted successfully.",
       "providerIdNotFound": "Provider ID not found.",
       "apiKeyDeleteSuccess": "API Key deleted successfully.",
@@ -1197,21 +1252,9 @@
       "noApiKeyForCheck": "At least one API Key must be saved to perform a model check.",
       "noModelForCheck": "At least one model must be saved to perform an API key check.",
       "noSourceForCheck": "At least one Source must be saved before a check can be performed.",
-      "sourceRequiredForCheck": "Select a concrete Source before running a check.",
-      "noSourceForModel": "At least one Source must be saved before remote model discovery.",
-      "discoveryInheritanceWarning": "Discovery uses {source}; imported models remain Provider-owned and are not Source-bound.",
-      "checking": "Performing check...",
       "checkSuccess": "Check successful. The connection is valid.",
       "checkFailed": "Check failed: {error}",
-      "buttonCheckAll": "Check All",
-      "noModelsToCheck": "No saved models to check.",
-      "noApiKeysToCheck": "No saved API keys to check.",
-      "batchChecking": "Performing batch check for {type}...",
-      "checkSuccessShort": "Check successful.",
-      "batchCheckComplete": "Batch check complete: {success}/{total} successful for {type}.",
-      "apiKeyNameFallback": "Key ending in ...{lastKeyChars}",
-      "checkTypeModels": "Models",
-      "checkTypeApiKeys": "API Keys"
+      "apiKeyNameFallback": "Key ending in ...{lastKeyChars}"
     },
     "sections": {
       "quickStart": {
@@ -1232,25 +1275,18 @@
       },
       "advanced": {
         "title": "Advanced",
-        "description": "Manage extra API keys, more models, request patches, and remote model sync here."
+        "description": "Manage extra API keys, more models, request patches, and runtime checks here."
       },
       "advancedConfig": {
         "title": "Reasoning",
         "description": "Manage reasoning suffixes and callback repair for this provider.",
         "scopeDescription": "Reasoning, runtime features, and request patches are temporary global Provider/Model settings here; they are not bound to a Source."
       },
-      "modelsDescription": "Edit model name, mapped model name, capabilities, and enabled state inline. Full configuration still lives in ModelEdit."
+      "modelsDescription": "Edit model name, mapped model name, Source Config summary, and enabled state inline. Full configuration still lives in ModelEdit."
     },
-    "modelCapabilities": {
-      "title": "Capabilities"
-    },
-    "sourceSelection": {
-      "title": "Source for upstream actions",
-      "description": "Choose the concrete Source used by model discovery and checks. The selection is required and is never inferred from the Provider default.",
-      "label": "Selected Source",
-      "placeholder": "Select a Source",
-      "warning": "The selected Source is sent as source_id. Changing the default Source does not change this selection.",
-      "empty": "No Source is available. Add and enable a Source before running upstream actions."
+    "modelSourceConfig": {
+      "title": "Source Config",
+      "warningCount": "{count} warning(s)"
     },
     "preview": {
       "title": "Identity Preview",
@@ -1283,33 +1319,11 @@
       "reveal": "Reveal",
       "revealTitle": "Revealed Provider Credential",
       "revealConfirm": "Confirm this plaintext reveal. When authenticator verification is enabled, submit a fresh code before decryption.",
-      "checkDraft": "Check Draft",
       "secretLocalOnly": "The plaintext is kept only in this dialog and is cleared when it closes.",
       "providerOwnership": "Credentials belong to the Logical Provider. Every Source for this Provider uses this shared credential pool; Source-level credentials are not supported before 1.0.",
       "mutationSuccess": "Provider credential updated.",
       "mutationFailed": "The credential operation failed: {error}. The saved state was refreshed because runtime activation may have failed after persistence.",
       "revealFailed": "Failed to reveal provider credential: {error}"
-    },
-    "modalSelectModel": {
-      "title": "Select Model for Check",
-      "description": "Please select a model to perform the check with the selected API key.",
-      "target": "Selected API key: {target}",
-      "selectPlaceholder": "Select a model"
-    },
-    "modalSelectApiKey": {
-      "title": "Select API Key for Check",
-      "description": "Please select an API key to perform the check with the selected model.",
-      "target": "Selected model: {target}",
-      "selectPlaceholder": "Select an API key"
-    },
-    "modalSourceCheck": {
-      "title": "Check a Source",
-      "description": "Select both a saved model and a saved credential for this Source. The check will use exactly the Source shown below.",
-      "source": "Source: {target}",
-      "modelLabel": "Model",
-      "modelPlaceholder": "Select a model",
-      "apiKeyLabel": "Credential",
-      "apiKeyPlaceholder": "Select a credential"
     },
     "requestPatch": {
       "title": "Request Patches",
@@ -1409,10 +1423,7 @@
     "tableHeaderMappedModelId": "Mapped Model ID",
     "placeholderModelId": "e.g., gpt-3.5-turbo",
     "placeholderMappedModelId": "e.g., azure-gpt-35 (optional)",
-    "buttonSaveModel": "Save Model",
     "buttonAddModel": "Add Model",
-    "buttonFetchRemote": "Fetch Remote Models",
-    "buttonClearUncommitted": "Clear Uncommitted",
     "sectionApiKeys": "API Keys",
     "tableHeaderApiKey": "API Key",
     "tableHeaderDescription": "Description",
@@ -1458,11 +1469,32 @@
       "updateSuccess": "Source updated successfully.",
       "deleteSuccess": "Source deleted successfully.",
       "saveFailed": "Failed to save Source: {error}",
-      "deleteFailed": "Failed to delete Source: {error}"
+      "deleteFailed": "Failed to delete Source: {error}",
+      "impactUnavailable": "Source impact preview failed: {error}. You may still continue after reviewing the normal confirmation.",
+      "impactDescription": "{changed} protocol selection(s) change; {unselectable} become unselectable. INHERIT_ALL models: {inheritAll}; explicit binding models: {explicit}; explicit defaults: {defaults}. Per protocol changed/unselectable: {protocols}",
+      "confirmDisable": "Disable Source {target}?",
+      "confirmDisableFallback": "Disabling this Source may make some models unavailable.",
+      "confirmSetDefault": "Set Source {target} as the Provider default?",
+      "confirmSetDefaultFallback": "This changes the Provider default used by INHERIT_ALL models.",
+      "confirmUnsetDefault": "Unset the Provider default for Source {target}?",
+      "confirmUnsetDefaultFallback": "INHERIT_ALL models may become unavailable when no default can satisfy a request.",
+      "confirmDeleteFallback": "Deleting this Source hides it from runtime selection and may affect model availability."
+    },
+    "checkDialog": {
+      "title": "Choose check targets",
+      "description": "Only enabled Sources, models, and credentials are selected automatically. The row you opened remains the fixed target, even when disabled.",
+      "sourceLabel": "Source",
+      "sourcePlaceholder": "Select an enabled Source",
+      "modelLabel": "Model",
+      "modelPlaceholder": "Select an enabled saved model",
+      "apiKeyLabel": "Provider Key",
+      "apiKeyPlaceholder": "Select an enabled Provider Key"
     }
   },
   "modelEditPage": {
     "title": "Edit Model",
+    "createTitle": "Create Model",
+    "createDescription": "Create the model and its Source Config together. You can refine either part independently later.",
     "loading": "Loading model data...",
     "buttonBackToModels": "Back to Model Library",
     "buttonBackToProviders": "View Providers",
@@ -1476,10 +1508,6 @@
     "labelModelName": "Model Name",
     "labelRealModelName": "Real Model Name",
     "labelEnabled": "Enabled",
-    "capabilities": {
-      "title": "Model Capabilities",
-      "description": "Explicit runtime capabilities used to validate and materialize requests. Keep them aligned with actual provider behavior."
-    },
     "advancedConfig": {
       "title": "Reasoning",
       "description": "Manage reasoning suffixes and callback repair for this model."
@@ -1489,7 +1517,9 @@
       "loadDataFailed": "Failed to load model data for ID: {modelId}.",
       "nameRequired": "Model Name cannot be empty.",
       "updateSuccess": "Model updated successfully.",
-      "saveFailed": "Failed to save model: {error}"
+      "saveFailed": "Failed to save model: {error}",
+      "createSuccess": "Model created successfully.",
+      "createFailed": "Failed to create model: {error}"
     },
     "priceSection": {
       "title": "Cost Catalog",

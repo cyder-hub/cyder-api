@@ -12,6 +12,82 @@ x-cyder-web-security-client-identity-contract: ../web-security-client-identity.m
 x-cyder-secret-governance-reauth-operation-ids: [revealProviderKeySecret]
 x-cyder-provider-mutation-operation-ids-without-totp: [createProviderKey, updateProviderKeyMetadata, replaceProviderKeySecret, deleteProviderKey]
 paths:
+  /ai/manager/api/model:
+    post:
+      operationId: createModel
+      description: Creates a Provider-scoped Model and optionally commits its complete Source Config in the same transaction. Omitting source_config persists INHERIT_ALL with no bindings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelCreate" }
+      responses:
+        "200": { $ref: "#/components/responses/Model" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/list:
+    get:
+      operationId: listModels
+      description: Returns active and historical Model rows with batched Source Config summaries.
+      responses:
+        "200": { $ref: "#/components/responses/ModelList" }
+  /ai/manager/api/model/summary/list:
+    get:
+      operationId: listModelSummaries
+      description: Returns Model summary rows with batched Source Config summaries.
+      responses:
+        "200": { $ref: "#/components/responses/ModelSummaryList" }
+  /ai/manager/api/model/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    put:
+      operationId: updateModel
+      description: Updates only Model core fields. Source Config is changed through its dedicated complete-replacement endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelUpdate" }
+      responses:
+        "200": { $ref: "#/components/responses/ModelCore" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+    delete:
+      operationId: deleteModel
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+  /ai/manager/api/model/{id}/detail:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    get:
+      operationId: getModelDetail
+      responses:
+        "200": { $ref: "#/components/responses/ModelDetail" }
+  /ai/manager/api/model/{id}/source-config:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    get:
+      operationId: getModelSourceConfig
+      responses:
+        "200": { $ref: "#/components/responses/ModelSourceConfig" }
+    put:
+      operationId: replaceModelSourceConfig
+      description: Atomically replaces the complete Model Source Config. INHERIT_ALL requires an empty bindings array; EXPLICIT may be empty and may contain at most one default.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelSourceConfig" }
+      responses:
+        "200": { $ref: "#/components/responses/ModelSourceConfig" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{id}/source-config/explain:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    get:
+      operationId: explainModelSourceConfig
+      description: Explains deterministic Source selection for OpenAI, Responses, Anthropic, and Gemini without selecting credentials or making an upstream call.
+      responses:
+        "200": { $ref: "#/components/responses/ModelSourceExplain" }
+        "422": { $ref: "#/components/responses/ManagerError" }
   /ai/manager/api/provider:
     post:
       operationId: createProvider
@@ -116,6 +192,21 @@ paths:
       description: Soft-deletes the addressed Source, including the final or default Source; no replacement is required.
       responses:
         "200": { $ref: "#/components/responses/Empty" }
+  /ai/manager/api/provider/{id}/sources/{source_id}/model-impact:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+      - $ref: "#/components/parameters/SourceId"
+    post:
+      operationId: previewProviderSourceModelImpact
+      description: Previews bounded Model Source selection impact for a Source mutation. This endpoint has no side effects and never returns Model IDs or request payloads.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceImpactRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/SourceImpact" }
+        "422": { $ref: "#/components/responses/ManagerError" }
   /ai/manager/api/provider/{id}/sources/{source_id}/check:
     parameters:
       - $ref: "#/components/parameters/ProviderId"
@@ -130,16 +221,6 @@ paths:
             schema: { $ref: "#/components/schemas/ProviderCheck" }
       responses:
         "200": { $ref: "#/components/responses/SourceEvidence" }
-        "422": { $ref: "#/components/responses/ManagerError" }
-  /ai/manager/api/provider/{id}/sources/{source_id}/remote_models:
-    parameters:
-      - $ref: "#/components/parameters/ProviderId"
-      - $ref: "#/components/parameters/SourceId"
-    get:
-      operationId: discoverProviderSourceModels
-      description: Discovers models through the explicitly addressed Source and returns its source_id/profile_type evidence with the unmodified upstream payload.
-      responses:
-        "200": { $ref: "#/components/responses/ProviderRemoteModels" }
         "422": { $ref: "#/components/responses/ManagerError" }
   /ai/manager/api/provider/{id}/provider_keys:
     parameters:
@@ -257,6 +338,11 @@ components:
       schema: { type: integer, format: int64 }
     SourceId:
       name: source_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    ModelId:
+      name: id
       in: path
       required: true
       schema: { type: integer, format: int64 }
@@ -379,34 +465,234 @@ components:
       properties:
         source_id: { type: integer, format: int64 }
         profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
-    ProviderRemoteModels:
+    DownstreamProtocol:
+      type: string
+      enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI]
+    UpstreamProtocol:
+      type: string
+      enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI, OLLAMA]
+    ModelSourceSelectionMode:
+      type: string
+      enum: [INHERIT_ALL, EXPLICIT]
+    ModelSourceBinding:
       type: object
       additionalProperties: false
-      required: [source_id, profile_type, models]
+      required: [source_id]
+      properties:
+        source_id: { type: integer, format: int64, minimum: 1 }
+        is_default: { type: boolean, default: false }
+    ModelSourceBindingSummary:
+      type: object
+      additionalProperties: false
+      required: [source_id, is_default, profile_type, is_enabled]
       properties:
         source_id: { type: integer, format: int64 }
+        is_default: { type: boolean }
         profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
-        models: {}
+        is_enabled: { type: boolean }
+    ModelSourceConfig:
+      type: object
+      additionalProperties: false
+      required: [source_selection_mode, bindings]
+      properties:
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/ModelSourceBinding" }
+    ModelSourceConfigSummary:
+      type: object
+      additionalProperties: false
+      required: [source_selection_mode, bindings, declared_source_count, enabled_source_count, model_default_source_id, warnings]
+      properties:
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/ModelSourceBindingSummary" }
+        declared_source_count: { type: integer, minimum: 0 }
+        enabled_source_count: { type: integer, minimum: 0 }
+        model_default_source_id: { type: [integer, "null"], format: int64 }
+        warnings:
+          type: array
+          items: { type: string }
+    SourceSelectionTraceEntry:
+      type: object
+      additionalProperties: false
+      required: [key, source_ids]
+      properties:
+        key: { type: string }
+        source_ids:
+          type: array
+          items: { type: integer, format: int64 }
+    ModelSourceProtocolExplain:
+      type: object
+      additionalProperties: false
+      required: [downstream_protocol, selection_status, source_id, profile_type, upstream_protocol, selection_reason, transform_required, decision_trace, failure_reason, generation_execution_status, generation_execution_reason]
+      properties:
+        downstream_protocol: { $ref: "#/components/schemas/DownstreamProtocol" }
+        selection_status: { type: string, enum: [selected, unselectable] }
+        source_id: { type: [integer, "null"], format: int64 }
+        profile_type:
+          anyOf:
+            - $ref: "#/components/schemas/UpstreamProfileType"
+            - type: "null"
+        upstream_protocol:
+          anyOf:
+            - $ref: "#/components/schemas/UpstreamProtocol"
+            - type: "null"
+        selection_reason:
+          type: [string, "null"]
+          enum: [protocol_match, provider_default_transform, model_default_transform, null]
+        transform_required: { type: [boolean, "null"] }
+        decision_trace:
+          type: array
+          items: { $ref: "#/components/schemas/SourceSelectionTraceEntry" }
+        failure_reason: { type: [string, "null"] }
+        generation_execution_status: { type: string }
+        generation_execution_reason: { type: string }
+    ModelSourceExplain:
+      type: object
+      additionalProperties: false
+      required: [model_id, provider_id, source_selection_mode, provider_enabled, model_enabled, declared_source_count, enabled_source_count, model_default_source_id, warnings, protocols]
+      properties:
+        model_id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        provider_enabled: { type: boolean }
+        model_enabled: { type: boolean }
+        declared_source_count: { type: integer, minimum: 0 }
+        enabled_source_count: { type: integer, minimum: 0 }
+        model_default_source_id: { type: [integer, "null"], format: int64 }
+        warnings:
+          type: array
+          items: { type: string }
+        protocols:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/ModelSourceProtocolExplain" }
+    ModelCreate:
+      type: object
+      additionalProperties: false
+      required: [provider_id, model_name]
+      properties:
+        provider_id: { type: integer, format: int64 }
+        model_name: { type: string, minLength: 1 }
+        real_model_name: { type: [string, "null"] }
+        is_enabled: { type: boolean, default: true }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfig" }
+    ModelUpdate:
+      type: object
+      additionalProperties: false
+      required: [model_name, is_enabled, cost_catalog_id]
+      properties:
+        model_name: { type: string, minLength: 1 }
+        real_model_name: { type: [string, "null"] }
+        is_enabled: { type: boolean }
+        cost_catalog_id: { type: [integer, "null"], format: int64 }
     Model:
       type: object
       additionalProperties: false
-      required: [id, provider_id, model_name, real_model_name, cost_catalog_id, supports_streaming, supports_tools, supports_reasoning, supports_image_input, supports_embeddings, supports_rerank, deleted_at, is_enabled, created_at, updated_at]
+      required: [id, provider_id, model_name, real_model_name, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at]
       properties:
         id: { type: integer, format: int64 }
         provider_id: { type: integer, format: int64 }
         model_name: { type: string }
         real_model_name: { type: [string, "null"] }
         cost_catalog_id: { type: [integer, "null"], format: int64 }
-        supports_streaming: { type: boolean }
-        supports_tools: { type: boolean }
-        supports_reasoning: { type: boolean }
-        supports_image_input: { type: boolean }
-        supports_embeddings: { type: boolean }
-        supports_rerank: { type: boolean }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
         deleted_at: { type: [integer, "null"], format: int64 }
         is_enabled: { type: boolean }
         created_at: { type: integer, format: int64 }
         updated_at: { type: integer, format: int64 }
+    ModelResponse:
+      type: object
+      additionalProperties: false
+      required: [id, provider_id, model_name, real_model_name, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at, source_config]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        model_name: { type: string }
+        real_model_name: { type: [string, "null"] }
+        cost_catalog_id: { type: [integer, "null"], format: int64 }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        is_enabled: { type: boolean }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    ModelSummary:
+      type: object
+      additionalProperties: false
+      required: [id, provider_id, provider_key, provider_name, model_name, real_model_name, source_selection_mode, is_enabled, source_config]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        provider_key: { type: string }
+        provider_name: { type: string }
+        model_name: { type: string }
+        real_model_name: { type: [string, "null"] }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        is_enabled: { type: boolean }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    ModelDetail:
+      type: object
+      additionalProperties: false
+      required: [model, request_patches, inherited_request_patches, effective_request_patches, request_patch_explain, request_patch_conflicts, has_request_patch_conflicts, source_config]
+      properties:
+        model: { $ref: "#/components/schemas/Model" }
+        request_patches:
+          type: array
+          items: { type: object }
+        inherited_request_patches:
+          type: array
+          items: { type: object }
+        effective_request_patches:
+          type: array
+          items: { type: object }
+        request_patch_explain:
+          type: array
+          items: { type: object }
+        request_patch_conflicts:
+          type: array
+          items: { type: object }
+        has_request_patch_conflicts: { type: boolean }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    ProviderModelDetail:
+      allOf:
+        - $ref: "#/components/schemas/ModelDetail"
+    SourceImpactAction:
+      type: string
+      enum: [DISABLE, DELETE, SET_DEFAULT, UNSET_DEFAULT]
+    SourceImpactRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: { $ref: "#/components/schemas/SourceImpactAction" }
+    SourceImpactProtocolSummary:
+      type: object
+      additionalProperties: false
+      required: [downstream_protocol, selection_changed_count, would_become_unselectable_count]
+      properties:
+        downstream_protocol: { $ref: "#/components/schemas/DownstreamProtocol" }
+        selection_changed_count: { type: integer, minimum: 0 }
+        would_become_unselectable_count: { type: integer, minimum: 0 }
+    SourceImpactReport:
+      type: object
+      additionalProperties: false
+      required: [action, provider_id, source_id, inherit_all_model_count, explicit_binding_model_count, explicit_default_model_count, protocols]
+      properties:
+        action: { $ref: "#/components/schemas/SourceImpactAction" }
+        provider_id: { type: integer, format: int64 }
+        source_id: { type: integer, format: int64 }
+        inherit_all_model_count: { type: integer, minimum: 0 }
+        explicit_binding_model_count: { type: integer, minimum: 0 }
+        explicit_default_model_count: { type: integer, minimum: 0 }
+        protocols:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/SourceImpactProtocolSummary" }
     BootstrapCheckResult:
       type: object
       additionalProperties: false
@@ -468,6 +754,66 @@ components:
           required: [api_key]
           properties:
             api_key: { type: string }
+    ModelEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelResponse" }
+    ModelListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ModelResponse" }
+    ModelSummaryListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ModelSummary" }
+    ModelCoreEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/Model" }
+    ModelDetailEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelDetail" }
+    ModelSourceConfigEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    ModelSourceExplainEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelSourceExplain" }
+    SourceImpactEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/SourceImpactReport" }
     ProviderAggregateEnvelope:
       type: object
       additionalProperties: false
@@ -492,7 +838,7 @@ components:
         provider: { $ref: "#/components/schemas/ProviderAggregate" }
         models:
           type: array
-          items: { $ref: "#/components/schemas/Model" }
+          items: { $ref: "#/components/schemas/ProviderModelDetail" }
         provider_keys:
           type: array
           items: { $ref: "#/components/schemas/ProviderKeySummary" }
@@ -545,13 +891,6 @@ components:
       properties:
         code: { type: integer, const: 0 }
         data: { $ref: "#/components/schemas/SourceEvidence" }
-    ProviderRemoteModelsEnvelope:
-      type: object
-      additionalProperties: false
-      required: [code, data]
-      properties:
-        code: { type: integer, const: 0 }
-        data: { $ref: "#/components/schemas/ProviderRemoteModels" }
     ProviderKeySummaryEnvelope:
       type: object
       required: [code, data]
@@ -585,6 +924,62 @@ components:
         code: { type: integer }
         msg: { type: string }
   responses:
+    Model:
+      description: Model core and batched Source Config summary.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelEnvelope" }
+    ModelList:
+      description: Model rows with batched Source Config summaries.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelListEnvelope" }
+    ModelSummaryList:
+      description: Model summary rows with batched Source Config summaries.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelSummaryListEnvelope" }
+    ModelCore:
+      description: Updated Model core without Source Config mutation.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelCoreEnvelope" }
+    ModelDetail:
+      description: Model detail with request patch diagnostics and Source Config summary.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelDetailEnvelope" }
+    ModelSourceConfig:
+      description: Complete visible Model Source Config summary; deleted Sources are omitted.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelSourceConfigEnvelope" }
+    ModelSourceExplain:
+      description: Deterministic four-protocol Source selection explanation with bounded trace and failure reasons.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelSourceExplainEnvelope" }
+    SourceImpact:
+      description: Bounded Source mutation impact counts by mode and downstream protocol.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SourceImpactEnvelope" }
     ProviderAggregate:
       description: Logical Provider with zero-to-many nested Upstream Sources.
       headers:
@@ -634,13 +1029,6 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/SourceEvidenceEnvelope" }
-    ProviderRemoteModels:
-      description: Exact Source evidence plus the unmodified upstream model discovery payload.
-      headers:
-        Cache-Control: { $ref: "#/components/headers/NoStore" }
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/ProviderRemoteModelsEnvelope" }
     UpstreamSource:
       description: Complete active or soft-deleted Source record identified only by source_id.
       headers:

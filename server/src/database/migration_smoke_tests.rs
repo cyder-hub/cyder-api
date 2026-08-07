@@ -26,6 +26,7 @@ const POSTGRES_CLEAN_BASELINE_VERSION: &str = "20260423180000";
 const R26_HASH: &str = "bb70cc6e62109d41551197d981876cd7b8ae92140ca73a2fc95c55a43c860d6b";
 const R39_UPSTREAM_SOURCE_VERSION: &str = "20260805090000";
 const R310_PROVIDER_MULTI_SOURCE_VERSION: &str = "20260806090000";
+const R311_MODEL_SOURCE_SELECTION_VERSION: &str = "20260807090000";
 
 const LEGACY_SQLITE_API_KEY_SCHEMA: &str = r#"
 CREATE TABLE api_key (
@@ -246,13 +247,21 @@ fn migrate_sqlite_to_before_r39(
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite upgrade migrations should load");
+    let r311 = migrations
+        .pop()
+        .expect("R3.11 sqlite migration should exist");
+    assert_eq!(
+        r311.name().version().to_string(),
+        R311_MODEL_SOURCE_SELECTION_VERSION,
+        "R3.11 must be the final sqlite migration in this release"
+    );
     let r310 = migrations
         .pop()
         .expect("R3.10 sqlite migration should exist");
     assert_eq!(
         r310.name().version().to_string(),
         R310_PROVIDER_MULTI_SOURCE_VERSION,
-        "R3.10 must be the final sqlite migration in this release"
+        "R3.10 must remain immediately before R3.11"
     );
     let r39 = migrations
         .pop()
@@ -278,13 +287,21 @@ fn migrate_postgres_to_before_r39(connection: &mut PgConnection) -> Box<dyn Migr
     let mut migrations = connection
         .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
         .expect("pending postgres upgrade migrations should load");
+    let r311 = migrations
+        .pop()
+        .expect("R3.11 postgres migration should exist");
+    assert_eq!(
+        r311.name().version().to_string(),
+        R311_MODEL_SOURCE_SELECTION_VERSION,
+        "R3.11 must be the final postgres migration in this release"
+    );
     let r310 = migrations
         .pop()
         .expect("R3.10 postgres migration should exist");
     assert_eq!(
         r310.name().version().to_string(),
         R310_PROVIDER_MULTI_SOURCE_VERSION,
-        "R3.10 must be the final postgres migration in this release"
+        "R3.10 must remain immediately before R3.11"
     );
     let r39 = migrations
         .pop()
@@ -792,6 +809,142 @@ fn assert_postgres_r310_source_schema(connection: &mut PgConnection) {
     assert_eq!(indexes, 2);
 }
 
+fn assert_sqlite_r311_model_source_schema(connection: &mut diesel::SqliteConnection) {
+    for column in [
+        "id",
+        "provider_id",
+        "cost_catalog_id",
+        "model_name",
+        "real_model_name",
+        "source_selection_mode",
+        "is_enabled",
+        "deleted_at",
+        "created_at",
+        "updated_at",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "model", column),
+            1,
+            "SQLite R3.11 model must contain {column}"
+        );
+    }
+    for column in [
+        "supports_streaming",
+        "supports_tools",
+        "supports_reasoning",
+        "supports_image_input",
+        "supports_embeddings",
+        "supports_rerank",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "model", column),
+            0,
+            "SQLite R3.11 model must not contain {column}"
+        );
+    }
+    for column in [
+        "model_id",
+        "source_id",
+        "is_default",
+        "created_at",
+        "updated_at",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "model_source_binding", column),
+            1,
+            "SQLite R3.11 binding must contain {column}"
+        );
+    }
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "source_selection_reason"),
+        1,
+        "SQLite R3.11 request_log must contain source_selection_reason"
+    );
+    for index in [
+        "idx_model_source_binding_source_id",
+        "idx_model_source_binding_model_default_unique",
+    ] {
+        let count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = '{index}'"
+        ))
+        .get_result::<CountRow>(connection)
+        .expect("SQLite R3.11 binding index should query")
+        .count;
+        assert_eq!(count, 1, "SQLite R3.11 must contain index {index}");
+    }
+}
+
+fn assert_postgres_r311_model_source_schema(connection: &mut PgConnection) {
+    let model_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'model'
+           AND column_name IN (
+               'id', 'provider_id', 'cost_catalog_id', 'model_name',
+               'real_model_name', 'source_selection_mode', 'is_enabled',
+               'deleted_at', 'created_at', 'updated_at'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.11 model columns should query")
+    .count;
+    assert_eq!(model_columns, 10);
+    let legacy_model_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'model'
+           AND column_name IN (
+               'supports_streaming', 'supports_tools', 'supports_reasoning',
+               'supports_image_input', 'supports_embeddings', 'supports_rerank'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL legacy model columns should query")
+    .count;
+    assert_eq!(legacy_model_columns, 0);
+
+    let binding_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'model_source_binding'
+           AND column_name IN ('model_id', 'source_id', 'is_default', 'created_at', 'updated_at')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.11 binding columns should query")
+    .count;
+    assert_eq!(binding_columns, 5);
+
+    let request_reason = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'request_log'
+           AND column_name = 'source_selection_reason'
+           AND is_nullable = 'YES'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL request selection reason should query")
+    .count;
+    assert_eq!(request_reason, 1);
+
+    let indexes = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND indexname IN (
+               'idx_model_source_binding_source_id',
+               'idx_model_source_binding_model_default_unique'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.11 binding indexes should query")
+    .count;
+    assert_eq!(indexes, 2);
+}
+
 fn seed_sqlite_r39_boundary_fixture(connection: &mut diesel::SqliteConnection) {
     connection
         .batch_execute(
@@ -1115,6 +1268,7 @@ fn sqlite_clean_upgrade_chain_from_empty() {
     run_sqlite_migrations(&mut connection).expect("sqlite clean + upgrade migrations should run");
     assert_sqlite_request_log_timing_schema(&mut connection);
     assert_sqlite_r310_source_schema(&mut connection);
+    assert_sqlite_r311_model_source_schema(&mut connection);
 
     let applied_versions = connection
         .applied_migrations()
@@ -1177,6 +1331,15 @@ fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
              ) VALUES (
                 31, 30, 'primary', 'OPENAI', 'https://source.example/v1', 0, 1, 1
              );
+             INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name,
+                supports_streaming, supports_tools, supports_reasoning,
+                supports_image_input, supports_embeddings, supports_rerank,
+                is_enabled, created_at, updated_at
+             ) VALUES (
+                33, 30, NULL, 'r310-model', 'r310-real-model',
+                1, 1, 1, 1, 1, 1, 1, 1, 1
+             );
              INSERT INTO request_log (
                 id, request_id, api_key_id, requested_model_name,
                 downstream_protocol, overall_status, request_received_at,
@@ -1209,9 +1372,13 @@ fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
         )
         .expect("R3.9 source fixture should insert");
 
-    let r310 = connection
+    let mut pending = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
-        .expect("pending sqlite migrations should load")
+        .expect("pending sqlite migrations should load");
+    let r311 = pending
+        .pop()
+        .expect("R3.11 sqlite migration should be pending");
+    let r310 = pending
         .pop()
         .expect("R3.10 sqlite migration should be pending");
     assert_eq!(
@@ -1229,6 +1396,66 @@ fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
             .expect("migrated source should query")
             .count,
         1
+    );
+    connection
+        .run_migration(r311.as_ref())
+        .expect("R3.11 sqlite migration should run");
+    assert_sqlite_r311_model_source_schema(&mut connection);
+    let model_snapshot = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM model
+         WHERE id = 33
+           AND model_name = 'r310-model'
+           AND real_model_name = 'r310-real-model'
+           AND source_selection_mode = 'INHERIT_ALL'",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("migrated model snapshot should query")
+    .count;
+    assert_eq!(
+        model_snapshot, 1,
+        "model identity and mode must be preserved"
+    );
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM model_source_binding")
+            .get_result::<CountRow>(&mut connection)
+            .expect("new binding table should query")
+            .count,
+        0,
+        "R3.11 must not synthesize bindings from existing Sources"
+    );
+    connection
+        .batch_execute(
+            "INSERT INTO model_source_binding (
+                model_id, source_id, is_default, created_at, updated_at
+             ) VALUES (33, 31, 1, 20, 20);",
+        )
+        .expect("valid model Source binding should insert");
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO model_source_binding (
+                    model_id, source_id, is_default, created_at, updated_at
+                 ) VALUES (33, 31, 1, 21, 21);",
+            )
+            .is_err(),
+        "a model may have only one default binding"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, request_id, api_key_id, downstream_protocol,
+                    overall_status, request_received_at, is_stream,
+                    source_selection_reason, created_at, updated_at
+                 ) VALUES (
+                    34, '018fa7d8-6a00-4c9a-8f7e-444444444444', 1,
+                    'OPENAI', 'SUCCESS', 20, 0,
+                    'invalid_reason', 20, 20
+                 );",
+            )
+            .is_err(),
+        "request log selection reason must use the stable enum values"
     );
     let snapshot = diesel::sql_query(
         "SELECT source_profile_type_snapshot AS value
@@ -2471,6 +2698,7 @@ fn postgres_clean_upgrade_chain_from_empty() {
         assert_postgres_request_identity_schema(&mut connection);
         assert_postgres_request_log_timing_schema(&mut connection);
         assert_postgres_r310_source_schema(&mut connection);
+        assert_postgres_r311_model_source_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -2552,6 +2780,15 @@ fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() 
                  ) VALUES (
                     31, 30, 'primary', 'OPENAI', 'https://source.example/v1', FALSE, 1, 1
                  );
+                 INSERT INTO model (
+                    id, provider_id, cost_catalog_id, model_name, real_model_name,
+                    supports_streaming, supports_tools, supports_reasoning,
+                    supports_image_input, supports_embeddings, supports_rerank,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (
+                    33, 30, NULL, 'r310-model', 'r310-real-model',
+                    TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, 1, 1
+                 );
                  INSERT INTO request_log (
                     id, request_id, api_key_id, requested_model_name,
                     downstream_protocol, overall_status, request_received_at,
@@ -2584,9 +2821,13 @@ fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() 
             )
             .expect("R3.9 postgres source fixture should insert");
 
-        let r310 = connection
+        let mut pending = connection
             .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
-            .expect("pending postgres migrations should load")
+            .expect("pending postgres migrations should load");
+        let r311 = pending
+            .pop()
+            .expect("R3.11 postgres migration should be pending");
+        let r310 = pending
             .pop()
             .expect("R3.10 postgres migration should be pending");
         assert_eq!(
@@ -2604,6 +2845,63 @@ fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() 
                 .expect("migrated postgres source should query")
                 .count,
             1
+        );
+        connection
+            .run_migration(r311.as_ref())
+            .expect("R3.11 postgres migration should run");
+        assert_postgres_r311_model_source_schema(&mut connection);
+        let model_snapshot = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM model
+             WHERE id = 33
+               AND model_name = 'r310-model'
+               AND real_model_name = 'r310-real-model'
+               AND source_selection_mode = 'INHERIT_ALL'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("migrated postgres model snapshot should query")
+        .count;
+        assert_eq!(model_snapshot, 1);
+        assert_eq!(
+            diesel::sql_query("SELECT COUNT(*) AS count FROM model_source_binding")
+                .get_result::<CountRow>(&mut connection)
+                .expect("new postgres binding table should query")
+                .count,
+            0,
+            "R3.11 must not synthesize postgres bindings"
+        );
+        connection
+            .batch_execute(
+                "INSERT INTO model_source_binding (
+                    model_id, source_id, is_default, created_at, updated_at
+                 ) VALUES (33, 31, TRUE, 20, 20);",
+            )
+            .expect("valid postgres model Source binding should insert");
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO model_source_binding (
+                        model_id, source_id, is_default, created_at, updated_at
+                     ) VALUES (33, 31, TRUE, 21, 21);",
+                )
+                .is_err(),
+            "a postgres model may have only one default binding"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_log (
+                        id, request_id, api_key_id, downstream_protocol,
+                        overall_status, request_received_at, is_stream,
+                        source_selection_reason, created_at, updated_at
+                     ) VALUES (
+                        34, '018fa7d8-6a00-4c9a-8f7e-444444444444', 1,
+                        'OPENAI', 'SUCCESS', 20, FALSE,
+                        'invalid_reason', 20, 20
+                     );",
+                )
+                .is_err(),
+            "postgres request log selection reason must use stable values"
         );
         let snapshot = diesel::sql_query(
             "SELECT source_profile_type_snapshot::text AS value

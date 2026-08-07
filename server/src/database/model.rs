@@ -27,12 +27,7 @@ db_object! {
         pub model_name: String,
         pub real_model_name: Option<String>,
         pub cost_catalog_id: Option<i64>,
-        pub supports_streaming: bool,
-        pub supports_tools: bool,
-        pub supports_reasoning: bool,
-        pub supports_image_input: bool,
-        pub supports_embeddings: bool,
-        pub supports_rerank: bool,
+        pub source_selection_mode: String,
         pub deleted_at: Option<i64>,
         pub is_enabled: bool,
         pub created_at: i64,
@@ -44,15 +39,10 @@ db_object! {
 pub struct NewModel {
     pub id: i64,
     pub provider_id: i64,
-    pub model_name: String,
-    pub real_model_name: Option<String>,
-    pub supports_streaming: bool,
-    pub supports_tools: bool,
-    pub supports_reasoning: bool,
-    pub supports_image_input: bool,
-    pub supports_embeddings: bool,
-    pub supports_rerank: bool,
-    pub is_enabled: bool,
+        pub model_name: String,
+        pub real_model_name: Option<String>,
+        pub source_selection_mode: String,
+        pub is_enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -61,40 +51,11 @@ pub struct NewModel {
 #[diesel(table_name = model)]
 pub struct UpdateModelData {
     pub model_name: Option<String>,
-    pub real_model_name: Option<Option<String>>, // Allow setting to NULL
-    pub is_enabled: Option<bool>,
-    pub cost_catalog_id: Option<Option<i64>>,
-    pub supports_streaming: Option<bool>,
-    pub supports_tools: Option<bool>,
-    pub supports_reasoning: Option<bool>,
-    pub supports_image_input: Option<bool>,
-    pub supports_embeddings: Option<bool>,
-    pub supports_rerank: Option<bool>,
+        pub real_model_name: Option<Option<String>>, // Allow setting to NULL
+        pub is_enabled: Option<bool>,
+        pub cost_catalog_id: Option<Option<i64>>,
 }
 
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-pub struct ModelCapabilityFlags {
-    pub supports_streaming: bool,
-    pub supports_tools: bool,
-    pub supports_reasoning: bool,
-    pub supports_image_input: bool,
-    pub supports_embeddings: bool,
-    pub supports_rerank: bool,
-}
-
-impl Default for ModelCapabilityFlags {
-    fn default() -> Self {
-        Self {
-            supports_streaming: true,
-            supports_tools: true,
-            supports_reasoning: true,
-            supports_image_input: true,
-            supports_embeddings: true,
-            supports_rerank: true,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -116,12 +77,7 @@ pub struct ModelSummaryItem {
     pub provider_name: String,
     pub model_name: String,
     pub real_model_name: Option<String>,
-    pub supports_streaming: bool,
-    pub supports_tools: bool,
-    pub supports_reasoning: bool,
-    pub supports_image_input: bool,
-    pub supports_embeddings: bool,
-    pub supports_rerank: bool,
+    pub source_selection_mode: String,
     pub is_enabled: bool,
 }
 
@@ -147,38 +103,46 @@ impl Model {
         model_name_val: &str,
         real_model_name_val: Option<&str>,
         is_enabled_val: bool,
-        capabilities: ModelCapabilityFlags,
+    ) -> DbResult<Model> {
+        Self::create_with_source_config(
+            provider_id_val,
+            model_name_val,
+            real_model_name_val,
+            is_enabled_val,
+            None,
+        )
+    }
+
+    /// Creates a model and its optional Source configuration in one transaction.
+    pub fn create_with_source_config(
+        provider_id_val: i64,
+        model_name_val: &str,
+        real_model_name_val: Option<&str>,
+        is_enabled_val: bool,
+        source_config: Option<&crate::database::model_source_binding::ModelSourceConfig>,
     ) -> DbResult<Model> {
         let now = Utc::now().timestamp_millis();
         let new_id = ID_GENERATOR.generate_id();
+
+        let source_selection_mode = source_config
+            .map(|config| config.source_selection_mode.clone())
+            .unwrap_or_else(|| "INHERIT_ALL".to_string());
 
         let new_model_data = NewModel {
             id: new_id,
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(|s| s.to_string()),
-            supports_streaming: capabilities.supports_streaming,
-            supports_tools: capabilities.supports_tools,
-            supports_reasoning: capabilities.supports_reasoning,
-            supports_image_input: capabilities.supports_image_input,
-            supports_embeddings: capabilities.supports_embeddings,
-            supports_rerank: capabilities.supports_rerank,
+            source_selection_mode,
             is_enabled: is_enabled_val,
             created_at: now,
             updated_at: now,
         };
 
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let inserted_db_model = diesel::insert_into(model::table)
-                .values(NewModelDb::to_db(&new_model_data))
-                .returning(ModelDb::as_returning())
-                .get_result::<ModelDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to create model: {}", e)))
-                })?;
-            Ok(inserted_db_model.from_db())
-        })
+        crate::database::model_source_binding::create_model_with_config(
+            &new_model_data,
+            source_config,
+        )
     }
 
     /// Updates an existing model record.
@@ -409,12 +373,7 @@ impl Model {
                     provider::dsl::name,
                     model::dsl::model_name,
                     model::dsl::real_model_name,
-                    model::dsl::supports_streaming,
-                    model::dsl::supports_tools,
-                    model::dsl::supports_reasoning,
-                    model::dsl::supports_image_input,
-                    model::dsl::supports_embeddings,
-                    model::dsl::supports_rerank,
+                    model::dsl::source_selection_mode,
                     model::dsl::is_enabled,
                 ))
                 .load::<(
@@ -424,12 +383,7 @@ impl Model {
                     String,
                     String,
                     Option<String>,
-                    bool,
-                    bool,
-                    bool,
-                    bool,
-                    bool,
-                    bool,
+                    String,
                     bool,
                 )>(conn)
                 .map_err(|e| {
@@ -446,12 +400,7 @@ impl Model {
                         provider_name,
                         model_name,
                         real_model_name,
-                        supports_streaming,
-                        supports_tools,
-                        supports_reasoning,
-                        supports_image_input,
-                        supports_embeddings,
-                        supports_rerank,
+                        source_selection_mode,
                         is_enabled,
                     )| {
                         ModelSummaryItem {
@@ -461,12 +410,7 @@ impl Model {
                             provider_name,
                             model_name,
                             real_model_name,
-                            supports_streaming,
-                            supports_tools,
-                            supports_reasoning,
-                            supports_image_input,
-                            supports_embeddings,
-                            supports_rerank,
+                            source_selection_mode,
                             is_enabled,
                         }
                     },
@@ -537,12 +481,6 @@ impl Model {
                         is_enabled: Some(true), // Ensure it's enabled
                         model_name: None,       // Not changing model_name itself here
                         cost_catalog_id: None,  // Do not update cost_catalog_id during upsert
-                        supports_streaming: None,
-                        supports_tools: None,
-                        supports_reasoning: None,
-                        supports_image_input: None,
-                        supports_embeddings: None,
-                        supports_rerank: None,
                     };
 
                     // Also ensure it's not deleted
@@ -570,12 +508,7 @@ impl Model {
                         provider_id: provider_id_val,
                         model_name: model_name_val.to_string(),
                         real_model_name: real_model_name_val.map(|s| s.to_string()),
-                        supports_streaming: true,
-                        supports_tools: true,
-                        supports_reasoning: true,
-                        supports_image_input: true,
-                        supports_embeddings: true,
-                        supports_rerank: true,
+                        source_selection_mode: "INHERIT_ALL".to_string(),
                         is_enabled: true,
                         created_at: now,
                         updated_at: now,
@@ -679,12 +612,7 @@ mod tests {
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(ToString::to_string),
-            supports_streaming: true,
-            supports_tools: true,
-            supports_reasoning: true,
-            supports_image_input: true,
-            supports_embeddings: true,
-            supports_rerank: true,
+            source_selection_mode: "INHERIT_ALL".to_string(),
             is_enabled: is_enabled_val,
             created_at: now,
             updated_at: now,
@@ -709,12 +637,7 @@ mod tests {
                 provider::dsl::name,
                 model::dsl::model_name,
                 model::dsl::real_model_name,
-                model::dsl::supports_streaming,
-                model::dsl::supports_tools,
-                model::dsl::supports_reasoning,
-                model::dsl::supports_image_input,
-                model::dsl::supports_embeddings,
-                model::dsl::supports_rerank,
+                model::dsl::source_selection_mode,
                 model::dsl::is_enabled,
             ))
             .load::<(
@@ -724,12 +647,7 @@ mod tests {
                 String,
                 String,
                 Option<String>,
-                bool,
-                bool,
-                bool,
-                bool,
-                bool,
-                bool,
+                String,
                 bool,
             )>(conn)
             .expect("model summary rows should load");
@@ -743,12 +661,7 @@ mod tests {
                     provider_name,
                     model_name,
                     real_model_name,
-                    supports_streaming,
-                    supports_tools,
-                    supports_reasoning,
-                    supports_image_input,
-                    supports_embeddings,
-                    supports_rerank,
+                    source_selection_mode,
                     is_enabled,
                 )| ModelSummaryItem {
                     id,
@@ -757,12 +670,7 @@ mod tests {
                     provider_name,
                     model_name,
                     real_model_name,
-                    supports_streaming,
-                    supports_tools,
-                    supports_reasoning,
-                    supports_image_input,
-                    supports_embeddings,
-                    supports_rerank,
+                    source_selection_mode,
                     is_enabled,
                 },
             )
@@ -802,12 +710,7 @@ mod tests {
                 model_name: "alpha-model".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_reasoning: true,
-                supports_image_input: true,
-                supports_embeddings: true,
-                supports_rerank: true,
+                source_selection_mode: "INHERIT_ALL".to_string(),
                 deleted_at: None,
                 is_enabled: true,
                 created_at: 1,

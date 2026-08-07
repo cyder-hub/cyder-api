@@ -184,13 +184,15 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
     id: 13,
     model_name: "gemini-1.5-pro",
     real_model_name: "gemini-1.5-pro-latest",
+    source_config: {
+      source_selection_mode: "INHERIT_ALL",
+      bindings: [],
+      declared_source_count: 1,
+      enabled_source_count: 1,
+      model_default_source_id: null,
+      warnings: [],
+    },
     is_enabled: false,
-    supports_streaming: true,
-    supports_tools: true,
-    supports_reasoning: true,
-    supports_image_input: true,
-    supports_embeddings: true,
-    supports_rerank: true,
     isEditing: false,
     checkStatus: "unchecked",
   });
@@ -382,32 +384,32 @@ test("provider credential service and UI keep saved summaries plaintext-free", a
   assert.doesNotMatch(service, /sensitiveTotpRequestConfig|totpCode/);
   assert.doesNotMatch(service, /provider_key\/\$\{keyId\}/);
 
-  assert.match(component, /provider_api_key: secretInput\.value/);
-  assert.match(check, /provider_api_key_id: keyItem\.id/);
-  assert.doesNotMatch(check, /provider_api_key: keyItem/);
+  assert.match(component, /api_key: secretInput\.value/);
+  assert.match(check, /provider_api_key_id: key\.id/);
+  assert.doesNotMatch(check, /provider_api_key: key/);
   assert.doesNotMatch(component, /localStorage|sessionStorage|console\.error/);
   assert.doesNotMatch(bootstrap, /localStorage|sessionStorage|console\.error/);
 });
 
-test("remote model discovery returns explicit Source evidence without a legacy payload fallback", async () => {
-  const [types, component] = await Promise.all([
+test("remote model discovery contracts are removed and model creation stays atomic", async () => {
+  const [types, component, service, createSheet] = await Promise.all([
     readFile(new URL("src/services/types/providers.ts", ROOT), "utf8"),
     readFile(
       new URL("src/pages/provider-edit/components/ProviderModelList.vue", ROOT),
       "utf8",
     ),
+    readFile(new URL("src/services/providers.ts", ROOT), "utf8"),
+    readFile(
+      new URL("src/pages/model-edit/components/ModelCreateSheet.vue", ROOT),
+      "utf8",
+    ),
   ]);
 
-  const responseContract = types.match(
-    /interface ProviderRemoteModelsResponse \{[\s\S]*?\n\}/,
-  )?.[0];
-  assert.ok(responseContract);
-  assert.match(responseContract, /source_id: number/);
-  assert.doesNotMatch(responseContract, /source_key/);
-  assert.match(responseContract, /profile_type: string/);
-  assert.match(responseContract, /models: ProviderRemoteModelsPayload/);
-  assert.match(component, /const discoveredModels = response\.models/);
-  assert.doesNotMatch(component, /Array\.isArray\(response\)/);
+  assert.doesNotMatch(types, /ProviderRemoteModels|ProviderRemoteModelItem/);
+  assert.doesNotMatch(component, /remote|batch|checkBatch/i);
+  assert.doesNotMatch(service, /remote_models|RemoteModels/);
+  assert.match(createSheet, /source_config: toSourceConfigPayload/);
+  assert.match(createSheet, /modelService\.createModel/);
 });
 
 test("provider Source management keeps the API explicit and refreshes server state", async () => {
@@ -432,7 +434,8 @@ test("provider Source management keeps the API explicit and refreshes server sta
   assert.doesNotMatch(types, /source_key/);
   assert.match(service, /provider\/\$\{providerId\}\/sources`/);
   assert.match(service, /sources\/\$\{sourceId\}`/);
-  assert.match(service, /sources\/\$\{sourceId\}\/remote_models/);
+  assert.match(service, /sources\/\$\{sourceId\}\/model-impact/);
+  assert.doesNotMatch(service, /remote_models/);
   assert.match(service, /sources\/\$\{sourceId\}\/check/);
   assert.doesNotMatch(service, /provider\/\$\{id\}\/remote_models/);
   assert.doesNotMatch(service, /provider\/\$\{id\}\/check/);

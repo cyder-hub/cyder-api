@@ -1,5 +1,4 @@
-import type { JsonValue } from "./shared";
-import type { ModelDetail, ModelItem } from "./models";
+import type { ModelDetail, ModelDetailModel } from "./models";
 import type { RequestPatchRule } from "./requestPatch";
 
 // ========== Provider Types ==========
@@ -78,24 +77,26 @@ export interface ProviderListItem {
 
 
 // ========== Provider CRUD Payloads ==========
-export interface ProviderRemoteModelItem {
-  [key: string]: JsonValue | undefined;
-  id?: string;
-  name?: string;
-  owned_by?: string;
+export type SourceImpactAction =
+  | "DISABLE"
+  | "DELETE"
+  | "SET_DEFAULT"
+  | "UNSET_DEFAULT";
+
+export interface SourceImpactProtocolSummary {
+  downstream_protocol: string;
+  selection_changed_count: number;
+  would_become_unselectable_count: number;
 }
 
-export type ProviderRemoteModelsPayload =
-  | ProviderRemoteModelItem[]
-  | {
-      data?: ProviderRemoteModelItem[];
-      models?: ProviderRemoteModelItem[];
-    };
-
-export interface ProviderRemoteModelsResponse {
+export interface SourceImpactReport {
+  action: SourceImpactAction;
+  provider_id: number;
   source_id: number;
-  profile_type: string;
-  models: ProviderRemoteModelsPayload;
+  inherit_all_model_count: number;
+  explicit_binding_model_count: number;
+  explicit_default_model_count: number;
+  protocols: SourceImpactProtocolSummary[];
 }
 
 export interface ProviderCheckPayload {
@@ -124,7 +125,9 @@ export interface ProviderBootstrapPayload {
 export interface ProviderBootstrapResponse {
   provider?: ProviderBase;
   created_key?: ProviderApiKeySummary | null;
-  created_model?: ModelItem | null;
+  // The bootstrap endpoint returns the raw Model core row. Source Config is
+  // hydrated from the returned Provider Sources by the provider editor.
+  created_model?: ModelDetailModel | null;
   provider_name?: string | null;
   provider_key?: string | null;
   check_result?: unknown;

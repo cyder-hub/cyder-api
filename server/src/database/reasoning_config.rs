@@ -1059,7 +1059,7 @@ impl ReasoningConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::upstream_source::NewUpstreamSource;
     use crate::database::{TestDbContext, open_test_sqlite_connection};
@@ -1101,14 +1101,7 @@ mod tests {
     }
 
     fn create_model(provider_id: i64, name: &str) -> crate::database::model::Model {
-        Model::create(
-            provider_id,
-            name,
-            None,
-            true,
-            ModelCapabilityFlags::default(),
-        )
-        .expect("model")
+        Model::create(provider_id, name, None, true).expect("model")
     }
 
     fn preset(

@@ -65,9 +65,6 @@
             {{ option.label }}
           </Button>
         </div>
-        <p v-if="modelSupportsReasoning === false" class="text-xs text-gray-500">
-          {{ t("reasoningConfigPanel.messages.modelReasoningUnsupported") }}
-        </p>
       </div>
 
       <slot name="runtime-feature" />
@@ -370,12 +367,10 @@ const props = withDefaults(
     ownerId: number | null;
     actions: ReasoningConfigActions;
     title?: string;
-    modelSupportsReasoning?: boolean;
     profileType?: string | null;
   }>(),
   {
     title: undefined,
-    modelSupportsReasoning: undefined,
     profileType: undefined,
   },
 );

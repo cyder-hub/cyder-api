@@ -12,7 +12,8 @@ import type {
   ProviderKeyReplacePayload,
   ProviderKeyUpdatePayload,
   ProviderListItem,
-  ProviderRemoteModelsResponse,
+  SourceImpactAction,
+  SourceImpactReport,
   ProviderSummaryItem,
   ProviderUpdatePayload,
   UpstreamSource,
@@ -82,12 +83,14 @@ export function deleteProviderSource(
   );
 }
 
-export function getProviderRemoteModels(
+export function previewProviderSourceImpact(
   providerId: number | string,
   sourceId: number | string,
-): Promise<ProviderRemoteModelsResponse> {
-  return request.get(
-    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/remote_models`,
+  action: SourceImpactAction,
+): Promise<SourceImpactReport> {
+  return request.post(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/model-impact`,
+    { action },
   );
 }
 

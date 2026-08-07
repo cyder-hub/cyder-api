@@ -3,16 +3,29 @@ import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 
 import * as modelService from "@/services/models";
+import * as providerService from "@/services/providers";
 import * as requestPatchService from "@/services/requestPatch";
 import { normalizeError } from "@/utils/error";
 import { toastController } from "@/services/uiFeedback";
 import { useProviderStore } from "@/store/providerStore";
 import { useModelStore } from "@/store/modelStore";
-import { MODEL_CAPABILITY_ITEMS } from "@/pages/model/composables/useModelList";
 import { useCostPage } from "@/pages/cost/composables/useCostPage";
-import type { CostCatalogVersion, ModelDetailResponse } from "@/services/types";
+import type {
+  CostCatalogVersion,
+  ModelDetailResponse,
+  ModelSourceConfigPayload,
+  ModelSourceConfigSummary,
+  ModelSourceExplain,
+  UpstreamSource,
+} from "@/services/types";
 import type { ReasoningConfigActions } from "@/components/reasoning/types";
 import type { EditingModelData } from "../types";
+import {
+  createSourceConfigDraft,
+  sourceConfigPayloadEquals,
+  toSourceConfigPayload,
+  type SourceConfigDraft,
+} from "@/components/model-source-config/sourceConfigViewModel";
 
 export function useModelEdit(
   propsModelId?: Ref<number | null>,
@@ -31,10 +44,18 @@ export function useModelEdit(
   const isSaving = ref(false);
   const modelDetail = ref<ModelDetailResponse | null>(null);
   const editingData = ref<EditingModelData | null>(null);
+  const providerSources = ref<UpstreamSource[]>([]);
+  const sourceConfigSummary = ref<ModelSourceConfigSummary | null>(null);
+  const sourceConfigDraft = ref<SourceConfigDraft>(createSourceConfigDraft());
+  const sourceConfigOriginal = ref<ModelSourceConfigPayload>(
+    toSourceConfigPayload(sourceConfigDraft.value),
+  );
+  const isSourceConfigSaving = ref(false);
+  const sourceConfigError = ref<string | null>(null);
+  const sourceConfigExplain = ref<ModelSourceExplain | null>(null);
   const shouldBindCreatedCatalog = ref(false);
   const costManager = useCostPage();
 
-  const capabilityItems = MODEL_CAPABILITY_ITEMS;
   let fetchSequence = 0;
 
   const reasoningActions: ReasoningConfigActions = {
@@ -99,18 +120,25 @@ export function useModelEdit(
       modelDetail.value = detail;
 
       if (detail) {
+        const providerDetail = await providerService.getProviderDetail(detail.model.provider_id);
+        if (requestSequence !== fetchSequence || requestedModelId !== modelId.value) {
+          return;
+        }
+        providerSources.value = providerDetail?.provider.upstream_sources ?? [];
+        sourceConfigSummary.value = detail.source_config;
+        sourceConfigDraft.value = createSourceConfigDraft(
+          detail.source_config,
+          providerSources.value,
+        );
+        sourceConfigOriginal.value = toSourceConfigPayload(sourceConfigDraft.value);
+        sourceConfigError.value = null;
+        sourceConfigExplain.value = null;
         editingData.value = {
           id: detail.model.id,
           provider_id: detail.model.provider_id,
           cost_catalog_id: detail.model.cost_catalog_id ?? null,
           model_name: detail.model.model_name,
           real_model_name: detail.model.real_model_name ?? "",
-          supports_streaming: detail.model.supports_streaming,
-          supports_tools: detail.model.supports_tools,
-          supports_reasoning: detail.model.supports_reasoning,
-          supports_image_input: detail.model.supports_image_input,
-          supports_embeddings: detail.model.supports_embeddings,
-          supports_rerank: detail.model.supports_rerank,
           is_enabled: detail.model.is_enabled,
           request_patches: detail.request_patches || [],
         };
@@ -146,12 +174,6 @@ export function useModelEdit(
     const payload = {
       model_name: editingData.value.model_name,
       real_model_name: editingData.value.real_model_name || null,
-      supports_streaming: editingData.value.supports_streaming,
-      supports_tools: editingData.value.supports_tools,
-      supports_reasoning: editingData.value.supports_reasoning,
-      supports_image_input: editingData.value.supports_image_input,
-      supports_embeddings: editingData.value.supports_embeddings,
-      supports_rerank: editingData.value.supports_rerank,
       is_enabled: editingData.value.is_enabled,
       cost_catalog_id: editingData.value.cost_catalog_id,
     };
@@ -163,7 +185,6 @@ export function useModelEdit(
       void providerStore.fetchProviders().catch((error) => {
         console.error("Failed to refresh providers after saving model:", error);
       });
-      void fetchData();
       return true;
     } catch (error: unknown) {
       const normalizedError = normalizeError(error, t("common.unknownError"));
@@ -175,6 +196,64 @@ export function useModelEdit(
       return false;
     } finally {
       isSaving.value = false;
+    }
+  };
+
+  const isSourceConfigDirty = computed(() =>
+    !sourceConfigPayloadEquals(
+      sourceConfigOriginal.value,
+      toSourceConfigPayload(sourceConfigDraft.value),
+    ),
+  );
+
+  const handleSaveSourceConfig = async (): Promise<boolean> => {
+    if (!editingData.value || isSourceConfigSaving.value) return false;
+    if (!isSourceConfigDirty.value) return true;
+
+    isSourceConfigSaving.value = true;
+    sourceConfigError.value = null;
+    try {
+      const summary = await modelService.updateModelSourceConfig(
+        editingData.value.id,
+        toSourceConfigPayload(sourceConfigDraft.value),
+      );
+      sourceConfigSummary.value = summary;
+      sourceConfigDraft.value = createSourceConfigDraft(summary, providerSources.value);
+      sourceConfigOriginal.value = toSourceConfigPayload(sourceConfigDraft.value);
+      if (modelDetail.value) {
+        modelDetail.value = { ...modelDetail.value, source_config: summary };
+      }
+      sourceConfigExplain.value = null;
+      toastController.success(t("modelSourceConfig.alert.saveSuccess"));
+      void Promise.all([providerStore.fetchProviders(), modelStore.fetchModels()]).catch(
+        (error) => console.error("Failed to refresh stores after Source Config save:", error),
+      );
+      return true;
+    } catch (error: unknown) {
+      const normalizedError = normalizeError(error, t("common.unknownError"));
+      sourceConfigError.value = normalizedError.message;
+      toastController.error(
+        t("modelSourceConfig.alert.saveFailed", { error: normalizedError.message }),
+      );
+      return false;
+    } finally {
+      isSourceConfigSaving.value = false;
+    }
+  };
+
+  const handleExplainSourceConfig = async (): Promise<void> => {
+    if (!editingData.value) return;
+    sourceConfigError.value = null;
+    try {
+      sourceConfigExplain.value = await modelService.getModelSourceExplain(
+        editingData.value.id,
+      );
+    } catch (error: unknown) {
+      const normalizedError = normalizeError(error, t("common.unknownError"));
+      sourceConfigError.value = normalizedError.message;
+      toastController.error(
+        t("modelSourceConfig.alert.explainFailed", { error: normalizedError.message }),
+      );
     }
   };
 
@@ -264,14 +343,22 @@ export function useModelEdit(
     isSaving,
     modelDetail,
     editingData,
+    providerSources,
+    sourceConfigSummary,
+    sourceConfigDraft,
+    isSourceConfigDirty,
+    isSourceConfigSaving,
+    sourceConfigError,
+    sourceConfigExplain,
     costManager,
-    capabilityItems,
     currentProvider,
     selectedCatalog,
     selectedCatalogVersions,
     reasoningActions,
     fetchData,
     handleSaveModel,
+    handleSaveSourceConfig,
+    handleExplainSourceConfig,
     handleReasoningConfigSaved,
     handleRuntimeFeatureConfigSaved,
     handleNavigateToModels,

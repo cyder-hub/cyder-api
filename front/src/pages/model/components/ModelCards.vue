@@ -26,15 +26,20 @@
           </span>
         </div>
         <div class="rounded-lg border border-gray-100 px-3 py-2.5">
-          <span>{{ t("modelPage.table.capabilities") }}</span>
-          <div class="mt-2 flex flex-wrap gap-1.5">
+          <span>{{ t("modelPage.table.sourceConfig") }}</span>
+          <div class="mt-2 flex flex-wrap items-center gap-1.5">
+            <Badge variant="secondary" class="font-mono text-[11px]">
+              {{ model.source_config.source_selection_mode }}
+            </Badge>
+            <span class="font-mono text-xs text-gray-500">
+              {{ model.source_config.declared_source_count }}
+            </span>
             <Badge
-              v-for="capability in capabilityItems"
-              :key="capability.key"
-              :variant="model[capability.key] ? 'secondary' : 'outline'"
-              class="font-mono text-[11px]"
+              v-if="model.source_config.warnings.length > 0"
+              variant="outline"
+              class="font-mono text-[11px] text-gray-600"
             >
-              {{ t(capability.labelKey) }}
+              {{ t("modelPage.sourceWarnings", { count: model.source_config.warnings.length }) }}
             </Badge>
           </div>
         </div>
@@ -58,11 +63,9 @@ import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { ModelSummaryItem } from "@/services/types";
-import type { ModelCapabilityItem } from "../types";
 
 defineProps<{
   models: ModelSummaryItem[];
-  capabilityItems: ModelCapabilityItem[];
 }>();
 
 defineEmits<{

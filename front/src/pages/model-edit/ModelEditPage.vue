@@ -31,6 +31,7 @@ import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
 import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./components/ModelBaseInfoForm.vue";
 import ModelRequestPatchPanel from "./components/ModelRequestPatchPanel.vue";
+import ModelSourceConfigEditor from "@/components/model-source-config/ModelSourceConfigEditor.vue";
 import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 import { useModelEdit } from "./composables/useModelEdit";
@@ -41,14 +42,22 @@ const {
   isLoading,
   modelDetail,
   editingData,
+  providerSources,
+  sourceConfigSummary,
+  sourceConfigDraft,
+  isSourceConfigDirty,
+  isSourceConfigSaving,
+  sourceConfigError,
+  sourceConfigExplain,
   costManager,
-  capabilityItems,
   currentProvider,
   selectedCatalog,
   selectedCatalogVersions,
   reasoningActions,
   fetchData,
   handleSaveModel,
+  handleSaveSourceConfig,
+  handleExplainSourceConfig,
   handleReasoningConfigSaved,
   handleRuntimeFeatureConfigSaved,
   handleNavigateToModels,
@@ -124,7 +133,18 @@ const {
 
         <ModelBaseInfoForm
           v-model:editingData="editingData"
-          :capability-items="capabilityItems"
+        />
+
+        <ModelSourceConfigEditor
+          v-model="sourceConfigDraft"
+          :sources="providerSources"
+          :summary="sourceConfigSummary"
+          :explain="sourceConfigExplain"
+          :dirty="isSourceConfigDirty"
+          :saving="isSourceConfigSaving"
+          :error="sourceConfigError"
+          @save="handleSaveSourceConfig"
+          @explain="handleExplainSourceConfig"
         />
 
         <div class="border-t border-gray-200 pt-5">
@@ -133,7 +153,6 @@ const {
             :owner-id="editingData.id"
             :actions="reasoningActions"
             :title="t('modelEditPage.advancedConfig.title')"
-            :model-supports-reasoning="editingData.supports_reasoning"
             @saved="handleReasoningConfigSaved"
           >
             <template #runtime-feature>

@@ -10,38 +10,46 @@ const ROOT = new URL("../", import.meta.url);
 
 const readSource = (path) => readFile(new URL(path, ROOT), "utf8");
 
-test("provider upstream actions require an explicit Source and keep Source evidence", async () => {
-  const [page, check, model, key, source, selector, service] = await Promise.all([
+test("provider checks use one dialog, enabled automatic candidates, and impact previews", async () => {
+  const [page, check, model, key, source, service, dialog, impact, sourceState] = await Promise.all([
     readSource("src/pages/provider-edit/ProviderEditPage.vue"),
     readSource("src/pages/provider-edit/composables/useProviderCheck.ts"),
     readSource("src/pages/provider-edit/components/ProviderModelList.vue"),
     readSource("src/pages/provider-edit/components/ProviderApiKeyList.vue"),
     readSource("src/pages/provider-edit/components/ProviderSourceList.vue"),
-    readSource("src/pages/provider-edit/components/ProviderSourceSelector.vue"),
     readSource("src/services/providers.ts"),
+    readSource("src/pages/provider-edit/components/ProviderCheckDialog.vue"),
+    readSource("src/pages/provider-edit/composables/sourceImpactViewModel.ts"),
+    readSource("src/pages/provider-edit/composables/useProviderSources.ts"),
   ]);
 
-  assert.match(page, /ProviderSourceSelector/);
-  assert.match(page, /:source-id="selectedSourceId"/);
+  assert.match(page, /ProviderCheckDialog/);
   assert.match(page, /@check-source="handleSourceCheck"/);
-  assert.doesNotMatch(page, /activeSourceProfile|profile-type=/);
+  assert.doesNotMatch(page, /ProviderSourceSelector|checkBatch|selectedSourceId/);
 
-  assert.match(check, /selectedSourceId: Ref<number \| null>/);
-  assert.match(check, /sourceRequiredForCheck/);
-  assert.match(check, /isSourceCheckModalOpen/);
-  assert.doesNotMatch(check, /getCheckSourceId/);
-  assert.doesNotMatch(check, /is_default\)\?\.id|upstream_sources\[0\]/);
+  assert.match(check, /resolveAutomaticSource/);
+  assert.match(check, /buildEnabledSourceOptions/);
+  assert.match(check, /buildEnabledApiKeyOptions/);
+  assert.doesNotMatch(check, /performBatch|selectedSourceId|sourceRequiredForCheck/);
+  assert.match(check, /kind === "source"[\s\S]*indexOrId/);
+  assert.match(check, /targetModelIndex\.value = kind === "model" \? indexOrId : null/);
+  assert.match(check, /targetApiKeyIndex\.value = kind === "apiKey" \? indexOrId : null/);
 
-  assert.match(model, /getProviderRemoteModels\(data\.id, props\.sourceId\)/);
-  assert.match(model, /response\.profile_type/);
-  assert.match(model, /discoveryInheritanceWarning/);
-  assert.match(key, /checkProviderConnection\(providerId, props\.sourceId/);
+  assert.doesNotMatch(model, /remote|batch|checkBatch/i);
+  assert.doesNotMatch(key, /sourceId|checkBatch/);
   assert.match(source, /emit\('checkSource', source\.id\)/);
-  assert.match(selector, /sourceSelection/);
 
   assert.match(service, /\/provider\/\$\{providerId\}\/sources\/\$\{sourceId\}\/check/);
-  assert.match(service, /\/provider\/\$\{providerId\}\/sources\/\$\{sourceId\}\/remote_models/);
+  assert.match(service, /\/provider\/\$\{providerId\}\/sources\/\$\{sourceId\}\/model-impact/);
+  assert.doesNotMatch(service, /remote_models/);
   assert.doesNotMatch(service, /\/provider\/\$\{providerId\}\/check/);
+  assert.match(dialog, /providerEditPage\.checkDialog\.description/);
+  assert.match(impact, /summarizeSourceImpact/);
+  assert.match(sourceState, /confirmSourceAction/);
+  for (const action of ["DISABLE", "DELETE", "SET_DEFAULT", "UNSET_DEFAULT"]) {
+    assert.match(sourceState, new RegExp(`"${action}"`));
+  }
+  assert.match(sourceState, /impactUnavailable/);
 });
 
 test("credential secrets are opaque text while dialog cleanup and reveal governance remain", async () => {

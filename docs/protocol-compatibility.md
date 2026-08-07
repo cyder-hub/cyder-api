@@ -38,11 +38,11 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 ## Upstream Source contract
 
-- Owner: `R3.10`; aggregate field `upstream_sources` has `zero_to_many` cardinality and `source_id_only` identity. Source state is `explicit_enabled_and_default`, default semantics are `optional`, and Profile mutability is `create_only`.
+- Owner: `R3.11`; aggregate field `upstream_sources` has `zero_to_many` cardinality and `source_id_only` identity. Source state is `explicit_enabled_and_default`, default semantics are `optional`, and Profile mutability is `create_only`.
 - Family uniqueness is `one_active_source_per_wire_family`; disabled Sources reserve family capacity: `true`; deleted Sources release it: `true`.
-- Selection order: `protocol_match -> enabled_default`; no fallback after selection: `true`. Credentials remain `provider` scoped and `opaque` representation; models use `provider_all_enabled_sources`.
-- Model owner: `R3.11`; Request Patch scope: `provider_global`; Reasoning scope: `provider_global`; configuration owner: `R3.12`.
-- Evidence: r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract.
+- Selection order: `protocol_match -> inherit_all_provider_default_transform -> explicit_model_default_transform`; no fallback after selection: `true`. Credentials remain `provider` scoped and `opaque` representation; models use `model_source_selection_mode_and_visible_bindings`.
+- Model owner: `R3.11`; Request Patch scope: `provider_global`; Reasoning scope: `provider_global`; configuration owner: `R3.11`.
+- Evidence: r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract, r3-11-source-selector, r3-11-model-source-config, r3-11-source-impact-and-check, r3-11-request-log-reason.
 
 ## Upstream Source profiles
 
@@ -128,7 +128,7 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 | Utility | Route suffix | Method | Exposed on | Not exposed on | Execution | Allowed upstreams | Incompatible upstream | Verification | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| models | `/models` | GET | OpenAI, Responses, Anthropic, Gemini | — | local | — | not_applicable | verified | — | router-contract, router-method-contract |
+| models | `/models` | GET | OpenAI, Responses, Anthropic, Gemini | — | local | — | not_applicable | verified | — | router-contract, router-method-contract, r3-11-model-catalog-selector, r3-11-ollama-discovery-boundary |
 | embeddings | `/embeddings` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | partial | R3.16 | router-contract, router-method-contract, utility-pre-send-reject |
 | rerank | `/rerank` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | partial | R3.16 | router-contract, router-method-contract, utility-pre-send-reject |
 | countTokens | `/models/{model}:countTokens` | POST | Gemini | OpenAI, Responses, Anthropic | upstream | Gemini | pre_send_reject | partial | R3.19 | gemini-utility-exposure, router-method-contract, utility-pre-send-reject |
@@ -155,7 +155,7 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 | `representative-fixture-scope` | test | `proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols` | Proves that the direct-execution suite contains exactly the four representative cells and no downstream Ollama fixture. |
 | `reachable-materializers-without-cell-regression` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | OpenAI and Gemini upstream materializers exist, but cells outside the representative suite lack complete direct-execution evidence. |
 | `native-materializer-unavailable` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | Responses and Anthropic upstream generation protocols are rejected before HTTP materialization. |
-| `ollama-upstream-incomplete` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | An Ollama /api/chat materialization path exists, but no complete direct-execution cell proves native behavior. |
+| `ollama-upstream-incomplete` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | An Ollama /api/chat materialization path exists, but no complete direct-execution cell proves native behavior; model directories are local configured Models and are not discovered through /api/tags. |
 | `ollama-stream-incomplete` | code | `server/src/proxy/runtime/transport/stream.rs` | The transport does not provide a complete native Ollama NDJSON streaming contract. |
 | `advanced-transform-only` | test | `cargo run -p cyder-api --bin transform_quality_gate -- --quick` | Transform quality evidence exists, but it does not satisfy the router-to-upstream direct-execution bar for advanced dimensions. |
 | `router-contract` | test | `proxy::router::tests::four_protocol_version_aliases_are_direct_and_equivalent` | Pins four public protocol prefixes, direct unversioned aliases, version variants, and local model routes. |
@@ -168,6 +168,12 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 | `r3-10-manager-source-contract` | test | `controller::provider::tests::manager_provider_openapi_matches_routes_safe_dtos_and_errors` | Pins the Manager Provider OpenAPI paths, aggregate DTOs, nested Source operations, opaque credentials, and removed legacy routes. |
 | `r3-10-runtime-source-contract` | test | `controller::provider_runtime::tests::snapshot_builds_summary_and_filtered_items_from_one_provider_set` | Pins Source-level Runtime rows, source identity/profile evidence, summary counts, and safe endpoint output. |
 | `r3-10-migration-contract` | test | `database::migration_smoke_tests::sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract` | Pins the R3.9-to-R3.10 Source migration retention, ID continuity, Profile labels, and database constraint contract. |
+| `r3-11-source-selector` | test | `proxy::direct_execution_regression::direct_execution_explicit_scope_is_closed_and_fail_closed` | Pins EXPLICIT model Source scope, explicit empty failure, disabled/deleted default failure, zero upstream calls, and no Provider-default escape. |
+| `r3-11-model-source-config` | test | `controller::model::tests::source_config_http_lifecycle_is_atomic_and_explain_survives_disabled_entities` | Pins atomic Model creation with Source Config, complete replacement, summary shape, four-protocol Explain, and disabled entity diagnostics. |
+| `r3-11-source-impact-and-check` | test | `controller::provider::tests::source_impact_http_preview_covers_all_actions_without_side_effects` | Pins bounded DISABLE, DELETE, SET_DEFAULT, and UNSET_DEFAULT impact previews without mutation or Model ID disclosure. |
+| `r3-11-request-log-reason` | test | `proxy::direct_execution_regression::direct_execution_model_default_selection_reason_is_persisted_after_flush` | Pins model-default Source selection reason persistence after request-log flush while retaining one selected Source. |
+| `r3-11-model-catalog-selector` | test | `proxy::models::tests::models_listing_uses_the_protocol_selector_for_source_visibility` | Pins local model directory visibility to the shared protocol Source selector and enabled Source state. |
+| `r3-11-ollama-discovery-boundary` | code | `server/src/proxy/models.rs::get_accessible_models` | The public model directory is built from saved local Model records; no Ollama /api/tags discovery or import route is part of the R3.11 contract. |
 
 ## Status semantics
 

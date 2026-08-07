@@ -34,7 +34,7 @@ use super::reload::{
 };
 
 type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
-const CATALOG_CACHE_SCHEMA_PREFIX: &str = "r310:";
+const CATALOG_CACHE_SCHEMA_PREFIX: &str = "r311:";
 type ProviderApiKeysInvalidationHook = Arc<
     dyn Fn(i64) -> Pin<Box<dyn Future<Output = Result<(), AppStoreError>> + Send + 'static>>
         + Send
@@ -290,7 +290,13 @@ impl CatalogService {
             Ok(models) => {
                 model_count = models.len();
                 for model in models {
-                    let cache_item = CacheModel::from(model);
+                    let Ok(cache_item) = CacheModel::from_db(model) else {
+                        increment_failure_counter(
+                            &mut failure_counts,
+                            "model_source_binding_snapshot",
+                        );
+                        continue;
+                    };
                     catalog_models.push(cache_item.clone());
                     let _ = self
                         .model_cache
@@ -896,7 +902,8 @@ impl CatalogService {
                 if let Ok(Some(db_model)) =
                     Model::get_by_name_and_provider_id(model_name, provider.id)
                 {
-                    let cache_item = CacheModel::from(db_model.clone());
+                    let cache_item = CacheModel::from_db(db_model.clone())
+                        .map_err(|error| AppStoreError::DatabaseError(error))?;
                     self.model_cache
                         .set_positive(
                             &CacheKey::ModelById(db_model.id).to_compact_string(),
@@ -916,7 +923,8 @@ impl CatalogService {
 
         self.get_or_load(&self.model_cache, &cache_key, || async {
             if let Ok(db_model) = Model::get_by_id(id) {
-                let cache_item = CacheModel::from(db_model.clone());
+                let cache_item = CacheModel::from_db(db_model.clone())
+                    .map_err(|error| AppStoreError::DatabaseError(error))?;
                 if let Some(provider) = self.get_provider_by_id(db_model.provider_id).await? {
                     self.model_cache
                         .set_positive(
@@ -1316,8 +1324,8 @@ impl CatalogService {
         let models = Model::list_all()
             .map_err(|e| AppStoreError::DatabaseError(format!("failed to list models: {e:?}")))?
             .into_iter()
-            .map(CacheModel::from)
-            .collect();
+            .map(|model| CacheModel::from_db(model).map_err(AppStoreError::DatabaseError))
+            .collect::<Result<Vec<_>, _>>()?;
         let reasoning_configs = ReasoningConfig::list_active_with_presets()
             .map_err(|e| {
                 AppStoreError::DatabaseError(format!("failed to list reasoning configs: {e:?}"))
@@ -1387,7 +1395,7 @@ mod tests {
     use super::{CATALOG_CACHE_SCHEMA_PREFIX, CatalogService, select_catalog_cache_backend_status};
     use crate::config::CacheBackendType;
     use crate::database::TestDbContext;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
     use crate::database::reasoning_config::{
         ReasoningConfig, ReasoningConfigMode, ReasoningConfigPresetInput, ReasoningConfigScope,
@@ -1454,15 +1462,9 @@ mod tests {
     }
 
     fn seed_model(provider_id: i64, model_name: &str) -> CacheModel {
-        let model = Model::create(
-            provider_id,
-            model_name,
-            None,
-            true,
-            ModelCapabilityFlags::default(),
-        )
-        .expect("model seed should succeed");
-        CacheModel::from(model)
+        let model =
+            Model::create(provider_id, model_name, None, true).expect("model seed should succeed");
+        CacheModel::from_db(model).expect("model source snapshot should load")
     }
 
     #[test]
@@ -1518,8 +1520,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_cache_schema_uses_the_r310_namespace() {
-        assert_eq!(CATALOG_CACHE_SCHEMA_PREFIX, "r310:");
+    fn catalog_cache_schema_uses_the_r311_namespace() {
+        assert_eq!(CATALOG_CACHE_SCHEMA_PREFIX, "r311:");
         assert_ne!(CATALOG_CACHE_SCHEMA_PREFIX, "r39:");
     }
 
@@ -1582,14 +1584,7 @@ mod tests {
         let db = TestDbContext::new_sqlite("catalog-reasoning-config-reload.sqlite");
         db.run_async(async {
             let provider = seed_provider(101, "openai");
-            let model = Model::create(
-                provider.id,
-                "gpt-4o-mini",
-                None,
-                true,
-                ModelCapabilityFlags::default(),
-            )
-            .expect("model");
+            let model = Model::create(provider.id, "gpt-4o-mini", None, true).expect("model");
 
             let provider_config = ReasoningConfig::upsert_provider_config(
                 provider.id,

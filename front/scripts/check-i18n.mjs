@@ -224,7 +224,6 @@ async function checkDynamicKeyCandidates(messageKeys) {
     "request-patch-prefix",
     "api-key-governance",
     "api-key-edit-modal",
-    "model-capabilities",
     "cost-options",
     "cost-version-state",
     "cost-validation-alert",

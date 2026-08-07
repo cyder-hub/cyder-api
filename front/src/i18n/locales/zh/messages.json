@@ -463,10 +463,16 @@
         "source": "实际执行 Source",
         "sourceId": "Source ID",
         "sourceEndpoint": "Source Endpoint",
+        "selectionReason": "Source 选择原因",
+        "selectionReasonUnknown": "未知（历史记录或未选定 Source）",
         "model": "模型",
         "realModel": "真实模型",
         "downstreamProtocol": "下游协议",
         "upstreamProtocol": "上游协议",
+        "transform": "转换",
+        "transformDirect": "协议族直连",
+        "transformRequired": "需要网关转换",
+        "transformUnknown": "未知",
         "clientIp": "客户端 IP",
         "clientRequestId": "客户端请求 ID（调用方提供）",
         "stream": "流式",
@@ -762,17 +768,74 @@
       "provider": "渠道",
       "model": "模型",
       "realModel": "真实模型",
-      "capabilities": "能力",
+      "sourceConfig": "Source 配置",
       "enabled": "启用"
-    }
+    },
+    "sourceWarnings": "{count} 个警告"
   },
-  "modelCapabilities": {
-    "streaming": "流式",
-    "tools": "工具",
-    "reasoning": "推理",
-    "imageInput": "图像输入",
-    "embeddings": "向量",
-    "rerank": "重排"
+  "modelSourceConfig": {
+    "title": "Source 配置",
+    "helpLabel": "Source 配置说明",
+    "description": "选择模型是动态继承所有可见 Source，还是使用封闭的显式 Source 集合。Source 选择是确定性的，执行开始后不会切换到另一条 Source 重试。",
+    "modeLabel": "选择模式",
+    "modePlaceholder": "选择 Source 选择模式",
+    "modes": {
+      "inheritAll": { "label": "继承全部 Source" },
+      "explicit": { "label": "显式 Source 集合" }
+    },
+    "modeHint": {
+      "inheritAll": "新的可见 Source 会自动进入可用范围；精确协议匹配失败后只允许使用 Provider 默认 Source。",
+      "explicit": "只有勾选的 Source 可用；精确匹配失败后只允许使用模型默认 Source；空集合也是明确的 fail-closed 状态。"
+    },
+    "inheritAllFutureSources": "INHERIT_ALL 会持续包含未来未删除的 Source。停用 Source 仍会显示用于治理，但重新启用前不会参与运行时选择。",
+    "explicitSourcesTitle": "声明的 Source",
+    "explicitSourcesDescription": "选择 Source，并可将一个已选 Source 标记为模型默认。停用 Source 可以继续保留在声明集合中，重新启用后即可恢复使用。",
+    "sourceCount": "已声明 {count} 个",
+    "selectSource": "选择 Source {id}",
+    "enabled": "已启用",
+    "disabled": "已停用",
+    "selected": "已声明给此模型",
+    "notSelected": "未声明",
+    "default": "模型默认",
+    "makeDefault": "设为默认",
+    "clearDefault": "清除默认",
+    "noSources": "当前 Provider 没有可见 Source。",
+    "actions": {
+      "explain": "解释选择"
+    },
+    "warnings": {
+      "invalid_mode_binding_state": "配置异常",
+      "invalid_mode_binding_stateDescription": "保存的模式与 binding 状态不一致。请检查并完整保存 Source 配置。",
+      "explicit_empty": "显式空集合",
+      "explicit_emptyDescription": "当前没有声明任何 Source。该模型请求会在凭据和网络访问前 fail closed。",
+      "no_visible_source": "没有可见 Source",
+      "no_visible_sourceDescription": "Provider 当前没有未删除且对该模型可见的 Source。",
+      "no_enabled_source": "没有启用 Source",
+      "no_enabled_sourceDescription": "声明的 Source 存在，但当前没有任何一条启用，可用于运行时选择。",
+      "model_default_unavailable": "默认不可用",
+      "model_default_unavailableDescription": "模型默认 Source 已声明但当前停用；重新启用后即可恢复使用。"
+    },
+    "explain": {
+      "title": "选择解释",
+      "selected": "已在运行时校验前选定",
+      "unselectable": "没有可选择的 Source",
+      "transformRequired": "需要转换",
+      "executionStatus": "执行诊断状态",
+      "executionReason": "执行诊断说明",
+      "yes": "是",
+      "no": "否"
+    },
+    "modeConfirm": {
+      "title": "更改 Source 选择模式？",
+      "toExplicit": "当前可见 Source 会复制到显式草稿中；未来新增 Source 不会自动加入。",
+      "toInheritAll": "显式 binding 会从草稿中清除；保存后未来所有可见 Source 都会自动加入。",
+      "confirm": "应用模式变更"
+    },
+    "alert": {
+      "saveSuccess": "Source 配置已保存。",
+      "saveFailed": "保存 Source 配置失败：{error}",
+      "explainFailed": "解释 Source 选择失败：{error}"
+    }
   },
   "reasoningConfigPanel": {
     "titles": {
@@ -1179,17 +1242,9 @@
       "providerNotSavedForModelDelete": "渠道未保存，无法从后端删除模型。",
       "deleteModelFailed": "删除模型失败: {error}",
       "deleteApiKeyFailed": "删除 API Key 失败: {error}",
-      "fetchRemoteModelsFailed": "获取远程模型失败: {error}",
-      "noRemoteModels": "无法从远程获取模型，或列表为空。",
-      "newModelsAdded": "已从 {source} 添加 {count} 个新模型。",
-      "noNewModels": "没有新模型可添加。所有远程模型可能已存在。",
-      "noNewModelsFromSource": "{source} 没有可添加的新模型；发现的模型可能都已存在。",
-      "uncommittedCleared": "已清除未提交的模型。",
-      "noUncommittedToClear": "没有未提交的模型可清除。",
       "noModels": "暂无模型",
       "noApiKeys": "暂无 API Key",
       "apiKeySaveSuccess": "API 密钥保存成功。",
-      "modelSaveSuccess": "模型保存成功。",
       "modelDeleteSuccess": "模型删除成功。",
       "providerIdNotFound": "未找到渠道ID。",
       "apiKeyDeleteSuccess": "API 密钥删除成功。",
@@ -1197,21 +1252,9 @@
       "noApiKeyForCheck": "必须至少保存一个API密钥才能执行模型检查。",
       "noModelForCheck": "必须至少保存一个模型才能执行API密钥检查。",
       "noSourceForCheck": "必须至少保存一个 Source 才能执行检查。",
-      "sourceRequiredForCheck": "执行检查前必须选择一个具体的 Source。",
-      "noSourceForModel": "必须至少保存一个 Source 才能获取远程模型。",
-      "discoveryInheritanceWarning": "本次发现使用 {source}；导入的模型仍归 Provider 所有，不绑定到 Source。",
-      "checking": "正在执行检查...",
       "checkSuccess": "检查成功。连接有效。",
       "checkFailed": "检查失败: {error}",
-      "buttonCheckAll": "全部检查",
-      "noModelsToCheck": "没有已保存的模型可供检查。",
-      "noApiKeysToCheck": "没有已保存的API密钥可供检查。",
-      "batchChecking": "正在对 {type} 进行批量检查...",
-      "checkSuccessShort": "检查成功。",
-      "batchCheckComplete": "批量检查完成: {type} {success}/{total} 成功。",
-      "apiKeyNameFallback": "以...{lastKeyChars}结尾的密钥",
-      "checkTypeModels": "模型",
-      "checkTypeApiKeys": "API密钥"
+      "apiKeyNameFallback": "以...{lastKeyChars}结尾的密钥"
     },
     "sections": {
       "quickStart": {
@@ -1232,25 +1275,18 @@
       },
       "advanced": {
         "title": "高级",
-        "description": "在这里管理额外 API Key、更多模型、request patch 和远端模型同步。"
+        "description": "在这里管理额外 API Key、更多模型、request patch 和运行时检查。"
       },
       "advancedConfig": {
         "title": "推理设置",
         "description": "管理这个渠道的推理后缀和回调修复。",
         "scopeDescription": "这里的推理、运行时特性和请求改写是临时的 Provider/Model 全局设置，不绑定任何 Source。"
       },
-      "modelsDescription": "这里可直接编辑模型名称、映射模型名称、能力和启用状态。完整配置仍然留在 ModelEdit。"
+      "modelsDescription": "这里可直接编辑模型名称、映射模型名称、Source 配置摘要和启用状态。完整配置仍然留在 ModelEdit。"
     },
-    "modelCapabilities": {
-      "title": "能力"
-    },
-    "sourceSelection": {
-      "title": "上游操作使用的 Source",
-      "description": "选择模型发现和检查实际使用的 Source。必须显式选择，不会从 Provider 默认值推断。",
-      "label": "当前 Source",
-      "placeholder": "选择 Source",
-      "warning": "请求会携带 source_id。修改 Provider 默认 Source 不会改变这里的选择。",
-      "empty": "当前没有可用 Source。请先添加并启用 Source，再执行上游操作。"
+    "modelSourceConfig": {
+      "title": "Source 配置",
+      "warningCount": "{count} 个告警"
     },
     "preview": {
       "title": "身份预览",
@@ -1283,33 +1319,11 @@
       "reveal": "查看明文",
       "revealTitle": "Provider 凭据明文",
       "revealConfirm": "请确认查看凭据明文。启用认证器验证后，解密前需要提交一枚新的验证码。",
-      "checkDraft": "检查草稿",
       "secretLocalOnly": "明文只保留在当前对话框内，关闭时会立即清除。",
       "providerOwnership": "凭据归属逻辑 Provider。该 Provider 的所有 Source 都使用同一个凭据池；pre-1.0 不支持 Source 级凭据。",
       "mutationSuccess": "Provider 凭据已更新。",
       "mutationFailed": "凭据操作失败：{error}。由于持久化后可能发生运行时激活失败，页面已重新拉取保存状态。",
       "revealFailed": "查看 Provider 凭据失败：{error}"
-    },
-    "modalSelectModel": {
-      "title": "选择检查模型",
-      "description": "请选择一个模型以使用所选的API密钥执行检查。",
-      "target": "当前 API Key：{target}",
-      "selectPlaceholder": "选择一个模型"
-    },
-    "modalSelectApiKey": {
-      "title": "选择检查的API密钥",
-      "description": "请选择一个API密钥以使用所选模型执行检查。",
-      "target": "当前模型：{target}",
-      "selectPlaceholder": "选择一个API密钥"
-    },
-    "modalSourceCheck": {
-      "title": "检查 Source",
-      "description": "为这个 Source 选择一个已保存模型和一个已保存凭据。检查只会使用下方显示的 Source。",
-      "source": "Source：{target}",
-      "modelLabel": "模型",
-      "modelPlaceholder": "选择模型",
-      "apiKeyLabel": "凭据",
-      "apiKeyPlaceholder": "选择凭据"
     },
     "requestPatch": {
       "title": "请求改写",
@@ -1409,10 +1423,7 @@
     "tableHeaderMappedModelId": "映射模型ID",
     "placeholderModelId": "例如 gpt-3.5-turbo",
     "placeholderMappedModelId": "例如 azure-gpt-35 (可选)",
-    "buttonSaveModel": "保存模型",
     "buttonAddModel": "添加模型",
-    "buttonFetchRemote": "获取远程模型",
-    "buttonClearUncommitted": "清除未提交",
     "sectionApiKeys": "API Keys",
     "tableHeaderApiKey": "API Key",
     "tableHeaderDescription": "描述",
@@ -1458,11 +1469,32 @@
       "updateSuccess": "Source 更新成功。",
       "deleteSuccess": "Source 删除成功。",
       "saveFailed": "保存 Source 失败：{error}",
-      "deleteFailed": "删除 Source 失败：{error}"
+      "deleteFailed": "删除 Source 失败：{error}",
+      "impactUnavailable": "Source 影响预检失败：{error}。仍可查看普通确认并继续。",
+      "impactDescription": "{changed} 个协议选择会变化；{unselectable} 个会变为不可选择。INHERIT_ALL 模型：{inheritAll}；显式 binding 模型：{explicit}；显式默认模型：{defaults}。各协议变化/不可选择：{protocols}",
+      "confirmDisable": "停用 Source {target}？",
+      "confirmDisableFallback": "停用该 Source 可能使部分模型不可用。",
+      "confirmSetDefault": "将 Source {target} 设为 Provider 默认？",
+      "confirmSetDefaultFallback": "这会改变 INHERIT_ALL 模型使用的 Provider 默认。",
+      "confirmUnsetDefault": "取消 Source {target} 的 Provider 默认？",
+      "confirmUnsetDefaultFallback": "没有可满足请求的默认时，INHERIT_ALL 模型可能不可用。",
+      "confirmDeleteFallback": "删除该 Source 后它会从运行时选择中隐藏，并可能影响模型可用性。"
+    },
+    "checkDialog": {
+      "title": "选择检查目标",
+      "description": "自动选择只使用启用的 Source、模型和凭据。你从某一行发起检查时，该行仍是固定目标，即使它已停用。",
+      "sourceLabel": "Source",
+      "sourcePlaceholder": "选择启用的 Source",
+      "modelLabel": "模型",
+      "modelPlaceholder": "选择已保存且启用的模型",
+      "apiKeyLabel": "Provider Key",
+      "apiKeyPlaceholder": "选择启用的 Provider Key"
     }
   },
   "modelEditPage": {
     "title": "编辑模型",
+    "createTitle": "新建模型",
+    "createDescription": "同时创建模型和 Source 配置；之后仍可分别独立调整两部分内容。",
     "loading": "正在加载模型数据...",
     "buttonBackToModels": "返回模型库",
     "buttonBackToProviders": "查看渠道",
@@ -1476,10 +1508,6 @@
     "labelModelName": "模型名称",
     "labelRealModelName": "真实模型名称",
     "labelEnabled": "已启用",
-    "capabilities": {
-      "title": "模型能力",
-      "description": "这些显式运行时能力用于校验和构造请求，请让它们与渠道的真实行为保持一致。"
-    },
     "advancedConfig": {
       "title": "推理设置",
       "description": "管理这个模型的推理后缀和回调修复。"
@@ -1489,7 +1517,9 @@
       "loadDataFailed": "加载模型数据失败，ID: {modelId}。",
       "nameRequired": "模型名称不能为空。",
       "updateSuccess": "模型更新成功。",
-      "saveFailed": "保存模型失败: {error}"
+      "saveFailed": "保存模型失败: {error}",
+      "createSuccess": "模型创建成功。",
+      "createFailed": "创建模型失败：{error}"
     },
     "priceSection": {
       "title": "成本目录",

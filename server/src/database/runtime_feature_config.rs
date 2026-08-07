@@ -524,7 +524,7 @@ impl RuntimeFeatureConfig {
 mod tests {
     use super::*;
     use crate::database::TestDbContext;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::upstream_source::NewUpstreamSource;
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
@@ -563,14 +563,7 @@ mod tests {
     }
 
     fn create_model(provider_id: i64, name: &str) -> Model {
-        Model::create(
-            provider_id,
-            name,
-            None,
-            true,
-            ModelCapabilityFlags::default(),
-        )
-        .expect("model")
+        Model::create(provider_id, name, None, true).expect("model")
     }
 
     #[test]

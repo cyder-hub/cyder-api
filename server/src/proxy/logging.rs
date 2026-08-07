@@ -17,6 +17,7 @@ use crate::{
     proxy::{
         ExecutionStage, ResponseVisibility,
         request_context::{ClientRequestId, ProxyRequestContext, RequestId},
+        runtime::route_resolver::SourceSelectionReason,
         runtime::transport::{
             lifecycle::ProxyTerminationCoordinator,
             timing::{TimingSnapshot, TransportTimingState},
@@ -48,6 +49,7 @@ pub struct RequestLogContext {
     pub provider_name: String,
     pub model_id: i64,
     pub source_id: i64,
+    pub source_selection_reason: Option<String>,
     pub source_profile_type: UpstreamProfileType,
     pub source_endpoint: Option<String>,
     pub provider_api_key_id: Option<i64>,
@@ -92,6 +94,7 @@ impl RequestLogContext {
         client_ip_addr: &Option<String>,
         downstream_protocol: DownstreamProtocol,
         upstream_protocol: UpstreamProtocol,
+        selection_reason: SourceSelectionReason,
     ) -> Self {
         let real_model_name = model
             .real_model_name
@@ -108,6 +111,7 @@ impl RequestLogContext {
             provider_name: provider.name.clone(),
             model_id: model.id,
             source_id: source.id,
+            source_selection_reason: Some(selection_reason.as_key().to_string()),
             source_profile_type: source.profile_type,
             source_endpoint: None,
             provider_api_key_id,
@@ -465,6 +469,7 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         provider_api_key_id: context.provider_api_key_id,
         model_id: Some(context.model_id),
         source_id: Some(context.source_id),
+        source_selection_reason: context.source_selection_reason.clone(),
         provider_key_snapshot: Some(context.provider_key.clone()),
         provider_name_snapshot: Some(context.provider_name.clone()),
         model_name_snapshot: Some(context.model_name.clone()),

@@ -754,14 +754,14 @@ mod tests {
         drop(listener);
         let marker = "manager-query-secret";
         let error = reqwest::Client::new()
-            .get(format!("http://{address}/models?api_key={marker}"))
+            .get(format!("http://{address}/auxiliary?api_key={marker}"))
             .send()
             .await
             .expect_err("closed local address must reject the request");
         assert!(error.url().unwrap().as_str().contains(marker));
 
-        let message = safe_http_error_message("Remote models request failed", &error);
-        assert_eq!(message, "Remote models request failed (connect)");
+        let message = safe_http_error_message("Auxiliary request failed", &error);
+        assert_eq!(message, "Auxiliary request failed (connect)");
         assert!(!message.contains(marker));
         assert!(!message.contains(&address.to_string()));
     }

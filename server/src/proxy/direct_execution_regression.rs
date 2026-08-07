@@ -45,6 +45,7 @@ use crate::{
         DbConnection, TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
         get_connection,
+        model_source_binding::{ModelSourceBindingInput, ModelSourceConfig, replace_for_model},
         provider::Provider,
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
         request_patch::CreateRequestPatchPayload,
@@ -56,7 +57,6 @@ use crate::{
         RequestPatchPlacement, RequestStatus, UpstreamProfileType,
     },
     service::{
-        admin::model::UpdateModelInput,
         admin::provider::BootstrapProviderCommand,
         app_state::{AppState, create_test_app_state},
         infra::AppInfra,
@@ -600,6 +600,23 @@ impl RouterFixture {
         .await
     }
 
+    pub(super) async fn new_zen(
+        context: TestDbContext,
+        fixture: &DirectExecutionFixture,
+        base_url: &str,
+    ) -> Self {
+        Self::new_with_default_action_and_identity(
+            context,
+            fixture,
+            base_url,
+            Action::Allow,
+            "zen-provider",
+            "Zen Provider",
+            "zen-chat",
+        )
+        .await
+    }
+
     async fn new_with_default_action(
         context: TestDbContext,
         fixture: &DirectExecutionFixture,
@@ -906,6 +923,12 @@ impl RouterFixture {
                     assert!(!endpoint.contains('?'));
                     assert!(!endpoint.contains('#'));
                 }
+                assert!(matches!(
+                    log.source_selection_reason.as_deref(),
+                    Some(
+                        "protocol_match" | "provider_default_transform" | "model_default_transform"
+                    )
+                ));
                 return log;
             }
             assert!(
@@ -1439,7 +1462,7 @@ fn model_resolution_preserves_parse_and_capability_error_codes() {
 }
 
 #[test]
-fn capability_rejection_does_not_decrypt_provider_credential() {
+fn tool_request_is_not_rejected_by_model_capability_flags() {
     let (name, fixture) = fixtures()
         .into_iter()
         .find(|(name, _)| *name == "openai")
@@ -1451,28 +1474,6 @@ fn capability_rejection_does_not_decrypt_provider_credential() {
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
-        let model = crate::database::model::Model::get_by_id(router.model_id).unwrap();
-        router
-            .app_state
-            .admin
-            .model
-            .update_model(
-                model.id,
-                UpdateModelInput {
-                    model_name: model.model_name,
-                    real_model_name: model.real_model_name,
-                    is_enabled: true,
-                    cost_catalog_id: model.cost_catalog_id,
-                    supports_streaming: Some(model.supports_streaming),
-                    supports_tools: Some(false),
-                    supports_reasoning: Some(model.supports_reasoning),
-                    supports_image_input: Some(model.supports_image_input),
-                    supports_embeddings: Some(model.supports_embeddings),
-                    supports_rerank: Some(model.supports_rerank),
-                },
-            )
-            .await
-            .expect("model capability should update");
         router
             .app_state
             .secret_encryption
@@ -1485,9 +1486,9 @@ fn capability_rejection_does_not_decrypt_provider_credential() {
 
         let response = router.send(&fixture, false, &body).await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
-        assert!(upstream.requests().await.is_empty());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(router.app_state.secret_encryption.decrypt_call_count() > 0);
+        assert_eq!(upstream.requests().await.len(), 1);
         upstream.shutdown().await;
     });
 }
@@ -1941,6 +1942,17 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
             );
             let first_log = router.wait_for_log(RequestStatus::Success).await;
             assert_eq!(first_log.source_id, Some(router.source_id));
+            let expected_first_reason = match fixture.protocol {
+                DownstreamProtocol::Openai | DownstreamProtocol::Gemini => "protocol_match",
+                DownstreamProtocol::Responses | DownstreamProtocol::Anthropic => {
+                    "provider_default_transform"
+                }
+            };
+            assert_eq!(
+                first_log.source_selection_reason.as_deref(),
+                Some(expected_first_reason),
+                "{name}: the first selection must persist its shared selector reason"
+            );
 
             let mutation_time = chrono::Utc::now().timestamp_millis();
             UpstreamSource::update(
@@ -2005,7 +2017,54 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                 Some(alternate_profile),
                 "{name}: request log must retain the selected Source profile"
             );
+            assert_eq!(
+                second_log.source_selection_reason.as_deref(),
+                Some("provider_default_transform"),
+                "{name}: request log must persist the provider default selection reason"
+            );
             router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn zen_fixture_uses_the_shared_selection_contract_for_all_public_downstreams() {
+    for (name, fixture) in fixtures() {
+        let case_name = format!("zen-{name}");
+        run_case(&case_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: fixture.non_stream.upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new_zen(context, &fixture, &upstream.base_url).await;
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Zen fixture response should be consumed");
+            assert_eq!(
+                upstream.requests().await.len(),
+                1,
+                "{name}: one upstream call"
+            );
+            assert!(router.provider_name.starts_with("Zen Provider"));
+            assert_eq!(router.model_name, "zen-chat");
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            let expected_reason = match fixture.protocol {
+                DownstreamProtocol::Openai | DownstreamProtocol::Gemini => "protocol_match",
+                DownstreamProtocol::Responses | DownstreamProtocol::Anthropic => {
+                    "provider_default_transform"
+                }
+            };
+            assert_eq!(
+                log.source_selection_reason.as_deref(),
+                Some(expected_reason),
+                "{name}: Zen fixture should use the shared selector"
+            );
             upstream.shutdown().await;
         });
     }
@@ -2114,6 +2173,199 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
             Some("provider_configuration_error")
         );
         assert_eq!(upstream.requests().await.len(), 2);
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let mutation_time = chrono::Utc::now().timestamp_millis();
+        let alternate_source = UpstreamSource::create(&NewUpstreamSource {
+            id: ID_GENERATOR.generate_id(),
+            provider_id: router.provider_id,
+            profile_type: UpstreamProfileType::Ollama,
+            endpoint: upstream.base_url.clone(),
+            use_proxy: false,
+            is_enabled: true,
+            is_default: false,
+            created_at: mutation_time,
+            updated_at: mutation_time,
+        })
+        .expect("explicit-scope alternate Source should be created");
+
+        let assert_configuration_failure = |response: Response<Body>| async {
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("configuration failure body should be readable");
+            let body: Value =
+                serde_json::from_slice(&body).expect("configuration failure should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("provider_configuration_error")
+            );
+        };
+
+        replace_for_model(
+            router.model_id,
+            &ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
+                source_id: alternate_source.id,
+                is_default: false,
+            }]),
+        )
+        .expect("singleton explicit Source should be saved");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("singleton explicit Source should invalidate the cache");
+        assert_configuration_failure(
+            router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await,
+        )
+        .await;
+
+        replace_for_model(router.model_id, &ModelSourceConfig::explicit(Vec::new()))
+            .expect("explicit empty Source Config should be saved");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("explicit empty Source Config should invalidate the cache");
+        assert_configuration_failure(
+            router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await,
+        )
+        .await;
+
+        replace_for_model(
+            router.model_id,
+            &ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
+                source_id: alternate_source.id,
+                is_default: true,
+            }]),
+        )
+        .expect("disabled model default Source should be saved");
+        UpstreamSource::update(
+            alternate_source.id,
+            router.provider_id,
+            &UpdateUpstreamSourceData {
+                endpoint: None,
+                use_proxy: None,
+                is_enabled: Some(false),
+                is_default: None,
+                updated_at: chrono::Utc::now().timestamp_millis(),
+            },
+        )
+        .expect("model default Source should be disabled");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("disabled model default should invalidate the cache");
+        assert_configuration_failure(
+            router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await,
+        )
+        .await;
+
+        UpstreamSource::delete(alternate_source.id, router.provider_id)
+            .expect("model default Source should be soft deleted");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("deleted model default should invalidate the cache");
+        assert_configuration_failure(
+            router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await,
+        )
+        .await;
+
+        assert!(
+            upstream.requests().await.is_empty(),
+            "explicit scope failures must never penetrate the Provider default or retry"
+        );
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn direct_execution_model_default_selection_reason_is_persisted_after_flush() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let model_default_source = UpstreamSource::create(&NewUpstreamSource {
+            id: ID_GENERATOR.generate_id(),
+            provider_id: router.provider_id,
+            profile_type: UpstreamProfileType::Ollama,
+            endpoint: upstream.base_url.clone(),
+            use_proxy: false,
+            is_enabled: true,
+            is_default: false,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .expect("model default Source should be created");
+        replace_for_model(
+            router.model_id,
+            &ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
+                source_id: model_default_source.id,
+                is_default: true,
+            }]),
+        )
+        .expect("model Source Config should be replaced atomically");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("model Source Config should invalidate the provider snapshot");
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("model default response should be consumed");
+        let requests = upstream.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/api/chat");
+        let log = router
+            .wait_for_log_for_source(model_default_source.id, RequestStatus::Success)
+            .await;
+        assert_eq!(
+            log.source_selection_reason.as_deref(),
+            Some("model_default_transform")
+        );
         upstream.shutdown().await;
     });
 }

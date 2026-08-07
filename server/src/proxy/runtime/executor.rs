@@ -11,7 +11,6 @@ use crate::{
         request_context::ProxyRequestContext,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
-            capability::{validate_generation_capabilities, validate_utility_capabilities},
             log_writer::{
                 RequestLogContextInput, finalize_request_failure_context, new_request_log_context,
                 record_completion,
@@ -149,38 +148,31 @@ pub(in crate::proxy) async fn execute_request(
         client_ip_addr: &client_ip_addr,
         request_context: &request_context,
         downstream_protocol,
+        selection_reason: target.selection_reason,
     });
 
-    let capability_result = match &kind {
-        RequestExecutionKind::Generation {
-            is_stream, data, ..
-        } => validate_generation_capabilities(
-            &target,
-            data,
-            *is_stream,
-            execution_plan.resolved_reasoning_preset,
-        ),
-        RequestExecutionKind::Utility { operation, data } => {
-            if execution_plan.resolved_reasoning_preset.is_some() {
-                let message = format!(
-                    "Reasoning suffixes are only supported for generation requests; '{}' is a utility operation.",
-                    operation.name
-                );
-                Err(ProxyError::gateway(
+    if let RequestExecutionKind::Utility { operation, .. } = &kind {
+        if execution_plan.resolved_reasoning_preset.is_some() {
+            let message = format!(
+                "Reasoning suffixes are only supported for generation requests; '{}' is a utility operation.",
+                operation.name
+            );
+            return fail_before_send(
+                &app_state,
+                log_context,
+                ProxyError::gateway(
                     ProxyErrorCode::UnsupportedCapabilityError,
                     ExecutionStage::Capability,
                     ResponseVisibility::NotVisible,
                     Some(message.clone()),
                     message,
-                ))
-            } else {
-                validate_utility_target(operation, target.upstream_protocol)
-                    .and_then(|()| validate_utility_capabilities(&target, &operation.name, data))
-            }
+                ),
+            )
+            .await;
         }
-    };
-    if let Err(error) = capability_result {
-        return fail_before_send(&app_state, log_context, error).await;
+        if let Err(error) = validate_utility_target(operation, target.upstream_protocol) {
+            return fail_before_send(&app_state, log_context, error).await;
+        }
     }
 
     if let Err(error) =

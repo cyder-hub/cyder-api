@@ -25,51 +25,20 @@
         <Checkbox id="is_enabled" v-model="editingData.is_enabled" />
       </div>
 
-      <div class="space-y-3">
-        <SectionHeader
-          :title="t('modelEditPage.capabilities.title')"
-          :help="t('modelEditPage.capabilities.description')"
-          :help-label="t('modelEditPage.capabilities.title')"
-          title-class="text-sm"
-        />
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div
-            v-for="capability in capabilityItems"
-            :key="capability.key"
-            class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5"
-          >
-            <Label class="cursor-pointer text-gray-700">
-              {{ t(capability.labelKey) }}
-            </Label>
-            <Checkbox
-              :model-value="editingData[capability.key]"
-              @update:model-value="
-                (value: boolean | 'indeterminate') =>
-                  (editingData[capability.key] = value === true)
-              "
-            />
-          </div>
-        </div>
-      </div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 
-import SectionHeader from "@/components/SectionHeader.vue";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { EditingModelData, ModelCapabilityItem } from "../types";
+import type { EditingModelData } from "../types";
 
 const editingData = defineModel<EditingModelData>("editingData", {
   required: true,
 });
-
-defineProps<{
-  capabilityItems: ModelCapabilityItem[];
-}>();
 
 const { t } = useI18n();
 </script>

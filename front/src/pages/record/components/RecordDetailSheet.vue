@@ -180,6 +180,13 @@ const value = (input: string | number | null | undefined) =>
 const eventTimestamp = (timestamp: number | null | undefined, missingLabel: string) =>
   timestamp == null ? missingLabel : formatDate(timestamp);
 
+const transformLabel = (record: RecordRequest) => {
+  if (!record.upstream_protocol) return $t("recordPage.detailDialog.summary.transformUnknown");
+  return record.downstream_protocol === record.upstream_protocol
+    ? $t("recordPage.detailDialog.summary.transformDirect")
+    : $t("recordPage.detailDialog.summary.transformRequired");
+};
+
 const copyRequestId = async () => {
   const requestId = props.record?.request_id;
   if (!requestId || !(await copyText(requestId))) {
@@ -200,6 +207,11 @@ const overviewItems = computed(() => {
       value: formatSourceIdentity(record, $t("recordPage.source.unselected")),
       mono: true,
     },
+    {
+      label: $t("recordPage.detailDialog.summary.selectionReason"),
+      value: record.source_selection_reason || $t("recordPage.detailDialog.summary.selectionReasonUnknown"),
+      mono: true,
+    },
     ...(record.source_id == null
       ? []
       : [
@@ -218,6 +230,7 @@ const overviewItems = computed(() => {
     { label: $t("recordPage.detailDialog.summary.realModel"), value: value(record.real_model_name), mono: true },
     { label: $t("recordPage.detailDialog.summary.downstreamProtocol"), value: value(record.downstream_protocol), mono: true },
     { label: $t("recordPage.detailDialog.summary.upstreamProtocol"), value: value(record.upstream_protocol), mono: true },
+    { label: $t("recordPage.detailDialog.summary.transform"), value: transformLabel(record), mono: true },
     { label: $t("recordPage.detailDialog.summary.clientIp"), value: value(record.client_ip), mono: true },
     ...(record.client_request_id
       ? [{ label: $t("recordPage.detailDialog.summary.clientRequestId"), value: record.client_request_id, mono: true }]

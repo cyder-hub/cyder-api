@@ -1657,12 +1657,10 @@ mod tests {
 
             INSERT INTO model (
                 id, provider_id, cost_catalog_id, model_name, real_model_name,
-                supports_streaming, supports_tools, supports_reasoning, supports_image_input,
-                supports_embeddings, supports_rerank, is_enabled, deleted_at, created_at, updated_at
+                source_selection_mode, is_enabled, deleted_at, created_at, updated_at
             ) VALUES (
                 30, 10, NULL, 'gpt-test', 'gpt-test-real',
-                1, 1, 1, 1,
-                0, 0, 1, NULL, 1, 1
+                'INHERIT_ALL', 1, NULL, 1, 1
             );
 
             INSERT INTO request_log (

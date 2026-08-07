@@ -128,7 +128,7 @@ evidence:
   - id: ollama-upstream-incomplete
     kind: code
     reference: "server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind"
-    summary: "An Ollama /api/chat materialization path exists, but no complete direct-execution cell proves native behavior."
+    summary: "An Ollama /api/chat materialization path exists, but no complete direct-execution cell proves native behavior; model directories are local configured Models and are not discovered through /api/tags."
   - id: ollama-stream-incomplete
     kind: code
     reference: "server/src/proxy/runtime/transport/stream.rs"
@@ -177,9 +177,33 @@ evidence:
     kind: test
     reference: "database::migration_smoke_tests::sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract"
     summary: "Pins the R3.9-to-R3.10 Source migration retention, ID continuity, Profile labels, and database constraint contract."
+  - id: r3-11-source-selector
+    kind: test
+    reference: "proxy::direct_execution_regression::direct_execution_explicit_scope_is_closed_and_fail_closed"
+    summary: "Pins EXPLICIT model Source scope, explicit empty failure, disabled/deleted default failure, zero upstream calls, and no Provider-default escape."
+  - id: r3-11-model-source-config
+    kind: test
+    reference: "controller::model::tests::source_config_http_lifecycle_is_atomic_and_explain_survives_disabled_entities"
+    summary: "Pins atomic Model creation with Source Config, complete replacement, summary shape, four-protocol Explain, and disabled entity diagnostics."
+  - id: r3-11-source-impact-and-check
+    kind: test
+    reference: "controller::provider::tests::source_impact_http_preview_covers_all_actions_without_side_effects"
+    summary: "Pins bounded DISABLE, DELETE, SET_DEFAULT, and UNSET_DEFAULT impact previews without mutation or Model ID disclosure."
+  - id: r3-11-request-log-reason
+    kind: test
+    reference: "proxy::direct_execution_regression::direct_execution_model_default_selection_reason_is_persisted_after_flush"
+    summary: "Pins model-default Source selection reason persistence after request-log flush while retaining one selected Source."
+  - id: r3-11-model-catalog-selector
+    kind: test
+    reference: "proxy::models::tests::models_listing_uses_the_protocol_selector_for_source_visibility"
+    summary: "Pins local model directory visibility to the shared protocol Source selector and enabled Source state."
+  - id: r3-11-ollama-discovery-boundary
+    kind: code
+    reference: "server/src/proxy/models.rs::get_accessible_models"
+    summary: "The public model directory is built from saved local Model records; no Ollama /api/tags discovery or import route is part of the R3.11 contract."
 
 upstream_source_contract:
-  owner: R3.10
+  owner: R3.11
   source_cardinality: zero_to_many
   source_identity: source_id_only
   aggregate_field: upstream_sources
@@ -189,16 +213,16 @@ upstream_source_contract:
   family_uniqueness: one_active_source_per_wire_family
   disabled_source_reserves_family: true
   deleted_source_releases_family: true
-  selection_order: [protocol_match, enabled_default]
+  selection_order: [protocol_match, inherit_all_provider_default_transform, explicit_model_default_transform]
   no_fallback_after_selection: true
   credential_scope: provider
   credential_representation: opaque
-  model_scope: provider_all_enabled_sources
+  model_scope: model_source_selection_mode_and_visible_bindings
   model_owner: R3.11
   request_patch_scope: provider_global
   reasoning_scope: provider_global
-  config_owner: R3.12
-  evidence: [r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract]
+  config_owner: R3.11
+  evidence: [r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract, r3-11-source-selector, r3-11-model-source-config, r3-11-source-impact-and-check, r3-11-request-log-reason]
 
 upstream_source_profiles:
   - profile_type: OPENAI
@@ -572,7 +596,7 @@ utilities:
     incompatible_upstream_behavior: not_applicable
     verification:
       status: verified
-      evidence: [router-contract, router-method-contract]
+      evidence: [router-contract, router-method-contract, r3-11-model-catalog-selector, r3-11-ollama-discovery-boundary]
   - name: embeddings
     route_suffix: /embeddings
     method: POST

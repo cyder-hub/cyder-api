@@ -31,6 +31,7 @@ export interface RecordListItem {
   real_model_name: string | null;
   source_id: number | null;
   source_profile_type: string | null;
+  source_selection_reason: string | null;
   upstream_http_status: number | null;
   estimated_cost_nanos: number | null;
   estimated_cost_currency: string | null;

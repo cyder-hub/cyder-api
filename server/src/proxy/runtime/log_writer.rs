@@ -10,7 +10,7 @@ use crate::{
         ProxyError, ProxyErrorCode,
         logging::{RequestLogContext, record_request_completion_and_log},
         request_context::ProxyRequestContext,
-        runtime::route_resolver::ExecutionTarget,
+        runtime::route_resolver::{ExecutionTarget, SourceSelectionReason},
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus},
     service::{
@@ -30,6 +30,7 @@ pub(in crate::proxy) struct RequestLogContextInput<'a> {
     pub client_ip_addr: &'a Option<String>,
     pub request_context: &'a ProxyRequestContext,
     pub downstream_protocol: DownstreamProtocol,
+    pub selection_reason: SourceSelectionReason,
 }
 
 pub(in crate::proxy) fn new_request_log_context(
@@ -46,6 +47,7 @@ pub(in crate::proxy) fn new_request_log_context(
         input.client_ip_addr,
         input.downstream_protocol,
         input.target.upstream_protocol,
+        input.selection_reason,
     );
     context.set_model_resolution_trace(
         input.base_requested_model_name,

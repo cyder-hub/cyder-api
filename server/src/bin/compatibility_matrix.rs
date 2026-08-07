@@ -619,15 +619,19 @@ fn validate_upstream_source_contract(
     contract: &UpstreamSourceContract,
     evidence: &HashMap<&str, &Evidence>,
 ) -> Result<(), String> {
-    const REQUIRED_EVIDENCE: [&str; 6] = [
+    const REQUIRED_EVIDENCE: [&str; 10] = [
         "r3-10-source-aggregate",
         "r3-10-source-repository",
         "r3-10-source-selector",
         "r3-10-manager-source-contract",
         "r3-10-runtime-source-contract",
         "r3-10-migration-contract",
+        "r3-11-source-selector",
+        "r3-11-model-source-config",
+        "r3-11-source-impact-and-check",
+        "r3-11-request-log-reason",
     ];
-    if contract.owner != "R3.10"
+    if contract.owner != "R3.11"
         || contract.source_cardinality != "zero_to_many"
         || contract.source_identity != "source_id_only"
         || contract.aggregate_field != "upstream_sources"
@@ -637,19 +641,24 @@ fn validate_upstream_source_contract(
         || contract.family_uniqueness != "one_active_source_per_wire_family"
         || !contract.disabled_source_reserves_family
         || !contract.deleted_source_releases_family
-        || contract.selection_order != ["protocol_match".to_string(), "enabled_default".to_string()]
+        || contract.selection_order
+            != [
+                "protocol_match".to_string(),
+                "inherit_all_provider_default_transform".to_string(),
+                "explicit_model_default_transform".to_string(),
+            ]
         || !contract.no_fallback_after_selection
         || contract.credential_scope != "provider"
         || contract.credential_representation != "opaque"
-        || contract.model_scope != "provider_all_enabled_sources"
+        || contract.model_scope != "model_source_selection_mode_and_visible_bindings"
         || contract.model_owner != "R3.11"
         || contract.request_patch_scope != "provider_global"
         || contract.reasoning_scope != "provider_global"
-        || contract.config_owner != "R3.12"
+        || contract.config_owner != "R3.11"
         || contract.evidence != REQUIRED_EVIDENCE
     {
         return Err(
-            "upstream_source_contract must pin the R3.10 zero-to-many Source, ID-only, selector, and Provider-credential boundary"
+            "upstream_source_contract must pin the R3.11 model-scoped selector while preserving the R3.10 zero-to-many Source and Provider-credential boundary"
                 .to_string(),
         );
     }

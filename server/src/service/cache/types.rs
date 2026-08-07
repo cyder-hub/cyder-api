@@ -3,6 +3,7 @@ use bincode::{Decode, Encode};
 // These structures contain only the fields needed for cache operations,
 // reducing memory footprint and improving cache performance.
 
+use crate::database::model_source_binding::list_visible_by_model_id;
 use crate::database::reasoning_config::{
     ReasoningConfigMode, ReasoningConfigScope, ReasoningConfigWithPresets, ReasoningPatchFamily,
     ReasoningPreset,
@@ -52,20 +53,23 @@ pub struct CacheApiKey {
     pub acl_rules: Vec<CacheApiKeyAclRule>,
 }
 
-/// Cached model with only essential fields
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+/// Source binding frozen into the model cache snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct CacheModelSourceBinding {
+    pub source_id: i64,
+    pub is_default: bool,
+}
+
+/// Cached model with only fields needed by selection and execution.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
 pub struct CacheModel {
     pub id: i64,
     pub provider_id: i64,
     pub model_name: String,
     pub real_model_name: Option<String>,
     pub cost_catalog_id: Option<i64>,
-    pub supports_streaming: bool,
-    pub supports_tools: bool,
-    pub supports_reasoning: bool,
-    pub supports_image_input: bool,
-    pub supports_embeddings: bool,
-    pub supports_rerank: bool,
+    pub source_selection_mode: String,
+    pub source_bindings: Vec<CacheModelSourceBinding>,
     pub is_enabled: bool,
 }
 
@@ -81,7 +85,7 @@ pub struct CacheProvider {
 }
 
 /// Immutable execution entry nested under a cached logical provider.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
 pub struct CacheUpstreamSource {
     pub id: i64,
     pub profile_type: UpstreamProfileType,
@@ -442,22 +446,57 @@ impl CacheApiKey {
     }
 }
 
-impl From<crate::database::model::Model> for CacheModel {
-    fn from(db: crate::database::model::Model) -> Self {
-        Self {
+impl CacheModel {
+    pub fn from_db(db: crate::database::model::Model) -> Result<Self, String> {
+        let source_bindings = list_visible_by_model_id(db.id)
+            .map_err(|error| format!("failed to load model source bindings: {error:?}"))?
+            .into_iter()
+            .map(|binding| CacheModelSourceBinding {
+                source_id: binding.source_id,
+                is_default: binding.is_default,
+            })
+            .collect();
+
+        Ok(Self {
             id: db.id,
             provider_id: db.provider_id,
             real_model_name: db.real_model_name,
             model_name: db.model_name,
             cost_catalog_id: db.cost_catalog_id,
-            supports_streaming: db.supports_streaming,
-            supports_tools: db.supports_tools,
-            supports_reasoning: db.supports_reasoning,
-            supports_image_input: db.supports_image_input,
-            supports_embeddings: db.supports_embeddings,
-            supports_rerank: db.supports_rerank,
+            source_selection_mode: db.source_selection_mode,
+            source_bindings,
             is_enabled: db.is_enabled,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CacheModel, CacheModelSourceBinding};
+
+    #[test]
+    fn cache_model_roundtrip_preserves_source_selection_snapshot() {
+        let model = CacheModel {
+            id: 1,
+            provider_id: 2,
+            model_name: "model".to_string(),
+            real_model_name: Some("real-model".to_string()),
+            cost_catalog_id: None,
+            source_selection_mode: "EXPLICIT".to_string(),
+            source_bindings: vec![CacheModelSourceBinding {
+                source_id: 3,
+                is_default: true,
+            }],
+            is_enabled: true,
+        };
+        let encoded = bincode::encode_to_vec(&model, bincode::config::standard())
+            .expect("cache model should encode");
+        let (decoded, consumed) =
+            bincode::decode_from_slice::<CacheModel, _>(&encoded, bincode::config::standard())
+                .expect("cache model should decode");
+
+        assert_eq!(decoded, model);
+        assert_eq!(consumed, encoded.len());
     }
 }
 

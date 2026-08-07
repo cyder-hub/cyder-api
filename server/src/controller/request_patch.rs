@@ -232,7 +232,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     use crate::database::TestDbContext;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::request_patch::RequestPatchRule;
     use crate::database::upstream_source::NewUpstreamSource;
@@ -269,21 +269,7 @@ mod tests {
     }
 
     fn seed_model_for_provider(provider_id: i64, model_name: &str) -> Model {
-        Model::create(
-            provider_id,
-            model_name,
-            None,
-            true,
-            ModelCapabilityFlags {
-                supports_streaming: true,
-                supports_tools: true,
-                supports_reasoning: true,
-                supports_image_input: true,
-                supports_embeddings: true,
-                supports_rerank: true,
-            },
-        )
-        .expect("model seed should succeed")
+        Model::create(provider_id, model_name, None, true).expect("model seed should succeed")
     }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {

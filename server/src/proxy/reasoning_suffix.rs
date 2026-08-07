@@ -23,7 +23,6 @@ pub(crate) struct ReasoningPatchContext<'a> {
     pub upstream_protocol: UpstreamProtocol,
     pub model_id: Option<i64>,
     pub model_name: Option<&'a str>,
-    pub supports_reasoning: bool,
 }
 
 impl<'a> ReasoningPatchContext<'a> {
@@ -32,7 +31,6 @@ impl<'a> ReasoningPatchContext<'a> {
             upstream_protocol,
             model_id: Some(model.id),
             model_name: Some(&model.model_name),
-            supports_reasoning: model.supports_reasoning,
         }
     }
 
@@ -42,7 +40,6 @@ impl<'a> ReasoningPatchContext<'a> {
             upstream_protocol,
             model_id: Some(1),
             model_name: Some("test-model"),
-            supports_reasoning: true,
         }
     }
 }
@@ -174,15 +171,6 @@ pub(crate) fn generate_reasoning_patches(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    if preset.requires_reasoning() && !context.supports_reasoning {
-        return Err(ReasoningPresetUnsupported::new(
-            family,
-            preset,
-            context,
-            "model capability does not include reasoning",
-        ));
-    }
-
     match family {
         ReasoningPatchFamily::OpenAiChatReasoningEffort => {
             generate_openai_chat_reasoning_effort_patch(family, preset, context)
@@ -1032,33 +1020,33 @@ mod tests {
     }
 
     #[test]
-    fn model_without_reasoning_capability_rejects_reasoning_required_preset() {
+    fn reasoning_generation_does_not_read_model_capability_flags() {
         let model = CacheModel {
             id: 7,
             provider_id: 1,
             model_name: "plain-model".to_string(),
             real_model_name: None,
             cost_catalog_id: None,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_reasoning: false,
-            supports_image_input: true,
-            supports_embeddings: false,
-            supports_rerank: false,
+            source_selection_mode: "INHERIT_ALL".to_string(),
+            source_bindings: vec![],
             is_enabled: true,
         };
         let context = ReasoningPatchContext::for_model(UpstreamProtocol::Openai, &model);
 
-        let err = generate_reasoning_patches(
+        let patches = generate_reasoning_patches(
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
             ReasoningPreset::High,
             context,
         )
-        .expect_err("model without reasoning should reject high preset");
+        .expect("reasoning support is determined by the selected gateway path");
 
-        assert_eq!(err.model_id, Some(7));
-        assert_eq!(err.model_name.as_deref(), Some("plain-model"));
-        assert!(err.reason.contains("capability"));
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0].family,
+            ReasoningPatchFamily::OpenAiChatReasoningEffort
+        );
+        assert_eq!(patches[0].preset, ReasoningPreset::High);
+        assert_eq!(patches[0].target, "/reasoning_effort");
     }
 
     #[test]
@@ -1185,12 +1173,11 @@ mod tests {
     }
 
     #[test]
-    fn preview_marks_model_capability_unsupported_for_reasoning_required_preset() {
+    fn preview_does_not_gate_reasoning_on_model_capability_flags() {
         let context = ReasoningPatchContext {
             upstream_protocol: UpstreamProtocol::Openai,
             model_id: Some(99),
             model_name: Some("plain-model"),
-            supports_reasoning: false,
         };
         let entry = preview_reasoning_patches(
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
@@ -1205,15 +1192,9 @@ mod tests {
         .find(|entry| entry.preset_key == "high")
         .expect("high preview entry should exist");
 
-        assert!(!entry.runtime_supported);
-        assert!(entry.generated_patches.is_empty());
-        assert!(
-            entry
-                .unsupported_reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("capability")
-        );
+        assert!(entry.runtime_supported);
+        assert!(!entry.generated_patches.is_empty());
+        assert!(entry.unsupported_reason.is_none());
     }
 
     #[test]

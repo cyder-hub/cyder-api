@@ -1,4 +1,4 @@
-import type { RequestPatchRule } from "@/services/types";
+import type { ModelSourceConfigSummary, RequestPatchRule } from "@/services/types";
 
 export interface LocalProviderApiKeyItem {
   id: number;
@@ -17,12 +17,7 @@ export interface LocalEditableModelItem {
   id: number | null;
   model_name: string;
   real_model_name: string | null;
-  supports_streaming: boolean;
-  supports_tools: boolean;
-  supports_reasoning: boolean;
-  supports_image_input: boolean;
-  supports_embeddings: boolean;
-  supports_rerank: boolean;
+  source_config?: ModelSourceConfigSummary;
   is_enabled: boolean;
   isEditing: boolean;
   checkStatus: "unchecked" | "checking" | "success" | "error";

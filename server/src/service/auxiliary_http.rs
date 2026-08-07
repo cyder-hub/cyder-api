@@ -33,13 +33,6 @@ impl AuxiliaryHttpError {
             Self::Parse => "invalid_json",
         }
     }
-
-    pub(crate) fn with_context(&self, context: &'static str) -> String {
-        match self {
-            Self::Body(error) => format!("{context}: {error}"),
-            _ => format!("{context} ({})", self.safe_kind()),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -55,14 +48,6 @@ impl AuxiliaryResponse {
 
     pub(crate) fn into_parts(self) -> (Response, Instant) {
         (self.response, self.deadline)
-    }
-
-    pub(crate) fn status(&self) -> reqwest::StatusCode {
-        self.response.status()
-    }
-
-    pub(crate) fn deadline(&self) -> Instant {
-        self.deadline
     }
 }
 

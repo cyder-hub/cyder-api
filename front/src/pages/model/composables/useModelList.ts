@@ -2,17 +2,8 @@ import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { useModelStore } from "@/store/modelStore";
-import type { ModelCapabilityItem, ModelSummaryCard } from "../types";
+import type { ModelSummaryCard } from "../types";
 import { buildModelPageState } from "./modelViewModel";
-
-export const MODEL_CAPABILITY_ITEMS: ModelCapabilityItem[] = [
-  { key: "supports_streaming", labelKey: "modelCapabilities.streaming" },
-  { key: "supports_tools", labelKey: "modelCapabilities.tools" },
-  { key: "supports_reasoning", labelKey: "modelCapabilities.reasoning" },
-  { key: "supports_image_input", labelKey: "modelCapabilities.imageInput" },
-  { key: "supports_embeddings", labelKey: "modelCapabilities.embeddings" },
-  { key: "supports_rerank", labelKey: "modelCapabilities.rerank" },
-];
 
 export { buildModelPageState } from "./modelViewModel";
 
@@ -56,7 +47,6 @@ export function useModelList() {
     modelStore,
     modelPageState,
     summaryCards,
-    capabilityItems: MODEL_CAPABILITY_ITEMS,
     loadData,
   };
 }

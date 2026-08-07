@@ -24,6 +24,7 @@ use crate::{
         cache::types::{
             CacheApiKey, CacheModel, CacheModelsCatalog, CacheProvider, CacheReasoningConfig,
         },
+        source_selector::{SourceSelection, select_source},
     },
     utils::acl::ACL_EVALUATOR,
 };
@@ -38,6 +39,7 @@ pub(super) struct AccessibleModel {
 pub(super) async fn get_accessible_models(
     app_state: &Arc<AppState>,
     api_key: &CacheApiKey,
+    downstream_protocol: DownstreamProtocol,
 ) -> Result<Vec<AccessibleModel>, ProxyError> {
     let catalog = app_state
         .catalog
@@ -53,7 +55,11 @@ pub(super) async fn get_accessible_models(
                 format!("Failed to retrieve models catalog: {store_err:?}"),
             )
         })?;
-    Ok(collect_accessible_models(catalog.as_ref(), api_key))
+    Ok(collect_accessible_models(
+        catalog.as_ref(),
+        api_key,
+        downstream_protocol,
+    ))
 }
 
 pub(super) async fn execute_models_listing(
@@ -69,7 +75,7 @@ pub(super) async fn execute_models_listing(
         request_context.request_id.clone(),
     );
     let result = async {
-        let models = get_accessible_models(&app_state, &api_key).await?;
+        let models = get_accessible_models(&app_state, &api_key, downstream_protocol).await?;
         let response_body = render_models_response(downstream_protocol, &models)?;
         Ok(Response::builder()
             .status(200)
@@ -144,6 +150,7 @@ fn render_models_response(
 fn collect_accessible_models(
     catalog: &CacheModelsCatalog,
     api_key: &CacheApiKey,
+    downstream_protocol: DownstreamProtocol,
 ) -> Vec<AccessibleModel> {
     let mut result = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -164,6 +171,9 @@ fn collect_accessible_models(
             if !is_model_allowed(api_key, provider, model) {
                 continue;
             }
+            let Ok(selection) = select_source(provider, model, downstream_protocol) else {
+                continue;
+            };
             push_model(
                 &mut result,
                 &mut seen_ids,
@@ -172,8 +182,14 @@ fn collect_accessible_models(
             );
 
             for preset in exposed_presets_for_model(catalog, provider, model) {
-                let supports_preset =
-                    enabled_source_supports_reasoning_preset(catalog, provider, model, preset);
+                let supports_preset = enabled_source_supports_reasoning_preset(
+                    catalog,
+                    provider,
+                    model,
+                    downstream_protocol,
+                    &selection,
+                    preset,
+                );
                 if supports_preset {
                     push_model(
                         &mut result,
@@ -197,16 +213,12 @@ fn enabled_source_supports_reasoning_preset(
     catalog: &CacheModelsCatalog,
     provider: &CacheProvider,
     model: &CacheModel,
+    downstream_protocol: DownstreamProtocol,
+    selection: &SourceSelection,
     preset: ReasoningPreset,
 ) -> bool {
-    provider
-        .upstream_sources
-        .iter()
-        .filter(|source| source.is_enabled)
-        .any(|source| {
-            let target = build_direct_reasoning_target(provider, model, source);
-            target_supports_reasoning_preset(catalog, &target, preset).is_ok()
-        })
+    let target = build_direct_reasoning_target(provider, model, downstream_protocol, selection);
+    target_supports_reasoning_preset(catalog, &target, preset).is_ok()
 }
 
 fn exposed_presets_for_model(
@@ -238,16 +250,16 @@ fn exposed_presets_for_config(config: &CacheReasoningConfig) -> Vec<ReasoningPre
 fn build_direct_reasoning_target(
     provider: &CacheProvider,
     model: &CacheModel,
-    source: &crate::service::cache::types::CacheUpstreamSource,
+    downstream_protocol: DownstreamProtocol,
+    selection: &SourceSelection,
 ) -> ExecutionTarget {
     ExecutionTarget {
         provider: Arc::new(provider.clone()),
         model: Arc::new(model.clone()),
-        upstream_source: Arc::new(source.clone()),
-        downstream_protocol: DownstreamProtocol::Openai,
-        upstream_protocol: determine_upstream_protocol(source),
-        selection_reason:
-            crate::proxy::runtime::route_resolver::SourceSelectionReason::ProtocolMatch,
+        upstream_source: Arc::new(selection.source.clone()),
+        downstream_protocol,
+        upstream_protocol: determine_upstream_protocol(&selection.source),
+        selection_reason: selection.reason,
         reasoning_config_id: None,
         reasoning_config_scope: None,
         reasoning_config_source: None,
@@ -325,12 +337,8 @@ mod tests {
                 model_name: "gpt-4o".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_reasoning: true,
-                supports_image_input: false,
-                supports_embeddings: false,
-                supports_rerank: false,
+                source_selection_mode: "INHERIT_ALL".to_string(),
+                source_bindings: vec![],
                 is_enabled: true,
             }],
             reasoning_configs: vec![CacheReasoningConfig {
@@ -380,21 +388,63 @@ mod tests {
     }
 
     #[test]
-    fn disabled_sources_do_not_advertise_reasoning_suffixes() {
+    fn models_listing_uses_the_protocol_selector_for_source_visibility() {
         let disabled_catalog = catalog_with_source_enabled(false);
-        let disabled_models = collect_accessible_models(&disabled_catalog, &allow_all_api_key());
-        assert_eq!(
-            disabled_models
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["openai/gpt-4o"]
+        let disabled_models = collect_accessible_models(
+            &disabled_catalog,
+            &allow_all_api_key(),
+            DownstreamProtocol::Openai,
         );
+        assert!(disabled_models.is_empty());
 
         let enabled_catalog = catalog_with_source_enabled(true);
-        let enabled_models = collect_accessible_models(&enabled_catalog, &allow_all_api_key());
+        let enabled_models = collect_accessible_models(
+            &enabled_catalog,
+            &allow_all_api_key(),
+            DownstreamProtocol::Openai,
+        );
         assert!(
             enabled_models
+                .iter()
+                .any(|model| model.id == "openai/gpt-4o-high")
+        );
+    }
+
+    #[test]
+    fn reasoning_suffixes_use_the_selected_source_family_only() {
+        let mut catalog = catalog_with_source_enabled(true);
+        catalog.providers[0]
+            .upstream_sources
+            .push(CacheUpstreamSource {
+                id: 6,
+                profile_type: UpstreamProfileType::Anthropic,
+                endpoint: "https://api.anthropic.com".to_string(),
+                use_proxy: false,
+                is_enabled: true,
+                is_default: false,
+            });
+        catalog.reasoning_configs[0].family = Some(ReasoningPatchFamily::AnthropicThinkingBudget);
+
+        let openai_models =
+            collect_accessible_models(&catalog, &allow_all_api_key(), DownstreamProtocol::Openai);
+        assert!(
+            openai_models
+                .iter()
+                .any(|model| model.id == "openai/gpt-4o")
+        );
+        assert!(
+            !openai_models
+                .iter()
+                .any(|model| model.id == "openai/gpt-4o-high")
+        );
+
+        let anthropic_models = collect_accessible_models(
+            &catalog,
+            &allow_all_api_key(),
+            DownstreamProtocol::Anthropic,
+        );
+        assert!(
+            anthropic_models
                 .iter()
                 .any(|model| model.id == "openai/gpt-4o-high")
         );

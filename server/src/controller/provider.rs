@@ -1,7 +1,8 @@
-use crate::config::{NonStreamResponseConfig, ProxyTimeoutConfig};
+use crate::config::ProxyTimeoutConfig;
 use crate::database::{
     DbResult,
     model::{Model, ModelDetail},
+    model_source_binding::get_config as get_model_source_config,
     provider::{
         BootstrapProviderResult, Provider, ProviderAggregate, ProviderApiKeySummary,
         ProviderSummaryItem,
@@ -14,10 +15,13 @@ use crate::proxy::{
     ProxyCancellationContext, ProxyError, ProxyErrorCode, apply_request_patches,
     load_runtime_request_patch_trace,
 };
+use crate::service::admin::model::{
+    ModelSourceConfigSummary, ModelSourceSnapshotOwner, load_model_source_config_summaries,
+};
 use crate::service::admin::provider::{
     BootstrapProviderCommand, CreateProviderApiKeyInput, ProviderApiKeyReveal, ProviderUpdateInput,
-    ProviderUpsertInput, ReplaceProviderApiKeyInput, UpdateProviderApiKeyInput,
-    UpstreamSourceCreateInput, UpstreamSourceUpdateInput,
+    ProviderUpsertInput, ReplaceProviderApiKeyInput, SourceImpactAction, SourceImpactReport,
+    UpdateProviderApiKeyInput, UpstreamSourceCreateInput, UpstreamSourceUpdateInput,
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use axum::{
@@ -39,25 +43,60 @@ use crate::utils::{HttpResult, ID_GENERATOR, auth::ManagerAuthContext};
 
 use super::{BaseError, auth::authorize_secret_governance_command};
 use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
-use crate::service::auxiliary_http::{
-    parse_auxiliary_json, read_auxiliary_response_body, send_auxiliary_request,
-};
 use crate::service::cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch};
 use crate::service::provider_credential::{
     ProviderCredential, ProviderCredentialError, apply_provider_request_auth_header,
     resolve_draft_provider_credential, resolve_saved_provider_credential,
-    resolve_selected_provider_credential, upstream_protocol_for_profile,
+    upstream_protocol_for_profile,
 };
 use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::SensitiveSecret;
 use crate::service::upstream_response::apply_upstream_accept_encoding;
 
 #[derive(Serialize)]
+struct ProviderModelDetailResponse {
+    #[serde(flatten)]
+    detail: ModelDetail,
+    source_config: ModelSourceConfigSummary,
+}
+
+#[derive(Serialize)]
 struct ProviderDetailResponse {
     provider: ProviderAggregate,
-    models: Vec<ModelDetail>,
+    models: Vec<ProviderModelDetailResponse>,
     provider_keys: Vec<ProviderApiKeySummary>,
     request_patches: Vec<RequestPatchRuleResponse>,
+}
+
+fn provider_model_details(provider_id: i64) -> DbResult<Vec<ProviderModelDetailResponse>> {
+    let models = Model::list_by_provider_id(provider_id)?
+        .into_iter()
+        .map(|model| Model::get_detail_by_id(model.id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let owners = models
+        .iter()
+        .map(|detail| ModelSourceSnapshotOwner {
+            model_id: detail.model.id,
+            provider_id,
+            source_selection_mode: detail.model.source_selection_mode.clone(),
+        })
+        .collect::<Vec<_>>();
+    let summaries = load_model_source_config_summaries(&owners)?;
+    models
+        .into_iter()
+        .map(|detail| {
+            let source_config = summaries.get(&detail.model.id).cloned().ok_or_else(|| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "source config summary for model {} was not loaded",
+                    detail.model.id
+                )))
+            })?;
+            Ok(ProviderModelDetailResponse {
+                detail,
+                source_config,
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -107,13 +146,6 @@ struct BootstrapProviderResponse {
     check_result: Option<BootstrapCheckResult>,
 }
 
-#[derive(Serialize)]
-struct ProviderRemoteModelsResponse {
-    source_id: i64,
-    profile_type: UpstreamProfileType,
-    models: Value,
-}
-
 async fn list() -> DbResult<HttpResult<Vec<ProviderAggregate>>> {
     let result = Provider::list_all()?;
     Ok(HttpResult::new(result))
@@ -149,6 +181,12 @@ struct UpdateSourcePayload {
     use_proxy: Option<bool>,
     is_enabled: Option<bool>,
     is_default: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceImpactPayload {
+    action: SourceImpactAction,
 }
 
 fn source_create_input(payload: UpstreamSourcePayload) -> UpstreamSourceCreateInput {
@@ -262,15 +300,25 @@ async fn delete_source(
     Ok(HttpResult::new(()))
 }
 
+async fn preview_source_impact(
+    State(app_state): State<Arc<AppState>>,
+    Path((provider_id, source_id)): Path<(i64, i64)>,
+    Json(payload): Json<SourceImpactPayload>,
+) -> Result<HttpResult<SourceImpactReport>, BaseError> {
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .provider
+            .preview_source_impact(provider_id, source_id, payload.action)?,
+    ))
+}
+
 async fn get_provider_detail(
     State(_app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ProviderDetailResponse>, BaseError> {
     let detail = Provider::get_detail_by_id(id)?;
-    let models = Model::list_by_provider_id(id)?
-        .into_iter()
-        .map(|model| Model::get_detail_by_id(model.id))
-        .collect::<Result<Vec<_>, _>>()?;
+    let models = provider_model_details(id)?;
 
     Ok(HttpResult::new(ProviderDetailResponse {
         provider: detail.provider,
@@ -287,6 +335,31 @@ struct CheckProviderPayload {
     model_name: Option<String>,
     provider_api_key_id: Option<i64>,
     provider_api_key: Option<String>,
+}
+
+fn validate_saved_model_source_for_check(model: &Model, source_id: i64) -> Result<(), BaseError> {
+    let source_config = get_model_source_config(model.id)?;
+    match source_config.source_selection_mode.as_str() {
+        "INHERIT_ALL" => Ok(()),
+        "EXPLICIT" => {
+            if source_config
+                .bindings
+                .iter()
+                .any(|binding| binding.source_id == source_id)
+            {
+                Ok(())
+            } else {
+                Err(BaseError::ParamInvalid(Some(format!(
+                    "Source {} is not declared by model {}",
+                    source_id, model.id
+                ))))
+            }
+        }
+        mode => Err(BaseError::DatabaseFatal(Some(format!(
+            "model {} has invalid source selection mode {}",
+            model.id, mode
+        )))),
+    }
 }
 
 struct ProviderCheckRequest {
@@ -312,7 +385,11 @@ async fn resolve_provider_check_request_patches(
     source: &crate::service::cache::types::CacheUpstreamSource,
 ) -> Result<Vec<RuntimeResolvedRequestPatch>, BaseError> {
     let cache_provider = CacheProvider::from(provider.clone());
-    let cache_model = model.cloned().map(CacheModel::from);
+    let cache_model = model
+        .cloned()
+        .map(CacheModel::from_db)
+        .transpose()
+        .map_err(|error| BaseError::DatabaseFatal(Some(error)))?;
     let trace = load_runtime_request_patch_trace(
         &cache_provider,
         cache_model.as_ref(),
@@ -681,6 +758,9 @@ async fn check_provider(
     let source = normalize_source_for_outbound(UpstreamSource::get_active_by_id_for_provider(
         source_id, id,
     )?)?;
+    if let Some(model) = selected_model.as_ref() {
+        validate_saved_model_source_for_check(model, source.id)?;
+    }
     let cache_source = crate::service::cache::types::CacheUpstreamSource {
         id: source.id,
         profile_type: source.profile_type,
@@ -870,128 +950,6 @@ async fn bootstrap_provider(
     )))
 }
 
-async fn get_remote_models(
-    State(app_state): State<Arc<AppState>>,
-    Path((id, source_id)): Path<(i64, i64)>,
-) -> Result<HttpResult<ProviderRemoteModelsResponse>, BaseError> {
-    let provider = Provider::get_by_id(id)?;
-    let source = normalize_source_for_outbound(UpstreamSource::get_active_by_id_for_provider(
-        source_id, id,
-    )?)?;
-    let cache_provider = CacheProvider::from(provider.clone());
-    let cache_source = cache_provider
-        .upstream_sources
-        .iter()
-        .find(|candidate| candidate.id == source.id)
-        .cloned()
-        .ok_or_else(|| BaseError::NotFound(Some("upstream source not found".to_string())))?;
-    let credential =
-        resolve_selected_provider_credential(&cache_provider, &cache_source, &app_state)
-            .await
-            .map_err(provider_credential_error)?;
-
-    let client = app_state
-        .infra
-        .auxiliary_client(source.use_proxy)
-        .await
-        .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
-
-    let (url, headers) = build_remote_models_request(&source, &cache_source, &credential)?;
-    let models = fetch_remote_models(
-        client.as_ref(),
-        url,
-        headers,
-        &app_state.infra.proxy_request_config().non_stream_response,
-        app_state.infra.auxiliary_total_timeout(),
-    )
-    .await?;
-
-    info!(
-        "provider model discovery succeeded: provider_id={}, source_id={}, profile_type={:?}",
-        provider.id, source.id, source.profile_type,
-    );
-
-    Ok(HttpResult::new(ProviderRemoteModelsResponse {
-        source_id: source.id,
-        profile_type: source.profile_type,
-        models,
-    }))
-}
-
-async fn fetch_remote_models(
-    client: &reqwest::Client,
-    url: Url,
-    mut headers: HeaderMap,
-    limits: &NonStreamResponseConfig,
-    auxiliary_total_timeout: std::time::Duration,
-) -> Result<Value, BaseError> {
-    apply_upstream_accept_encoding(&mut headers, false);
-    let auxiliary_response =
-        send_auxiliary_request(client.get(url).headers(headers), auxiliary_total_timeout)
-            .await
-            .map_err(|error| {
-                BaseError::ParamInvalid(Some(error.with_context("Failed to fetch remote models")))
-            })?;
-
-    if !auxiliary_response.status().is_success() {
-        let status = auxiliary_response.status();
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Provider API returned status {}",
-            status
-        ))));
-    }
-
-    let deadline = auxiliary_response.deadline();
-    let body = read_auxiliary_response_body(auxiliary_response, limits)
-        .await
-        .map_err(|error| {
-            BaseError::ParamInvalid(Some(
-                error.with_context("Failed to read remote models response"),
-            ))
-        })?;
-    parse_auxiliary_json::<Value>(body.bytes, deadline)
-        .await
-        .map_err(|error| {
-            BaseError::ParamInvalid(Some(
-                error.with_context("Failed to parse remote models response"),
-            ))
-        })
-}
-
-fn build_remote_models_request(
-    source: &UpstreamSource,
-    cache_source: &crate::service::cache::types::CacheUpstreamSource,
-    credential: &ProviderCredential,
-) -> Result<(Url, HeaderMap), BaseError> {
-    let url = if matches!(
-        source.profile_type,
-        UpstreamProfileType::Gemini | UpstreamProfileType::Vertex
-    ) {
-        Url::parse(&source.endpoint).map_err(|e| {
-            BaseError::ParamInvalid(Some(format!(
-                "Failed to parse provider endpoint as URL: {}",
-                e
-            )))
-        })?
-    } else {
-        Url::parse(&format!("{}/models", source.endpoint.trim_end_matches('/'))).map_err(|e| {
-            BaseError::ParamInvalid(Some(format!(
-                "Failed to parse provider endpoint as URL: {}",
-                e
-            )))
-        })?
-    };
-    let mut headers = HeaderMap::new();
-    apply_provider_request_auth_header(
-        &mut headers,
-        cache_source,
-        upstream_protocol_for_profile(&cache_source.profile_type),
-        &credential,
-    )
-    .map_err(provider_credential_error)?;
-    Ok((url, headers))
-}
-
 // Removed full_commit function as Provider::full_commit is no longer available.
 
 async fn list_provider_details(
@@ -1002,10 +960,7 @@ async fn list_provider_details(
 
     for provider in providers {
         let detail = Provider::get_detail_by_id(provider.id)?;
-        let models = Model::list_by_provider_id(provider.id)?
-            .into_iter()
-            .map(|model| Model::get_detail_by_id(model.id))
-            .collect::<Result<Vec<_>, _>>()?;
+        let models = provider_model_details(provider.id)?;
 
         provider_details.push(ProviderDetailResponse {
             provider: detail.provider,
@@ -1167,11 +1122,11 @@ pub fn create_provider_router() -> StateRouter {
                 "/{id}/sources/{source_id}",
                 put(update_source).delete(delete_source),
             )
-            .route("/{id}/sources/{source_id}/check", post(check_provider))
             .route(
-                "/{id}/sources/{source_id}/remote_models",
-                get(get_remote_models),
+                "/{id}/sources/{source_id}/model-impact",
+                post(preview_source_impact),
             )
+            .route("/{id}/sources/{source_id}/check", post(check_provider))
             .route("/{id}", delete(delete_provider))
             .route("/{id}", put(update_provider))
             // Provider API Key routes
@@ -1199,13 +1154,12 @@ pub fn create_provider_router() -> StateRouter {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::{io::Write as _, net::SocketAddr, sync::Arc, time::Duration};
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     use axum::{
         body::{Body, to_bytes},
         http::{Method, Request, StatusCode, header::CONTENT_TYPE},
     };
-    use flate2::{Compression, write::GzEncoder};
     use serde_json::{Value, json};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -1215,10 +1169,11 @@ mod tests {
     };
     use tower::util::ServiceExt;
 
-    use super::{ProviderRemoteModelsResponse, create_provider_router};
+    use super::create_provider_router;
     use crate::controller::BaseError;
     use crate::database::TestDbContext;
     use crate::database::model::Model;
+    use crate::database::model_source_binding::{ModelSourceBindingInput, ModelSourceConfig};
     use crate::database::provider::ProviderSummaryItem;
     use crate::database::provider::{
         Provider, ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
@@ -1230,7 +1185,7 @@ mod tests {
     };
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::cache::types::{
-        CacheProvider, RequestPatchRuleOrigin, RequestPatchSource, RuntimeResolvedRequestPatch,
+        RequestPatchRuleOrigin, RequestPatchSource, RuntimeResolvedRequestPatch,
     };
     use crate::service::provider_credential::ProviderCredential;
     use crate::service::runtime::SourceHealthStatus;
@@ -1262,77 +1217,6 @@ mod tests {
 
     fn credential(secret: &str) -> ProviderCredential {
         ProviderCredential::for_test(0, secret)
-    }
-
-    fn gzip(body: &[u8]) -> Vec<u8> {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(body).unwrap();
-        encoder.finish().unwrap()
-    }
-
-    fn exact_json(size: usize) -> Vec<u8> {
-        let overhead = serde_json::to_vec(&json!({"data": ""})).unwrap().len();
-        let body = serde_json::to_vec(&json!({"data": "x".repeat(size - overhead)})).unwrap();
-        assert_eq!(body.len(), size);
-        body
-    }
-
-    async fn response_fixture(
-        headers: &[(&str, &str)],
-        body: &[u8],
-        query: &str,
-    ) -> (reqwest::Url, oneshot::Receiver<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut wire = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n",
-            body.len()
-        );
-        for (name, value) in headers {
-            wire.push_str(name);
-            wire.push_str(": ");
-            wire.push_str(value);
-            wire.push_str("\r\n");
-        }
-        wire.push_str("\r\n");
-        let body = body.to_vec();
-        let (request_tx, request_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0u8; 8192];
-            let read = socket.read(&mut request).await.unwrap();
-            let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
-            socket.write_all(wire.as_bytes()).await.unwrap();
-            socket.write_all(&body).await.unwrap();
-        });
-        (
-            reqwest::Url::parse(&format!("http://{address}/models{query}")).unwrap(),
-            request_rx,
-        )
-    }
-
-    async fn fetch_remote_fixture(
-        headers: &[(&str, &str)],
-        body: &[u8],
-        limits: &crate::config::NonStreamResponseConfig,
-        query: &str,
-    ) -> Result<Value, BaseError> {
-        let (url, request_rx) = response_fixture(headers, body, query).await;
-        let result = super::fetch_remote_models(
-            &reqwest::Client::new(),
-            url,
-            reqwest::header::HeaderMap::new(),
-            limits,
-            Duration::from_secs(60),
-        )
-        .await;
-        let request = request_rx.await.unwrap();
-        assert!(
-            request
-                .to_ascii_lowercase()
-                .contains("accept-encoding: gzip, identity")
-        );
-        result
     }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
@@ -1599,6 +1483,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_model_check_enforces_source_scope_before_any_upstream_call() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-check-source-scope-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (request_tx, request_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = vec![0u8; 8192];
+                    let read = socket.read(&mut request).await.unwrap();
+                    let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                });
+
+                let provider_id = 26001;
+                let checked_source_id = 26002;
+                let unbound_source_id = 26003;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "check-scope-provider".to_string(),
+                        name: "Check Scope Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: checked_source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Openai,
+                        endpoint: format!("http://{address}/v1"),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .expect("provider seed should succeed")
+                .provider;
+                UpstreamSource::create(&crate::database::upstream_source::NewUpstreamSource {
+                    id: unbound_source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Responses,
+                    endpoint: "http://127.0.0.1:9/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: false,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .expect("unbound source seed should succeed");
+
+                let source_config = ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
+                    source_id: checked_source_id,
+                    is_default: true,
+                }]);
+                let model = Model::create_with_source_config(
+                    provider.id,
+                    "checkable-model",
+                    Some("checkable-real-model"),
+                    true,
+                    Some(&source_config),
+                )
+                .expect("model seed should succeed");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let valid = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
+                        json!({
+                            "model_id": model.id,
+                            "provider_api_key": "draft-check-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(valid.status(), StatusCode::OK);
+                let valid_body = response_json(valid).await;
+                assert_eq!(valid_body["data"]["source_id"], checked_source_id);
+                assert!(
+                    request_rx
+                        .await
+                        .expect("valid check should call upstream")
+                        .contains("POST")
+                );
+
+                let unbound = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{unbound_source_id}/check"),
+                        json!({
+                            "model_id": model.id,
+                            "provider_api_key": "draft-check-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(unbound.status(), StatusCode::BAD_REQUEST);
+                let unbound_body = response_json(unbound).await;
+                assert!(unbound_body.to_string().contains("not declared"));
+
+                let other_provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: 26004,
+                        provider_key: "other-check-provider".to_string(),
+                        name: "Other Check Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: 26005,
+                        provider_id: 26004,
+                        profile_type: UpstreamProfileType::Openai,
+                        endpoint: "http://127.0.0.1:9/v1".to_string(),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .expect("other provider seed should succeed")
+                .provider;
+                let other_model = Model::create(other_provider.id, "other-model", None, true)
+                    .expect("other model should seed");
+                let wrong_owner = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
+                        json!({
+                            "model_id": other_model.id,
+                            "provider_api_key": "draft-check-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(wrong_owner.status(), StatusCode::BAD_REQUEST);
+
+                UpstreamSource::delete(checked_source_id, provider_id)
+                    .expect("checked source should soft delete");
+                let deleted = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
+                        json!({
+                            "model_id": model.id,
+                            "provider_api_key": "draft-check-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn provider_check_header_stall_uses_proxy_policy_without_circuit_attribution() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1639,164 +1697,6 @@ mod tests {
         let message = super::base_error_message(&error);
         assert!(!message.contains("provider-check-secret"));
         assert!(request_rx.await.unwrap().contains("POST"));
-    }
-
-    #[tokio::test]
-    async fn remote_models_body_timeout_stays_in_manager_param_error_category() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 1024];
-            let _ = socket.read(&mut request).await;
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nfirst\r\n",
-                )
-                .await
-                .unwrap();
-            sleep(Duration::from_secs(2)).await;
-        });
-
-        let error = timeout(
-            Duration::from_secs(3),
-            super::fetch_remote_models(
-                &reqwest::Client::new(),
-                reqwest::Url::parse(&format!("http://{address}/models")).unwrap(),
-                reqwest::header::HeaderMap::new(),
-                &crate::config::ProxyRequestConfig::default().non_stream_response,
-                Duration::from_secs(1),
-            ),
-        )
-        .await
-        .expect("remote model body timeout should be bounded")
-        .expect_err("stalled remote model body should fail");
-
-        assert!(matches!(error, BaseError::ParamInvalid(_)));
-        assert!(super::base_error_message(&error).contains("timeout"));
-    }
-
-    #[tokio::test]
-    async fn remote_models_shared_reader_covers_encoding_limits_json_and_safe_errors() {
-        let limits = crate::config::NonStreamResponseConfig {
-            raw_body_limit_bytes: 64,
-            decoded_body_limit_bytes: 64,
-        };
-        let exact = exact_json(64);
-        assert_eq!(
-            fetch_remote_fixture(&[("Content-Type", "application/json")], &exact, &limits, "")
-                .await
-                .unwrap()["data"]
-                .as_str()
-                .unwrap()
-                .len(),
-            53
-        );
-        assert!(
-            fetch_remote_fixture(
-                &[
-                    ("Content-Type", "application/json"),
-                    ("Content-Encoding", "gzip")
-                ],
-                &gzip(&exact),
-                &limits,
-                ""
-            )
-            .await
-            .is_ok()
-        );
-
-        let raw_error = fetch_remote_fixture(&[], &exact_json(65), &limits, "")
-            .await
-            .expect_err("raw +1 must fail");
-        assert!(super::base_error_message(&raw_error).contains("raw response body exceeded"));
-
-        let decoded_error = fetch_remote_fixture(
-            &[("Content-Encoding", "gzip")],
-            &gzip(&exact_json(65)),
-            &limits,
-            "",
-        )
-        .await
-        .expect_err("decoded +1 must fail");
-        assert!(
-            super::base_error_message(&decoded_error).contains("decoded response body exceeded")
-        );
-
-        for (headers, body, expected_category) in [
-            (
-                vec![
-                    ("Content-Encoding", "br"),
-                    ("X-Private", "header-secret-marker"),
-                ],
-                b"provider-body-secret-marker".as_slice(),
-                "Content-Encoding",
-            ),
-            (
-                vec![("Content-Encoding", "gzip")],
-                b"invalid-gzip-body-secret".as_slice(),
-                "gzip",
-            ),
-            (
-                vec![("Content-Type", "application/json")],
-                b"invalid-json-body-secret".as_slice(),
-                "invalid_json",
-            ),
-        ] {
-            let error =
-                fetch_remote_fixture(&headers, body, &limits, "?api_key=query-secret-marker")
-                    .await
-                    .expect_err("invalid remote models response must fail");
-            let message = super::base_error_message(&error);
-            assert!(message.contains(expected_category), "{message}");
-            for secret in [
-                "query-secret-marker",
-                "header-secret-marker",
-                "provider-body-secret-marker",
-                "invalid-gzip-body-secret",
-                "invalid-json-body-secret",
-            ] {
-                assert!(!message.contains(secret), "{message}");
-            }
-        }
-    }
-
-    #[test]
-    fn remote_models_uses_shared_auth_headers_and_never_query_credentials() {
-        for (profile_type, endpoint, expected_header, expected_path) in [
-            (
-                UpstreamProfileType::Openai,
-                "https://api.example.com/v1",
-                "authorization",
-                "/v1/models",
-            ),
-            (
-                UpstreamProfileType::Gemini,
-                "https://api.example.com/v1/models",
-                "x-goog-api-key",
-                "/v1/models",
-            ),
-            (
-                UpstreamProfileType::Anthropic,
-                "https://api.example.com/v1",
-                "x-api-key",
-                "/v1/models",
-            ),
-        ] {
-            let provider = sample_provider(profile_type, endpoint);
-            let cache_provider = CacheProvider::from(provider.clone());
-            let source = &provider.upstream_sources[0];
-            let (url, headers) = super::build_remote_models_request(
-                source,
-                &cache_provider.upstream_sources[0],
-                &credential("remote-secret"),
-            )
-            .expect("remote models request should build");
-
-            assert_eq!(url.path(), expected_path);
-            assert!(url.query().is_none());
-            assert!(headers.get(expected_header).is_some());
-        }
     }
 
     #[test]
@@ -2491,6 +2391,18 @@ mod tests {
                 )
                 .await;
                 assert_eq!(old_discovery_response.status(), StatusCode::NOT_FOUND);
+                let removed_source_discovery_response = send(
+                    &app_state,
+                    empty_request(
+                        Method::GET,
+                        &format!("/provider/{provider_id}/sources/{source_id}/remote_models"),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    removed_source_discovery_response.status(),
+                    StatusCode::NOT_FOUND
+                );
 
                 let delete_response = send(
                     &app_state,
@@ -2555,12 +2467,7 @@ mod tests {
                 model_name: "gpt-4o-mini".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_reasoning: true,
-                supports_image_input: true,
-                supports_embeddings: true,
-                supports_rerank: true,
+                source_selection_mode: "INHERIT_ALL".to_string(),
                 deleted_at: None,
                 is_enabled: true,
                 created_at: 0,
@@ -2644,12 +2551,12 @@ mod tests {
                 "delete",
             ),
             (
-                "/ai/manager/api/provider/{id}/sources/{source_id}/check",
+                "/ai/manager/api/provider/{id}/sources/{source_id}/model-impact",
                 "post",
             ),
             (
-                "/ai/manager/api/provider/{id}/sources/{source_id}/remote_models",
-                "get",
+                "/ai/manager/api/provider/{id}/sources/{source_id}/check",
+                "post",
             ),
         ];
         for (path, method) in provider_operations {
@@ -2662,6 +2569,35 @@ mod tests {
                 .rsplit('/')
                 .next()
                 .expect("response ref should contain a name");
+            assert_eq!(
+                document["components"]["responses"][response_name]["headers"]
+                    ["Cache-Control"]["$ref"]
+                    .as_str(),
+                Some("#/components/headers/NoStore")
+            );
+        }
+
+        let model_operations = [
+            ("/ai/manager/api/model", "post"),
+            ("/ai/manager/api/model/list", "get"),
+            ("/ai/manager/api/model/summary/list", "get"),
+            ("/ai/manager/api/model/{id}", "put"),
+            ("/ai/manager/api/model/{id}", "delete"),
+            ("/ai/manager/api/model/{id}/detail", "get"),
+            ("/ai/manager/api/model/{id}/source-config", "get"),
+            ("/ai/manager/api/model/{id}/source-config", "put"),
+            ("/ai/manager/api/model/{id}/source-config/explain", "get"),
+        ];
+        for (path, method) in model_operations {
+            let operation = &document["paths"][path][method];
+            assert!(operation.is_mapping(), "missing {method} {path}");
+            let success_ref = operation["responses"]["200"]["$ref"]
+                .as_str()
+                .expect("Model success response must reference an explicit DTO");
+            let response_name = success_ref
+                .rsplit('/')
+                .next()
+                .expect("Model response ref should contain a name");
             assert_eq!(
                 document["components"]["responses"][response_name]["headers"]
                     ["Cache-Control"]["$ref"]
@@ -2695,13 +2631,57 @@ mod tests {
         assert!(document["components"]["schemas"]["ProviderAggregate"]["properties"]
             ["upstream_sources"]
             .is_mapping());
+        let model_properties = document["components"]["schemas"]["Model"]["properties"]
+            .as_mapping()
+            .expect("Model properties should exist");
+        assert!(model_properties.contains_key(serde_yaml::Value::from("source_selection_mode")));
+        for forbidden in [
+            "supports_streaming",
+            "supports_tools",
+            "supports_reasoning",
+            "supports_image_input",
+            "supports_embeddings",
+            "supports_rerank",
+        ] {
+            assert!(
+                !model_properties.contains_key(serde_yaml::Value::from(forbidden)),
+                "Model OpenAPI must not expose {forbidden}"
+            );
+        }
+        let source_config_properties =
+            document["components"]["schemas"]["ModelSourceConfig"]["properties"]
+                .as_mapping()
+                .expect("Model Source Config properties should exist");
+        assert!(
+            source_config_properties.contains_key(serde_yaml::Value::from("source_selection_mode"))
+        );
+        assert!(source_config_properties.contains_key(serde_yaml::Value::from("bindings")));
+        assert_eq!(
+            document["components"]["schemas"]["ModelSourceSelectionMode"]["enum"]
+                .as_sequence()
+                .expect("Source selection mode enum should exist")
+                .len(),
+            2
+        );
+        let source_impact_actions = document["components"]["schemas"]["SourceImpactAction"]["enum"]
+            .as_sequence()
+            .expect("Source impact actions should exist");
+        for action in ["DISABLE", "DELETE", "SET_DEFAULT", "UNSET_DEFAULT"] {
+            assert!(source_impact_actions.contains(&serde_yaml::Value::from(action)));
+        }
+        assert!(document["components"]["schemas"]["ModelSourceProtocolExplain"]
+            ["properties"]["selection_reason"]
+            .is_mapping());
+        assert!(document["components"]["schemas"]["ModelSourceProtocolExplain"]
+            ["properties"]["decision_trace"]
+            .is_mapping());
         for field in ["is_enabled", "is_default"] {
             assert!(
                 document["components"]["schemas"]["UpstreamSource"]["properties"][field]
                     .is_mapping()
             );
         }
-        for schema in ["SourceEvidence", "ProviderRemoteModels"] {
+        for schema in ["SourceEvidence"] {
             let properties = document["components"]["schemas"][schema]["properties"]
                 .as_mapping()
                 .expect("Source evidence properties should exist");
@@ -2800,18 +2780,200 @@ mod tests {
         assert_eq!(refresh_body["code"], 1201);
     }
 
-    #[test]
-    fn remote_model_discovery_response_includes_exact_source_evidence() {
-        let response = ProviderRemoteModelsResponse {
-            source_id: 42,
-            profile_type: UpstreamProfileType::Gemini,
-            models: json!({"models": [{"name": "models/gemini"}]}),
-        };
-        let value = serde_json::to_value(response).expect("response should serialize");
-        assert_eq!(value["source_id"], 42);
-        assert!(value.get("source_key").is_none());
-        assert_eq!(value["profile_type"], "GEMINI");
-        assert_eq!(value["models"]["models"][0]["name"], "models/gemini");
+    #[tokio::test]
+    async fn source_impact_http_preview_covers_all_actions_without_side_effects() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-source-impact-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let provider_id = 24301;
+                let default_source_id = 24302;
+                let responses_source_id = 24303;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "source-impact-provider".to_string(),
+                        name: "Source Impact Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: default_source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Openai,
+                        endpoint: "https://impact-openai.example.com/v1".to_string(),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .expect("provider seed should succeed")
+                .provider;
+                UpstreamSource::create(&crate::database::upstream_source::NewUpstreamSource {
+                    id: responses_source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Responses,
+                    endpoint: "https://impact-responses.example.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: false,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .expect("secondary source seed should succeed");
+
+                let inherit_model = Model::create(provider.id, "impact-inherit", None, true)
+                    .expect("inherit model should seed");
+                let disabled_inherit_model =
+                    Model::create(provider.id, "impact-disabled-inherit", None, false)
+                        .expect("disabled inherit model should seed");
+                let explicit_default_model = Model::create_with_source_config(
+                    provider.id,
+                    "impact-explicit-default",
+                    None,
+                    true,
+                    Some(&ModelSourceConfig::explicit(vec![
+                        ModelSourceBindingInput {
+                            source_id: default_source_id,
+                            is_default: true,
+                        },
+                    ])),
+                )
+                .expect("explicit default model should seed");
+                let explicit_other_model = Model::create_with_source_config(
+                    provider.id,
+                    "impact-explicit-other",
+                    None,
+                    true,
+                    Some(&ModelSourceConfig::explicit(vec![
+                        ModelSourceBindingInput {
+                            source_id: responses_source_id,
+                            is_default: true,
+                        },
+                    ])),
+                )
+                .expect("explicit other model should seed");
+                let explicit_empty_model = Model::create_with_source_config(
+                    provider.id,
+                    "impact-explicit-empty",
+                    None,
+                    true,
+                    Some(&ModelSourceConfig::explicit(Vec::new())),
+                )
+                .expect("explicit empty model should seed");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let mut reports = Vec::new();
+                for action in ["DISABLE", "DELETE", "SET_DEFAULT", "UNSET_DEFAULT"] {
+                    let response = send(
+                        &app_state,
+                        json_request(
+                            Method::POST,
+                            &format!(
+                                "/provider/{provider_id}/sources/{default_source_id}/model-impact"
+                            ),
+                            json!({"action": action}),
+                        ),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::OK, "action {action}");
+                    let body = response_json(response).await;
+                    assert_eq!(body["code"], 0, "action {action}");
+                    assert_eq!(body["data"]["action"], action, "action {action}");
+                    assert_eq!(body["data"]["provider_id"], provider_id);
+                    assert_eq!(body["data"]["source_id"], default_source_id);
+                    assert_eq!(body["data"]["inherit_all_model_count"], 2);
+                    assert_eq!(body["data"]["explicit_binding_model_count"], 3);
+                    assert_eq!(body["data"]["explicit_default_model_count"], 2);
+                    assert_eq!(body["data"].get("model_ids"), None);
+                    assert_eq!(body["data"]["protocols"].as_array().unwrap().len(), 4);
+                    reports.push((action, body));
+                }
+
+                let disable_openai = reports
+                    .iter()
+                    .find(|(action, _)| *action == "DISABLE")
+                    .map(|(_, body)| body)
+                    .unwrap();
+                let openai_disable = disable_openai["data"]["protocols"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
+                    .unwrap();
+                assert_eq!(openai_disable["selection_changed_count"], 3);
+                assert_eq!(openai_disable["would_become_unselectable_count"], 3);
+
+                let set_default = reports
+                    .iter()
+                    .find(|(action, _)| *action == "SET_DEFAULT")
+                    .map(|(_, body)| body)
+                    .unwrap();
+                assert!(
+                    set_default["data"]["protocols"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|protocol| protocol["selection_changed_count"] == 0
+                            && protocol["would_become_unselectable_count"] == 0)
+                );
+
+                let unset_default = reports
+                    .iter()
+                    .find(|(action, _)| *action == "UNSET_DEFAULT")
+                    .map(|(_, body)| body)
+                    .unwrap();
+                let anthropic_unset = unset_default["data"]["protocols"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|protocol| protocol["downstream_protocol"] == "ANTHROPIC")
+                    .unwrap();
+                assert_eq!(anthropic_unset["selection_changed_count"], 2);
+                assert_eq!(anthropic_unset["would_become_unselectable_count"], 2);
+
+                let delete_openai = reports
+                    .iter()
+                    .find(|(action, _)| *action == "DELETE")
+                    .map(|(_, body)| body)
+                    .unwrap();
+                let openai_delete = delete_openai["data"]["protocols"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
+                    .unwrap();
+                assert_eq!(openai_delete["selection_changed_count"], 3);
+                assert_eq!(openai_delete["would_become_unselectable_count"], 3);
+
+                let unchanged_provider = Provider::get_by_id(provider_id)
+                    .expect("provider should remain readable after previews");
+                let unchanged_source = unchanged_provider
+                    .upstream_sources
+                    .iter()
+                    .find(|source| source.id == default_source_id)
+                    .expect("target source should remain visible");
+                assert!(unchanged_source.is_enabled);
+                assert!(unchanged_source.is_default);
+                assert!(Model::get_by_id(inherit_model.id).is_ok());
+                assert!(Model::get_by_id(disabled_inherit_model.id).is_ok());
+                assert!(Model::get_by_id(explicit_default_model.id).is_ok());
+                assert!(Model::get_by_id(explicit_other_model.id).is_ok());
+                assert!(Model::get_by_id(explicit_empty_model.id).is_ok());
+                assert_eq!(
+                    crate::database::model_source_binding::get_config(explicit_default_model.id)
+                        .expect("binding should remain readable")
+                        .bindings
+                        .len(),
+                    1
+                );
+            })
+            .await;
     }
 
     fn sample_provider(profile_type: UpstreamProfileType, endpoint: &str) -> ProviderAggregate {

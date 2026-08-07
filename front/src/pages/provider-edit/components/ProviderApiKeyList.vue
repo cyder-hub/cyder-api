@@ -8,15 +8,6 @@
       </template>
       <template #actions>
         <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Button
-            variant="outline"
-            size="sm"
-            :disabled="!editingData.id || editingData.provider_keys.length === 0"
-            @click="emit('checkBatch')"
-          >
-            <Check class="mr-1.5 h-4 w-4" />
-            {{ $t("providerEditPage.alert.buttonCheckAll") }}
-          </Button>
           <Button size="sm" :disabled="!editingData.id" @click="openCreateDialog">
             <Plus class="mr-1.5 h-4 w-4" />
             {{ $t("providerEditPage.buttonAddApiKey") }}
@@ -162,14 +153,6 @@
         </div>
         <DialogFooter class="gap-2 sm:gap-0">
           <Button variant="ghost" @click="closeSecretDialog">{{ $t("common.cancel") }}</Button>
-          <Button
-            v-if="secretDialogMode === 'create'"
-            variant="outline"
-            :disabled="isBusy"
-            @click="handleDraftCheck"
-          >
-            {{ $t("providerEditPage.credentials.checkDraft") }}
-          </Button>
           <Button :disabled="isBusy" @click="handleSecretSubmit">
             <Loader2 v-if="isBusy" class="mr-1.5 h-4 w-4 animate-spin" />
             {{
@@ -296,12 +279,8 @@ import type { EditingProviderData, LocalProviderApiKeyItem } from "../types";
 const { t: $t } = useI18n();
 const authStore = useAuthStore();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
-const props = defineProps<{
-  sourceId: number | null;
-}>();
 const emit = defineEmits<{
   (event: "checkSingle", index: number): void;
-  (event: "checkBatch"): void;
 }>();
 
 const secretDialogOpen = ref(false);
@@ -420,35 +399,6 @@ const handleSecretSubmit = async () => {
     await recoverAfterMutationFailure(error);
   } finally {
     secretInput.value = "";
-    isBusy.value = false;
-  }
-};
-
-const handleDraftCheck = async () => {
-  const providerId = editingData.value.id;
-  const model = editingData.value.models.find((item) => item.id !== null);
-  if (!providerId || !model || !validateSecret() || isBusy.value) {
-    if (!model) toastController.warn($t("providerEditPage.alert.noModelForCheck"));
-    return;
-  }
-  isBusy.value = true;
-  try {
-    if (props.sourceId === null) {
-      toastController.warn($t("providerEditPage.alert.sourceRequiredForCheck"));
-      return;
-    }
-    await providerService.checkProviderConnection(providerId, props.sourceId, {
-      model_id: model.id ?? undefined,
-      provider_api_key: secretInput.value,
-    });
-    toastController.success($t("providerEditPage.alert.checkSuccess"));
-  } catch (error) {
-    toastController.error(
-      $t("providerEditPage.alert.checkFailed", {
-        error: (error as Error).message || $t("common.unknownError"),
-      }),
-    );
-  } finally {
     isBusy.value = false;
   }
 };

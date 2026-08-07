@@ -2,7 +2,8 @@ import type {
   ProviderApiKeySummary,
   ProviderBootstrapPayload,
   ProviderBootstrapResponse,
-  ModelItem,
+  ModelSourceConfigSummary,
+  UpstreamSource,
   ProviderUpdatePayload,
 } from "@/services/types";
 import type {
@@ -90,37 +91,62 @@ function titleize(value: unknown): string {
 
 function mapCreatedModel(
   model:
-    | Partial<
-        Pick<
-          ModelItem,
-          | "id"
-          | "model_name"
-          | "real_model_name"
-          | "supports_streaming"
-          | "supports_tools"
-          | "supports_reasoning"
-          | "supports_image_input"
-          | "supports_embeddings"
-          | "supports_rerank"
-          | "is_enabled"
-        >
-      >
+    | {
+        id?: number;
+        model_name?: string;
+        real_model_name?: string | null;
+        source_selection_mode?: string;
+        source_config?: ModelSourceConfigSummary;
+        is_enabled?: boolean;
+      }
     | null
     | undefined,
+  sources: UpstreamSource[] = [],
 ): LocalEditableModelItem {
   return {
     id: model?.id ?? null,
     model_name: model?.model_name ?? "",
     real_model_name: model?.real_model_name ?? null,
-    supports_streaming: model?.supports_streaming ?? true,
-    supports_tools: model?.supports_tools ?? true,
-    supports_reasoning: model?.supports_reasoning ?? true,
-    supports_image_input: model?.supports_image_input ?? true,
-    supports_embeddings: model?.supports_embeddings ?? true,
-    supports_rerank: model?.supports_rerank ?? true,
+    source_config:
+      model?.source_config ?? buildBootstrapSourceConfigSummary(model, sources),
     is_enabled: model?.is_enabled ?? true,
     isEditing: false,
     checkStatus: "unchecked",
+  };
+}
+
+export function buildBootstrapSourceConfigSummary(
+  model:
+    | Pick<
+        {
+          source_selection_mode?: string;
+        },
+        "source_selection_mode"
+      >
+    | null
+    | undefined,
+  sources: UpstreamSource[] = [],
+): ModelSourceConfigSummary {
+  const sourceSelectionMode =
+    model?.source_selection_mode === "EXPLICIT" ? "EXPLICIT" : "INHERIT_ALL";
+  const visibleSources = sources.filter((source) => source.deleted_at === null);
+
+  return {
+    source_selection_mode: sourceSelectionMode,
+    bindings: [],
+    declared_source_count:
+      sourceSelectionMode === "INHERIT_ALL" ? visibleSources.length : 0,
+    enabled_source_count:
+      sourceSelectionMode === "INHERIT_ALL"
+        ? visibleSources.filter((source) => source.is_enabled).length
+        : 0,
+    model_default_source_id: null,
+    warnings:
+      sourceSelectionMode === "INHERIT_ALL" && visibleSources.length === 0
+        ? ["no_visible_source"]
+        : sourceSelectionMode === "EXPLICIT"
+          ? ["explicit_empty"]
+          : [],
   };
 }
 
@@ -289,7 +315,10 @@ export function hydrateEditingProviderDataFromBootstrap(
   }
 
   if (response.created_model) {
-    const normalizedModel = mapCreatedModel(response.created_model);
+    const normalizedModel = mapCreatedModel(
+      response.created_model,
+      editingData.upstream_sources,
+    );
     const existingIndex =
       normalizedModel.id === null
         ? -1

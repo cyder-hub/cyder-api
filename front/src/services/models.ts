@@ -3,6 +3,9 @@ import type {
   ModelDetailResponse,
   ModelItem,
   ModelPayload,
+  ModelSourceConfigPayload,
+  ModelSourceConfigSummary,
+  ModelSourceExplain,
   ModelSummaryItem,
 } from "./types";
 
@@ -29,4 +32,23 @@ export function getModelDetail(
   id: number | string,
 ): Promise<ModelDetailResponse> {
   return request.get(`/ai/manager/api/model/${id}/detail`);
+}
+
+export function getModelSourceConfig(
+  id: number | string,
+): Promise<ModelSourceConfigSummary> {
+  return request.get(`/ai/manager/api/model/${id}/source-config`);
+}
+
+export function updateModelSourceConfig(
+  id: number | string,
+  payload: ModelSourceConfigPayload,
+): Promise<ModelSourceConfigSummary> {
+  return request.put(`/ai/manager/api/model/${id}/source-config`, payload);
+}
+
+export function getModelSourceExplain(
+  id: number | string,
+): Promise<ModelSourceExplain> {
+  return request.get(`/ai/manager/api/model/${id}/source-config/explain`);
 }

@@ -32,8 +32,6 @@ import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./components/ModelBaseInfoForm.vue";
 import ModelRequestPatchPanel from "./components/ModelRequestPatchPanel.vue";
 import ModelSourceConfigEditor from "@/components/model-source-config/ModelSourceConfigEditor.vue";
-import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
-import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 import { useModelEdit } from "./composables/useModelEdit";
 
 const { t } = useI18n();
@@ -53,13 +51,10 @@ const {
   currentProvider,
   selectedCatalog,
   selectedCatalogVersions,
-  reasoningActions,
   fetchData,
   handleSaveModel,
   handleSaveSourceConfig,
   handleExplainSourceConfig,
-  handleReasoningConfigSaved,
-  handleRuntimeFeatureConfigSaved,
   handleNavigateToModels,
   handleNavigateToProviders,
   handleOpenSelectedCostCatalog,
@@ -146,25 +141,6 @@ const {
           @save="handleSaveSourceConfig"
           @explain="handleExplainSourceConfig"
         />
-
-        <div class="border-t border-gray-200 pt-5">
-          <ReasoningConfigPanel
-            owner-kind="model"
-            :owner-id="editingData.id"
-            :actions="reasoningActions"
-            :title="t('modelEditPage.advancedConfig.title')"
-            @saved="handleReasoningConfigSaved"
-          >
-            <template #runtime-feature>
-              <RuntimeFeatureConfigPanel
-                owner-kind="model"
-                :owner-id="editingData.id"
-                embedded
-                @saved="handleRuntimeFeatureConfigSaved"
-              />
-            </template>
-          </ReasoningConfigPanel>
-        </div>
 
       <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
         <SectionHeader :title="t('modelEditPage.priceSection.title')" />
@@ -353,8 +329,11 @@ const {
 
         <ModelRequestPatchPanel
           :model-id="editingData.id"
+          :provider-id="editingData.provider_id"
           :provider-name="currentProvider?.name"
           :provider-key="currentProvider?.provider_key"
+          :sources="providerSources"
+          :source-config="sourceConfigSummary"
         />
 
         <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 mt-2 sm:flex-row sm:justify-end">

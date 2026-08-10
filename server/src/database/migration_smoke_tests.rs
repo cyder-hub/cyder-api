@@ -27,6 +27,7 @@ const R26_HASH: &str = "bb70cc6e62109d41551197d981876cd7b8ae92140ca73a2fc95c55a4
 const R39_UPSTREAM_SOURCE_VERSION: &str = "20260805090000";
 const R310_PROVIDER_MULTI_SOURCE_VERSION: &str = "20260806090000";
 const R311_MODEL_SOURCE_SELECTION_VERSION: &str = "20260807090000";
+const R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION: &str = "20260810090000";
 
 const LEGACY_SQLITE_API_KEY_SCHEMA: &str = r#"
 CREATE TABLE api_key (
@@ -247,6 +248,14 @@ fn migrate_sqlite_to_before_r39(
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite upgrade migrations should load");
+    let r312 = migrations
+        .pop()
+        .expect("R3.12 sqlite migration should exist");
+    assert_eq!(
+        r312.name().version().to_string(),
+        R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION,
+        "R3.12 must be the final sqlite migration in this release"
+    );
     let r311 = migrations
         .pop()
         .expect("R3.11 sqlite migration should exist");
@@ -287,6 +296,14 @@ fn migrate_postgres_to_before_r39(connection: &mut PgConnection) -> Box<dyn Migr
     let mut migrations = connection
         .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
         .expect("pending postgres upgrade migrations should load");
+    let r312 = migrations
+        .pop()
+        .expect("R3.12 postgres migration should exist");
+    assert_eq!(
+        r312.name().version().to_string(),
+        R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION,
+        "R3.12 must be the final postgres migration in this release"
+    );
     let r311 = migrations
         .pop()
         .expect("R3.11 postgres migration should exist");
@@ -945,6 +962,200 @@ fn assert_postgres_r311_model_source_schema(connection: &mut PgConnection) {
     assert_eq!(indexes, 2);
 }
 
+fn assert_sqlite_r312_request_patch_schema(connection: &mut diesel::SqliteConnection) {
+    for table in [
+        "request_patch_rule",
+        "reasoning_config",
+        "reasoning_config_preset",
+        "runtime_feature_config",
+    ] {
+        let count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+        ))
+        .get_result::<CountRow>(connection)
+        .expect("SQLite R3.12 legacy table query should succeed")
+        .count;
+        if table == "request_patch_rule" {
+            assert_eq!(count, 1, "SQLite R3.12 must recreate request_patch_rule");
+        } else {
+            assert_eq!(count, 0, "SQLite R3.12 must remove legacy table {table}");
+        }
+    }
+
+    for column in [
+        "id",
+        "source_id",
+        "model_id",
+        "suffix",
+        "enabled",
+        "expose_in_models",
+        "deleted_at",
+        "created_at",
+        "updated_at",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "request_patch_variant", column),
+            1,
+            "SQLite R3.12 variant must contain {column}"
+        );
+    }
+    for column in ["provider_id", "is_enabled"] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "request_patch_rule", column),
+            0,
+            "SQLite R3.12 rule must not contain {column}"
+        );
+    }
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_patch_rule", "variant_id"),
+        1
+    );
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "resolved_patch_suffix"),
+        1
+    );
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "resolved_reasoning_suffix"),
+        0
+    );
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "resolved_reasoning_preset"),
+        0
+    );
+    for index in [
+        "idx_request_patch_variant_source_base_active",
+        "idx_request_patch_variant_source_suffix_active",
+        "idx_request_patch_variant_model_base_active",
+        "idx_request_patch_variant_model_suffix_active",
+        "idx_request_patch_rule_variant_identity_active",
+    ] {
+        let count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = '{index}'"
+        ))
+        .get_result::<CountRow>(connection)
+        .expect("SQLite R3.12 index query should succeed")
+        .count;
+        assert_eq!(count, 1, "SQLite R3.12 must contain index {index}");
+    }
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM request_patch_variant")
+            .get_result::<CountRow>(connection)
+            .expect("SQLite R3.12 variant row count should query")
+            .count,
+        0,
+        "R3.12 clean schema must not synthesize Patch Variants"
+    );
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
+            .get_result::<CountRow>(connection)
+            .expect("SQLite R3.12 foreign key check should query")
+            .count,
+        0,
+        "SQLite R3.12 schema must have no foreign key violations"
+    );
+}
+
+fn assert_postgres_r312_request_patch_schema(connection: &mut PgConnection) {
+    for table in [
+        "reasoning_config",
+        "reasoning_config_preset",
+        "runtime_feature_config",
+    ] {
+        let count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count
+             FROM information_schema.tables
+             WHERE table_schema = current_schema() AND table_name = '{table}'"
+        ))
+        .get_result::<CountRow>(connection)
+        .expect("PostgreSQL R3.12 legacy table query should succeed")
+        .count;
+        assert_eq!(
+            count, 0,
+            "PostgreSQL R3.12 must remove legacy table {table}"
+        );
+    }
+
+    let variant_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'request_patch_variant'
+           AND column_name IN (
+               'id', 'source_id', 'model_id', 'suffix', 'enabled',
+               'expose_in_models', 'deleted_at', 'created_at', 'updated_at'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.12 variant columns should query")
+    .count;
+    assert_eq!(variant_columns, 9);
+
+    let legacy_rule_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'request_patch_rule'
+           AND column_name IN ('provider_id', 'model_id', 'is_enabled')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.12 legacy rule columns should query")
+    .count;
+    assert_eq!(legacy_rule_columns, 0);
+
+    let rule_variant_column = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'request_patch_rule'
+           AND column_name = 'variant_id'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.12 rule owner should query")
+    .count;
+    assert_eq!(rule_variant_column, 1);
+
+    let request_suffix_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'request_log'
+           AND column_name = 'resolved_patch_suffix'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.12 request suffix should query")
+    .count;
+    assert_eq!(request_suffix_columns, 1);
+
+    let legacy_request_suffix_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'request_log'
+           AND column_name IN ('resolved_reasoning_suffix', 'resolved_reasoning_preset')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.12 legacy request suffix should query")
+    .count;
+    assert_eq!(legacy_request_suffix_columns, 0);
+
+    let indexes = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND indexname IN (
+               'idx_request_patch_variant_source_base_active',
+               'idx_request_patch_variant_source_suffix_active',
+               'idx_request_patch_variant_model_base_active',
+               'idx_request_patch_variant_model_suffix_active',
+               'idx_request_patch_rule_variant_identity_active'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.12 indexes should query")
+    .count;
+    assert_eq!(indexes, 5);
+}
+
 fn seed_sqlite_r39_boundary_fixture(connection: &mut diesel::SqliteConnection) {
     connection
         .batch_execute(
@@ -1269,6 +1480,7 @@ fn sqlite_clean_upgrade_chain_from_empty() {
     assert_sqlite_request_log_timing_schema(&mut connection);
     assert_sqlite_r310_source_schema(&mut connection);
     assert_sqlite_r311_model_source_schema(&mut connection);
+    assert_sqlite_r312_request_patch_schema(&mut connection);
 
     let applied_versions = connection
         .applied_migrations()
@@ -1375,6 +1587,13 @@ fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
     let mut pending = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite migrations should load");
+    let r312 = pending
+        .pop()
+        .expect("R3.12 sqlite migration should be pending");
+    assert_eq!(
+        r312.name().version().to_string(),
+        R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION
+    );
     let r311 = pending
         .pop()
         .expect("R3.11 sqlite migration should be pending");
@@ -1441,6 +1660,24 @@ fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
             .is_err(),
         "a model may have only one default binding"
     );
+    connection
+        .batch_execute(
+            "UPDATE request_log
+             SET resolved_reasoning_suffix = 'legacy-high'
+             WHERE id = 32;",
+        )
+        .expect("historical reasoning suffix should be writable before R3.12");
+    connection
+        .run_migration(r312.as_ref())
+        .expect("R3.12 sqlite migration should run");
+    assert_sqlite_r312_request_patch_schema(&mut connection);
+    let migrated_suffix = diesel::sql_query(
+        "SELECT resolved_patch_suffix AS value
+         FROM request_log WHERE id = 32",
+    )
+    .get_result::<TextValueRow>(&mut connection)
+    .expect("migrated request patch suffix should query");
+    assert_eq!(migrated_suffix.value, "legacy-high");
     assert!(
         connection
             .batch_execute(
@@ -1971,7 +2208,20 @@ fn sqlite_request_identity_upgrade_is_destructive_constrained_and_preserves_roll
 fn sqlite_request_log_timing_upgrade_preserves_body_timing_and_round_trips() {
     let (_temp_dir, mut connection) =
         open_test_sqlite_connection("request-log-timing-contract-upgrade.sqlite");
-    run_sqlite_migrations(&mut connection).expect("sqlite migrations should run");
+    let mut migrations = connection
+        .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
+        .expect("sqlite upgrade migrations should load");
+    let r312 = migrations
+        .pop()
+        .expect("R3.12 sqlite migration should exist");
+    assert_eq!(
+        r312.name().version().to_string(),
+        R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION,
+        "R3.12 must remain outside this historical timing down-migration fixture"
+    );
+    connection
+        .run_migrations(&migrations)
+        .expect("pre-R3.12 sqlite migrations should run");
 
     connection
         .batch_execute(include_str!(
@@ -2699,6 +2949,7 @@ fn postgres_clean_upgrade_chain_from_empty() {
         assert_postgres_request_log_timing_schema(&mut connection);
         assert_postgres_r310_source_schema(&mut connection);
         assert_postgres_r311_model_source_schema(&mut connection);
+        assert_postgres_r312_request_patch_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -2824,6 +3075,13 @@ fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() 
         let mut pending = connection
             .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
             .expect("pending postgres migrations should load");
+        let r312 = pending
+            .pop()
+            .expect("R3.12 postgres migration should be pending");
+        assert_eq!(
+            r312.name().version().to_string(),
+            R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION
+        );
         let r311 = pending
             .pop()
             .expect("R3.11 postgres migration should be pending");
@@ -2887,6 +3145,24 @@ fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() 
                 .is_err(),
             "a postgres model may have only one default binding"
         );
+        connection
+            .batch_execute(
+                "UPDATE request_log
+                 SET resolved_reasoning_suffix = 'legacy-high'
+                 WHERE id = 32;",
+            )
+            .expect("historical postgres reasoning suffix should be writable before R3.12");
+        connection
+            .run_migration(r312.as_ref())
+            .expect("R3.12 postgres migration should run");
+        assert_postgres_r312_request_patch_schema(&mut connection);
+        let migrated_suffix = diesel::sql_query(
+            "SELECT resolved_patch_suffix AS value
+             FROM request_log WHERE id = 32",
+        )
+        .get_result::<TextValueRow>(&mut connection)
+        .expect("migrated postgres request patch suffix should query");
+        assert_eq!(migrated_suffix.value, "legacy-high");
         assert!(
             connection
                 .batch_execute(

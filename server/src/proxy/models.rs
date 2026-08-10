@@ -4,27 +4,16 @@ use axum::{body::Body, response::Response};
 use serde::Serialize;
 
 use super::{
-    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
-    auth::admit_api_key_request,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, auth::admit_api_key_request,
     request_context::ProxyRequestContext,
-    runtime::{
-        api_key_lease::ApiKeyRequestLeaseFinalizer,
-        route_resolver::{
-            ExecutionTarget, RuntimeFeatureConfigSource, TargetRuntimeFeatures,
-            resolve_effective_reasoning_config, target_supports_reasoning_preset,
-        },
-    },
-    util::determine_upstream_protocol,
 };
 use crate::{
-    database::reasoning_config::{ReasoningConfigMode, ReasoningPreset},
     schema::enum_def::DownstreamProtocol,
     service::{
         app_state::AppState,
-        cache::types::{
-            CacheApiKey, CacheModel, CacheModelsCatalog, CacheProvider, CacheReasoningConfig,
-        },
-        source_selector::{SourceSelection, select_source},
+        cache::types::{CacheApiKey, CacheModel, CacheModelsCatalog, CacheProvider},
+        request_patch::evaluate_request_patch_variants,
+        source_selector::select_source,
     },
     utils::acl::ACL_EVALUATOR,
 };
@@ -69,7 +58,7 @@ pub(super) async fn execute_models_listing(
     request_context: Arc<ProxyRequestContext>,
 ) -> Result<Response<Body>, ProxyError> {
     let request_lease = admit_api_key_request(&app_state, &api_key).await?;
-    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(
+    let mut request_lease = super::runtime::api_key_lease::ApiKeyRequestLeaseFinalizer::new(
         &app_state,
         request_lease,
         request_context.request_id.clone(),
@@ -181,25 +170,32 @@ fn collect_accessible_models(
                 provider,
             );
 
-            for preset in exposed_presets_for_model(catalog, provider, model) {
-                let supports_preset = enabled_source_supports_reasoning_preset(
-                    catalog,
-                    provider,
-                    model,
-                    downstream_protocol,
-                    &selection,
-                    preset,
+            let mut suffixes = catalog
+                .request_patch_variants
+                .iter()
+                .filter(|variant| {
+                    variant.enabled
+                        && variant.source_id == selection.source.id
+                        && (variant.model_id.is_some_and(|id| id == model.id)
+                            || variant.model_id.is_none())
+                })
+                .filter_map(|variant| variant.suffix.clone())
+                .collect::<Vec<_>>();
+            suffixes
+                .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+            suffixes.dedup();
+            for suffix in suffixes {
+                let evaluation = evaluate_request_patch_variants(
+                    &catalog.request_patch_variants,
+                    selection.source.id,
+                    Some(model.id),
+                    Some(&suffix),
                 );
-                if supports_preset {
+                if evaluation.executable && evaluation.exposed_in_models {
                     push_model(
                         &mut result,
                         &mut seen_ids,
-                        format!(
-                            "{}/{}-{}",
-                            provider.provider_key,
-                            model.model_name,
-                            preset.canonical_suffix()
-                        ),
+                        format!("{}/{}-{}", provider.provider_key, model.model_name, suffix),
                         provider,
                     );
                 }
@@ -207,71 +203,6 @@ fn collect_accessible_models(
         }
     }
     result
-}
-
-fn enabled_source_supports_reasoning_preset(
-    catalog: &CacheModelsCatalog,
-    provider: &CacheProvider,
-    model: &CacheModel,
-    downstream_protocol: DownstreamProtocol,
-    selection: &SourceSelection,
-    preset: ReasoningPreset,
-) -> bool {
-    let target = build_direct_reasoning_target(provider, model, downstream_protocol, selection);
-    target_supports_reasoning_preset(catalog, &target, preset).is_ok()
-}
-
-fn exposed_presets_for_model(
-    catalog: &CacheModelsCatalog,
-    provider: &CacheProvider,
-    model: &CacheModel,
-) -> Vec<ReasoningPreset> {
-    let Some(config) = resolve_effective_reasoning_config(catalog, provider, model).config else {
-        return Vec::new();
-    };
-    if !matches!(config.mode, ReasoningConfigMode::Custom) {
-        return Vec::new();
-    }
-    exposed_presets_for_config(config)
-}
-
-fn exposed_presets_for_config(config: &CacheReasoningConfig) -> Vec<ReasoningPreset> {
-    ReasoningPreset::ALL
-        .into_iter()
-        .filter(|preset| {
-            config
-                .presets
-                .iter()
-                .any(|row| row.preset == *preset && row.is_enabled && row.expose_in_models)
-        })
-        .collect()
-}
-
-fn build_direct_reasoning_target(
-    provider: &CacheProvider,
-    model: &CacheModel,
-    downstream_protocol: DownstreamProtocol,
-    selection: &SourceSelection,
-) -> ExecutionTarget {
-    ExecutionTarget {
-        provider: Arc::new(provider.clone()),
-        model: Arc::new(model.clone()),
-        upstream_source: Arc::new(selection.source.clone()),
-        downstream_protocol,
-        upstream_protocol: determine_upstream_protocol(&selection.source),
-        selection_reason: selection.reason,
-        reasoning_config_id: None,
-        reasoning_config_scope: None,
-        reasoning_config_source: None,
-        reasoning_config_preset_id: None,
-        reasoning_family: None,
-        reasoning_preset: None,
-        reasoning_suffix: None,
-        runtime_features: TargetRuntimeFeatures {
-            openai_reasoning_content_repair_enabled: false,
-            openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
-        },
-    }
 }
 
 fn push_model(
@@ -310,58 +241,13 @@ fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &Cac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::reasoning_config::{ReasoningConfigMode, ReasoningPatchFamily};
-    use crate::schema::enum_def::{Action, ProviderApiKeyMode, UpstreamProfileType};
-    use crate::service::cache::types::{CacheReasoningConfigPreset, CacheUpstreamSource};
-
-    fn catalog_with_source_enabled(source_enabled: bool) -> CacheModelsCatalog {
-        CacheModelsCatalog {
-            providers: vec![CacheProvider {
-                id: 1,
-                provider_key: "openai".to_string(),
-                name: "OpenAI".to_string(),
-                provider_api_key_mode: ProviderApiKeyMode::Queue,
-                is_enabled: true,
-                upstream_sources: vec![CacheUpstreamSource {
-                    id: 2,
-                    profile_type: UpstreamProfileType::Openai,
-                    endpoint: "https://api.openai.com/v1".to_string(),
-                    use_proxy: false,
-                    is_enabled: source_enabled,
-                    is_default: true,
-                }],
-            }],
-            models: vec![CacheModel {
-                id: 3,
-                provider_id: 1,
-                model_name: "gpt-4o".to_string(),
-                real_model_name: None,
-                cost_catalog_id: None,
-                source_selection_mode: "INHERIT_ALL".to_string(),
-                source_bindings: vec![],
-                is_enabled: true,
-            }],
-            reasoning_configs: vec![CacheReasoningConfig {
-                id: 4,
-                scope_kind: crate::database::reasoning_config::ReasoningConfigScope::Provider,
-                provider_id: Some(1),
-                model_id: None,
-                mode: ReasoningConfigMode::Custom,
-                family: Some(ReasoningPatchFamily::OpenAiChatReasoningEffort),
-                presets: vec![CacheReasoningConfigPreset {
-                    id: 5,
-                    config_id: 4,
-                    preset: ReasoningPreset::High,
-                    suffix: "high".to_string(),
-                    requires_reasoning: true,
-                    allowed_operation_kinds: vec!["generation".to_string()],
-                    expose_in_models: true,
-                    is_enabled: true,
-                }],
-            }],
-            runtime_feature_configs: vec![],
-        }
-    }
+    use crate::schema::enum_def::{
+        Action, ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement,
+        UpstreamProfileType,
+    };
+    use crate::service::cache::types::{
+        CacheRequestPatchRule, CacheRequestPatchVariant, CacheUpstreamSource,
+    };
 
     fn allow_all_api_key() -> CacheApiKey {
         CacheApiKey {
@@ -387,66 +273,191 @@ mod tests {
         }
     }
 
-    #[test]
-    fn models_listing_uses_the_protocol_selector_for_source_visibility() {
-        let disabled_catalog = catalog_with_source_enabled(false);
-        let disabled_models = collect_accessible_models(
-            &disabled_catalog,
-            &allow_all_api_key(),
-            DownstreamProtocol::Openai,
-        );
-        assert!(disabled_models.is_empty());
+    fn catalog(source_enabled: bool, with_suffix: bool) -> CacheModelsCatalog {
+        let variants = with_suffix.then(|| CacheRequestPatchVariant {
+            id: 4,
+            source_id: 2,
+            model_id: None,
+            suffix: Some("fast".to_string()),
+            enabled: true,
+            expose_in_models: true,
+            rules: vec![CacheRequestPatchRule {
+                id: 5,
+                variant_id: 4,
+                placement: RequestPatchPlacement::Body,
+                target: "/temperature".to_string(),
+                operation: RequestPatchOperation::Set,
+                value_json: Some("0.2".to_string()),
+                description: None,
+                created_at: 1,
+                updated_at: 1,
+            }],
+        });
+        CacheModelsCatalog {
+            providers: vec![CacheProvider {
+                id: 1,
+                provider_key: "openai".to_string(),
+                name: "OpenAI".to_string(),
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+                is_enabled: true,
+                upstream_sources: vec![CacheUpstreamSource {
+                    id: 2,
+                    profile_type: UpstreamProfileType::Openai,
+                    endpoint: "https://example.test".to_string(),
+                    use_proxy: false,
+                    is_enabled: source_enabled,
+                    is_default: true,
+                }],
+            }],
+            models: vec![CacheModel {
+                id: 3,
+                provider_id: 1,
+                model_name: "gpt-4o".to_string(),
+                real_model_name: None,
+                cost_catalog_id: None,
+                source_selection_mode: "INHERIT_ALL".to_string(),
+                source_bindings: vec![],
+                is_enabled: true,
+            }],
+            request_patch_variants: variants.into_iter().collect(),
+        }
+    }
 
-        let enabled_catalog = catalog_with_source_enabled(true);
-        let enabled_models = collect_accessible_models(
-            &enabled_catalog,
+    #[test]
+    fn models_listing_uses_selected_source_and_exposure() {
+        let disabled = collect_accessible_models(
+            &catalog(false, true),
             &allow_all_api_key(),
             DownstreamProtocol::Openai,
         );
+        assert!(disabled.is_empty());
+
+        let enabled = collect_accessible_models(
+            &catalog(true, true),
+            &allow_all_api_key(),
+            DownstreamProtocol::Openai,
+        );
+        assert!(enabled.iter().any(|model| model.id == "openai/gpt-4o"));
+        assert!(enabled.iter().any(|model| model.id == "openai/gpt-4o-fast"));
+    }
+
+    #[test]
+    fn models_listing_excludes_disabled_masked_and_hidden_suffix_aliases() {
+        let mut disabled = catalog(true, true);
+        disabled.request_patch_variants[0].enabled = false;
         assert!(
-            enabled_models
+            collect_accessible_models(&disabled, &allow_all_api_key(), DownstreamProtocol::Openai,)
                 .iter()
-                .any(|model| model.id == "openai/gpt-4o-high")
+                .all(|model| model.id != "openai/gpt-4o-fast")
+        );
+
+        let mut masked = catalog(true, true);
+        masked
+            .request_patch_variants
+            .push(CacheRequestPatchVariant {
+                id: 6,
+                source_id: 2,
+                model_id: Some(3),
+                suffix: Some("fast".to_string()),
+                enabled: false,
+                expose_in_models: false,
+                rules: Vec::new(),
+            });
+        assert!(
+            collect_accessible_models(&masked, &allow_all_api_key(), DownstreamProtocol::Openai)
+                .iter()
+                .all(|model| model.id != "openai/gpt-4o-fast")
+        );
+
+        let mut hidden = catalog(true, true);
+        hidden.request_patch_variants[0].expose_in_models = false;
+        assert!(
+            collect_accessible_models(&hidden, &allow_all_api_key(), DownstreamProtocol::Openai)
+                .iter()
+                .all(|model| model.id != "openai/gpt-4o-fast")
         );
     }
 
     #[test]
-    fn reasoning_suffixes_use_the_selected_source_family_only() {
-        let mut catalog = catalog_with_source_enabled(true);
+    fn models_listing_applies_base_acl_once_to_base_and_suffix_aliases() {
+        let mut denied = allow_all_api_key();
+        denied.default_action = Action::Deny;
+        let models =
+            collect_accessible_models(&catalog(true, true), &denied, DownstreamProtocol::Openai);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn model_exposure_override_is_respected_without_disabling_explicit_resolution() {
+        let mut catalog = catalog(true, true);
+        catalog
+            .request_patch_variants
+            .push(CacheRequestPatchVariant {
+                id: 7,
+                source_id: 2,
+                model_id: Some(3),
+                suffix: Some("fast".to_string()),
+                enabled: true,
+                expose_in_models: false,
+                rules: vec![CacheRequestPatchRule {
+                    id: 8,
+                    variant_id: 7,
+                    placement: RequestPatchPlacement::Query,
+                    target: "mode".to_string(),
+                    operation: RequestPatchOperation::Set,
+                    value_json: Some("\"fast\"".to_string()),
+                    description: None,
+                    created_at: 1,
+                    updated_at: 1,
+                }],
+            });
+        let models =
+            collect_accessible_models(&catalog, &allow_all_api_key(), DownstreamProtocol::Openai);
+        assert!(models.iter().any(|model| model.id == "openai/gpt-4o"));
+        assert!(models.iter().all(|model| model.id != "openai/gpt-4o-fast"));
+    }
+
+    #[test]
+    fn models_listing_uses_the_protocol_selected_source_for_suffix_exposure() {
+        let mut catalog = catalog(true, true);
         catalog.providers[0]
             .upstream_sources
             .push(CacheUpstreamSource {
-                id: 6,
-                profile_type: UpstreamProfileType::Anthropic,
-                endpoint: "https://api.anthropic.com".to_string(),
+                id: 3,
+                profile_type: UpstreamProfileType::Gemini,
+                endpoint: "https://gemini.example".to_string(),
                 use_proxy: false,
                 is_enabled: true,
                 is_default: false,
             });
-        catalog.reasoning_configs[0].family = Some(ReasoningPatchFamily::AnthropicThinkingBudget);
+        catalog
+            .request_patch_variants
+            .push(CacheRequestPatchVariant {
+                id: 9,
+                source_id: 3,
+                model_id: None,
+                suffix: Some("fast".to_string()),
+                enabled: true,
+                expose_in_models: true,
+                rules: vec![CacheRequestPatchRule {
+                    id: 10,
+                    variant_id: 9,
+                    placement: RequestPatchPlacement::Body,
+                    target: "/generationConfig/temperature".to_string(),
+                    operation: RequestPatchOperation::Set,
+                    value_json: Some("0.2".to_string()),
+                    description: None,
+                    created_at: 1,
+                    updated_at: 1,
+                }],
+            });
 
-        let openai_models =
+        let openai =
             collect_accessible_models(&catalog, &allow_all_api_key(), DownstreamProtocol::Openai);
-        assert!(
-            openai_models
-                .iter()
-                .any(|model| model.id == "openai/gpt-4o")
-        );
-        assert!(
-            !openai_models
-                .iter()
-                .any(|model| model.id == "openai/gpt-4o-high")
-        );
-
-        let anthropic_models = collect_accessible_models(
-            &catalog,
-            &allow_all_api_key(),
-            DownstreamProtocol::Anthropic,
-        );
-        assert!(
-            anthropic_models
-                .iter()
-                .any(|model| model.id == "openai/gpt-4o-high")
-        );
+        let gemini =
+            collect_accessible_models(&catalog, &allow_all_api_key(), DownstreamProtocol::Gemini);
+        assert!(openai.iter().any(|model| model.id == "openai/gpt-4o-fast"));
+        assert!(gemini.iter().any(|model| model.id == "openai/gpt-4o-fast"));
+        assert_eq!(openai.len(), gemini.len());
     }
 }

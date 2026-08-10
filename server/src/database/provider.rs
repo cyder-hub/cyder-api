@@ -11,7 +11,7 @@ use crate::{db_execute, db_object};
 // db_object! is exported at the crate root by `#[macro_export]` in `database/mod.rs`.
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
 use crate::controller::BaseError;
-use crate::database::request_patch::{RequestPatchRule, RequestPatchRuleResponse};
+use crate::database::request_patch::{RequestPatchVariantAggregate, RequestPatchVariantRepository};
 use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::secret_encryption::{
     EncryptedSecret, ProviderSecretFingerprint, SecretEncryptionError,
@@ -486,7 +486,7 @@ macro_rules! bootstrap_transaction {
 pub struct ProviderDetail {
     pub provider: ProviderAggregate,
     pub api_keys: Vec<ProviderApiKeySummary>,
-    pub request_patches: Vec<RequestPatchRuleResponse>,
+    pub request_patch_variants: Vec<RequestPatchVariantAggregate>,
 }
 
 macro_rules! create_provider_transaction {
@@ -785,26 +785,63 @@ impl Provider {
                     )))
                 })?;
 
-                diesel::update(
-                    request_patch_rule::table.filter(
-                        request_patch_rule::dsl::provider_id
-                            .eq(target_id_value)
-                            .and(request_patch_rule::dsl::model_id.is_null())
-                            .and(request_patch_rule::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    request_patch_rule::dsl::deleted_at.eq(current_time),
-                    request_patch_rule::dsl::is_enabled.eq(false),
-                    request_patch_rule::dsl::updated_at.eq(current_time),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete provider request patch rules for {}: {}",
-                        target_id_value, e
-                    )))
-                })?;
+                let source_ids = upstream_source::table
+                    .filter(upstream_source::dsl::provider_id.eq(target_id_value))
+                    .select(upstream_source::dsl::id)
+                    .load::<i64>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to load provider Sources for {}: {}",
+                            target_id_value, e
+                        )))
+                    })?;
+                let variant_ids = if source_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    request_patch_variant::table
+                        .filter(request_patch_variant::dsl::source_id.eq_any(&source_ids))
+                        .filter(request_patch_variant::dsl::deleted_at.is_null())
+                        .select(request_patch_variant::dsl::id)
+                        .load::<i64>(conn)
+                        .map_err(|e| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load provider request patch Variants for {}: {}",
+                                target_id_value, e
+                            )))
+                        })?
+                };
+                if !variant_ids.is_empty() {
+                    diesel::update(
+                        request_patch_variant::table
+                            .filter(request_patch_variant::dsl::id.eq_any(&variant_ids)),
+                    )
+                    .set((
+                        request_patch_variant::dsl::deleted_at.eq(current_time),
+                        request_patch_variant::dsl::enabled.eq(false),
+                        request_patch_variant::dsl::expose_in_models.eq(false),
+                        request_patch_variant::dsl::updated_at.eq(current_time),
+                    ))
+                    .execute(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to delete provider request patch Variants for {}: {}",
+                            target_id_value, e
+                        )))
+                    })?;
+                    diesel::update(
+                        request_patch_rule::table
+                            .filter(request_patch_rule::dsl::variant_id.eq_any(&variant_ids))
+                            .filter(request_patch_rule::dsl::deleted_at.is_null()),
+                    )
+                    .set(request_patch_rule::dsl::deleted_at.eq(current_time))
+                    .execute(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to delete provider request patch Rules for {}: {}",
+                            target_id_value, e
+                        )))
+                    })?;
+                }
 
                 Ok(updated)
             })
@@ -959,16 +996,21 @@ impl Provider {
         attach_sources_batch(providers)
     }
 
-    /// Retrieves a provider's details including API keys and direct request patches by its ID.
+    /// Retrieves a provider's details including API keys and Source-bound patch Variants.
     pub fn get_detail_by_id(provider_id_val: i64) -> DbResult<ProviderDetail> {
         let provider = Provider::get_by_id(provider_id_val)?;
         let api_keys = ProviderApiKeyRepository::list_summaries_by_provider_id(provider_id_val)?;
-        let request_patches = RequestPatchRule::list_by_provider_id(provider_id_val)?;
+        let source_ids = UpstreamSource::list_active_by_provider_id(provider_id_val)?
+            .into_iter()
+            .map(|source| source.id)
+            .collect::<Vec<_>>();
+        let request_patch_variants =
+            RequestPatchVariantRepository::list_by_source_ids(&source_ids)?;
 
         Ok(ProviderDetail {
             provider,
             api_keys,
-            request_patches,
+            request_patch_variants,
         })
     }
 }
@@ -1624,10 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_detail_contract_uses_request_patch_fields() {
-        use crate::database::request_patch::RequestPatchScopeKind;
-        use crate::schema::enum_def::{RequestPatchOperation, RequestPatchPlacement};
-
+    fn provider_detail_contract_uses_variant_fields() {
         let detail = ProviderDetail {
             provider: ProviderAggregate {
                 provider: Provider {
@@ -1654,20 +1693,7 @@ mod tests {
                 }],
             },
             api_keys: vec![],
-            request_patches: vec![RequestPatchRuleResponse {
-                id: 10,
-                provider_id: Some(1),
-                model_id: None,
-                scope: RequestPatchScopeKind::Provider,
-                placement: RequestPatchPlacement::Body,
-                target: "/generationConfig".to_string(),
-                operation: RequestPatchOperation::Set,
-                value_json: Some(serde_json::json!({ "temperature": 0.2 })),
-                description: Some("provider default".to_string()),
-                is_enabled: true,
-                created_at: 1,
-                updated_at: 1,
-            }],
+            request_patch_variants: vec![],
         };
 
         let value = serde_json::to_value(detail).expect("provider detail should serialize");
@@ -1676,13 +1702,10 @@ mod tests {
             .expect("detail should serialize as object");
         assert!(matches!(object.get("api_keys"), Some(Value::Array(_))));
         assert!(matches!(
-            object.get("request_patches"),
+            object.get("request_patch_variants"),
             Some(Value::Array(_))
         ));
-        assert_eq!(
-            object["request_patches"][0]["value_json"],
-            serde_json::json!({ "temperature": 0.2 })
-        );
+        assert!(object.get("request_patches").is_none());
         assert!(object.get("custom_fields").is_none());
         assert_eq!(
             object["provider"]["upstream_sources"][0]["profile_type"],

@@ -87,7 +87,6 @@ const handleSave = async () => {
       model_name: saved.model_name,
       real_model_name: saved.real_model_name ?? "",
       is_enabled: saved.is_enabled,
-      request_patches: [],
       source_config: saved.source_config,
     });
     isOpen.value = false;

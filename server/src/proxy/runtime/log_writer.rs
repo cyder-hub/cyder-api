@@ -25,8 +25,7 @@ pub(in crate::proxy) struct RequestLogContextInput<'a> {
     pub target: &'a ExecutionTarget,
     pub requested_model_name: &'a str,
     pub base_requested_model_name: &'a str,
-    pub resolved_reasoning_suffix: Option<&'a str>,
-    pub resolved_reasoning_preset: Option<&'a str>,
+    pub resolved_patch_suffix: Option<&'a str>,
     pub client_ip_addr: &'a Option<String>,
     pub request_context: &'a ProxyRequestContext,
     pub downstream_protocol: DownstreamProtocol,
@@ -49,11 +48,8 @@ pub(in crate::proxy) fn new_request_log_context(
         input.target.upstream_protocol,
         input.selection_reason,
     );
-    context.set_model_resolution_trace(
-        input.base_requested_model_name,
-        input.resolved_reasoning_suffix,
-        input.resolved_reasoning_preset,
-    );
+    context
+        .set_model_resolution_trace(input.base_requested_model_name, input.resolved_patch_suffix);
     context
 }
 

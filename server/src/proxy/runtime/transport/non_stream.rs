@@ -8,7 +8,6 @@ use chrono::Utc;
 
 use super::{
     ProxyRequestFailure, ProxyRequestOutcome, ProxyResponseMode,
-    ReasoningContinuationCaptureContext,
     body::{
         BODY_FRAME_CHANNEL_CAPACITY, BodyFrame, FrameDeliveryError, GuardedBodyStream,
         guarded_body, send_body_frame,
@@ -30,7 +29,6 @@ use crate::{
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{apply_final_error_fact, finalize_non_streaming_log_context},
-            reasoning_content_repair::continuation_snapshots_from_openai_response_body,
         },
         source_governance::{
             record_source_failure_or_release_probe, record_source_success, release_source_probe,
@@ -39,7 +37,7 @@ use crate::{
             json_top_level_field_count_from_bytes, parse_utility_usage_normalization, sha256_hex,
         },
     },
-    schema::enum_def::{RequestStatus, UpstreamProtocol},
+    schema::enum_def::RequestStatus,
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
@@ -65,7 +63,6 @@ pub(super) async fn handle_non_streaming_response(
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
-    reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
     upstream_error_body_limit_bytes: usize,
     non_stream_response_limits: &NonStreamResponseConfig,
     response_visibility: ResponseVisibilityTracker,
@@ -154,15 +151,6 @@ pub(super) async fn handle_non_streaming_response(
             decoded_response_body_bytes = complete_body.decoded_bytes,
             content_encoding = complete_body.encoding.as_str(),
         );
-        capture_non_stream_reasoning_continuation(
-            app_state,
-            reasoning_capture,
-            response_mode,
-            &decompressed_body,
-            completed_at,
-            &request_id,
-        )
-        .await;
         let (final_body, parsed_usage_info, parsed_usage_normalization, _) = match response_mode {
             ProxyResponseMode::Generation {
                 downstream_protocol,
@@ -510,7 +498,6 @@ async fn run_guarded_non_stream_worker(
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
-    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     proxy_timeouts: ProxyTimeoutConfig,
     non_stream_response_limits: NonStreamResponseConfig,
     response_visibility: ResponseVisibilityTracker,
@@ -611,15 +598,6 @@ async fn run_guarded_non_stream_worker(
         decoded_response_body_bytes = complete_body.decoded_bytes,
         content_encoding = complete_body.encoding.as_str(),
     );
-    capture_non_stream_reasoning_continuation(
-        &app_state,
-        reasoning_capture.as_ref(),
-        response_mode,
-        &complete_body.bytes,
-        upstream_completed_at,
-        &request_id,
-    )
-    .await;
     let (final_body, parsed_usage_info, parsed_usage_normalization, _) = match response_mode {
         ProxyResponseMode::Generation {
             downstream_protocol,
@@ -740,7 +718,6 @@ pub(super) async fn handle_non_streaming_response_guarded(
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
-    reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
     upstream_error_body_limit_bytes: usize,
     non_stream_response_limits: &NonStreamResponseConfig,
     proxy_timeouts: ProxyTimeoutConfig,
@@ -759,7 +736,6 @@ pub(super) async fn handle_non_streaming_response_guarded(
             api_key_request_lease,
             source_circuit_permit,
             response_mode,
-            reasoning_capture,
             upstream_error_body_limit_bytes,
             non_stream_response_limits,
             response_visibility,
@@ -795,7 +771,6 @@ pub(super) async fn handle_non_streaming_response_guarded(
             api_key_request_lease.with_coordinator(coordinator.clone()),
             source_circuit_permit,
             response_mode,
-            reasoning_capture.cloned(),
             proxy_timeouts,
             non_stream_response_limits.clone(),
             response_visibility.clone(),
@@ -836,58 +811,4 @@ pub(super) async fn handle_non_streaming_response_guarded(
             })
         }
     }
-}
-
-pub(super) async fn capture_non_stream_reasoning_continuation(
-    app_state: &Arc<AppState>,
-    reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
-    response_mode: ProxyResponseMode,
-    body: &Bytes,
-    observed_at_ms: i64,
-    request_id: &crate::proxy::request_context::RequestId,
-) {
-    let Some(reasoning_capture) = reasoning_capture else {
-        return;
-    };
-    if !reasoning_capture.feature_enabled {
-        return;
-    }
-    if !reasoning_capture.target_is_openai_compatible_generation
-        || !target_is_openai_compatible_generation(response_mode)
-    {
-        return;
-    }
-
-    let snapshots = match continuation_snapshots_from_openai_response_body(
-        reasoning_capture.scope.clone(),
-        body,
-        observed_at_ms,
-    ) {
-        Ok(snapshots) => snapshots,
-        Err(_) => return,
-    };
-
-    for snapshot in snapshots {
-        if let Err(err) = app_state
-            .reasoning_continuation_store
-            .insert(snapshot, observed_at_ms)
-            .await
-        {
-            crate::debug_event!(
-                "proxy.reasoning_continuation_cache_failed",
-                request_id = request_id,
-                error = err,
-            );
-        }
-    }
-}
-
-fn target_is_openai_compatible_generation(response_mode: ProxyResponseMode) -> bool {
-    matches!(
-        response_mode,
-        ProxyResponseMode::Generation {
-            upstream_protocol: UpstreamProtocol::Openai,
-            ..
-        }
-    )
 }

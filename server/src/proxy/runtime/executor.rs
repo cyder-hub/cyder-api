@@ -19,9 +19,9 @@ use crate::{
                 apply_gateway_request_identity, materialize_generation_request,
                 materialize_utility_request,
             },
-            request_patch::load_runtime_request_patch_trace,
+            request_patch::resolve_runtime_request_patch_trace,
             route_resolver::{ExecutionPlan, ExecutionTarget},
-            transport::{ReasoningContinuationCaptureContext, send_materialized_request},
+            transport::send_materialized_request,
         },
         source_governance::{SourceGovernanceCheckError, ensure_source_request_allowed},
         util::get_cost_catalog_version,
@@ -33,7 +33,7 @@ use crate::{
         cache::types::CacheApiKey,
         provider_credential::{ProviderCredentialError, resolve_selected_provider_credential},
         provider_http::normalize_provider_endpoint,
-        runtime::{ReasoningContinuationScope, SourceCircuitProbePermit},
+        runtime::SourceCircuitProbePermit,
     },
 };
 
@@ -141,20 +141,23 @@ pub(in crate::proxy) async fn execute_request(
         target: &target,
         requested_model_name: &execution_plan.requested_name,
         base_requested_model_name: &execution_plan.base_requested_name,
-        resolved_reasoning_suffix: execution_plan.resolved_reasoning_suffix.as_deref(),
-        resolved_reasoning_preset: execution_plan
-            .resolved_reasoning_preset
-            .map(|preset| preset.as_key()),
+        resolved_patch_suffix: execution_plan.resolved_patch_suffix.as_deref(),
         client_ip_addr: &client_ip_addr,
         request_context: &request_context,
         downstream_protocol,
         selection_reason: target.selection_reason,
     });
 
+    if let Err(error) =
+        check_access_control(&api_key, &target.provider, &target.model, &app_state).await
+    {
+        return fail_before_send(&app_state, log_context, error).await;
+    }
+
     if let RequestExecutionKind::Utility { operation, .. } = &kind {
-        if execution_plan.resolved_reasoning_preset.is_some() {
+        if execution_plan.resolved_patch_suffix.is_some() {
             let message = format!(
-                "Reasoning suffixes are only supported for generation requests; '{}' is a utility operation.",
+                "Patch suffixes are only supported for generation requests; '{}' is a utility operation.",
                 operation.name
             );
             return fail_before_send(
@@ -175,8 +178,36 @@ pub(in crate::proxy) async fn execute_request(
         }
     }
 
-    if let Err(error) =
-        check_access_control(&api_key, &target.provider, &target.model, &app_state).await
+    let request_patch_trace = resolve_runtime_request_patch_trace(
+        &target.upstream_source,
+        Some(target.model.id),
+        target.requested_patch_suffix.clone(),
+        execution_plan.request_patch_variants.as_slice(),
+    );
+    debug_assert_eq!(request_patch_trace.source_id, target.upstream_source.id);
+    debug_assert_eq!(request_patch_trace.model_id, Some(target.model.id));
+    debug_assert_eq!(
+        request_patch_trace.profile_type,
+        target.upstream_source.profile_type
+    );
+    debug_assert_eq!(
+        request_patch_trace.suffix.as_deref(),
+        target.requested_patch_suffix.as_deref()
+    );
+    debug_assert_eq!(
+        request_patch_trace.layers.len(),
+        if target.requested_patch_suffix.is_some() {
+            4
+        } else {
+            2
+        }
+    );
+    debug_assert!(
+        request_patch_trace.explain.len() >= request_patch_trace.applied_rules.len(),
+        "frozen Request Patch explain snapshot must cover applied Rules"
+    );
+    if let Some(error) =
+        request_patch_trace.execution_error(&target.provider.provider_key, &target.model.model_name)
     {
         return fail_before_send(&app_state, log_context, error).await;
     }
@@ -223,27 +254,6 @@ pub(in crate::proxy) async fn execute_request(
         .await;
     }
 
-    let request_patch_trace = match load_runtime_request_patch_trace(
-        &target.provider,
-        Some(&target.model),
-        Some(&target),
-        None,
-        &app_state,
-    )
-    .await
-    {
-        Ok(trace) => trace,
-        Err(error) => return fail_before_send(&app_state, log_context, error).await,
-    };
-    debug_assert_eq!(request_patch_trace.source_id, target.upstream_source.id);
-    debug_assert_eq!(
-        request_patch_trace.profile_type,
-        target.upstream_source.profile_type
-    );
-    if let Some(error) = request_patch_trace.conflict_error(&target.model.model_name) {
-        return fail_before_send(&app_state, log_context, error).await;
-    }
-
     let cost_catalog_version = get_cost_catalog_version(&target.model, &app_state).await;
     let request_lease = match admit_api_key_request(&app_state, &api_key).await {
         Ok(lease) => lease,
@@ -288,8 +298,6 @@ pub(in crate::proxy) async fn execute_request(
                 &query_params,
                 &request_patch_trace.applied_rules,
                 &provider_credential,
-                api_key.id,
-                app_state.reasoning_continuation_store.as_ref(),
             )
             .await
             {
@@ -329,18 +337,6 @@ pub(in crate::proxy) async fn execute_request(
             return fail_before_send(&app_state, log_context, error).await;
         }
     };
-    let reasoning_capture = Some(ReasoningContinuationCaptureContext {
-        scope: ReasoningContinuationScope {
-            api_key_id: api_key.id,
-            provider_id: target.provider.id,
-            model_id: target.model.id,
-        },
-        feature_enabled: target
-            .runtime_features
-            .openai_reasoning_content_repair_enabled,
-        target_is_openai_compatible_generation: target.is_openai_compatible_generation(),
-    });
-
     match send_materialized_request(
         Arc::clone(&app_state),
         cancellation,
@@ -354,7 +350,6 @@ pub(in crate::proxy) async fn execute_request(
         request_lease,
         source_permit,
         materialized.response_mode,
-        reasoning_capture,
         request_context.response_visibility.clone(),
     )
     .await

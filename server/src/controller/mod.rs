@@ -12,10 +12,8 @@ use metrics::create_metrics_router;
 use model::create_model_controller_router;
 use provider::create_provider_router;
 use provider_runtime::create_provider_runtime_router;
-use reasoning_config::create_reasoning_config_router;
 use request_log::create_record_router;
 use request_patch::create_request_patch_router;
-use runtime_feature_config::create_runtime_feature_config_router;
 use stat::routes as create_stat_router;
 use std::{
     path::{Path, PathBuf},
@@ -32,10 +30,8 @@ mod api_key;
 mod model;
 mod provider;
 mod provider_runtime;
-mod reasoning_config;
 mod request_log;
 mod request_patch;
-mod runtime_feature_config;
 mod stat;
 mod system;
 
@@ -73,8 +69,6 @@ fn create_manager_router_with_public_dir(
             .merge(create_api_key_management_router())
             .merge(create_model_controller_router())
             .merge(create_request_patch_router())
-            .merge(create_reasoning_config_router())
-            .merge(create_runtime_feature_config_router())
             .merge(create_cost_router())
             .merge(create_metrics_router())
             .merge(create_stat_router())

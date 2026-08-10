@@ -1,15 +1,11 @@
 use std::{fmt, sync::Arc};
 
 use crate::{
-    database::reasoning_config::{
-        ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
-    },
-    database::runtime_feature_config::{RuntimeFeatureConfigScope, RuntimeFeatureKey},
     schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::{
-            CacheModel, CacheModelsCatalog, CacheProvider, CacheReasoningConfig,
+            CacheModel, CacheModelsCatalog, CacheProvider, CacheRequestPatchVariant,
             CacheUpstreamSource,
         },
         source_selector::select_source as select_model_source,
@@ -20,10 +16,9 @@ use cyder_tools::log::error;
 pub use crate::service::source_selector::SourceSelectionReason;
 
 use super::super::{
-    reasoning_suffix::{ReasoningPatchContext, generate_reasoning_patches},
     requested_model::{
-        RequestedModelParseStatus, ResolvedRequestedModelName, enabled_reasoning_suffixes,
-        parse_reasoning_suffix,
+        RequestedModelParseStatus, ResolvedRequestedModelName, enabled_patch_suffixes,
+        parse_patch_suffix,
     },
     util::determine_upstream_protocol,
 };
@@ -36,63 +31,7 @@ pub struct ExecutionTarget {
     pub downstream_protocol: DownstreamProtocol,
     pub upstream_protocol: UpstreamProtocol,
     pub selection_reason: SourceSelectionReason,
-    pub reasoning_config_id: Option<i64>,
-    pub reasoning_config_scope: Option<ReasoningConfigScope>,
-    pub reasoning_config_source: Option<ReasoningConfigSource>,
-    pub reasoning_config_preset_id: Option<i64>,
-    pub reasoning_family: Option<ReasoningPatchFamily>,
-    pub reasoning_preset: Option<ReasoningPreset>,
-    pub reasoning_suffix: Option<String>,
-    pub runtime_features: TargetRuntimeFeatures,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TargetRuntimeFeatures {
-    pub openai_reasoning_content_repair_enabled: bool,
-    pub openai_reasoning_content_repair_source: RuntimeFeatureConfigSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeFeatureConfigSource {
-    DefaultFalse,
-    ProviderDefault,
-    ModelOverride,
-}
-
-impl RuntimeFeatureConfigSource {
-    #[cfg(test)]
-    pub(crate) fn as_key(self) -> &'static str {
-        match self {
-            Self::DefaultFalse => "default_false",
-            Self::ProviderDefault => "provider_default",
-            Self::ModelOverride => "model_override",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReasoningConfigSource {
-    ProviderDefault,
-    ModelCustom,
-    ModelDisabled,
-    Missing,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct EffectiveReasoningConfig<'a> {
-    pub source: ReasoningConfigSource,
-    pub config: Option<&'a CacheReasoningConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExecutionTargetReasoningBinding {
-    pub config_id: i64,
-    pub config_scope: ReasoningConfigScope,
-    pub config_source: ReasoningConfigSource,
-    pub config_preset_id: i64,
-    pub family: ReasoningPatchFamily,
-    pub preset: ReasoningPreset,
-    pub suffix: String,
+    pub requested_patch_suffix: Option<String>,
 }
 
 impl ExecutionTarget {
@@ -105,53 +44,31 @@ impl ExecutionTarget {
                     | UpstreamProfileType::GeminiOpenai
             )
     }
-
-    fn apply_reasoning_binding(&mut self, binding: ExecutionTargetReasoningBinding) {
-        self.reasoning_config_id = Some(binding.config_id);
-        self.reasoning_config_scope = Some(binding.config_scope);
-        self.reasoning_config_source = Some(binding.config_source);
-        self.reasoning_config_preset_id = Some(binding.config_preset_id);
-        self.reasoning_family = Some(binding.family);
-        self.reasoning_preset = Some(binding.preset);
-        self.reasoning_suffix = Some(binding.suffix);
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionPlan {
     pub requested_name: String,
     pub base_requested_name: String,
-    pub resolved_reasoning_suffix: Option<String>,
-    pub resolved_reasoning_preset: Option<ReasoningPreset>,
+    pub resolved_patch_suffix: Option<String>,
     pub requested_model_parse_status: RequestedModelParseStatus,
     pub target: ExecutionTarget,
+    pub(crate) request_patch_variants: Arc<Vec<CacheRequestPatchVariant>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExecutionPlanBuildError {
     InvalidModelFormat(String),
     TargetNotFound(String),
-    UnsupportedCapability(String),
     ProviderConfiguration(String),
     CatalogUnavailable(String),
 }
 
 impl ExecutionPlanBuildError {
-    fn with_message(self, message: String) -> Self {
-        match self {
-            Self::InvalidModelFormat(_) => Self::InvalidModelFormat(message),
-            Self::TargetNotFound(_) => Self::TargetNotFound(message),
-            Self::UnsupportedCapability(_) => Self::UnsupportedCapability(message),
-            Self::ProviderConfiguration(_) => Self::ProviderConfiguration(message),
-            Self::CatalogUnavailable(_) => Self::CatalogUnavailable(message),
-        }
-    }
-
     fn message(&self) -> &str {
         match self {
             Self::InvalidModelFormat(message)
             | Self::TargetNotFound(message)
-            | Self::UnsupportedCapability(message)
             | Self::ProviderConfiguration(message)
             | Self::CatalogUnavailable(message) => message,
         }
@@ -171,7 +88,7 @@ impl ExecutionPlan {
     pub fn target_summary_for_log(&self) -> String {
         let target = &self.target;
         format!(
-            "base_name={}; provider={}/{}; model={}/{}; source={}({:?}); downstream_protocol={:?}; upstream_protocol={:?}; selection_reason={}; reasoning_suffix={:?}; runtime_feature_openai_reasoning_content_repair={}/{}",
+            "base_name={}; provider={}/{}; model={}/{}; source={}({:?}); downstream_protocol={:?}; upstream_protocol={:?}; selection_reason={}; patch_suffix={:?}",
             self.base_requested_name,
             target.provider.id,
             target.provider.provider_key,
@@ -182,23 +99,16 @@ impl ExecutionPlan {
             target.downstream_protocol,
             target.upstream_protocol,
             target.selection_reason.as_key(),
-            self.resolved_reasoning_suffix,
-            target
-                .runtime_features
-                .openai_reasoning_content_repair_enabled,
-            target
-                .runtime_features
-                .openai_reasoning_content_repair_source
-                .as_key(),
+            self.resolved_patch_suffix,
         )
     }
 
     fn apply_resolved_requested_model_name(&mut self, resolved: ResolvedRequestedModelName) {
         self.requested_name = resolved.original_requested_name;
         self.base_requested_name = resolved.base_requested_name;
-        self.resolved_reasoning_suffix = resolved.requested_suffix;
-        self.resolved_reasoning_preset = resolved.requested_preset;
+        self.resolved_patch_suffix = resolved.requested_suffix.clone();
         self.requested_model_parse_status = resolved.parse_status;
+        self.target.requested_patch_suffix = resolved.requested_suffix;
     }
 }
 
@@ -219,7 +129,6 @@ fn build_direct_execution_plan(
             requested_name
         )));
     }
-
     let provider = catalog
         .providers
         .iter()
@@ -251,170 +160,23 @@ fn build_direct_execution_plan(
                 error.failure.as_key()
             ))
         })?;
-    let selected_source = selection.source;
-    let selection_reason = selection.reason;
-    // Freeze the selected source before resolving Provider/Model-scoped runtime
-    // configuration so every later stage observes the same execution entry.
-    let upstream_source = Arc::new(selected_source);
-    let upstream_protocol = determine_upstream_protocol(&upstream_source);
-    let runtime_features = resolve_target_runtime_features(catalog, &provider, &model);
+    let upstream_source = Arc::new(selection.source);
     Ok(ExecutionPlan {
         requested_name: requested_name.to_string(),
         base_requested_name: requested_name.to_string(),
-        resolved_reasoning_suffix: None,
-        resolved_reasoning_preset: None,
+        resolved_patch_suffix: None,
         requested_model_parse_status: RequestedModelParseStatus::Exact,
         target: ExecutionTarget {
             provider: Arc::new(provider),
             model: Arc::new(model),
+            upstream_protocol: determine_upstream_protocol(&upstream_source),
             upstream_source,
             downstream_protocol,
-            upstream_protocol,
-            selection_reason,
-            reasoning_config_id: None,
-            reasoning_config_scope: None,
-            reasoning_config_source: None,
-            reasoning_config_preset_id: None,
-            reasoning_family: None,
-            reasoning_preset: None,
-            reasoning_suffix: None,
-            runtime_features,
+            selection_reason: selection.reason,
+            requested_patch_suffix: None,
         },
+        request_patch_variants: Arc::new(catalog.request_patch_variants.clone()),
     })
-}
-
-pub(crate) fn target_supports_reasoning_preset(
-    catalog: &CacheModelsCatalog,
-    target: &ExecutionTarget,
-    preset: ReasoningPreset,
-) -> Result<ExecutionTargetReasoningBinding, String> {
-    let effective = resolve_effective_reasoning_config(catalog, &target.provider, &target.model);
-    let config = match effective.config {
-        Some(_) if matches!(effective.source, ReasoningConfigSource::ModelDisabled) => {
-            return Err(format!(
-                "model '{}' has disabled reasoning suffix config",
-                target.model.model_name
-            ));
-        }
-        Some(config) if matches!(config.mode, ReasoningConfigMode::Custom) => config,
-        Some(config) => {
-            return Err(format!(
-                "reasoning config {} for provider '{}' model '{}' is not custom",
-                config.id, target.provider.provider_key, target.model.model_name
-            ));
-        }
-        None => {
-            return Err(format!(
-                "provider '{}' model '{}' has no active reasoning config",
-                target.provider.provider_key, target.model.model_name
-            ));
-        }
-    };
-    let family = config
-        .family
-        .ok_or_else(|| format!("reasoning config {} is missing a patch family", config.id))?;
-    let config_preset = config
-        .presets
-        .iter()
-        .find(|row| row.preset == preset && row.is_enabled)
-        .ok_or_else(|| {
-            format!(
-                "reasoning config {} does not enable preset '{}'",
-                config.id, preset
-            )
-        })?;
-
-    generate_reasoning_patches(
-        family,
-        preset,
-        ReasoningPatchContext::for_model(target.upstream_protocol, &target.model),
-    )
-    .map_err(|err| err.to_string())?;
-
-    Ok(ExecutionTargetReasoningBinding {
-        config_id: config.id,
-        config_scope: config.scope_kind,
-        config_source: effective.source,
-        config_preset_id: config_preset.id,
-        family,
-        preset,
-        suffix: preset.canonical_suffix().to_string(),
-    })
-}
-
-pub(crate) fn resolve_effective_reasoning_config<'a>(
-    catalog: &'a CacheModelsCatalog,
-    provider: &CacheProvider,
-    model: &CacheModel,
-) -> EffectiveReasoningConfig<'a> {
-    if let Some(model_config) = catalog.reasoning_configs.iter().find(|config| {
-        matches!(config.scope_kind, ReasoningConfigScope::Model)
-            && config.model_id == Some(model.id)
-    }) {
-        return EffectiveReasoningConfig {
-            source: match model_config.mode {
-                ReasoningConfigMode::Custom => ReasoningConfigSource::ModelCustom,
-                ReasoningConfigMode::Disabled => ReasoningConfigSource::ModelDisabled,
-            },
-            config: Some(model_config),
-        };
-    }
-
-    if let Some(provider_config) = catalog.reasoning_configs.iter().find(|config| {
-        matches!(config.scope_kind, ReasoningConfigScope::Provider)
-            && config.provider_id == Some(provider.id)
-            && matches!(config.mode, ReasoningConfigMode::Custom)
-    }) {
-        return EffectiveReasoningConfig {
-            source: ReasoningConfigSource::ProviderDefault,
-            config: Some(provider_config),
-        };
-    }
-
-    EffectiveReasoningConfig {
-        source: ReasoningConfigSource::Missing,
-        config: None,
-    }
-}
-
-pub(crate) fn resolve_target_runtime_features(
-    catalog: &CacheModelsCatalog,
-    provider: &CacheProvider,
-    model: &CacheModel,
-) -> TargetRuntimeFeatures {
-    let (enabled, source) = resolve_effective_runtime_feature(
-        catalog,
-        provider,
-        model,
-        RuntimeFeatureKey::OpenAiReasoningContentRepair,
-    );
-    TargetRuntimeFeatures {
-        openai_reasoning_content_repair_enabled: enabled,
-        openai_reasoning_content_repair_source: source,
-    }
-}
-
-fn resolve_effective_runtime_feature(
-    catalog: &CacheModelsCatalog,
-    provider: &CacheProvider,
-    model: &CacheModel,
-    feature_key: RuntimeFeatureKey,
-) -> (bool, RuntimeFeatureConfigSource) {
-    if let Some(config) = catalog.runtime_feature_configs.iter().find(|config| {
-        matches!(config.scope_kind, RuntimeFeatureConfigScope::Model)
-            && config.model_id == Some(model.id)
-            && config.feature_key == feature_key
-    }) {
-        return (config.enabled, RuntimeFeatureConfigSource::ModelOverride);
-    }
-    if let Some(config) = catalog.runtime_feature_configs.iter().find(|config| {
-        matches!(config.scope_kind, RuntimeFeatureConfigScope::Provider)
-            && config.provider_id == Some(provider.id)
-            && config.feature_key == feature_key
-    }) {
-        return (config.enabled, RuntimeFeatureConfigSource::ProviderDefault);
-    }
-    (false, RuntimeFeatureConfigSource::DefaultFalse)
 }
 
 fn build_execution_plan_from_catalog(
@@ -425,38 +187,18 @@ fn build_execution_plan_from_catalog(
     match build_direct_execution_plan(catalog, requested_name, downstream_protocol) {
         Ok(plan) => Ok(plan),
         Err(exact_error) => {
-            let suffixes = enabled_reasoning_suffixes(catalog);
-            let Some(resolved_name) = parse_reasoning_suffix(requested_name, &suffixes) else {
+            let suffixes = enabled_patch_suffixes(catalog);
+            let Some(resolved_name) = parse_patch_suffix(requested_name, &suffixes) else {
                 return Err(exact_error);
             };
-            let mut plan = build_direct_execution_plan(
+            let mut plan = match build_direct_execution_plan(
                 catalog,
                 &resolved_name.base_requested_name,
                 downstream_protocol,
-            )
-            .map_err(|base_error| {
-                    let message = format!(
-                        "Model '{}' uses a known reasoning suffix, but base model '{}' could not be resolved: {}",
-                        resolved_name.original_requested_name,
-                        resolved_name.base_requested_name,
-                        base_error
-                    );
-                    base_error.with_message(message)
-                })?;
-            let preset = resolved_name
-                .requested_preset
-                .expect("reasoning suffix parse includes a preset");
-            let binding = target_supports_reasoning_preset(catalog, &plan.target, preset).map_err(
-                |reason| {
-                    ExecutionPlanBuildError::UnsupportedCapability(format!(
-                        "Reasoning suffix '{}' is not supported by '{}': {}",
-                        resolved_name.requested_suffix.as_deref().unwrap_or(""),
-                        resolved_name.base_requested_name,
-                        reason
-                    ))
-                },
-            )?;
-            plan.target.apply_reasoning_binding(binding);
+            ) {
+                Ok(plan) => plan,
+                Err(_) => return Err(exact_error),
+            };
             plan.apply_resolved_requested_model_name(resolved_name);
             Ok(plan)
         }
@@ -486,246 +228,166 @@ pub(crate) async fn build_execution_plan(
 }
 
 #[cfg(test)]
-fn select_source(
-    provider: &CacheProvider,
-    downstream_protocol: DownstreamProtocol,
-) -> Result<(CacheUpstreamSource, SourceSelectionReason), ExecutionPlanBuildError> {
-    let model = CacheModel {
-        id: 1,
-        provider_id: provider.id,
-        model_name: "test-model".to_string(),
-        real_model_name: None,
-        cost_catalog_id: None,
-        source_selection_mode: "INHERIT_ALL".to_string(),
-        source_bindings: Vec::new(),
-        is_enabled: true,
-    };
-    let selection =
-        select_model_source(provider, &model, downstream_protocol).map_err(|error| {
-            ExecutionPlanBuildError::ProviderConfiguration(error.failure.as_key().to_string())
-        })?;
-    Ok((selection.source, selection.reason))
-}
+mod tests {
+    use super::*;
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+    use crate::service::cache::types::{CacheRequestPatchRule, CacheRequestPatchVariant};
 
-#[cfg(test)]
-mod execution_plan_error_tests {
-    use super::{
-        ExecutionPlanBuildError, SourceSelectionReason, build_execution_plan_from_catalog,
-        select_source,
-    };
-    use crate::{
-        schema::enum_def::{
-            DownstreamProtocol, ProviderApiKeyMode, UpstreamProfileType, UpstreamProtocol,
-        },
-        service::cache::types::{
-            CacheModel, CacheModelsCatalog, CacheProvider, CacheUpstreamSource,
-        },
-    };
-
-    fn empty_catalog() -> CacheModelsCatalog {
+    fn catalog() -> CacheModelsCatalog {
         CacheModelsCatalog {
-            providers: vec![],
-            models: vec![],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
+            providers: vec![CacheProvider {
+                id: 1,
+                provider_key: "openai".to_string(),
+                name: "OpenAI".to_string(),
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+                is_enabled: true,
+                upstream_sources: vec![CacheUpstreamSource {
+                    id: 2,
+                    profile_type: UpstreamProfileType::Openai,
+                    endpoint: "https://example.test".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                }],
+            }],
+            models: vec![CacheModel {
+                id: 3,
+                provider_id: 1,
+                model_name: "gpt-4o".to_string(),
+                real_model_name: None,
+                cost_catalog_id: None,
+                source_selection_mode: "INHERIT_ALL".to_string(),
+                source_bindings: vec![],
+                is_enabled: true,
+            }],
+            request_patch_variants: Vec::new(),
         }
     }
 
-    fn direct_catalog(provider_enabled: bool) -> CacheModelsCatalog {
-        let mut catalog = empty_catalog();
-        catalog.providers.push(CacheProvider {
-            id: 11,
-            provider_key: "gemini-openai".to_string(),
-            name: "Gemini OpenAI".to_string(),
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-            is_enabled: provider_enabled,
-            upstream_sources: vec![CacheUpstreamSource {
-                id: 12,
-                profile_type: UpstreamProfileType::GeminiOpenai,
-                endpoint: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
-                use_proxy: true,
-                is_enabled: true,
-                is_default: true,
+    fn suffix_variant(
+        id: i64,
+        model_id: Option<i64>,
+        suffix: &str,
+        enabled: bool,
+    ) -> CacheRequestPatchVariant {
+        CacheRequestPatchVariant {
+            id,
+            source_id: 2,
+            model_id,
+            suffix: Some(suffix.to_string()),
+            enabled,
+            expose_in_models: true,
+            rules: vec![CacheRequestPatchRule {
+                id: id + 100,
+                variant_id: id,
+                placement: crate::schema::enum_def::RequestPatchPlacement::Body,
+                target: "/options/temperature".to_string(),
+                operation: crate::schema::enum_def::RequestPatchOperation::Set,
+                value_json: Some("0.2".to_string()),
+                description: None,
+                created_at: id,
+                updated_at: id,
             }],
-        });
+        }
+    }
+
+    #[test]
+    fn exact_model_name_wins_before_suffix_fallback() {
+        let mut catalog = catalog();
         catalog.models.push(CacheModel {
-            id: 13,
-            provider_id: 11,
-            model_name: "gemini-2.5-flash".to_string(),
+            id: 4,
+            provider_id: 1,
+            model_name: "gpt-4o-fast".to_string(),
             real_model_name: None,
             cost_catalog_id: None,
             source_selection_mode: "INHERIT_ALL".to_string(),
             source_bindings: vec![],
             is_enabled: true,
         });
-        catalog
-    }
-
-    fn source(
-        id: i64,
-        profile_type: UpstreamProfileType,
-        is_enabled: bool,
-        is_default: bool,
-    ) -> CacheUpstreamSource {
-        CacheUpstreamSource {
-            id,
-            profile_type,
-            endpoint: format!("https://source-{id}.example.com"),
-            use_proxy: false,
-            is_enabled,
-            is_default,
-        }
-    }
-
-    fn provider_with_sources(sources: Vec<CacheUpstreamSource>) -> CacheProvider {
-        CacheProvider {
-            id: 21,
-            provider_key: "multi-source".to_string(),
-            name: "Multi Source".to_string(),
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-            is_enabled: true,
-            upstream_sources: sources,
-        }
+        assert_eq!(
+            build_execution_plan_from_catalog(
+                &catalog,
+                "openai/gpt-4o-fast",
+                DownstreamProtocol::Openai,
+            )
+            .unwrap()
+            .target
+            .model
+            .id,
+            4
+        );
     }
 
     #[test]
-    fn malformed_model_name_is_a_parse_error() {
-        let error = build_execution_plan_from_catalog(
-            &empty_catalog(),
-            "gpt-4o",
-            DownstreamProtocol::Openai,
-        )
-        .expect_err("provider prefix is required");
-
-        assert!(matches!(
-            error,
-            ExecutionPlanBuildError::InvalidModelFormat(_)
-        ));
-    }
-
-    #[test]
-    fn missing_direct_target_is_not_a_parse_error() {
-        let error = build_execution_plan_from_catalog(
-            &empty_catalog(),
-            "openai/gpt-4o",
-            DownstreamProtocol::Openai,
-        )
-        .expect_err("missing provider should fail resolution");
-
-        assert!(matches!(error, ExecutionPlanBuildError::TargetNotFound(_)));
-    }
-
-    #[test]
-    fn direct_plan_freezes_selected_source_before_runtime_config_resolution() {
-        let mut catalog = direct_catalog(true);
-
+    fn suffix_resolution_uses_longest_enabled_token_after_exact_lookup() {
+        let mut catalog = catalog();
+        catalog.request_patch_variants = vec![
+            suffix_variant(10, None, "fast", true),
+            suffix_variant(11, None, "fast-long", true),
+        ];
         let plan = build_execution_plan_from_catalog(
             &catalog,
-            "gemini-openai/gemini-2.5-flash",
+            "openai/gpt-4o-fast-long",
             DownstreamProtocol::Openai,
         )
-        .expect("direct plan should resolve");
-        catalog.providers[0].upstream_sources[0].endpoint = "https://changed.invalid".to_string();
-
-        assert_eq!(plan.target.upstream_source.id, 12);
+        .expect("known longest suffix should resolve");
+        assert_eq!(plan.target.model.id, 3);
+        assert_eq!(plan.resolved_patch_suffix.as_deref(), Some("fast-long"));
         assert_eq!(
-            plan.target.upstream_source.endpoint,
-            "https://generativelanguage.googleapis.com/v1beta/openai"
-        );
-        assert_eq!(plan.target.upstream_protocol, UpstreamProtocol::Openai);
-        assert!(plan.target.is_openai_compatible_generation());
-        assert!(
-            plan.target_summary_for_log()
-                .contains("source=12(GeminiOpenai)")
+            plan.requested_model_parse_status,
+            RequestedModelParseStatus::PatchSuffix
         );
     }
 
     #[test]
-    fn disabled_logical_provider_cannot_resolve_its_source_or_model() {
-        let error = build_execution_plan_from_catalog(
-            &direct_catalog(false),
-            "gemini-openai/gemini-2.5-flash",
+    fn disabled_and_unknown_suffixes_fail_while_masked_suffix_is_deferred_to_execution() {
+        let mut disabled = catalog();
+        disabled.request_patch_variants = vec![suffix_variant(20, None, "disabled", false)];
+        assert!(matches!(
+            build_execution_plan_from_catalog(
+                &disabled,
+                "openai/gpt-4o-disabled",
+                DownstreamProtocol::Openai,
+            ),
+            Err(ExecutionPlanBuildError::TargetNotFound(_))
+        ));
+        assert!(matches!(
+            build_execution_plan_from_catalog(
+                &catalog(),
+                "openai/gpt-4o-unknown",
+                DownstreamProtocol::Openai,
+            ),
+            Err(ExecutionPlanBuildError::TargetNotFound(_))
+        ));
+
+        let mut masked = catalog();
+        masked.request_patch_variants = vec![
+            suffix_variant(21, None, "fast", true),
+            suffix_variant(22, Some(3), "fast", false),
+        ];
+        let masked_plan = build_execution_plan_from_catalog(
+            &masked,
+            "openai/gpt-4o-fast",
             DownstreamProtocol::Openai,
         )
-        .expect_err("disabled provider must fail before execution");
-
-        assert!(matches!(error, ExecutionPlanBuildError::TargetNotFound(_)));
+        .expect("masked suffix validation must be deferred until after API key ACL");
+        assert_eq!(masked_plan.resolved_patch_suffix.as_deref(), Some("fast"));
     }
 
     #[test]
-    fn selector_maps_all_downstream_protocols_to_exact_wire_families() {
-        let provider = provider_with_sources(vec![
-            source(31, UpstreamProfileType::Openai, true, true),
-            source(32, UpstreamProfileType::Responses, true, false),
-            source(33, UpstreamProfileType::Anthropic, true, false),
-            source(34, UpstreamProfileType::Gemini, true, false),
-            source(35, UpstreamProfileType::Ollama, true, false),
-        ]);
-
-        for (downstream_protocol, expected_source_id) in [
-            (DownstreamProtocol::Openai, 31),
-            (DownstreamProtocol::Responses, 32),
-            (DownstreamProtocol::Anthropic, 33),
-            (DownstreamProtocol::Gemini, 34),
-        ] {
-            let (selected, reason) =
-                select_source(&provider, downstream_protocol).expect("exact Source should win");
-            assert_eq!(selected.id, expected_source_id);
-            assert_eq!(reason, SourceSelectionReason::ProtocolMatch);
-        }
-    }
-
-    #[test]
-    fn selector_uses_enabled_default_when_exact_source_is_disabled() {
-        let provider = provider_with_sources(vec![
-            source(41, UpstreamProfileType::Openai, false, false),
-            source(42, UpstreamProfileType::Ollama, true, true),
-        ]);
-
-        let (selected, reason) =
-            select_source(&provider, DownstreamProtocol::Openai).expect("default should apply");
-        assert_eq!(selected.id, 42);
-        assert_eq!(reason, SourceSelectionReason::ProviderDefaultTransform);
-    }
-
-    #[test]
-    fn selector_fails_closed_for_zero_sources_and_missing_default() {
-        let zero_source = provider_with_sources(vec![]);
-        assert!(matches!(
-            select_source(&zero_source, DownstreamProtocol::Openai),
-            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
-        ));
-
-        let no_default = provider_with_sources(vec![source(
-            51,
-            UpstreamProfileType::Responses,
-            true,
-            false,
-        )]);
-        assert!(matches!(
-            select_source(&no_default, DownstreamProtocol::Openai),
-            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
-        ));
-    }
-
-    #[test]
-    fn selector_fails_closed_for_duplicate_family_or_default_state() {
-        let duplicate_family = provider_with_sources(vec![
-            source(61, UpstreamProfileType::Openai, true, true),
-            source(62, UpstreamProfileType::GeminiOpenai, false, false),
-        ]);
-        assert!(matches!(
-            select_source(&duplicate_family, DownstreamProtocol::Openai),
-            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
-        ));
-
-        let duplicate_default = provider_with_sources(vec![
-            source(63, UpstreamProfileType::Responses, true, true),
-            source(64, UpstreamProfileType::Ollama, true, true),
-        ]);
-        assert!(matches!(
-            select_source(&duplicate_default, DownstreamProtocol::Openai),
-            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
-        ));
+    fn direct_provider_keys_with_hyphens_remain_exactly_addressable() {
+        let mut catalog = catalog();
+        catalog.providers[0].provider_key = "provider-with-hyphen".to_string();
+        let plan = build_execution_plan_from_catalog(
+            &catalog,
+            "provider-with-hyphen/gpt-4o",
+            DownstreamProtocol::Openai,
+        )
+        .expect("hyphenated provider key should resolve");
+        assert_eq!(plan.target.provider.provider_key, "provider-with-hyphen");
+        assert_eq!(
+            plan.requested_model_parse_status,
+            RequestedModelParseStatus::Exact
+        );
     }
 }

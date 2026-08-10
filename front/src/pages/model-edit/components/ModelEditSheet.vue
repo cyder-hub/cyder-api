@@ -39,8 +39,6 @@ import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./ModelBaseInfoForm.vue";
 import ModelSourceConfigEditor from "@/components/model-source-config/ModelSourceConfigEditor.vue";
 import ModelRequestPatchPanel from "./ModelRequestPatchPanel.vue";
-import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
-import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 import { useModelEdit } from "../composables/useModelEdit";
 import type { EditingModelData } from "../types";
 
@@ -78,13 +76,10 @@ const {
   currentProvider,
   selectedCatalog,
   selectedCatalogVersions,
-  reasoningActions,
   fetchData,
   handleSaveModel,
   handleSaveSourceConfig,
   handleExplainSourceConfig,
-  handleReasoningConfigSaved,
-  handleRuntimeFeatureConfigSaved,
   handleOpenSelectedCostCatalog,
   handleCreateCostCatalog,
   handleDuplicateSelectedCostCatalog,
@@ -189,25 +184,6 @@ const onSaveSourceConfig = async () => {
             @save="onSaveSourceConfig"
             @explain="handleExplainSourceConfig"
           />
-
-          <div class="border-t border-gray-200 pt-5">
-            <ReasoningConfigPanel
-              owner-kind="model"
-              :owner-id="editingData.id"
-              :actions="reasoningActions"
-              :title="t('modelEditPage.advancedConfig.title')"
-              @saved="handleReasoningConfigSaved"
-            >
-              <template #runtime-feature>
-                <RuntimeFeatureConfigPanel
-                  owner-kind="model"
-                  :owner-id="editingData.id"
-                  embedded
-                  @saved="handleRuntimeFeatureConfigSaved"
-                />
-              </template>
-            </ReasoningConfigPanel>
-          </div>
 
           <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
             <SectionHeader :title="t('modelEditPage.priceSection.title')" />
@@ -326,8 +302,11 @@ const onSaveSourceConfig = async () => {
 
           <ModelRequestPatchPanel
             :model-id="editingData.id"
+            :provider-id="editingData.provider_id"
             :provider-name="currentProvider?.name"
             :provider-key="currentProvider?.provider_key"
+            :sources="providerSources"
+            :source-config="sourceConfigSummary"
           />
         </div>
       </div>

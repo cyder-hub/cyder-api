@@ -1,4 +1,4 @@
-import type { ModelSourceConfigSummary, RequestPatchRule } from "@/services/types";
+import type { ModelSourceConfigSummary } from "@/services/types";
 
 export interface LocalProviderApiKeyItem {
   id: number;
@@ -33,7 +33,6 @@ export interface EditingProviderData {
   upstream_sources: EditingProviderSource[];
   models: LocalEditableModelItem[];
   provider_keys: LocalProviderApiKeyItem[];
-  request_patches: RequestPatchRule[];
 }
 
 export interface EditingProviderSource {

@@ -25,7 +25,7 @@ test("provider checks use one dialog, enabled automatic candidates, and impact p
 
   assert.match(page, /ProviderCheckDialog/);
   assert.match(page, /@check-source="handleSourceCheck"/);
-  assert.doesNotMatch(page, /ProviderSourceSelector|checkBatch|selectedSourceId/);
+  assert.doesNotMatch(page, /ProviderSourceSelector|checkBatch/);
 
   assert.match(check, /resolveAutomaticSource/);
   assert.match(check, /buildEnabledSourceOptions/);
@@ -145,12 +145,11 @@ test("retired Source deep links remain selectable in the historical record filte
   assert.match(state.sourceOptions.value[2].label, /999/);
 });
 
-test("reasoning loading keeps the editor available when saved preview is ambiguous", async () => {
-  const panel = await readSource("src/components/reasoning/ReasoningConfigPanel.vue");
-  assert.match(panel, /const \[catalogResponse, configResponse\] = await Promise\.all/);
-  assert.match(panel, /savedPreviewError/);
-  assert.match(panel, /props\.actions\.previewSaved\(props\.ownerId\)/);
-  assert.match(panel, /savedPreviewFailed/);
+test("Source rows expose a Source-bound Request Patch action", async () => {
+  const panel = await readSource("src/pages/provider-edit/components/ProviderSourceList.vue");
+  assert.match(panel, /requestPatch/);
+  assert.match(panel, /requestPatchAction/);
+  assert.match(panel, /emit\('requestPatch'/);
 });
 
 test("Source mutations reconcile committed state after post-commit failures", async () => {

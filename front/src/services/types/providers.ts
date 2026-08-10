@@ -1,5 +1,5 @@
 import type { ModelDetail, ModelDetailModel } from "./models";
-import type { RequestPatchRule } from "./requestPatch";
+import type { RequestPatchVariantAggregate } from "./requestPatch";
 
 // ========== Provider Types ==========
 export interface ProviderBase {
@@ -72,7 +72,7 @@ export interface ProviderListItem {
   provider: ProviderBase;
   models: ModelDetail[];
   provider_keys: ProviderApiKeySummary[];
-  request_patches: RequestPatchRule[];
+  request_patch_variants: RequestPatchVariantAggregate[];
 }
 
 

@@ -227,6 +227,9 @@ const overviewItems = computed(() => {
           },
         ]),
     { label: $t("recordPage.detailDialog.summary.model"), value: value(record.model_name || record.requested_model_name), mono: true },
+    ...(record.resolved_patch_suffix
+      ? [{ label: $t("recordPage.detailDialog.summary.patchSuffix"), value: record.resolved_patch_suffix, mono: true }]
+      : []),
     { label: $t("recordPage.detailDialog.summary.realModel"), value: value(record.real_model_name), mono: true },
     { label: $t("recordPage.detailDialog.summary.downstreamProtocol"), value: value(record.downstream_protocol), mono: true },
     { label: $t("recordPage.detailDialog.summary.upstreamProtocol"), value: value(record.upstream_protocol), mono: true },

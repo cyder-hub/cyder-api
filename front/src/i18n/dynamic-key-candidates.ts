@@ -72,25 +72,16 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
   {
     id: "request-patch-prefix",
     keyTemplates: [
-      "{textPrefix}.placements.{placement}",
-      "{textPrefix}.operations.{operation}",
+      "requestPatchVariant.placements.{placement}",
+      "requestPatchVariant.operations.{operation}",
     ],
-    values: [
-      "providerEditPage.requestPatch",
-      "modelEditPage.requestPatch",
-      "HEADER",
-      "QUERY",
-      "BODY",
-      "SET",
-      "REMOVE",
-    ],
+    values: ["requestPatchVariant", "HEADER", "QUERY", "BODY", "SET", "REMOVE"],
     placeholders: {
-      textPrefix: ["providerEditPage.requestPatch", "modelEditPage.requestPatch"],
       placement: ["HEADER", "QUERY", "BODY"],
       operation: ["SET", "REMOVE"],
     },
     valueSource:
-      "front/src/components/request-patch/RequestPatchRulesPanel.vue props.textPrefix",
+      "front/src/components/request-patch/RequestPatchVariantEditor.vue dynamic placement/operation labels",
   },
   {
     id: "api-key-governance",

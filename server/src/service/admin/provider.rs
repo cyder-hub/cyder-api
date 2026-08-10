@@ -11,6 +11,7 @@ use crate::database::provider::{
     ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
     UpdateProviderApiKeyMetadata, UpdateProviderData,
 };
+use crate::database::request_patch::RequestPatchVariantRepository;
 use crate::database::upstream_source::{
     NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource,
 };
@@ -83,6 +84,9 @@ pub struct SourceImpactReport {
     pub inherit_all_model_count: usize,
     pub explicit_binding_model_count: usize,
     pub explicit_default_model_count: usize,
+    pub source_variant_count: usize,
+    pub model_variant_count: usize,
+    pub request_patch_rule_count: usize,
     pub protocols: Vec<SourceImpactProtocolSummary>,
 }
 
@@ -290,6 +294,9 @@ impl ProviderAdminService {
             || input
                 .is_enabled
                 .is_some_and(|value| value != before.is_enabled);
+        if input.is_enabled == Some(true) && !before.is_enabled {
+            RequestPatchVariantRepository::validate_source_reactivation(source_id)?;
+        }
         let now = Utc::now().timestamp_millis();
         let source = UpstreamSource::update(
             source_id,
@@ -350,6 +357,13 @@ impl ProviderAdminService {
         }
 
         let models = Model::list_by_provider_id(provider_id)?;
+        let source_variants = RequestPatchVariantRepository::list_by_source(source_id)?;
+        let model_variants = RequestPatchVariantRepository::list_by_model_ids(
+            &models.iter().map(|model| model.id).collect::<Vec<_>>(),
+        )?
+        .into_iter()
+        .filter(|variant| variant.variant.source_id == source_id)
+        .collect::<Vec<_>>();
         let snapshots = load_cache_model_snapshots(&models)?;
         let cache_provider = CacheProvider::from(provider.clone());
         let mut simulated_sources = cache_provider.upstream_sources.clone();
@@ -447,6 +461,13 @@ impl ProviderAdminService {
             inherit_all_model_count,
             explicit_binding_model_count,
             explicit_default_model_count,
+            source_variant_count: source_variants.len(),
+            model_variant_count: model_variants.len(),
+            request_patch_rule_count: source_variants
+                .iter()
+                .chain(model_variants.iter())
+                .map(|variant| variant.rules.len())
+                .sum(),
             protocols,
         })
     }
@@ -877,7 +898,24 @@ fn secret_mask_parts(secret: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::config::SecretEncryptionConfig;
+    use crate::database::TestDbContext;
+    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::request_patch::{
+        RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
+    };
+    use crate::database::upstream_source::NewUpstreamSource;
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
+    };
+    use crate::service::admin::mutation::AdminMutationRunner;
+    use crate::service::catalog::CatalogService;
+    use crate::service::runtime::SourceCircuitService;
+    use crate::service::secret_encryption::SecretEncryptionService;
+    use serde_json::json;
 
     #[test]
     fn provider_secret_masks_always_hide_at_least_one_character() {
@@ -934,6 +972,95 @@ mod tests {
                     .expect("non-empty provider credentials should remain opaque");
             assert!(!secret.expose().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn source_reactivation_validates_variants_and_refreshes_catalog() {
+        let database = TestDbContext::new_sqlite("admin-source-reactivation.sqlite");
+        database
+            .run_async(async {
+                Provider::create(
+                    &NewProvider {
+                        id: 9201,
+                        provider_key: "source-reactivation".to_string(),
+                        name: "Source Reactivation".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &NewUpstreamSource {
+                        id: 9202,
+                        provider_id: 9201,
+                        profile_type: UpstreamProfileType::Openai,
+                        endpoint: "https://source-reactivation.example/v1".to_string(),
+                        use_proxy: false,
+                        is_enabled: false,
+                        is_default: false,
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .expect("provider should be seeded");
+                RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+                    source_id: 9202,
+                    model_id: None,
+                    suffix: Some("fast".to_string()),
+                    enabled: true,
+                    expose_in_models: true,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/options/temperature".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!(0.2))),
+                        description: None,
+                        confirm_dangerous_target: false,
+                    }],
+                })
+                .expect("disabled source should accept preconfigured Variant");
+
+                let catalog = Arc::new(CatalogService::new(true).await);
+                let runner = Arc::new(AdminMutationRunner::new(
+                    Arc::clone(&catalog),
+                    Arc::new(SourceCircuitService::new_memory()),
+                ));
+                let service = ProviderAdminService::new(
+                    Arc::clone(&runner),
+                    Arc::new(SecretEncryptionService::from_config(
+                        &SecretEncryptionConfig::default(),
+                    )),
+                );
+                let source = service
+                    .update_source(
+                        9201,
+                        9202,
+                        UpstreamSourceUpdateInput {
+                            endpoint: None,
+                            use_proxy: None,
+                            is_enabled: Some(true),
+                            is_default: Some(true),
+                        },
+                    )
+                    .await
+                    .expect("source reactivation should validate and commit");
+                assert!(source.is_enabled && source.is_default);
+                assert!(
+                    runner
+                        .drain_audit_events()
+                        .iter()
+                        .any(|event| { event.event_name() == "manager.provider_source_updated" })
+                );
+                assert_eq!(
+                    catalog
+                        .get_models_catalog()
+                        .await
+                        .expect("catalog should reload after source update")
+                        .request_patch_variants
+                        .len(),
+                    1
+                );
+            })
+            .await;
     }
 
     #[test]

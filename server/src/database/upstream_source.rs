@@ -210,30 +210,74 @@ impl UpstreamSource {
         let conn = &mut get_connection()?;
         let now = chrono::Utc::now().timestamp_millis();
         db_execute!(conn, {
-            diesel::update(
-                upstream_source::table.filter(
-                    upstream_source::dsl::id
-                        .eq(source_id_value)
-                        .and(upstream_source::dsl::provider_id.eq(provider_id_value))
-                        .and(upstream_source::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set((
-                upstream_source::dsl::deleted_at.eq(Some(now)),
-                upstream_source::dsl::is_enabled.eq(false),
-                upstream_source::dsl::is_default.eq(false),
-                upstream_source::dsl::updated_at.eq(now),
-            ))
-            .returning(UpstreamSourceDb::as_returning())
-            .get_result::<UpstreamSourceDb>(conn)
-            .map(UpstreamSourceDb::from_db)
-            .map_err(|error| match error {
-                diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                    "upstream source {source_id_value} not found for provider {provider_id_value}"
-                ))),
-                other => BaseError::DatabaseFatal(Some(format!(
-                    "failed to delete upstream source {source_id_value}: {other}"
-                ))),
+            conn.transaction::<Self, BaseError, _>(|conn| {
+                let source = diesel::update(
+                    upstream_source::table.filter(
+                        upstream_source::dsl::id
+                            .eq(source_id_value)
+                            .and(upstream_source::dsl::provider_id.eq(provider_id_value))
+                            .and(upstream_source::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    upstream_source::dsl::deleted_at.eq(Some(now)),
+                    upstream_source::dsl::is_enabled.eq(false),
+                    upstream_source::dsl::is_default.eq(false),
+                    upstream_source::dsl::updated_at.eq(now),
+                ))
+                .returning(UpstreamSourceDb::as_returning())
+                .get_result::<UpstreamSourceDb>(conn)
+                .map(UpstreamSourceDb::from_db)
+                .map_err(|error| match error {
+                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                        "upstream source {source_id_value} not found for provider {provider_id_value}"
+                    ))),
+                    other => BaseError::DatabaseFatal(Some(format!(
+                        "failed to delete upstream source {source_id_value}: {other}"
+                    ))),
+                })?;
+
+                let variant_ids = request_patch_variant::table
+                    .filter(request_patch_variant::dsl::source_id.eq(source_id_value))
+                    .filter(request_patch_variant::dsl::deleted_at.is_null())
+                    .select(request_patch_variant::dsl::id)
+                    .load::<i64>(conn)
+                    .map_err(|error| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "failed to load request patch Variants for source {source_id_value}: {error}"
+                        )))
+                    })?;
+                if !variant_ids.is_empty() {
+                    diesel::update(
+                        request_patch_variant::table
+                            .filter(request_patch_variant::dsl::id.eq_any(&variant_ids)),
+                    )
+                    .set((
+                        request_patch_variant::dsl::deleted_at.eq(Some(now)),
+                        request_patch_variant::dsl::enabled.eq(false),
+                        request_patch_variant::dsl::expose_in_models.eq(false),
+                        request_patch_variant::dsl::updated_at.eq(now),
+                    ))
+                    .execute(conn)
+                    .map_err(|error| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "failed to delete request patch Variants for source {source_id_value}: {error}"
+                        )))
+                    })?;
+                    diesel::update(
+                        request_patch_rule::table
+                            .filter(request_patch_rule::dsl::variant_id.eq_any(&variant_ids))
+                            .filter(request_patch_rule::dsl::deleted_at.is_null()),
+                    )
+                    .set(request_patch_rule::dsl::deleted_at.eq(Some(now)))
+                    .execute(conn)
+                    .map_err(|error| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "failed to delete request patch Rules for source {source_id_value}: {error}"
+                        )))
+                    })?;
+                }
+                Ok(source)
             })
         })
     }
@@ -343,7 +387,13 @@ mod tests {
     use super::{NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource};
     use crate::database::TestDbContext;
     use crate::database::provider::{NewProvider, Provider};
-    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+    use crate::database::request_patch::{
+        RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
+    };
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
+    };
+    use serde_json::json;
 
     fn provider(id: i64) -> NewProvider {
         NewProvider {
@@ -483,6 +533,24 @@ mod tests {
                 .expect("non-default source should be disableable");
                 assert!(!disabled_openai.is_enabled && !disabled_openai.is_default);
 
+                let source_variant =
+                    RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+                        source_id: openai.id,
+                        model_id: None,
+                        suffix: Some("fast".to_string()),
+                        enabled: true,
+                        expose_in_models: true,
+                        rules: vec![RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Body,
+                            target: "/options/temperature".to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!(0.2))),
+                            description: None,
+                            confirm_dangerous_target: false,
+                        }],
+                    })
+                    .expect("source Variant should be created before source delete");
+
                 let duplicate_family = UpstreamSource::create(&source(
                     13,
                     1,
@@ -522,6 +590,20 @@ mod tests {
                     .expect("source delete should soft-delete the target");
                 assert!(deleted.deleted_at.is_some());
                 assert!(!deleted.is_enabled && !deleted.is_default);
+                assert!(
+                    RequestPatchVariantRepository::list_by_source(openai.id)
+                        .expect("active source Variants should load")
+                        .is_empty()
+                );
+                let historical =
+                    RequestPatchVariantRepository::list_by_source_ids_including_deleted(&[
+                        openai.id
+                    ])
+                    .expect("historical source Variants should load");
+                assert_eq!(historical.len(), 1);
+                assert_eq!(historical[0].variant.id, source_variant.variant.id);
+                assert!(historical[0].variant.deleted_at.is_some());
+                assert!(historical[0].rules.is_empty());
 
                 let replacement = UpstreamSource::create(&source(
                     13,

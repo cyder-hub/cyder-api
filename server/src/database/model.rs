@@ -4,12 +4,7 @@ use serde::Deserialize;
 
 use super::{DbResult, get_connection};
 use crate::controller::BaseError;
-use crate::database::request_patch::{RequestPatchRule, RequestPatchRuleResponse};
-use crate::service::cache::types::{
-    CacheInheritedRequestPatch, CacheRequestPatchConflict, CacheRequestPatchExplainEntry,
-    CacheRequestPatchRule, CacheResolvedRequestPatch,
-};
-use crate::service::request_patch::resolve_effective_request_patches;
+use crate::database::request_patch::{RequestPatchVariantAggregate, RequestPatchVariantRepository};
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
@@ -61,12 +56,7 @@ pub struct UpdateModelData {
 #[derive(Debug, Serialize)]
 pub struct ModelDetail {
     pub model: Model,
-    pub request_patches: Vec<CacheRequestPatchRule>,
-    pub inherited_request_patches: Vec<CacheInheritedRequestPatch>,
-    pub effective_request_patches: Vec<CacheResolvedRequestPatch>,
-    pub request_patch_explain: Vec<CacheRequestPatchExplainEntry>,
-    pub request_patch_conflicts: Vec<CacheRequestPatchConflict>,
-    pub has_request_patch_conflicts: bool,
+    pub request_patch_variants: Vec<RequestPatchVariantAggregate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,21 +72,6 @@ pub struct ModelSummaryItem {
 }
 
 impl Model {
-    fn cache_request_patch_rules(
-        rows: Vec<RequestPatchRuleResponse>,
-    ) -> DbResult<Vec<CacheRequestPatchRule>> {
-        rows.into_iter()
-            .map(|row| {
-                CacheRequestPatchRule::try_from(row).map_err(|err| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to convert request patch rule into cache snapshot: {}",
-                        err
-                    )))
-                })
-            })
-            .collect()
-    }
-
     /// Creates a new model record.
     pub fn create(
         provider_id_val: i64,
@@ -190,7 +165,9 @@ impl Model {
         })
     }
 
-    /// Soft deletes a model and all delete-owned dependent rows in one transaction.
+    /// Soft deletes a model in one transaction while retaining its Source-bound variants.
+    /// The deleted model keeps its dormant configuration for audit and possible recovery;
+    /// business queries hide it through the model's deleted_at state.
     pub fn delete_with_dependents(id_value: i64) -> DbResult<usize> {
         let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
@@ -210,27 +187,6 @@ impl Model {
                             id_value, e
                         )))
                     })?;
-
-                diesel::update(
-                    request_patch_rule::table.filter(
-                        request_patch_rule::dsl::model_id
-                            .eq(id_value)
-                            .and(request_patch_rule::dsl::provider_id.is_null())
-                            .and(request_patch_rule::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    request_patch_rule::dsl::deleted_at.eq(current_time),
-                    request_patch_rule::dsl::is_enabled.eq(false),
-                    request_patch_rule::dsl::updated_at.eq(current_time),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete model request patch rules for {}: {}",
-                        id_value, e
-                    )))
-                })?;
 
                 Ok(updated)
             })
@@ -294,25 +250,11 @@ impl Model {
 
     pub fn get_detail_by_id(model_id_val: i64) -> DbResult<ModelDetail> {
         let model = Model::get_by_id(model_id_val)?;
-        let request_patches =
-            Self::cache_request_patch_rules(RequestPatchRule::list_by_model_id(model_id_val)?)?;
-        let provider_request_patches = Self::cache_request_patch_rules(
-            RequestPatchRule::list_by_provider_id(model.provider_id)?,
-        )?;
-        let resolved = resolve_effective_request_patches(
-            model.provider_id,
-            model_id_val,
-            &provider_request_patches,
-            &request_patches,
-        );
         Ok(ModelDetail {
             model,
-            request_patches,
-            inherited_request_patches: resolved.inherited_rules,
-            effective_request_patches: resolved.effective_rules,
-            request_patch_explain: resolved.explain,
-            request_patch_conflicts: resolved.conflicts,
-            has_request_patch_conflicts: resolved.has_conflicts,
+            request_patch_variants: RequestPatchVariantRepository::list_by_model_ids(&[
+                model_id_val,
+            ])?,
         })
     }
 
@@ -534,8 +476,14 @@ impl Model {
 mod tests {
     use super::*;
     use crate::database::_sqlite_schema::*;
-    use crate::database::provider::NewProvider;
-    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+    use crate::database::TestDbContext;
+    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::request_patch::{
+        RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
+    };
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
+    };
     use serde_json::Value;
 
     struct TestSqliteDb {
@@ -702,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn model_detail_contract_uses_request_patch_fields() {
+    fn model_detail_contract_uses_variant_aggregate_fields() {
         let detail = ModelDetail {
             model: Model {
                 id: 22,
@@ -716,12 +664,7 @@ mod tests {
                 created_at: 1,
                 updated_at: 1,
             },
-            request_patches: vec![],
-            inherited_request_patches: vec![],
-            effective_request_patches: vec![],
-            request_patch_explain: vec![],
-            request_patch_conflicts: vec![],
-            has_request_patch_conflicts: false,
+            request_patch_variants: vec![],
         };
 
         let value = serde_json::to_value(detail).expect("model detail should serialize");
@@ -729,29 +672,73 @@ mod tests {
             .as_object()
             .expect("detail should serialize as object");
         assert!(matches!(
-            object.get("request_patches"),
+            object.get("request_patch_variants"),
             Some(Value::Array(_))
         ));
-        assert!(matches!(
-            object.get("inherited_request_patches"),
-            Some(Value::Array(_))
-        ));
-        assert!(matches!(
-            object.get("effective_request_patches"),
-            Some(Value::Array(_))
-        ));
-        assert!(matches!(
-            object.get("request_patch_explain"),
-            Some(Value::Array(_))
-        ));
-        assert!(matches!(
-            object.get("request_patch_conflicts"),
-            Some(Value::Array(_))
-        ));
-        assert_eq!(
-            object.get("has_request_patch_conflicts"),
-            Some(&Value::Bool(false))
-        );
+        assert!(object.get("request_patches").is_none());
         assert!(object.get("custom_fields").is_none());
+    }
+
+    #[tokio::test]
+    async fn model_soft_delete_preserves_source_bound_variants_for_recovery() {
+        let database = TestDbContext::new_sqlite("model-delete-preserves-variants.sqlite");
+        database
+            .run_async(async {
+                let provider = Provider::create(
+                    &NewProvider {
+                        id: 71,
+                        provider_key: "model-delete-provider".to_string(),
+                        name: "Model Delete Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: 72,
+                        provider_id: 71,
+                        profile_type: UpstreamProfileType::Openai,
+                        endpoint: "https://model-delete.example/v1".to_string(),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .expect("provider should be created");
+                let model = Model::create(provider.provider.id, "recoverable-model", None, true)
+                    .expect("model should be created");
+                let variant = RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+                    source_id: 72,
+                    model_id: Some(model.id),
+                    suffix: Some("fast".to_string()),
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/options/temperature".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(serde_json::json!(0.2))),
+                        description: None,
+                        confirm_dangerous_target: false,
+                    }],
+                })
+                .expect("model Variant should be created");
+
+                assert_eq!(
+                    Model::delete_with_dependents(model.id).expect("model delete"),
+                    1
+                );
+                assert!(Model::get_by_id(model.id).is_err());
+                let historical =
+                    RequestPatchVariantRepository::list_by_model_ids_including_deleted(&[model.id])
+                        .expect("historical model Variants should load");
+                assert_eq!(historical.len(), 1);
+                assert_eq!(historical[0].variant.id, variant.variant.id);
+                assert!(historical[0].variant.deleted_at.is_none());
+                assert_eq!(historical[0].rules.len(), 1);
+            })
+            .await;
     }
 }

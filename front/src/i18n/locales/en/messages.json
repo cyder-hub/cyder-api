@@ -421,6 +421,7 @@
     },
     "table": {
       "model": "Model",
+      "patchSuffix": "Patch suffix",
       "requestId": "Gateway Request ID",
       "provider": "Provider",
       "source": "Source",
@@ -466,6 +467,7 @@
         "selectionReason": "Source Selection Reason",
         "selectionReasonUnknown": "Unknown (legacy record or no selected Source)",
         "model": "Model",
+        "patchSuffix": "Patch suffix",
         "realModel": "Real Model",
         "downstreamProtocol": "Downstream Protocol",
         "upstreamProtocol": "Upstream Protocol",
@@ -837,129 +839,164 @@
       "explainFailed": "Failed to explain Source selection: {error}"
     }
   },
-  "reasoningConfigPanel": {
-    "titles": {
-      "provider": "Provider reasoning config",
-      "model": "Model reasoning config"
-    },
+  "requestPatchVariant": {
+    "title": "Request Patches",
+    "description": "Review Source-bound base and suffix Variants, four-layer evaluation, and model overrides.",
     "actions": {
-      "save": "Save reasoning config",
-      "clearProvider": "Clear provider config",
-      "clearModel": "Clear model override"
+      "addRule": "Add Rule",
+      "addVariant": "Add Variant",
+      "addModelRule": "Add Model Rule",
+      "addModelSuffix": "Add Model Suffix",
+      "allowModel": "Allow this model",
+      "deleteRule": "Delete Rule",
+      "deleteVariant": "Delete Variant",
+      "details": "Details",
+      "editRule": "Edit Rule",
+      "editVariant": "Edit Variant",
+      "preview": "Preview",
+      "refresh": "Refresh",
+      "restore": "Restore"
     },
-    "summary": {
-      "ownerConfig": "Owner config",
-      "providerDefault": "Provider default",
-      "effectiveConfig": "Effective config"
+    "alert": {
+      "created": "Request Patch Variant created.",
+      "updated": "Request Patch Variant updated.",
+      "deleted": "Request Patch Variant deleted.",
+      "restored": "Request Patch suffix inheritance restored.",
+      "saveFailed": "Failed to save Request Patch Variant: {error}",
+      "deleteFailed": "Failed to delete Request Patch Variant: {error}"
+    },
+    "delete": {
+      "title": "Delete Request Patch Variant?",
+      "description": "Delete Variant {variant}? Its rules and exposure metadata will no longer be active."
+    },
+    "restore": {
+      "title": "Restore Request Patch inheritance?",
+      "description": "Remove the disabled zero-rule override for Variant {variant} and allow the Source suffix to inherit again.",
+      "confirm": "Restore inheritance"
+    },
+    "editor": {
+      "addTitle": "Add Request Patch Variant",
+      "editTitle": "Edit Request Patch Variant",
+      "description": "Save the Variant and all of its Rules together. Preview checks conflicts and sensitive targets before persistence.",
+      "readOnlyDescription": "Source Rules are shown as read-only evidence. Model Rules remain independently editable.",
+      "suffixPlaceholder": "for example: reasoning",
+      "suffixHelp": "Leave empty for the base Variant. Suffixes use lowercase letters, digits, and single hyphens.",
+      "enabledHelp": "Disabled suffix Variants can act as model tombstones.",
+      "exposeHelp": "Expose an enabled suffix Variant in downstream model discovery.",
+      "rulesHelp": "Rules are edited locally and submitted with the complete Variant.",
+      "addRuleTitle": "Add Request Patch Rule",
+      "editRuleTitle": "Edit Request Patch Rule",
+      "ruleDescription": "Choose a placement and target, then provide a JSON value when using SET.",
+      "selectPlacement": "Select placement",
+      "selectOperation": "Select operation",
+      "targetPlaceholderHeader": "authorization",
+      "targetPlaceholderQuery": "api-version",
+      "targetPlaceholderBody": "/generationConfig/temperature",
+      "targetHelpHEADER": "Use a header name. Reserved transport headers are rejected by the backend.",
+      "targetHelpQUERY": "Use a query key without ?, &, =, or whitespace.",
+      "targetHelpBODY": "Use a JSON Pointer such as /model or /generationConfig/temperature.",
+      "valueHelp": "HEADER and QUERY accept JSON scalar values. BODY accepts any JSON value.",
+      "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
+      "removeValuePlaceholder": "REMOVE does not accept a value.",
+      "descriptionPlaceholder": "Optional note for operators and future debugging."
+    },
+    "emptyRules": "No Rules in this Variant.",
+    "errors": {
+      "target": "Target is required.",
+      "required": "SET Rules require a JSON value.",
+      "suffixRequired": "A suffix is required for this Model Variant.",
+      "invalid": "Value must be valid JSON.",
+      "previewInvalid": "Preview did not produce a valid executable Variant."
     },
     "fields": {
-      "patchFamily": "Patch family",
-      "preset": "Preset",
-      "suffix": "Suffix",
-      "runtime": "Runtime",
+      "description": "Description",
       "enabled": "Enabled",
-      "models": "/models",
-      "patch": "Patch",
-      "reasoning": "Reasoning"
+      "expose": "Expose in models",
+      "operation": "Operation",
+      "placement": "Placement",
+      "rules": "Rules",
+      "status": "Status",
+      "suffix": "Suffix",
+      "target": "Target",
+      "value": "Value",
+      "variant": "Variant"
     },
-    "modes": {
-      "inherit": "Inherit provider",
-      "disabled": "Disabled",
-      "custom": "Custom"
+    "manager": {
+      "eyebrow": "Source-bound Request Patches",
+      "description": "Manage base and suffix Variants for this Source. Rules, exposure, and runtime evidence stay in the same scope.",
+      "loading": "Loading Request Patch Variants...",
+      "empty": "No Variants configured.",
+      "emptyDescription": "Add a base or suffix Variant to start documenting this Source's request transformation.",
+      "totalVariants": "Variants",
+      "totalRules": "Rules",
+      "suffixVariants": "Suffix Variants",
+      "ruleCount": "{count} Rules"
+    },
+    "model": {
+      "noSources": "No Provider Sources are available for this model.",
+      "sourceSummary": "{variants} Variant(s) in this Source scope",
+      "baseDescription": "Base layers resolve Source Base and Model Base configuration.",
+      "suffixDescription": "Suffix layers resolve Source Suffix and Model Suffix configuration.",
+      "sourceRulesReadOnly": "Source Rules (read-only)"
+    },
+    "origins": {
+      "SourceBase": "Source Base",
+      "ModelBase": "Model Base",
+      "SourceSuffix": "Source Suffix",
+      "ModelSuffix": "Model Suffix"
+    },
+    "operations": {
+      "SET": "Set",
+      "REMOVE": "Remove"
+    },
+    "placements": {
+      "HEADER": "Header",
+      "QUERY": "Query Parameter",
+      "BODY": "Body JSON"
+    },
+    "preview": {
+      "title": "Variant Preview",
+      "valid": "Valid",
+      "invalid": "Needs attention",
+      "layers": "Four-layer result",
+      "ruleCount": "Rules",
+      "effectiveRules": "Effective Rules",
+      "affectedModels": "Affected models",
+      "conflicts": "Conflicts",
+      "executable": "Executable",
+      "exposed": "Exposed in models",
+      "yes": "Yes",
+      "no": "No",
+      "dangerousTargets": "Sensitive targets",
+      "dangerousTitle": "Confirm Sensitive Target",
+      "dangerousDescription": "This Variant changes an upstream-sensitive target. Confirm each listed target before the final save.",
+      "confirm": "Confirm and Save"
+    },
+    "explain": {
+      "layers": "Four-layer evaluation",
+      "effective": "Effective Rules",
+      "conflictTitle": "Request Patch conflicts detected",
+      "conflictDescription": "{count} conflict(s) are present in the Source/model evaluation. Runtime execution fails closed until they are resolved."
     },
     "states": {
-      "unsaved": "unsaved",
-      "review": "review",
-      "supported": "supported",
-      "blocked": "blocked"
-    },
-    "sources": {
-      "providerDefault": "provider default",
-      "modelCustom": "model custom",
-      "modelDisabled": "model disabled",
-      "missing": "missing config",
-      "unknown": "unknown"
-    },
-    "messages": {
-      "saveOwnerFirst": "Save the owner before configuring reasoning suffixes.",
-      "loading": "Loading reasoning config",
-      "modelReasoningUnsupported": "This model is marked as not supporting reasoning. Reasoning-required presets can still be saved, but runtime preview will mark them unsupported.",
-      "selectPatchFamily": "Select a patch family",
-      "previewRefreshing": "Refreshing patch preview.",
-      "familyTargets": "Targets: {targets}.",
-      "familyIncompatible": "Targets: {targets}; current provider resolves to {current}.",
-      "familyTargetsShort": "targets {targets}",
-      "familyCompatibleShort": "compatible with {current}",
-      "presetUnsupported": "Preset is not supported by the selected family.",
-      "reviewOnly": "Enable this preset before saving to apply it at runtime.",
-      "presetDisabled": "Preset is not enabled.",
-      "runtimeUnsupported": "Runtime preview marks this preset unsupported.",
-      "runtimeSupported": "Runtime preview is supported.",
-      "disabledMode": "Model reasoning suffixes are disabled.",
-      "none": "none"
-    },
-    "alert": {
-      "selectPatchFamily": "Select a reasoning patch family first.",
-      "previewFailed": "Failed to preview reasoning config draft.",
-      "savedPreviewFailed": "Saved reasoning preview is unavailable for this Source set; the configuration remains editable.",
-      "loadFailed": "Failed to load reasoning config.",
-      "saveFailed": "Failed to save reasoning config.",
-      "clearFailed": "Failed to clear reasoning config.",
-      "saved": "Reasoning config saved.",
-      "draftCleared": "Reasoning config draft cleared.",
-      "cleared": "Reasoning config cleared."
-    }
-  },
-  "runtimeFeatureConfigPanel": {
-    "titles": {
-      "provider": "Provider runtime features",
-      "model": "Model runtime features"
-    },
-    "features": {
-      "openaiReasoningContentRepair": {
-        "label": "Reasoning callback",
-        "description": "Restore cached reasoning_content for compatible OpenAI tool continuations."
-      }
-    },
-    "actions": {
-      "saveProvider": "Save provider default",
-      "saveModel": "Save model override",
-      "clearProvider": "Clear provider default",
-      "clearModel": "Inherit provider"
-    },
-    "summary": {
-      "ownerConfig": "Current config",
-      "providerDefault": "Provider default",
-      "effective": "Effective value"
-    },
-    "fields": {
-      "providerDefault": "Provider default",
-      "modelOverride": "Model override"
-    },
-    "sources": {
-      "defaultFalse": "default false",
-      "providerDefault": "provider default",
-      "modelOverride": "model override",
-      "unknown": "unknown"
-    },
-    "values": {
+      "base": "Base",
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "missing": "missing"
+      "sourceVariant": "Source",
+      "modelOverride": "Model override",
+      "metadataOverride": "Metadata override",
+      "metadataOverrideDescription": "Enabled with no Model Rules. The inherited effective set currently contains {count} Rule(s).",
+      "tombstone": "Disabled tombstone",
+      "tombstoneDescription": "This disabled zero-rule Variant masks the inherited suffix. Restore deletes the tombstone.",
+      "sourceDisabled": "Source disabled",
+      "unboundDormant": "Unbound / dormant"
     },
-    "messages": {
-      "reasoningIndependent": "Reasoning suffix config and runtime repair are independent. Enabling reasoning_config does not automatically enable reasoning_content repair.",
-      "saveOwnerFirst": "Save the owner before configuring runtime features.",
-      "loading": "Loading runtime feature config",
-      "providerDefaultHelp": "This default applies to models that do not define their own override.",
-      "modelOverrideHelp": "Saving here creates a model override. Clear it to inherit the provider default again."
-    },
-    "alert": {
-      "loadFailed": "Failed to load runtime feature config.",
-      "saveFailed": "Failed to save runtime feature config.",
-      "clearFailed": "Failed to clear runtime feature config.",
-      "saved": "Runtime feature config saved.",
-      "cleared": "Runtime feature config cleared."
+    "status": {
+      "Effective": "Effective",
+      "Overridden": "Overridden",
+      "Conflicted": "Conflicted",
+      "Masked": "Masked",
+      "Dormant": "Dormant"
     }
   },
   "apiKeyPage": {
@@ -1267,7 +1304,7 @@
       },
       "logicalProvider": {
         "title": "Logical Provider",
-        "description": "Owns identity, models, credentials, and Provider-level configuration."
+      "description": "Owns identity, models, credentials, and Source-bound configuration."
       },
       "initialSource": {
         "title": "Initial Source",
@@ -1275,12 +1312,7 @@
       },
       "advanced": {
         "title": "Advanced",
-        "description": "Manage extra API keys, more models, request patches, and runtime checks here."
-      },
-      "advancedConfig": {
-        "title": "Reasoning",
-        "description": "Manage reasoning suffixes and callback repair for this provider.",
-        "scopeDescription": "Reasoning, runtime features, and request patches are temporary global Provider/Model settings here; they are not bound to a Source."
+        "description": "Manage extra API keys, more models, and runtime checks here."
       },
       "modelsDescription": "Edit model name, mapped model name, Source Config summary, and enabled state inline. Full configuration still lives in ModelEdit."
     },
@@ -1324,81 +1356,6 @@
       "mutationSuccess": "Provider credential updated.",
       "mutationFailed": "The credential operation failed: {error}. The saved state was refreshed because runtime activation may have failed after persistence.",
       "revealFailed": "Failed to reveal provider credential: {error}"
-    },
-    "requestPatch": {
-      "title": "Request Patches",
-      "description": "Manage direct provider rules inherited by downstream models. Model explain and conflict views remain on the model page.",
-      "directTitle": "Direct Provider Rules",
-      "directDescription": "Provider rules are inherited by downstream models, and exact-target model rules can override them.",
-      "addRule": "Add Rule",
-      "emptyDirect": "No direct request patches configured for this provider yet.",
-      "noDescription": "No description",
-      "placements": {
-        "HEADER": "Header",
-        "QUERY": "Query Parameter",
-        "BODY": "Body JSON"
-      },
-      "operations": {
-        "SET": "Set",
-        "REMOVE": "Remove"
-      },
-      "fields": {
-        "value": "Value",
-        "description": "Description",
-        "trace": "Trace",
-        "enabled": "Enabled",
-        "ruleId": "Rule ID"
-      },
-      "states": {
-        "disabled": "Disabled",
-        "enabled": "Enabled"
-      },
-      "messages": {
-        "providerDirect": "Direct provider rule. Inherited/effective diagnostics are shown on each model."
-      },
-      "editor": {
-        "addTitle": "Add Provider Request Patch",
-        "editTitle": "Edit Provider Request Patch",
-        "description": "Create direct provider rules for headers, query parameters, or body JSON Pointer targets.",
-        "placement": "Placement",
-        "operation": "Operation",
-        "selectPlacement": "Select placement",
-        "selectOperation": "Select operation",
-        "target": "Target",
-        "targetPlaceholderHeader": "authorization",
-        "targetPlaceholderQuery": "api-version",
-        "targetPlaceholderBody": "/generationConfig/temperature",
-        "valueJson": "Value JSON",
-        "valueHelp": "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
-        "descriptionLabel": "Description",
-        "descriptionPlaceholder": "Optional note for operators and future debugging.",
-        "enabledTitle": "Enabled",
-        "enabledDescription": "Disabled rules stay on the provider but are skipped at runtime.",
-        "targetHelpHeader": "Use a header name. Reserved transport headers are rejected by the backend.",
-        "targetHelpQuery": "Use a query parameter key without ?, &, =, or whitespace.",
-        "targetHelpBody": "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
-        "removeValuePlaceholder": "REMOVE does not accept value_json.",
-        "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
-        "create": "Create Rule",
-        "save": "Save Changes",
-        "dangerousTitle": "Confirm Dangerous Target",
-        "dangerousDescription": "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
-        "saveAnyway": "Save Anyway"
-      },
-      "alert": {
-        "saveBeforeEdit": "Save the provider before editing request patch rules.",
-        "saveFailed": "Failed to save request patch rule.",
-        "createSuccess": "Provider request patch created.",
-        "updateSuccess": "Provider request patch updated.",
-        "deleteSuccess": "Provider request patch deleted.",
-        "deleteFailed": "Failed to delete provider request patch.",
-        "toggleFailed": "Failed to update request patch status.",
-        "enableSuccess": "Request patch enabled.",
-        "disableSuccess": "Request patch disabled.",
-        "dangerousConfirmFailed": "Failed to confirm dangerous request patch target.",
-        "targetRequired": "Target is required.",
-        "valueRequired": "Value JSON is required for SET rules."
-      }
     },
     "labelName": "Name",
     "labelProviderKey": "Provider Key",
@@ -1457,6 +1414,7 @@
         "state": "State"
       },
       "editAction": "Edit Source",
+      "requestPatchAction": "Request Patch",
       "checkAction": "Check Source",
       "enableAction": "Enable Source",
       "disableAction": "Disable Source",
@@ -1503,15 +1461,11 @@
       "unknown": "Unknown Provider",
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "description": "This model belongs to the provider above. Basic model fields stay editable here; cost, reasoning, and request patches are managed separately."
+      "description": "This model belongs to the provider above. Basic fields, Source Config, cost, and Source-bound Request Patches are managed here."
     },
     "labelModelName": "Model Name",
     "labelRealModelName": "Real Model Name",
     "labelEnabled": "Enabled",
-    "advancedConfig": {
-      "title": "Reasoning",
-      "description": "Manage reasoning suffixes and callback repair for this model."
-    },
     "alert": {
       "missingId": "Model ID is missing. Cannot edit.",
       "loadDataFailed": "Failed to load model data for ID: {modelId}.",
@@ -1532,119 +1486,6 @@
       "enabled": "Enabled",
       "effectiveFrom": "Effective from",
       "effectiveUntil": "Effective until"
-    },
-    "requestPatch": {
-      "title": "Request Patches",
-      "description": "Edit direct model rules and review inherited provider rules, effective runtime output, and explain diagnostics from one place.",
-      "refresh": "Refresh",
-      "loading": "Loading request patch state...",
-      "providerFallback": "Provider",
-      "directTitle": "Direct Model Rules",
-      "directDescription": "Model rules can override inherited provider rules only on the exact same target.",
-      "addRule": "Add Rule",
-      "emptyDirect": "No direct request patches configured for this model yet.",
-      "inheritedTitle": "Inherited Provider Rules",
-      "inheritedDescription": "Active provider direct rules inherited by this model from {provider}. Overridden rules stay visible.",
-      "emptyInherited": "This model is not inheriting any active provider request patches.",
-      "effectiveTitle": "Effective Runtime Result",
-      "effectiveDescription": "This is the resolved rule set the runtime will try to apply for this model.",
-      "emptyEffective": "No effective request patches are active for this model.",
-      "explainTitle": "Explain and Conflict",
-      "explainDescription": "Review how each active rule resolves, which rules are overridden, and whether any unsafe cross-scope conflicts remain.",
-      "emptyExplain": "No active request patch diagnostics are available for this model.",
-      "details": "Details",
-      "noDescription": "No description",
-      "conflictBannerTitle": "Unsafe request patch configuration",
-      "conflictBannerDescription": "This model currently has provider/model cross-scope conflicts. Resolve them before treating the model as safe to use.",
-      "conflictFields": {
-        "providerTarget": "Provider Target",
-        "modelTarget": "Model Target"
-      },
-      "placements": {
-        "HEADER": "Header",
-        "QUERY": "Query Parameter",
-        "BODY": "Body JSON"
-      },
-      "operations": {
-        "SET": "Set",
-        "REMOVE": "Remove"
-      },
-      "fields": {
-        "value": "Value",
-        "description": "Description",
-        "source": "Source",
-        "trace": "Trace",
-        "enabled": "Enabled",
-        "ruleId": "Rule ID",
-        "sourceRule": "Source Rule",
-        "effectiveRule": "Effective Rule",
-        "conflictsWith": "Conflicts With"
-      },
-      "states": {
-        "effective": "Effective",
-        "overridden": "Overridden",
-        "conflicted": "Conflicted",
-        "disabled": "Disabled",
-        "enabled": "Enabled"
-      },
-      "origin": {
-        "ProviderDirect": "Provider Direct",
-        "ModelDirect": "Model Direct"
-      },
-      "messages": {
-        "directEffective": "This direct model rule is part of the effective runtime set.",
-        "disabledSkipped": "Disabled rules stay stored on the model but are skipped at runtime.",
-        "inheritedEffective": "Inherited from the provider and currently effective for this model.",
-        "overriddenByRule": "Overridden by model rule {id}.",
-        "conflictsWithRules": "Conflicts with rule(s) {ids}.",
-        "overridesProviderRules": "Overrides provider rule(s) {ids}.",
-        "effectiveFromOrigin": "Applied from {origin} rule {id}.",
-        "noRuntimeTrace": "No additional diagnostic message."
-      },
-      "editor": {
-        "addTitle": "Add Model Request Patch",
-        "editTitle": "Edit Model Request Patch",
-        "description": "Create direct model rules for headers, query parameters, or body JSON Pointer targets.",
-        "placement": "Placement",
-        "operation": "Operation",
-        "selectPlacement": "Select placement",
-        "selectOperation": "Select operation",
-        "target": "Target",
-        "targetPlaceholderHeader": "authorization",
-        "targetPlaceholderQuery": "api-version",
-        "targetPlaceholderBody": "/generationConfig/temperature",
-        "valueJson": "Value JSON",
-        "valueHelp": "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
-        "descriptionLabel": "Description",
-        "descriptionPlaceholder": "Optional note for operators and future debugging.",
-        "enabledTitle": "Enabled",
-        "enabledDescription": "Disabled rules stay on the model but are skipped at runtime.",
-        "targetHelpHeader": "Use a header name. Reserved transport headers are rejected by the backend.",
-        "targetHelpQuery": "Use a query parameter key without ?, &, =, or whitespace.",
-        "targetHelpBody": "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
-        "removeValuePlaceholder": "REMOVE does not accept value_json.",
-        "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
-        "create": "Create Rule",
-        "save": "Save Changes",
-        "dangerousTitle": "Confirm Dangerous Target",
-        "dangerousDescription": "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
-        "saveAnyway": "Save Anyway"
-      },
-      "alert": {
-        "loadFailed": "Failed to load request patch state.",
-        "saveBeforeEdit": "Save the model before editing request patch rules.",
-        "saveFailed": "Failed to save request patch rule.",
-        "createSuccess": "Model request patch created.",
-        "updateSuccess": "Model request patch updated.",
-        "deleteSuccess": "Model request patch deleted.",
-        "deleteFailed": "Failed to delete request patch rule.",
-        "toggleFailed": "Failed to update request patch status.",
-        "enableSuccess": "Request patch enabled.",
-        "disableSuccess": "Request patch disabled.",
-        "dangerousConfirmFailed": "Failed to confirm dangerous request patch target.",
-        "targetRequired": "Target is required.",
-        "valueRequired": "Value JSON is required for SET rules."
-      }
     }
   },
   "costPage": {

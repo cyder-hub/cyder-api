@@ -17,9 +17,9 @@ use super::admin::AdminServices;
 use super::catalog::CatalogService;
 use super::infra::AppInfra;
 use super::runtime::{
-    ApiKeyGovernanceService, ProviderKeySelector, ReasoningContinuationStore,
-    RuntimeStateBackendBundle, RuntimeStateBackendError, RuntimeStateBackendOperatorStatus,
-    RuntimeStateBackendStatus, SourceCircuitService,
+    ApiKeyGovernanceService, ProviderKeySelector, RuntimeStateBackendBundle,
+    RuntimeStateBackendError, RuntimeStateBackendOperatorStatus, RuntimeStateBackendStatus,
+    SourceCircuitService,
 };
 
 const RUNTIME_STATE_BACKEND_HEALTHCHECK_SOURCE_ID: i64 = 0;
@@ -32,7 +32,6 @@ pub struct AppState {
     pub provider_key_selector: Arc<ProviderKeySelector>,
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
     pub source_circuit: Arc<SourceCircuitService>,
-    pub reasoning_continuation_store: Arc<dyn ReasoningContinuationStore>,
     pub metrics: Arc<MetricsService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
     pub secret_encryption: Arc<SecretEncryptionService>,
@@ -132,7 +131,6 @@ impl AppState {
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             source_circuit: Arc::clone(&runtime_backend.source_circuit),
-            reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
             secret_encryption,
@@ -361,7 +359,6 @@ mod tests {
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             source_circuit: Arc::clone(&runtime_backend.source_circuit),
-            reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
             secret_encryption,
@@ -382,10 +379,6 @@ mod tests {
         assert_eq!(Arc::strong_count(&app_state.provider_key_selector), 1);
         assert_eq!(Arc::strong_count(&app_state.api_key_governance), 1);
         assert_eq!(Arc::strong_count(&app_state.source_circuit), 2);
-        assert_eq!(
-            Arc::strong_count(&app_state.reasoning_continuation_store),
-            1
-        );
         assert_eq!(Arc::strong_count(&app_state.runtime_backend_status), 1);
         assert!(Arc::ptr_eq(
             &app_state.secret_encryption,

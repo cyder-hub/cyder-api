@@ -1,282 +1,80 @@
 import type { JsonValue } from "./shared";
-import type { UpstreamProtocol } from "./records";
 
-// ========== Request Patch Types ==========
 export type RequestPatchPlacement = "HEADER" | "QUERY" | "BODY";
-
 export type RequestPatchOperation = "SET" | "REMOVE";
-
-export type RequestPatchScopeKind = "PROVIDER" | "MODEL";
-
-export type RequestPatchRuleOrigin = "ProviderDirect" | "ModelDirect";
-
-export type ReasoningPresetKey =
-  | "disabled"
-  | "enabled"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh"
-  | "auto"
-  | string;
-
-export type ReasoningPatchFamilyKey = string;
-
-export type ReasoningConfigScope = "provider" | "model" | string;
-
-export type ReasoningConfigSource =
-  | "provider_default"
-  | "model_custom"
-  | "model_disabled"
-  | "missing"
-  | string;
-
-export interface ReasoningPresetMetadata {
-  preset_key: ReasoningPresetKey;
-  suffix: string;
-  requires_reasoning: boolean;
-  allowed_operation_kinds: string[];
-}
-
-export interface ReasoningFamilyMetadata {
-  family_key: ReasoningPatchFamilyKey;
-  supported_presets: ReasoningPresetKey[];
-  upstream_protocols: UpstreamProtocol[];
-}
-
-export type ReasoningConfigMode = "custom" | "disabled" | string;
-
-export type ReasoningConfigOwnerStatus =
-  | "custom"
-  | "disabled"
-  | "inherited"
-  | "missing"
-  | string;
-
-export type ModelReasoningConfigWriteMode = "inherit" | "disabled" | "custom";
-
-export interface ReasoningConfigCatalog {
-  families: ReasoningFamilyMetadata[];
-  presets: ReasoningPresetMetadata[];
-}
-
-export interface ReasoningConfigPreset {
-  id: number;
-  config_id: number;
-  preset_key: ReasoningPresetKey;
-  suffix: string;
-  requires_reasoning: boolean;
-  allowed_operation_kinds: string[];
-  expose_in_models: boolean;
-  is_enabled: boolean;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface ReasoningConfigDetail {
-  id: number;
-  scope_kind: ReasoningConfigScope;
-  provider_id: number | null;
-  model_id: number | null;
-  mode: ReasoningConfigMode;
-  family_key: ReasoningPatchFamilyKey | null;
-  presets: ReasoningConfigPreset[];
-  created_at: number;
-  updated_at: number;
-}
-
-export interface ReasoningConfigResponse {
-  owner_kind: ReasoningConfigScope;
-  owner_id: number;
-  owner_config: ReasoningConfigDetail | null;
-  provider_config: ReasoningConfigDetail | null;
-  effective_config: ReasoningConfigDetail | null;
-  effective_source: ReasoningConfigSource;
-  status: ReasoningConfigOwnerStatus;
-}
-
-export interface ReasoningGeneratedPatchPreview {
-  placement: RequestPatchPlacement | string;
-  target: string;
-  operation: RequestPatchOperation | string;
-  value_json: JsonValue | null;
-  description: string | null;
-}
-
-export interface ReasoningConfigPreviewPreset {
-  preset_key: ReasoningPresetKey;
-  suffix: string;
-  requires_reasoning: boolean;
-  allowed_operation_kinds: string[];
-  family_supported: boolean;
-  enabled: boolean;
-  expose_in_models: boolean;
-  runtime_supported: boolean;
-  unsupported_reason: string | null;
-  generated_patches: ReasoningGeneratedPatchPreview[];
-}
-
-export interface ReasoningConfigPreview {
-  config: ReasoningConfigResponse;
-  upstream_protocol: UpstreamProtocol;
-  presets: ReasoningConfigPreviewPreset[];
-}
-
-export interface ReasoningConfigPresetPayload {
-  preset_key: ReasoningPresetKey;
-  expose_in_models: boolean;
-  is_enabled: boolean;
-}
-
-export interface ProviderReasoningConfigPayload {
-  family_key: ReasoningPatchFamilyKey;
-  presets: ReasoningConfigPresetPayload[];
-}
-
-export interface ProviderReasoningConfigPreviewPayload {
-  profile_type?: string | null;
-  family_key?: ReasoningPatchFamilyKey | null;
-  presets?: ReasoningConfigPresetPayload[];
-}
-
-export interface ModelReasoningConfigPayload {
-  mode: ModelReasoningConfigWriteMode;
-  family_key?: ReasoningPatchFamilyKey | null;
-  presets?: ReasoningConfigPresetPayload[];
-}
-
-export type RequestPatchSource =
-  | {
-      kind: "provider_rule";
-      rule_id: number;
-    }
-  | {
-      kind: "model_rule";
-      rule_id: number;
-    }
-  | {
-      kind: "reasoning_preset";
-      config_id: number;
-      config_scope: ReasoningConfigScope;
-      config_preset_id: number;
-      family: ReasoningPatchFamilyKey;
-      preset: ReasoningPresetKey;
-      suffix: string;
-    }
-  | {
-      kind: "reasoning_preset";
-      profile_id: number;
-      profile_preset_id: number;
-      family: ReasoningPatchFamilyKey;
-      preset: ReasoningPresetKey;
-      suffix: string;
-    }
-  | {
-      kind: string;
-      [key: string]: unknown;
-    };
-
+export type RequestPatchVariantOrigin =
+  | "SourceBase"
+  | "ModelBase"
+  | "SourceSuffix"
+  | "ModelSuffix";
 export type RequestPatchExplainStatus =
   | "Effective"
   | "Overridden"
-  | "Conflicted";
+  | "Conflicted"
+  | "Masked"
+  | "Dormant";
 
-export interface RequestPatchRule {
+export interface RequestPatchVariant {
   id: number;
-  provider_id: number | null;
+  source_id: number;
   model_id: number | null;
-  scope?: RequestPatchScopeKind;
-  placement: RequestPatchPlacement;
-  target: string;
-  operation: RequestPatchOperation;
-  value_json: JsonValue | string | null;
-  description: string | null;
-  is_enabled: boolean;
+  suffix: string | null;
+  enabled: boolean;
+  expose_in_models: boolean;
+  deleted_at: number | null;
   created_at: number;
   updated_at: number;
 }
 
-export interface InheritedRequestPatchRule {
-  rule: RequestPatchRule;
-  overridden_by_rule_id: number | null;
-  conflict_with_rule_ids: number[];
-  is_effective: boolean;
-}
-
-export interface ResolvedRequestPatchRule {
+export interface RequestPatchRule {
+  id: number;
+  variant_id: number;
   placement: RequestPatchPlacement;
   target: string;
   operation: RequestPatchOperation;
   value_json: string | null;
-  source_rule_id: number;
-  source_origin: RequestPatchRuleOrigin;
-  overridden_rule_ids: number[];
   description: string | null;
+  deleted_at: number | null;
+  created_at: number;
+  updated_at: number;
 }
 
-export interface RuntimeResolvedRequestPatchRule {
+export interface RequestPatchVariantAggregate {
+  variant: RequestPatchVariant;
+  rules: RequestPatchRule[];
+}
+
+export interface RequestPatchRuleInput {
   placement: RequestPatchPlacement;
   target: string;
   operation: RequestPatchOperation;
-  value_json: string | null;
-  source: RequestPatchSource;
-  source_rule_id: number | null;
-  source_origin: RequestPatchRuleOrigin | null;
-  overridden_rule_ids: number[];
-  overridden_sources: RequestPatchSource[];
+  value_json: JsonValue | null;
   description: string | null;
-}
-
-export interface RequestPatchConflict {
-  provider_rule_id: number;
-  model_rule_id: number;
-  placement: RequestPatchPlacement;
-  provider_target: string;
-  model_target: string;
-  reason: string;
-}
-
-export interface RuntimeRequestPatchConflict {
-  placement: RequestPatchPlacement;
-  lower_priority_source: RequestPatchSource;
-  higher_priority_source: RequestPatchSource;
-  lower_priority_target: string;
-  higher_priority_target: string;
-  reason: string;
-}
-
-export interface RequestPatchExplainEntry {
-  rule: RequestPatchRule;
-  origin: RequestPatchRuleOrigin;
-  status: RequestPatchExplainStatus;
-  effective_rule_id: number | null;
-  conflict_with_rule_ids: number[];
-  message: string | null;
-}
-
-
-export interface RequestPatchPayload {
-  placement: RequestPatchPlacement;
-  target: string;
-  operation: RequestPatchOperation;
-  value_json?: JsonValue | null;
-  description?: string | null;
-  is_enabled?: boolean;
   confirm_dangerous_target?: boolean;
 }
 
-export interface DangerousRequestPatchSavePayload extends RequestPatchPayload {
-  confirm_dangerous_target: true;
+export interface RequestPatchVariantInput {
+  source_id: number;
+  model_id?: number | null;
+  suffix?: string | null;
+  enabled: boolean;
+  expose_in_models: boolean;
+  rules: RequestPatchRuleInput[];
 }
 
-export interface RequestPatchUpdatePayload {
-  placement?: RequestPatchPlacement;
-  target?: string;
-  operation?: RequestPatchOperation;
-  value_json?: JsonValue | null;
-  description?: string | null;
-  is_enabled?: boolean;
-  confirm_dangerous_target?: boolean;
+export interface RequestPatchVariantListResponse {
+  source_id: number;
+  model_id: number | null;
+  variants: RequestPatchVariantAggregate[];
+  variant_count: number;
+  rule_count: number;
+}
+
+export interface ModelRequestPatchOverviewResponse {
+  model_id: number;
+  variants: RequestPatchVariantAggregate[];
+  variant_count: number;
+  rule_count: number;
 }
 
 export interface RequestPatchDangerousTargetConfirmation {
@@ -286,40 +84,104 @@ export interface RequestPatchDangerousTargetConfirmation {
   confirm_field: string;
 }
 
-export type RequestPatchMutationOutcome =
-  | {
-      result: "saved";
-      rule: RequestPatchRule;
-    }
-  | {
-      result: "confirmation_required";
-      confirmation: RequestPatchDangerousTargetConfirmation;
-    };
+export interface RequestPatchPreviewConflict {
+  existing_variant_id: number;
+  existing_model_id: number | null;
+  existing_suffix: string | null;
+  placement: RequestPatchPlacement;
+  candidate_target: string;
+  existing_target: string;
+  reason: string;
+}
 
-export interface ModelEffectiveRequestPatchResponse {
-  provider_id: number;
-  model_id: number;
-  effective_rules: ResolvedRequestPatchRule[];
+export interface RequestPatchVariantPreview {
+  suffix: string | null;
+  rule_count: number;
+  dangerous_targets: RequestPatchDangerousTargetConfirmation[];
+  conflicts: RequestPatchPreviewConflict[];
+  affected_model_count: number;
+  valid: boolean;
+  failure_reason: string | null;
+}
+
+export interface RequestPatchPreviewResponse {
+  historical_snapshot: boolean;
+  preview: RequestPatchVariantPreview;
+  evaluation: RequestPatchEvaluation | null;
+}
+
+export interface RequestPatchLayerState {
+  origin: RequestPatchVariantOrigin;
+  variant_id: number | null;
+  enabled: boolean;
+  rule_count: number;
+  expose_in_models: boolean;
+  status: RequestPatchExplainStatus;
+  reason: string | null;
+}
+
+export interface RequestPatchEffectiveRule {
+  placement: RequestPatchPlacement;
+  target: string;
+  operation: RequestPatchOperation;
+  value_json: string | null;
+  source_variant_id: number;
+  source_rule_id: number;
+  source_origin: RequestPatchVariantOrigin;
+  overridden_rule_ids: number[];
+  description: string | null;
+}
+
+export interface RequestPatchExplainRule {
+  id: number;
+  variant_id: number;
+  placement: RequestPatchPlacement;
+  target: string;
+  operation: RequestPatchOperation;
+  value_json: string | null;
+  description: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RequestPatchExplainEntry {
+  rule: RequestPatchExplainRule;
+  origin: RequestPatchVariantOrigin;
+  status: RequestPatchExplainStatus;
+  effective_rule_id: number | null;
+  conflict_with_rule_ids: number[];
+  message: string | null;
+}
+
+export interface RequestPatchConflict {
+  lower_priority_variant_id: number;
+  higher_priority_variant_id: number;
+  lower_priority_origin: RequestPatchVariantOrigin;
+  higher_priority_origin: RequestPatchVariantOrigin;
+  placement: RequestPatchPlacement;
+  lower_priority_target: string;
+  higher_priority_target: string;
+  reason: string;
+}
+
+export interface RequestPatchEvaluation {
+  source_id: number;
+  model_id: number | null;
+  suffix: string | null;
+  layers: RequestPatchLayerState[];
+  effective_rules: RequestPatchEffectiveRule[];
+  explain: RequestPatchExplainEntry[];
   conflicts: RequestPatchConflict[];
   has_conflicts: boolean;
+  exposed_in_models: boolean;
+  executable: boolean;
+  failure_reason: string | null;
 }
 
 export interface RequestPatchExplainResponse {
-  provider_id: number;
-  model_id: number;
-  direct_rules: RequestPatchRule[];
-  inherited_rules: InheritedRequestPatchRule[];
-  effective_rules: ResolvedRequestPatchRule[];
-  explain: RequestPatchExplainEntry[];
-  conflicts: RequestPatchConflict[];
-  has_conflicts: boolean;
-}
-
-export interface RequestPatchTraceSummary {
-  provider_id: number;
+  historical_snapshot: boolean;
+  source_id: number;
   model_id: number | null;
-  effective_rules: RuntimeResolvedRequestPatchRule[];
-  explain: RequestPatchExplainEntry[];
-  conflicts: RuntimeRequestPatchConflict[];
-  has_conflicts: boolean;
+  suffix: string | null;
+  evaluation: RequestPatchEvaluation;
 }

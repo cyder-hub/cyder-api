@@ -13,9 +13,6 @@ use super::api_key_governance::{
 use super::provider_key_selection::{
     MemoryProviderKeyCursorStore, ProviderKeyCursorStore, RedisProviderKeyCursorStore,
 };
-use super::reasoning_continuation::{
-    MemoryReasoningContinuationStore, ReasoningContinuationStore, RedisReasoningContinuationStore,
-};
 use super::source_circuit::{
     MemorySourceCircuitStore, RedisSourceCircuitStore, SourceCircuitService,
 };
@@ -82,7 +79,6 @@ pub struct RuntimeStateBackendBundle {
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
     pub source_circuit: Arc<SourceCircuitService>,
     pub provider_key_cursor_store: Arc<dyn ProviderKeyCursorStore>,
-    pub reasoning_continuation_store: Arc<dyn ReasoningContinuationStore>,
     pub status: RuntimeStateBackendStatus,
 }
 
@@ -199,10 +195,6 @@ impl RuntimeStateBackendBundle {
                 config.provider_governance.clone(),
             )),
             provider_key_cursor_store: Arc::new(MemoryProviderKeyCursorStore::default()),
-            reasoning_continuation_store: Arc::new(MemoryReasoningContinuationStore::new(
-                config.runtime_state.reasoning_continuation_ttl(),
-                config.runtime_state.reasoning_continuation_memory_capacity,
-            )),
             status,
         }
     }
@@ -249,11 +241,6 @@ impl RuntimeStateBackendBundle {
                 pool.clone(),
                 key_prefix.clone(),
                 state_ttl,
-            )),
-            reasoning_continuation_store: Arc::new(RedisReasoningContinuationStore::new(
-                pool,
-                key_prefix,
-                config.runtime_state.reasoning_continuation_ttl(),
             )),
             status,
         }

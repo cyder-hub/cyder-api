@@ -1,10 +1,4 @@
-import type {
-  InheritedRequestPatchRule,
-  RequestPatchConflict,
-  RequestPatchExplainEntry,
-  RequestPatchRule,
-  ResolvedRequestPatchRule,
-} from "./requestPatch";
+import type { RequestPatchVariantAggregate } from "./requestPatch";
 
 export type ModelSourceSelectionMode = "INHERIT_ALL" | "EXPLICIT";
 
@@ -75,7 +69,7 @@ export interface ModelItem {
 
 export interface ModelDetail {
   model: ModelDetailModel;
-  request_patches: RequestPatchRule[];
+  request_patch_variants: RequestPatchVariantAggregate[];
   source_config: ModelSourceConfigSummary;
 }
 
@@ -107,12 +101,7 @@ export interface ModelDetailModel {
 
 export interface ModelDetailResponse {
   model: ModelDetailModel;
-  request_patches: RequestPatchRule[];
-  inherited_request_patches: InheritedRequestPatchRule[];
-  effective_request_patches: ResolvedRequestPatchRule[];
-  request_patch_explain: RequestPatchExplainEntry[];
-  request_patch_conflicts: RequestPatchConflict[];
-  has_request_patch_conflicts: boolean;
+  request_patch_variants: RequestPatchVariantAggregate[];
   source_config: ModelSourceConfigSummary;
 }
 

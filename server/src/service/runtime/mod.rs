@@ -1,7 +1,6 @@
 pub mod api_key_governance;
 pub mod backend;
 pub mod provider_key_selection;
-pub mod reasoning_continuation;
 pub mod source_circuit;
 
 #[cfg(test)]
@@ -17,11 +16,6 @@ pub use backend::{
 pub use provider_key_selection::{
     GroupItemSelectionStrategy, MemoryProviderKeyCursorStore, ProviderKeyCursorStore,
     ProviderKeySelector, RedisProviderKeyCursorStore,
-};
-pub use reasoning_continuation::{
-    MemoryReasoningContinuationStore, ReasoningContinuationCacheKey,
-    ReasoningContinuationLookupResult, ReasoningContinuationRecord, ReasoningContinuationScope,
-    ReasoningContinuationSnapshot, ReasoningContinuationStore, RedisReasoningContinuationStore,
 };
 pub use source_circuit::{
     RedisSourceCircuitStore, SourceCircuitDecision, SourceCircuitError, SourceCircuitProbePermit,

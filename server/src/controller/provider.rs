@@ -7,14 +7,13 @@ use crate::database::{
         BootstrapProviderResult, Provider, ProviderAggregate, ProviderApiKeySummary,
         ProviderSummaryItem,
     },
-    request_patch::RequestPatchRuleResponse,
+    request_patch::RequestPatchVariantAggregate,
     upstream_source::UpstreamSource,
 };
-use crate::proxy::runtime::transport::send_with_deadline;
-use crate::proxy::{
-    ProxyCancellationContext, ProxyError, ProxyErrorCode, apply_request_patches,
-    load_runtime_request_patch_trace,
+use crate::proxy::runtime::{
+    request_patch::resolve_runtime_request_patch_trace, transport::send_with_deadline,
 };
+use crate::proxy::{ProxyCancellationContext, ProxyError, ProxyErrorCode, apply_request_patches};
 use crate::service::admin::model::{
     ModelSourceConfigSummary, ModelSourceSnapshotOwner, load_model_source_config_summaries,
 };
@@ -65,7 +64,7 @@ struct ProviderDetailResponse {
     provider: ProviderAggregate,
     models: Vec<ProviderModelDetailResponse>,
     provider_keys: Vec<ProviderApiKeySummary>,
-    request_patches: Vec<RequestPatchRuleResponse>,
+    request_patch_variants: Vec<RequestPatchVariantAggregate>,
 }
 
 fn provider_model_details(provider_id: i64) -> DbResult<Vec<ProviderModelDetailResponse>> {
@@ -324,7 +323,7 @@ async fn get_provider_detail(
         provider: detail.provider,
         models,
         provider_keys: detail.api_keys,
-        request_patches: detail.request_patches,
+        request_patch_variants: detail.request_patch_variants,
     }))
 }
 
@@ -390,19 +389,24 @@ async fn resolve_provider_check_request_patches(
         .map(CacheModel::from_db)
         .transpose()
         .map_err(|error| BaseError::DatabaseFatal(Some(error)))?;
-    let trace = load_runtime_request_patch_trace(
-        &cache_provider,
-        cache_model.as_ref(),
+    let variants = app_state
+        .catalog
+        .get_request_patch_variants()
+        .await
+        .map_err(|error| BaseError::InternalServerError(Some(error.to_string())))?;
+    let trace = resolve_runtime_request_patch_trace(
+        source,
+        cache_model.as_ref().map(|model| model.id),
         None,
-        Some(source),
-        app_state,
-    )
-    .await
-    .map_err(provider_check_patch_error)?;
-    if let Some(model) = model {
-        if let Some(conflict_error) = trace.conflict_error(&model.model_name) {
-            return Err(provider_check_patch_error(conflict_error));
-        }
+        variants.as_ref(),
+    );
+    if let Some(error) = trace.execution_error(
+        &cache_provider.provider_key,
+        cache_model
+            .as_ref()
+            .map_or("<provider-check>", |model| model.model_name.as_str()),
+    ) {
+        return Err(provider_check_patch_error(error));
     }
 
     Ok(trace.applied_rules)
@@ -425,14 +429,6 @@ async fn build_provider_check_request(
         is_enabled: source.is_enabled,
         is_default: source.is_default,
     };
-    apply_provider_request_auth_header(
-        &mut headers,
-        &cache_source,
-        upstream_protocol_for_profile(&cache_source.profile_type),
-        credential,
-    )
-    .map_err(provider_credential_error)?;
-
     let mut request = match source.profile_type {
         UpstreamProfileType::Gemini => ProviderCheckRequest {
             url: format_gemini_generate_content_url(source, model_name),
@@ -531,6 +527,13 @@ async fn build_provider_check_request(
         request_patches,
     )
     .map_err(provider_check_patch_error)?;
+    apply_provider_request_auth_header(
+        &mut request.headers,
+        &cache_source,
+        upstream_protocol_for_profile(&cache_source.profile_type),
+        credential,
+    )
+    .map_err(provider_credential_error)?;
     request.url = url.to_string();
 
     Ok(request)
@@ -966,7 +969,7 @@ async fn list_provider_details(
             provider: detail.provider,
             models,
             provider_keys: detail.api_keys,
-            request_patches: detail.request_patches,
+            request_patch_variants: detail.request_patch_variants,
         });
     }
 
@@ -1185,7 +1188,7 @@ mod tests {
     };
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::cache::types::{
-        RequestPatchRuleOrigin, RequestPatchSource, RuntimeResolvedRequestPatch,
+        RequestPatchSource, RequestPatchVariantOrigin, RuntimeResolvedRequestPatch,
     };
     use crate::service::provider_credential::ProviderCredential;
     use crate::service::runtime::SourceHealthStatus;
@@ -1206,9 +1209,12 @@ mod tests {
             target: target.to_string(),
             operation,
             value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
-            source: RequestPatchSource::ProviderRule { rule_id: id },
+            source: RequestPatchSource::Variant {
+                variant_id: id,
+                origin: RequestPatchVariantOrigin::SourceBase,
+            },
             source_rule_id: Some(id),
-            source_origin: Some(RequestPatchRuleOrigin::ProviderDirect),
+            source_origin: Some(RequestPatchVariantOrigin::SourceBase),
             overridden_rule_ids: Vec::new(),
             overridden_sources: Vec::new(),
             description: None,

@@ -2,39 +2,45 @@ use std::sync::Arc;
 
 use crate::controller::BaseError;
 use crate::database::request_patch::{
-    CreateRequestPatchPayload, RequestPatchMutationOutcome, RequestPatchRule,
-    RequestPatchRuleResponse, UpdateRequestPatchPayload,
+    RequestPatchVariantAggregate, RequestPatchVariantInput, RequestPatchVariantPreview,
+    RequestPatchVariantRepository,
 };
+use crate::database::upstream_source::UpstreamSource;
 
 use super::audit::{AdminAuditEvent, AdminAuditField};
 use super::mutation::{AdminCatalogInvalidation, AdminMutationEffect, AdminMutationRunner};
 
 #[derive(Clone, Copy)]
-enum RequestPatchAdminScope {
-    Provider(i64),
-    Model(i64),
+enum RequestPatchAdminOwner {
+    Source { source_id: i64 },
+    ModelSource { model_id: i64, source_id: i64 },
 }
 
-impl RequestPatchAdminScope {
-    fn scope_kind(self) -> &'static str {
-        match self {
-            Self::Provider(_) => "provider",
-            Self::Model(_) => "model",
-        }
-    }
-
-    fn scope_id(self) -> i64 {
-        match self {
-            Self::Provider(id) | Self::Model(id) => id,
-        }
-    }
-
+impl RequestPatchAdminOwner {
     fn invalidation(self) -> AdminCatalogInvalidation {
         match self {
-            Self::Provider(provider_id) => {
-                AdminCatalogInvalidation::ProviderRequestPatchRules { provider_id }
+            Self::Source { source_id } => {
+                AdminCatalogInvalidation::RequestPatchSource { source_id }
             }
-            Self::Model(model_id) => AdminCatalogInvalidation::ModelRequestPatchRules { model_id },
+            Self::ModelSource { model_id, .. } => {
+                AdminCatalogInvalidation::RequestPatchModel { model_id }
+            }
+        }
+    }
+
+    fn fields(self) -> [AdminAuditField; 2] {
+        match self {
+            Self::Source { source_id } => [
+                AdminAuditField::new("source_id", source_id),
+                AdminAuditField::new("model_id", "none"),
+            ],
+            Self::ModelSource {
+                model_id,
+                source_id,
+            } => [
+                AdminAuditField::new("source_id", source_id),
+                AdminAuditField::new("model_id", model_id),
+            ],
         }
     }
 }
@@ -53,112 +59,230 @@ impl RequestPatchAdminService {
         &self.mutation_runner
     }
 
-    pub async fn create_provider_request_patch(
+    pub fn list_source_variants(
         &self,
-        provider_id: i64,
-        payload: CreateRequestPatchPayload,
-    ) -> Result<RequestPatchMutationOutcome, BaseError> {
-        let outcome = RequestPatchRule::create_for_provider(provider_id, &payload)?;
-        self.run_saved_outcome_effects(
-            RequestPatchAdminScope::Provider(provider_id),
+        source_id: i64,
+    ) -> Result<Vec<RequestPatchVariantAggregate>, BaseError> {
+        RequestPatchVariantRepository::list_by_source(source_id)
+    }
+
+    pub fn validate_source_route(&self, provider_id: i64, source_id: i64) -> Result<(), BaseError> {
+        UpstreamSource::get_active_by_id_for_provider(source_id, provider_id).map(|_| ())
+    }
+
+    pub fn list_model_source_variants(
+        &self,
+        model_id: i64,
+        source_id: i64,
+    ) -> Result<Vec<RequestPatchVariantAggregate>, BaseError> {
+        RequestPatchVariantRepository::list_by_model_source(model_id, source_id)
+    }
+
+    pub fn list_model_variants(
+        &self,
+        model_id: i64,
+    ) -> Result<Vec<RequestPatchVariantAggregate>, BaseError> {
+        RequestPatchVariantRepository::list_by_model_ids(&[model_id])
+    }
+
+    pub fn preview_source_variant(
+        &self,
+        source_id: i64,
+        input: RequestPatchVariantInput,
+        exclude_variant_id: Option<i64>,
+    ) -> Result<RequestPatchVariantPreview, BaseError> {
+        validate_owner_input(RequestPatchAdminOwner::Source { source_id }, &input)?;
+        RequestPatchVariantRepository::preview(&input, exclude_variant_id)
+    }
+
+    pub fn preview_model_source_variant(
+        &self,
+        model_id: i64,
+        source_id: i64,
+        input: RequestPatchVariantInput,
+        exclude_variant_id: Option<i64>,
+    ) -> Result<RequestPatchVariantPreview, BaseError> {
+        validate_owner_input(
+            RequestPatchAdminOwner::ModelSource {
+                model_id,
+                source_id,
+            },
+            &input,
+        )?;
+        RequestPatchVariantRepository::preview(&input, exclude_variant_id)
+    }
+
+    pub async fn create_source_variant(
+        &self,
+        source_id: i64,
+        input: RequestPatchVariantInput,
+    ) -> Result<RequestPatchVariantAggregate, BaseError> {
+        validate_owner_input(RequestPatchAdminOwner::Source { source_id }, &input)?;
+        let aggregate = RequestPatchVariantRepository::create(&input)?;
+        self.run_saved_effects(
+            RequestPatchAdminOwner::Source { source_id },
             "create",
-            &outcome,
+            &aggregate,
         )
         .await;
-        Ok(outcome)
+        Ok(aggregate)
     }
 
-    pub async fn update_provider_request_patch(
+    pub async fn update_source_variant(
         &self,
-        provider_id: i64,
-        rule_id: i64,
-        payload: UpdateRequestPatchPayload,
-    ) -> Result<RequestPatchMutationOutcome, BaseError> {
-        let outcome = RequestPatchRule::update_for_provider(provider_id, rule_id, &payload)?;
-        self.run_saved_outcome_effects(
-            RequestPatchAdminScope::Provider(provider_id),
+        source_id: i64,
+        variant_id: i64,
+        input: RequestPatchVariantInput,
+    ) -> Result<RequestPatchVariantAggregate, BaseError> {
+        validate_owner_input(RequestPatchAdminOwner::Source { source_id }, &input)?;
+        let aggregate = RequestPatchVariantRepository::replace(variant_id, &input)?;
+        self.run_saved_effects(
+            RequestPatchAdminOwner::Source { source_id },
             "update",
-            &outcome,
+            &aggregate,
         )
         .await;
-        Ok(outcome)
+        Ok(aggregate)
     }
 
-    pub async fn delete_provider_request_patch(
+    pub async fn delete_source_variant(
         &self,
-        provider_id: i64,
-        rule_id: i64,
-    ) -> Result<(), BaseError> {
-        let rule = RequestPatchRule::get_provider_rule(provider_id, rule_id)?;
-        RequestPatchRule::delete_for_provider(provider_id, rule_id)?;
-        self.run_delete_effects(RequestPatchAdminScope::Provider(provider_id), &rule)
-            .await;
-        Ok(())
+        source_id: i64,
+        variant_id: i64,
+    ) -> Result<RequestPatchVariantAggregate, BaseError> {
+        let aggregate = RequestPatchVariantRepository::get(variant_id)?;
+        validate_owner_input(
+            RequestPatchAdminOwner::Source { source_id },
+            &RequestPatchVariantInput {
+                source_id: aggregate.variant.source_id,
+                model_id: aggregate.variant.model_id,
+                suffix: aggregate.variant.suffix.clone(),
+                enabled: aggregate.variant.enabled,
+                expose_in_models: aggregate.variant.expose_in_models,
+                rules: Vec::new(),
+            },
+        )?;
+        let deleted = RequestPatchVariantRepository::soft_delete(variant_id)?;
+        self.run_saved_effects(
+            RequestPatchAdminOwner::Source { source_id },
+            "delete",
+            &deleted,
+        )
+        .await;
+        Ok(deleted)
     }
 
-    pub async fn create_model_request_patch(
-        &self,
-        model_id: i64,
-        payload: CreateRequestPatchPayload,
-    ) -> Result<RequestPatchMutationOutcome, BaseError> {
-        let outcome = RequestPatchRule::create_for_model(model_id, &payload)?;
-        self.run_saved_outcome_effects(RequestPatchAdminScope::Model(model_id), "create", &outcome)
-            .await;
-        Ok(outcome)
-    }
-
-    pub async fn update_model_request_patch(
-        &self,
-        model_id: i64,
-        rule_id: i64,
-        payload: UpdateRequestPatchPayload,
-    ) -> Result<RequestPatchMutationOutcome, BaseError> {
-        let outcome = RequestPatchRule::update_for_model(model_id, rule_id, &payload)?;
-        self.run_saved_outcome_effects(RequestPatchAdminScope::Model(model_id), "update", &outcome)
-            .await;
-        Ok(outcome)
-    }
-
-    pub async fn delete_model_request_patch(
+    pub async fn create_model_source_variant(
         &self,
         model_id: i64,
-        rule_id: i64,
-    ) -> Result<(), BaseError> {
-        let rule = RequestPatchRule::get_model_rule(model_id, rule_id)?;
-        RequestPatchRule::delete_for_model(model_id, rule_id)?;
-        self.run_delete_effects(RequestPatchAdminScope::Model(model_id), &rule)
-            .await;
-        Ok(())
+        source_id: i64,
+        input: RequestPatchVariantInput,
+    ) -> Result<RequestPatchVariantAggregate, BaseError> {
+        validate_owner_input(
+            RequestPatchAdminOwner::ModelSource {
+                model_id,
+                source_id,
+            },
+            &input,
+        )?;
+        let aggregate = RequestPatchVariantRepository::create(&input)?;
+        self.run_saved_effects(
+            RequestPatchAdminOwner::ModelSource {
+                model_id,
+                source_id,
+            },
+            "create",
+            &aggregate,
+        )
+        .await;
+        Ok(aggregate)
     }
 
-    async fn run_saved_outcome_effects(
+    pub async fn update_model_source_variant(
         &self,
-        scope: RequestPatchAdminScope,
+        model_id: i64,
+        source_id: i64,
+        variant_id: i64,
+        input: RequestPatchVariantInput,
+    ) -> Result<RequestPatchVariantAggregate, BaseError> {
+        validate_owner_input(
+            RequestPatchAdminOwner::ModelSource {
+                model_id,
+                source_id,
+            },
+            &input,
+        )?;
+        let aggregate = RequestPatchVariantRepository::replace(variant_id, &input)?;
+        self.run_saved_effects(
+            RequestPatchAdminOwner::ModelSource {
+                model_id,
+                source_id,
+            },
+            "update",
+            &aggregate,
+        )
+        .await;
+        Ok(aggregate)
+    }
+
+    pub async fn delete_model_source_variant(
+        &self,
+        model_id: i64,
+        source_id: i64,
+        variant_id: i64,
+    ) -> Result<RequestPatchVariantAggregate, BaseError> {
+        let aggregate = RequestPatchVariantRepository::get(variant_id)?;
+        validate_owner_input(
+            RequestPatchAdminOwner::ModelSource {
+                model_id,
+                source_id,
+            },
+            &RequestPatchVariantInput {
+                source_id: aggregate.variant.source_id,
+                model_id: aggregate.variant.model_id,
+                suffix: aggregate.variant.suffix.clone(),
+                enabled: aggregate.variant.enabled,
+                expose_in_models: aggregate.variant.expose_in_models,
+                rules: Vec::new(),
+            },
+        )?;
+        let deleted = RequestPatchVariantRepository::soft_delete(variant_id)?;
+        self.run_saved_effects(
+            RequestPatchAdminOwner::ModelSource {
+                model_id,
+                source_id,
+            },
+            "delete",
+            &deleted,
+        )
+        .await;
+        Ok(deleted)
+    }
+
+    async fn run_saved_effects(
+        &self,
+        owner: RequestPatchAdminOwner,
         action: &'static str,
-        outcome: &RequestPatchMutationOutcome,
+        aggregate: &RequestPatchVariantAggregate,
     ) {
-        if let RequestPatchMutationOutcome::Saved { rule } = outcome {
-            self.run_post_commit_effects(vec![
-                AdminMutationEffect::catalog_invalidation(scope.invalidation()),
-                AdminMutationEffect::audit(request_patch_audit_event(
-                    action,
-                    scope,
-                    rule,
-                    rule.is_enabled,
-                )),
-            ])
-            .await;
-        }
-    }
-
-    async fn run_delete_effects(
-        &self,
-        scope: RequestPatchAdminScope,
-        rule: &RequestPatchRuleResponse,
-    ) {
+        let mut fields = owner.fields().to_vec();
+        fields.push(AdminAuditField::new("variant_id", aggregate.variant.id));
+        fields.extend(AdminAuditField::optional(
+            "suffix",
+            aggregate.variant.suffix.as_deref(),
+        ));
+        fields.push(AdminAuditField::new("enabled", aggregate.variant.enabled));
+        fields.push(AdminAuditField::new(
+            "expose_in_models",
+            aggregate.variant.expose_in_models,
+        ));
+        fields.push(AdminAuditField::new("rule_count", aggregate.rules.len()));
         self.run_post_commit_effects(vec![
-            AdminMutationEffect::catalog_invalidation(scope.invalidation()),
-            AdminMutationEffect::audit(request_patch_audit_event("delete", scope, rule, false)),
+            AdminMutationEffect::catalog_invalidation(owner.invalidation()),
+            AdminMutationEffect::audit(AdminAuditEvent::with_fields(
+                request_patch_event_name(owner, action),
+                fields,
+            )),
         ])
         .await;
     }
@@ -168,336 +292,202 @@ impl RequestPatchAdminService {
     }
 }
 
-fn request_patch_audit_event(
-    action: &'static str,
-    scope: RequestPatchAdminScope,
-    rule: &RequestPatchRuleResponse,
-    is_enabled: bool,
-) -> AdminAuditEvent {
-    let event_name = match (scope.scope_kind(), action) {
-        ("provider", "create") => "manager.provider_request_patch_created",
-        ("provider", "update") => "manager.provider_request_patch_updated",
-        ("provider", "delete") => "manager.provider_request_patch_deleted",
-        ("model", "create") => "manager.model_request_patch_created",
-        ("model", "update") => "manager.model_request_patch_updated",
-        ("model", "delete") => "manager.model_request_patch_deleted",
-        _ => unreachable!(
-            "unsupported request patch audit action: {}:{}",
-            scope.scope_kind(),
-            action
-        ),
-    };
+fn validate_owner_input(
+    owner: RequestPatchAdminOwner,
+    input: &RequestPatchVariantInput,
+) -> Result<(), BaseError> {
+    match owner {
+        RequestPatchAdminOwner::Source { source_id }
+            if input.source_id == source_id && input.model_id.is_none() =>
+        {
+            Ok(())
+        }
+        RequestPatchAdminOwner::ModelSource {
+            model_id,
+            source_id,
+        } if input.source_id == source_id && input.model_id == Some(model_id) => Ok(()),
+        _ => Err(BaseError::ParamInvalid(Some(
+            "request patch Variant owner does not match route".to_string(),
+        ))),
+    }
+}
 
-    AdminAuditEvent::with_fields(
-        event_name,
-        [
-            AdminAuditField::new("action", action),
-            AdminAuditField::new("scope_kind", scope.scope_kind()),
-            AdminAuditField::new("scope_id", scope.scope_id()),
-            AdminAuditField::new("request_patch_rule_id", rule.id),
-            AdminAuditField::new("placement", format!("{:?}", rule.placement)),
-            AdminAuditField::new("operation", format!("{:?}", rule.operation)),
-            AdminAuditField::new("is_enabled", is_enabled),
-        ],
-    )
+fn request_patch_event_name(owner: RequestPatchAdminOwner, action: &'static str) -> &'static str {
+    match (owner, action) {
+        (RequestPatchAdminOwner::Source { .. }, "create") => {
+            "manager.source_request_patch_variant_created"
+        }
+        (RequestPatchAdminOwner::Source { .. }, "update") => {
+            "manager.source_request_patch_variant_updated"
+        }
+        (RequestPatchAdminOwner::Source { .. }, "delete") => {
+            "manager.source_request_patch_variant_deleted"
+        }
+        (RequestPatchAdminOwner::ModelSource { .. }, "create") => {
+            "manager.model_source_request_patch_variant_created"
+        }
+        (RequestPatchAdminOwner::ModelSource { .. }, "update") => {
+            "manager.model_source_request_patch_variant_updated"
+        }
+        (RequestPatchAdminOwner::ModelSource { .. }, "delete") => {
+            "manager.model_source_request_patch_variant_deleted"
+        }
+        _ => unreachable!("unsupported request patch Variant audit action"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use crate::database::TestDbContext;
-    use crate::database::model::Model;
-    use crate::database::provider::{NewProvider, Provider};
-    use crate::database::request_patch::RequestPatchRule;
-    use crate::database::upstream_source::NewUpstreamSource;
-    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
-    use crate::schema::enum_def::{RequestPatchOperation, RequestPatchPlacement};
-    use crate::service::app_state::create_test_app_state;
-    use serde_json::json;
-
     use super::RequestPatchAdminService;
-    use super::{
-        CreateRequestPatchPayload, RequestPatchMutationOutcome, UpdateRequestPatchPayload,
+    use crate::database::TestDbContext;
+    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::request_patch::{
+        RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
     };
+    use crate::database::upstream_source::NewUpstreamSource;
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
+    };
+    use crate::service::admin::mutation::AdminMutationRunner;
+    use crate::service::catalog::CatalogService;
+    use crate::service::runtime::SourceCircuitService;
 
-    fn seed_provider(id: i64, provider_key: &str) -> Provider {
-        Provider::create(
-            &NewProvider {
-                id,
-                provider_key: provider_key.to_string(),
-                name: provider_key.to_string(),
-                is_enabled: true,
-                created_at: 1,
-                updated_at: 1,
-                provider_api_key_mode: ProviderApiKeyMode::Queue,
-            },
-            &NewUpstreamSource {
-                id,
-                provider_id: id,
-                profile_type: UpstreamProfileType::Openai,
-                endpoint: "https://api.example.com/v1".to_string(),
-                use_proxy: false,
-                is_enabled: true,
-                is_default: true,
-                created_at: 1,
-                updated_at: 1,
-            },
-        )
-        .expect("provider seed should succeed")
-        .provider
-    }
-
-    fn seed_model_for_provider(provider_id: i64, model_name: &str) -> Model {
-        Model::create(provider_id, model_name, None, true).expect("model seed should succeed")
-    }
-
-    fn create_payload(target: &str, value: serde_json::Value) -> CreateRequestPatchPayload {
-        CreateRequestPatchPayload {
-            placement: RequestPatchPlacement::Body,
-            target: target.to_string(),
-            operation: RequestPatchOperation::Set,
-            value_json: Some(Some(value)),
-            description: Some("patch".to_string()),
-            is_enabled: Some(true),
-            confirm_dangerous_target: None,
+    fn variant_input(source_id: i64, target: &str) -> RequestPatchVariantInput {
+        RequestPatchVariantInput {
+            source_id,
+            model_id: None,
+            suffix: Some("fast".to_string()),
+            enabled: true,
+            expose_in_models: true,
+            rules: vec![RequestPatchRuleInput {
+                placement: RequestPatchPlacement::Body,
+                target: target.to_string(),
+                operation: RequestPatchOperation::Set,
+                value_json: Some(Some(serde_json::json!(0.2))),
+                description: Some("operator temperature override".to_string()),
+                confirm_dangerous_target: false,
+            }],
         }
     }
 
-    fn update_payload(target: &str, value: serde_json::Value) -> UpdateRequestPatchPayload {
-        UpdateRequestPatchPayload {
-            target: Some(target.to_string()),
-            value_json: Some(Some(value)),
-            ..Default::default()
-        }
-    }
-
-    fn service(app_state: &Arc<crate::service::app_state::AppState>) -> &RequestPatchAdminService {
-        app_state.admin.request_patch.as_ref()
-    }
-
     #[tokio::test]
-    async fn provider_scope_request_patch_lifecycle_refreshes_cached_rules_and_effective_view() {
-        let test_db_context = TestDbContext::new_sqlite("admin-request-patch-provider.sqlite");
-
-        test_db_context
+    async fn aggregate_mutations_invalidate_catalog_and_audit_without_rule_values() {
+        let database = TestDbContext::new_sqlite("admin-request-patch-aggregate.sqlite");
+        database
             .run_async(async {
-                let provider = seed_provider(9101, "openai");
-                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+                Provider::create(
+                    &NewProvider {
+                        id: 9101,
+                        provider_key: "request-patch-admin".to_string(),
+                        name: "Request Patch Admin".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &NewUpstreamSource {
+                        id: 9102,
+                        provider_id: 9101,
+                        profile_type: UpstreamProfileType::Openai,
+                        endpoint: "https://request-patch-admin.example/v1".to_string(),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .expect("provider should be seeded");
+                let catalog = Arc::new(CatalogService::new(true).await);
+                let runner = Arc::new(AdminMutationRunner::new(
+                    Arc::clone(&catalog),
+                    Arc::new(SourceCircuitService::new_memory()),
+                ));
+                let service = RequestPatchAdminService::new(Arc::clone(&runner));
 
-                let provider_rules_before = app_state
-                    .catalog
-                    .get_provider_request_patch_rules(provider.id)
-                    .await
-                    .expect("provider patch cache should load");
-                let effective_before = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should load")
-                    .expect("effective cache should exist");
-                assert!(provider_rules_before.is_empty());
-                assert!(effective_before.effective_rules.is_empty());
-
-                let created = service(&app_state)
-                    .create_provider_request_patch(
-                        provider.id,
-                        create_payload("/temperature", json!(0.2)),
+                let preview = service
+                    .preview_source_variant(
+                        9102,
+                        RequestPatchVariantInput {
+                            rules: vec![RequestPatchRuleInput {
+                                placement: RequestPatchPlacement::Header,
+                                target: "authorization".to_string(),
+                                operation: RequestPatchOperation::Set,
+                                value_json: Some(Some(serde_json::json!("Bearer preview"))),
+                                description: None,
+                                confirm_dangerous_target: false,
+                            }],
+                            ..variant_input(9102, "/options/temperature")
+                        },
+                        None,
                     )
-                    .await
-                    .expect("provider request patch create should succeed");
-                let created_rule = match created {
-                    RequestPatchMutationOutcome::Saved { rule } => rule,
-                    other => panic!("unexpected create outcome: {other:?}"),
-                };
-
-                let provider_rules_after_create = app_state
-                    .catalog
-                    .get_provider_request_patch_rules(provider.id)
-                    .await
-                    .expect("provider patch cache should reload");
-                let effective_after_create = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should reload")
-                    .expect("effective cache should exist");
-
-                assert_eq!(provider_rules_after_create.len(), 1);
-                assert_eq!(provider_rules_after_create[0].target, "/temperature");
-                assert_eq!(effective_after_create.effective_rules.len(), 1);
-                assert_eq!(
-                    effective_after_create.effective_rules[0].target,
-                    "/temperature"
-                );
-
-                let updated = service(&app_state)
-                    .update_provider_request_patch(
-                        provider.id,
-                        created_rule.id,
-                        update_payload("/top_p", json!(0.9)),
-                    )
-                    .await
-                    .expect("provider request patch update should succeed");
-                let updated_rule = match updated {
-                    RequestPatchMutationOutcome::Saved { rule } => rule,
-                    other => panic!("unexpected update outcome: {other:?}"),
-                };
-
-                let provider_rules_after_update = app_state
-                    .catalog
-                    .get_provider_request_patch_rules(provider.id)
-                    .await
-                    .expect("provider patch cache should reload after update");
-                let effective_after_update = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should reload after update")
-                    .expect("effective cache should exist");
-
-                assert_eq!(updated_rule.target, "/top_p");
-                assert_eq!(provider_rules_after_update[0].target, "/top_p");
-                assert_eq!(effective_after_update.effective_rules[0].target, "/top_p");
-
-                service(&app_state)
-                    .delete_provider_request_patch(provider.id, created_rule.id)
-                    .await
-                    .expect("provider request patch delete should succeed");
-
-                let provider_rules_after_delete = app_state
-                    .catalog
-                    .get_provider_request_patch_rules(provider.id)
-                    .await
-                    .expect("provider patch cache should reload after delete");
-                let effective_after_delete = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should reload after delete")
-                    .expect("effective cache should exist");
-
-                assert!(provider_rules_after_delete.is_empty());
-                assert!(effective_after_delete.effective_rules.is_empty());
+                    .expect("preview should return a confirmation result");
+                assert!(!preview.valid);
+                assert_eq!(preview.dangerous_targets.len(), 1);
                 assert!(
-                    RequestPatchRule::list_by_provider_id(provider.id)
-                        .expect("provider rules should load")
+                    RequestPatchVariantRepository::list_by_source(9102)
+                        .expect("preview should not write")
                         .is_empty()
                 );
-            })
-            .await;
-    }
+                assert!(runner.drain_audit_events().is_empty());
 
-    #[tokio::test]
-    async fn model_scope_request_patch_lifecycle_refreshes_cached_rules_and_effective_view() {
-        let test_db_context = TestDbContext::new_sqlite("admin-request-patch-model.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let provider = seed_provider(9201, "openai");
-                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let model_rules_before = app_state
-                    .catalog
-                    .get_model_request_patch_rules(model.id)
+                let created = service
+                    .create_source_variant(9102, variant_input(9102, "/options/temperature"))
                     .await
-                    .expect("model patch cache should load");
-                let effective_before = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should load")
-                    .expect("effective cache should exist");
-                assert!(model_rules_before.is_empty());
-                assert!(effective_before.effective_rules.is_empty());
-
-                let created = service(&app_state)
-                    .create_model_request_patch(
-                        model.id,
-                        create_payload("/temperature", json!(0.4)),
-                    )
-                    .await
-                    .expect("model request patch create should succeed");
-                let created_rule = match created {
-                    RequestPatchMutationOutcome::Saved { rule } => rule,
-                    other => panic!("unexpected create outcome: {other:?}"),
-                };
-
-                let model_rules_after_create = app_state
-                    .catalog
-                    .get_model_request_patch_rules(model.id)
-                    .await
-                    .expect("model patch cache should reload");
-                let effective_after_create = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should reload")
-                    .expect("effective cache should exist");
-
-                assert_eq!(model_rules_after_create.len(), 1);
-                assert_eq!(model_rules_after_create[0].target, "/temperature");
-                assert_eq!(effective_after_create.effective_rules.len(), 1);
-                assert_eq!(
-                    effective_after_create.effective_rules[0].target,
-                    "/temperature"
-                );
-
-                let updated = service(&app_state)
-                    .update_model_request_patch(
-                        model.id,
-                        created_rule.id,
-                        update_payload("/top_p", json!(0.7)),
-                    )
-                    .await
-                    .expect("model request patch update should succeed");
-                let updated_rule = match updated {
-                    RequestPatchMutationOutcome::Saved { rule } => rule,
-                    other => panic!("unexpected update outcome: {other:?}"),
-                };
-
-                let model_rules_after_update = app_state
-                    .catalog
-                    .get_model_request_patch_rules(model.id)
-                    .await
-                    .expect("model patch cache should reload after update");
-                let effective_after_update = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should reload after update")
-                    .expect("effective cache should exist");
-
-                assert_eq!(updated_rule.target, "/top_p");
-                assert_eq!(model_rules_after_update[0].target, "/top_p");
-                assert_eq!(effective_after_update.effective_rules[0].target, "/top_p");
-
-                service(&app_state)
-                    .delete_model_request_patch(model.id, created_rule.id)
-                    .await
-                    .expect("model request patch delete should succeed");
-
-                let model_rules_after_delete = app_state
-                    .catalog
-                    .get_model_request_patch_rules(model.id)
-                    .await
-                    .expect("model patch cache should reload after delete");
-                let effective_after_delete = app_state
-                    .catalog
-                    .get_model_effective_request_patches(model.id)
-                    .await
-                    .expect("effective cache should reload after delete")
-                    .expect("effective cache should exist");
-
-                assert!(model_rules_after_delete.is_empty());
-                assert!(effective_after_delete.effective_rules.is_empty());
+                    .expect("variant create should commit");
+                let events = runner.drain_audit_events();
+                let event = events
+                    .iter()
+                    .find(|event| {
+                        event.event_name() == "manager.source_request_patch_variant_created"
+                    })
+                    .expect("create should emit an audit event");
                 assert!(
-                    RequestPatchRule::list_by_model_id(model.id)
-                        .expect("model rules should load")
+                    event
+                        .fields()
+                        .iter()
+                        .any(|field| { field.key() == "rule_count" && field.value() == "1" })
+                );
+                assert!(
+                    event
+                        .fields()
+                        .iter()
+                        .all(|field| { field.key() != "value_json" && field.key() != "target" })
+                );
+                let catalog_snapshot = catalog
+                    .get_models_catalog()
+                    .await
+                    .expect("catalog should reload after invalidation");
+                assert_eq!(catalog_snapshot.request_patch_variants.len(), 1);
+
+                let updated = service
+                    .update_source_variant(
+                        9102,
+                        created.variant.id,
+                        variant_input(9102, "/options/top_p"),
+                    )
+                    .await
+                    .expect("variant update should commit");
+                assert_eq!(updated.rules[0].target, "/options/top_p");
+                assert!(runner.drain_audit_events().iter().any(|event| {
+                    event.event_name() == "manager.source_request_patch_variant_updated"
+                }));
+
+                service
+                    .delete_source_variant(9102, created.variant.id)
+                    .await
+                    .expect("variant delete should commit");
+                assert!(
+                    service
+                        .list_source_variants(9102)
+                        .expect("active variants should load")
                         .is_empty()
                 );
+                assert!(runner.drain_audit_events().iter().any(|event| {
+                    event.event_name() == "manager.source_request_patch_variant_deleted"
+                }));
             })
             .await;
     }

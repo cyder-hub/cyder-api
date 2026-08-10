@@ -18,8 +18,7 @@ db_object! {
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
         pub base_requested_model_name: Option<String>,
-        pub resolved_reasoning_suffix: Option<String>,
-        pub resolved_reasoning_preset: Option<String>,
+        pub resolved_patch_suffix: Option<String>,
         pub downstream_protocol: DownstreamProtocol,
         #[diesel(column_name = status)]
         pub overall_status: RequestStatus,
@@ -76,8 +75,7 @@ db_object! {
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
         pub base_requested_model_name: Option<String>,
-        pub resolved_reasoning_suffix: Option<String>,
-        pub resolved_reasoning_preset: Option<String>,
+        pub resolved_patch_suffix: Option<String>,
         #[diesel(column_name = status)]
         pub overall_status: RequestStatus,
         pub request_received_at: i64,
@@ -306,20 +304,11 @@ impl RequestLog {
                                     .assume_not_null()
                                     .like(pattern.clone()),
                             ))
-                        .or(request_log::dsl::resolved_reasoning_suffix
-                            .is_not_null()
-                            .and(
-                                request_log::dsl::resolved_reasoning_suffix
-                                    .assume_not_null()
-                                    .like(pattern.clone()),
-                            ))
-                        .or(request_log::dsl::resolved_reasoning_preset
-                            .is_not_null()
-                            .and(
-                                request_log::dsl::resolved_reasoning_preset
-                                    .assume_not_null()
-                                    .like(pattern.clone()),
-                            ))
+                        .or(request_log::dsl::resolved_patch_suffix.is_not_null().and(
+                            request_log::dsl::resolved_patch_suffix
+                                .assume_not_null()
+                                .like(pattern.clone()),
+                        ))
                         .or(request_log::dsl::provider_name_snapshot.is_not_null().and(
                             request_log::dsl::provider_name_snapshot
                                 .assume_not_null()
@@ -488,20 +477,11 @@ impl RequestLog {
                                     .assume_not_null()
                                     .like(pattern.clone()),
                             ))
-                        .or(request_log::dsl::resolved_reasoning_suffix
-                            .is_not_null()
-                            .and(
-                                request_log::dsl::resolved_reasoning_suffix
-                                    .assume_not_null()
-                                    .like(pattern.clone()),
-                            ))
-                        .or(request_log::dsl::resolved_reasoning_preset
-                            .is_not_null()
-                            .and(
-                                request_log::dsl::resolved_reasoning_preset
-                                    .assume_not_null()
-                                    .like(pattern.clone()),
-                            ))
+                        .or(request_log::dsl::resolved_patch_suffix.is_not_null().and(
+                            request_log::dsl::resolved_patch_suffix
+                                .assume_not_null()
+                                .like(pattern.clone()),
+                        ))
                         .or(request_log::dsl::provider_name_snapshot.is_not_null().and(
                             request_log::dsl::provider_name_snapshot
                                 .assume_not_null()
@@ -610,8 +590,7 @@ mod tests {
             api_key_id,
             requested_model_name: Some("provider/model".to_string()),
             base_requested_model_name: Some("provider/model".to_string()),
-            resolved_reasoning_suffix: None,
-            resolved_reasoning_preset: None,
+            resolved_patch_suffix: None,
             downstream_protocol,
             overall_status: RequestStatus::Success,
             final_error_code: None,

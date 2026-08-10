@@ -39,20 +39,8 @@ pub enum AdminCatalogInvalidation {
     ProviderApiKeys {
         provider_id: i64,
     },
-    ProviderRequestPatchRules {
-        provider_id: i64,
-    },
-    ReasoningProviderConfig {
-        provider_id: i64,
-    },
-    ReasoningModelConfig {
-        model_id: i64,
-    },
-    RuntimeFeatureProviderConfig {
-        provider_id: i64,
-    },
-    RuntimeFeatureModelConfig {
-        model_id: i64,
+    RequestPatchSource {
+        source_id: i64,
     },
     Model {
         id: i64,
@@ -65,7 +53,7 @@ pub enum AdminCatalogInvalidation {
     ApiKeyHash {
         api_key_hash: String,
     },
-    ModelRequestPatchRules {
+    RequestPatchModel {
         model_id: i64,
     },
     CostCatalogVersions {
@@ -79,15 +67,11 @@ impl AdminCatalogInvalidation {
             Self::ModelsCatalog => "models_catalog",
             Self::Provider { .. } => "provider",
             Self::ProviderApiKeys { .. } => "provider_api_keys",
-            Self::ProviderRequestPatchRules { .. } => "provider_request_patch_rules",
-            Self::ReasoningProviderConfig { .. } => "reasoning_provider_config",
-            Self::ReasoningModelConfig { .. } => "reasoning_model_config",
-            Self::RuntimeFeatureProviderConfig { .. } => "runtime_feature_provider_config",
-            Self::RuntimeFeatureModelConfig { .. } => "runtime_feature_model_config",
+            Self::RequestPatchSource { .. } => "request_patch_source",
             Self::Model { .. } => "model",
             Self::ApiKeyId { .. } => "api_key_id",
             Self::ApiKeyHash { .. } => "api_key_hash",
-            Self::ModelRequestPatchRules { .. } => "model_request_patch_rules",
+            Self::RequestPatchModel { .. } => "request_patch_model",
             Self::CostCatalogVersions { .. } => "cost_catalog_versions",
         }
     }
@@ -231,29 +215,9 @@ impl AdminMutationRunner {
                     .invalidate_provider_api_keys(*provider_id)
                     .await
             }
-            AdminCatalogInvalidation::ProviderRequestPatchRules { provider_id } => {
+            AdminCatalogInvalidation::RequestPatchSource { source_id } => {
                 self.catalog
-                    .invalidate_provider_request_patch_rules(*provider_id)
-                    .await
-            }
-            AdminCatalogInvalidation::ReasoningProviderConfig { provider_id } => {
-                self.catalog
-                    .invalidate_reasoning_provider_config(*provider_id)
-                    .await
-            }
-            AdminCatalogInvalidation::ReasoningModelConfig { model_id } => {
-                self.catalog
-                    .invalidate_reasoning_model_config(*model_id)
-                    .await
-            }
-            AdminCatalogInvalidation::RuntimeFeatureProviderConfig { provider_id } => {
-                self.catalog
-                    .invalidate_runtime_feature_provider_config(*provider_id)
-                    .await
-            }
-            AdminCatalogInvalidation::RuntimeFeatureModelConfig { model_id } => {
-                self.catalog
-                    .invalidate_runtime_feature_model_config(*model_id)
+                    .invalidate_request_patch_source(*source_id)
                     .await
             }
             AdminCatalogInvalidation::Model {
@@ -280,10 +244,8 @@ impl AdminMutationRunner {
             AdminCatalogInvalidation::ApiKeyHash { api_key_hash } => {
                 self.catalog.invalidate_api_key_hash(api_key_hash).await
             }
-            AdminCatalogInvalidation::ModelRequestPatchRules { model_id } => {
-                self.catalog
-                    .invalidate_model_request_patch_rules(*model_id)
-                    .await
+            AdminCatalogInvalidation::RequestPatchModel { model_id } => {
+                self.catalog.invalidate_request_patch_model(*model_id).await
             }
             AdminCatalogInvalidation::CostCatalogVersions { ids } => {
                 for id in ids {

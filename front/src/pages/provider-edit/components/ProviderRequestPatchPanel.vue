@@ -1,44 +1,35 @@
 <template>
-  <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
-    <SectionHeader
-      :title="t('providerEditPage.requestPatch.title')"
-      :help="t('providerEditPage.requestPatch.description')"
-      :help-label="t('providerEditPage.requestPatch.title')"
-    >
-      <template #actions>
-      <Badge variant="outline" class="w-fit font-mono text-[11px]">
-        {{ editingData.request_patches.length }}
-      </Badge>
-      </template>
-    </SectionHeader>
-
-    <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-3 text-sm text-gray-500">
-      {{ t("providerEditPage.requestPatch.messages.providerDirect") }}
-    </div>
-
-    <RequestPatchRulesPanel
-      owner-kind="provider"
-      :owner-ready="!!editingData.id"
-      :rules="editingData.request_patches"
-      :actions="actions"
-      @changed="refreshRules"
-    />
-  </section>
+  <Drawer :open="props.open" :direction="isDesktop ? 'right' : 'bottom'" @update:open="(open) => emit('update:open', open)">
+    <DrawerContent class="flex max-h-[94dvh] flex-col border-gray-200 bg-white p-0 outline-none md:h-full md:max-h-full md:max-w-2xl md:rounded-none">
+      <RequestPatchVariantManager
+        :open="props.open"
+        :provider-id="props.providerId"
+        :source-id="props.sourceId"
+        :title="props.sourceTitle"
+        mode="source"
+      />
+    </DrawerContent>
+  </Drawer>
 </template>
 
 <script setup lang="ts">
-import { useI18n } from "vue-i18n";
+import { useMediaQuery } from "@vueuse/core";
+import {
+  Drawer,
+  DrawerContent,
+} from "@/components/ui/drawer";
+import RequestPatchVariantManager from "@/components/request-patch/RequestPatchVariantManager.vue";
 
-import RequestPatchRulesPanel from "@/components/request-patch/RequestPatchRulesPanel.vue";
-import SectionHeader from "@/components/SectionHeader.vue";
-import { Badge } from "@/components/ui/badge";
-import type { EditingProviderData } from "../types";
-import { useProviderRequestPatch } from "../composables/useProviderRequestPatch";
+const props = defineProps<{
+  open: boolean;
+  providerId: number;
+  sourceId: number;
+  sourceTitle: string;
+}>();
 
-const editingData = defineModel<EditingProviderData>("editingData", {
-  required: true,
-});
+const emit = defineEmits<{
+  "update:open": [value: boolean];
+}>();
 
-const { t } = useI18n();
-const { actions, refreshRules } = useProviderRequestPatch(editingData);
+const isDesktop = useMediaQuery("(min-width: 768px)");
 </script>

@@ -12,6 +12,8 @@ use crate::database::model_source_binding::{
     replace_for_model as replace_model_source_config,
 };
 use crate::database::provider::Provider;
+use crate::database::request_patch::RequestPatchVariantRepository;
+use crate::database::upstream_source::UpstreamSource;
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 use crate::service::cache::types::{CacheModel, CacheModelSourceBinding, CacheProvider};
 use crate::service::source_selector::{
@@ -426,6 +428,24 @@ impl ModelAdminService {
     ) -> Result<ModelSourceConfig, BaseError> {
         let model = Model::get_by_id(model_id)?;
         let provider = Provider::get_by_id(model.provider_id)?;
+        let reactivated_source_ids = if source_config.source_selection_mode == "EXPLICIT" {
+            source_config
+                .bindings
+                .iter()
+                .map(|binding| binding.source_id)
+                .collect::<Vec<_>>()
+        } else if source_config.source_selection_mode == "INHERIT_ALL" {
+            UpstreamSource::list_active_by_provider_id(provider.id)?
+                .into_iter()
+                .filter(|source| source.is_enabled)
+                .map(|source| source.id)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for source_id in reactivated_source_ids {
+            RequestPatchVariantRepository::validate_model_source_reactivation(model_id, source_id)?;
+        }
         let replaced = replace_model_source_config(model_id, &source_config)?;
 
         self.run_post_commit_effects(vec![
@@ -569,8 +589,13 @@ mod tests {
     use crate::database::TestDbContext;
     use crate::database::model_source_binding::{ModelSourceBindingInput, ModelSourceConfig};
     use crate::database::provider::{NewProvider, Provider};
-    use crate::database::upstream_source::NewUpstreamSource;
-    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+    use crate::database::request_patch::{
+        RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
+    };
+    use crate::database::upstream_source::{NewUpstreamSource, UpstreamSource};
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
+    };
     use crate::service::catalog::CatalogService;
     use crate::service::runtime::SourceCircuitService;
 
@@ -711,6 +736,92 @@ mod tests {
                     .fields()
                     .iter()
                     .any(|field| field.key() == "endpoint" || field.key() == "api_key")
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn inherit_all_rejects_dormant_model_variant_without_effective_suffix_rules() {
+        let db = TestDbContext::new_sqlite("admin-model-inherit-all-request-patch.sqlite");
+        db.run_async(async {
+            Provider::create(&provider_input(), &source_input()).expect("provider should seed");
+            let second_source = UpstreamSource::create(&NewUpstreamSource {
+                id: 8103,
+                provider_id: 8101,
+                profile_type: UpstreamProfileType::Anthropic,
+                endpoint: "https://secondary.example.com/v1".to_string(),
+                use_proxy: false,
+                is_enabled: true,
+                is_default: false,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .expect("second Source should seed");
+            let catalog = Arc::new(CatalogService::new(true).await);
+            let runner = Arc::new(AdminMutationRunner::new(
+                Arc::clone(&catalog),
+                Arc::new(SourceCircuitService::new_memory()),
+            ));
+            let service = ModelAdminService::new(Arc::clone(&runner));
+            let model = service
+                .create_model_with_source_config(
+                    CreateModelInput {
+                        provider_id: 8101,
+                        model_name: "inherit-all-model".to_string(),
+                        real_model_name: None,
+                        is_enabled: true,
+                    },
+                    Some(ModelSourceConfig::inherit_all()),
+                )
+                .await
+                .expect("Model should be created in INHERIT_ALL mode");
+            let source_variant = RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+                source_id: second_source.id,
+                model_id: None,
+                suffix: Some("fast".to_string()),
+                enabled: true,
+                expose_in_models: true,
+                rules: vec![RequestPatchRuleInput {
+                    placement: RequestPatchPlacement::Body,
+                    target: "/options/temperature".to_string(),
+                    operation: RequestPatchOperation::Set,
+                    value_json: Some(Some(serde_json::json!(0.2))),
+                    description: None,
+                    confirm_dangerous_target: false,
+                }],
+            })
+            .expect("Source suffix should be created");
+            RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+                source_id: second_source.id,
+                model_id: Some(model.id),
+                suffix: Some("fast".to_string()),
+                enabled: true,
+                expose_in_models: false,
+                rules: Vec::new(),
+            })
+            .expect("empty Model suffix should inherit Source Rules");
+
+            service
+                .replace_model_source_config(model.id, explicit_config())
+                .await
+                .expect("switching to the primary explicit Source should make S2 dormant");
+            RequestPatchVariantRepository::soft_delete(source_variant.variant.id)
+                .expect("dormant Source suffix may be removed");
+
+            assert!(
+                service
+                    .replace_model_source_config(model.id, ModelSourceConfig::inherit_all())
+                    .await
+                    .is_err(),
+                "INHERIT_ALL must preflight the reactivated S2 Model Variant"
+            );
+            assert_eq!(
+                service
+                    .get_model_source_config(model.id)
+                    .await
+                    .expect("failed replacement must preserve source config"),
+                explicit_config()
             );
         })
         .await;

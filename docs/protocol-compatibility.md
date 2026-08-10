@@ -38,11 +38,11 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 ## Upstream Source contract
 
-- Owner: `R3.11`; aggregate field `upstream_sources` has `zero_to_many` cardinality and `source_id_only` identity. Source state is `explicit_enabled_and_default`, default semantics are `optional`, and Profile mutability is `create_only`.
+- Owner: `R3.12`; aggregate field `upstream_sources` has `zero_to_many` cardinality and `source_id_only` identity. Source state is `explicit_enabled_and_default`, default semantics are `optional`, and Profile mutability is `create_only`.
 - Family uniqueness is `one_active_source_per_wire_family`; disabled Sources reserve family capacity: `true`; deleted Sources release it: `true`.
 - Selection order: `protocol_match -> inherit_all_provider_default_transform -> explicit_model_default_transform`; no fallback after selection: `true`. Credentials remain `provider` scoped and `opaque` representation; models use `model_source_selection_mode_and_visible_bindings`.
-- Model owner: `R3.11`; Request Patch scope: `provider_global`; Reasoning scope: `provider_global`; configuration owner: `R3.11`.
-- Evidence: r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract, r3-11-source-selector, r3-11-model-source-config, r3-11-source-impact-and-check, r3-11-request-log-reason.
+- Model owner: `R3.11`; Request Patch scope: `source_bound_variant`; Reasoning scope: `protocol_transform_only`; configuration owner: `R3.12`.
+- Evidence: r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract, r3-11-source-selector, r3-11-model-source-config, r3-11-source-impact-and-check, r3-11-request-log-reason, r3-12-request-patch-contract, r3-12-request-patch-execution, r3-12-request-patch-migration.
 
 ## Upstream Source profiles
 
@@ -174,6 +174,9 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 | `r3-11-request-log-reason` | test | `proxy::direct_execution_regression::direct_execution_model_default_selection_reason_is_persisted_after_flush` | Pins model-default Source selection reason persistence after request-log flush while retaining one selected Source. |
 | `r3-11-model-catalog-selector` | test | `proxy::models::tests::models_listing_uses_the_protocol_selector_for_source_visibility` | Pins local model directory visibility to the shared protocol Source selector and enabled Source state. |
 | `r3-11-ollama-discovery-boundary` | code | `server/src/proxy/models.rs::get_accessible_models` | The public model directory is built from saved local Model records; no Ollama /api/tags discovery or import route is part of the R3.11 contract. |
+| `r3-12-request-patch-contract` | test | `controller::request_patch::tests::request_patch_openapi_matches_aggregate_routes_and_current_detail_shapes` | Pins Source and Model+Source aggregate Request Patch routes, current DTO shapes, old route negatives, no-store responses, and ownership errors. |
+| `r3-12-request-patch-execution` | test | `proxy::direct_execution_regression::request_patch_query_value_reaches_upstream_but_not_request_log` | Pins the Source-bound Variant through real request materialization and upstream execution while keeping patched values out of the persisted request log. |
+| `r3-12-request-patch-migration` | test | `database::migration_smoke_tests::sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract` | Pins the R3.11-to-R3.12 destructive migration, historical suffix rename, preserved governance/metrics, removed configuration tables, and new Source-bound constraints. |
 
 ## Status semantics
 

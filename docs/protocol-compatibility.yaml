@@ -201,9 +201,21 @@ evidence:
     kind: code
     reference: "server/src/proxy/models.rs::get_accessible_models"
     summary: "The public model directory is built from saved local Model records; no Ollama /api/tags discovery or import route is part of the R3.11 contract."
+  - id: r3-12-request-patch-contract
+    kind: test
+    reference: "controller::request_patch::tests::request_patch_openapi_matches_aggregate_routes_and_current_detail_shapes"
+    summary: "Pins Source and Model+Source aggregate Request Patch routes, current DTO shapes, old route negatives, no-store responses, and ownership errors."
+  - id: r3-12-request-patch-execution
+    kind: test
+    reference: "proxy::direct_execution_regression::request_patch_query_value_reaches_upstream_but_not_request_log"
+    summary: "Pins the Source-bound Variant through real request materialization and upstream execution while keeping patched values out of the persisted request log."
+  - id: r3-12-request-patch-migration
+    kind: test
+    reference: "database::migration_smoke_tests::sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract"
+    summary: "Pins the R3.11-to-R3.12 destructive migration, historical suffix rename, preserved governance/metrics, removed configuration tables, and new Source-bound constraints."
 
 upstream_source_contract:
-  owner: R3.11
+  owner: R3.12
   source_cardinality: zero_to_many
   source_identity: source_id_only
   aggregate_field: upstream_sources
@@ -219,10 +231,10 @@ upstream_source_contract:
   credential_representation: opaque
   model_scope: model_source_selection_mode_and_visible_bindings
   model_owner: R3.11
-  request_patch_scope: provider_global
-  reasoning_scope: provider_global
-  config_owner: R3.11
-  evidence: [r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract, r3-11-source-selector, r3-11-model-source-config, r3-11-source-impact-and-check, r3-11-request-log-reason]
+  request_patch_scope: source_bound_variant
+  reasoning_scope: protocol_transform_only
+  config_owner: R3.12
+  evidence: [r3-10-source-aggregate, r3-10-source-repository, r3-10-source-selector, r3-10-manager-source-contract, r3-10-runtime-source-contract, r3-10-migration-contract, r3-11-source-selector, r3-11-model-source-config, r3-11-source-impact-and-check, r3-11-request-log-reason, r3-12-request-patch-contract, r3-12-request-patch-execution, r3-12-request-patch-migration]
 
 upstream_source_profiles:
   - profile_type: OPENAI

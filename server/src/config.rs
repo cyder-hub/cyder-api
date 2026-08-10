@@ -626,10 +626,6 @@ pub struct RuntimeStateConfig {
     pub redis: RuntimeStateRedisConfig,
     #[serde(default)]
     pub fallback_to_memory: bool,
-    #[serde(default = "default_reasoning_continuation_ttl_seconds")]
-    pub reasoning_continuation_ttl_seconds: u64,
-    #[serde(default = "default_reasoning_continuation_memory_capacity")]
-    pub reasoning_continuation_memory_capacity: usize,
 }
 
 impl Default for RuntimeStateConfig {
@@ -638,9 +634,6 @@ impl Default for RuntimeStateConfig {
             backend: RuntimeStateBackendType::default(),
             redis: RuntimeStateRedisConfig::default(),
             fallback_to_memory: false,
-            reasoning_continuation_ttl_seconds: default_reasoning_continuation_ttl_seconds(),
-            reasoning_continuation_memory_capacity: default_reasoning_continuation_memory_capacity(
-            ),
         }
     }
 }
@@ -656,10 +649,6 @@ impl RuntimeStateConfig {
 
     pub fn state_ttl(&self) -> Duration {
         Duration::from_secs(self.redis.state_ttl_seconds)
-    }
-
-    pub fn reasoning_continuation_ttl(&self) -> Duration {
-        Duration::from_secs(self.reasoning_continuation_ttl_seconds)
     }
 }
 
@@ -1077,14 +1066,6 @@ fn default_provider_circuit_probe_lease_ttl_seconds() -> u64 {
 
 fn default_runtime_state_ttl_seconds() -> u64 {
     30 * 24 * 60 * 60
-}
-
-fn default_reasoning_continuation_ttl_seconds() -> u64 {
-    30 * 60
-}
-
-fn default_reasoning_continuation_memory_capacity() -> usize {
-    4096
 }
 
 fn default_redis_url() -> String {

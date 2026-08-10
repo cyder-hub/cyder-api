@@ -48,7 +48,7 @@ use crate::{
         model_source_binding::{ModelSourceBindingInput, ModelSourceConfig, replace_for_model},
         provider::Provider,
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
-        request_patch::CreateRequestPatchPayload,
+        request_patch::{RequestPatchRuleInput, RequestPatchVariantInput},
         upstream_source::{NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource},
     },
     ingress::client_identity::ClientIdentityResolver,
@@ -1554,6 +1554,93 @@ fn acl_rejection_precedes_invalid_provider_endpoint_preflight() {
 }
 
 #[test]
+fn acl_rejection_precedes_masked_request_patch_suffix_validation() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new_with_default_action(
+            context,
+            &fixture,
+            &upstream.base_url,
+            Action::Deny,
+        )
+        .await;
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_source_variant(
+                router.source_id,
+                RequestPatchVariantInput {
+                    source_id: router.source_id,
+                    model_id: None,
+                    suffix: Some("fast".to_string()),
+                    enabled: true,
+                    expose_in_models: true,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/options/temperature".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!(0.2))),
+                        description: Some("ACL ordering regression".to_string()),
+                        confirm_dangerous_target: false,
+                    }],
+                },
+            )
+            .await
+            .expect("Source suffix should create");
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_model_source_variant(
+                router.model_id,
+                router.source_id,
+                RequestPatchVariantInput {
+                    source_id: router.source_id,
+                    model_id: Some(router.model_id),
+                    suffix: Some("fast".to_string()),
+                    enabled: false,
+                    expose_in_models: false,
+                    rules: Vec::new(),
+                },
+            )
+            .await
+            .expect("Model tombstone should create");
+        let requested_model = format!("{}-fast", router.requested_model());
+        let uri = fixture
+            .downstream_path
+            .replace("$REQUESTED_MODEL", &requested_model);
+
+        let response = router
+            .send_raw_post(
+                uri,
+                render_value(&fixture.request.downstream, &requested_model),
+                fixture.downstream_auth,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(upstream.requests().await.is_empty());
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.final_error_code.as_deref(), Some("permission_error"));
+        assert!(
+            log.final_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Access denied"))
+        );
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
 fn acl_rejection_precedes_missing_proxy_preflight() {
     let (name, fixture) = fixtures()
         .into_iter()
@@ -1638,29 +1725,57 @@ fn request_patch_conflict_rejection_does_not_decrypt_provider_credential() {
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
-        let patch = |target: &str| CreateRequestPatchPayload {
-            placement: RequestPatchPlacement::Body,
-            target: target.to_string(),
-            operation: RequestPatchOperation::Set,
-            value_json: Some(Some(json!({"temperature": 0.2}))),
-            description: Some("decrypt ordering regression".to_string()),
-            is_enabled: Some(true),
-            confirm_dangerous_target: None,
+        let patch = |model_id: Option<i64>, target: &str| RequestPatchVariantInput {
+            source_id: router.source_id,
+            model_id,
+            suffix: None,
+            enabled: true,
+            expose_in_models: false,
+            rules: vec![RequestPatchRuleInput {
+                placement: RequestPatchPlacement::Body,
+                target: target.to_string(),
+                operation: RequestPatchOperation::Set,
+                value_json: Some(Some(json!({"temperature": 0.2}))),
+                description: Some("decrypt ordering regression".to_string()),
+                confirm_dangerous_target: false,
+            }],
         };
         router
             .app_state
             .admin
             .request_patch
-            .create_provider_request_patch(router.provider_id, patch("/generation_config"))
+            .create_source_variant(router.source_id, patch(None, "/generation_config"))
             .await
-            .expect("provider patch should create");
-        router
+            .expect("source patch should create");
+        let model_variant = router
             .app_state
             .admin
             .request_patch
-            .create_model_request_patch(router.model_id, patch("/generation_config/temperature"))
+            .create_model_source_variant(
+                router.model_id,
+                router.source_id,
+                patch(Some(router.model_id), "/safe"),
+            )
             .await
-            .expect("model patch should create");
+            .expect("model source patch should create");
+        let mut connection = get_connection().expect("test database connection");
+        match &mut connection {
+            DbConnection::Sqlite(connection) => diesel::sql_query(format!(
+                "UPDATE request_patch_rule SET target = '/generation_config/temperature' WHERE id = {}",
+                model_variant.rules[0].id
+            ))
+            .execute(connection)
+            .expect("test corruption should update the model rule target"),
+            DbConnection::Postgres(_) => {
+                panic!("direct execution regression uses the isolated SQLite fixture")
+            }
+        };
+        router
+            .app_state
+            .catalog
+            .invalidate_models_catalog()
+            .await
+            .expect("corrupted catalog should be invalidated");
         router
             .app_state
             .secret_encryption
@@ -1685,6 +1800,7 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
         .expect("openai fixture");
     run_case(name, move |context| async move {
         const PATCH_QUERY_SECRET: &str = "patch-query-secret-marker";
+        const PATCH_AUTH_SECRET: &str = "patch-auth-overwrite-marker";
         let upstream = TestUpstream::spawn(ScriptedReply::Json {
             status: StatusCode::OK,
             body: fixture.non_stream.upstream_response.clone(),
@@ -1695,23 +1811,47 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
             .app_state
             .admin
             .request_patch
-            .create_provider_request_patch(
-                router.provider_id,
-                CreateRequestPatchPayload {
-                    placement: RequestPatchPlacement::Query,
-                    target: "diagnostic".to_string(),
-                    operation: RequestPatchOperation::Set,
-                    value_json: Some(Some(json!(PATCH_QUERY_SECRET))),
-                    description: Some("transient query regression".to_string()),
-                    is_enabled: Some(true),
-                    confirm_dangerous_target: None,
+            .create_source_variant(
+                router.source_id,
+                RequestPatchVariantInput {
+                    source_id: router.source_id,
+                    model_id: None,
+                    suffix: Some("tool-use-v2".to_string()),
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![
+                        RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Query,
+                            target: "diagnostic".to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!(PATCH_QUERY_SECRET))),
+                            description: Some("transient query regression".to_string()),
+                            confirm_dangerous_target: false,
+                        },
+                        RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Header,
+                            target: "authorization".to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!(PATCH_AUTH_SECRET))),
+                            description: Some("credential ordering regression".to_string()),
+                            confirm_dangerous_target: true,
+                        },
+                    ],
                 },
             )
             .await
             .expect("query patch should create");
 
+        let requested_model = format!("{}-tool-use-v2", router.requested_model());
+        let uri = fixture
+            .downstream_path
+            .replace("$REQUESTED_MODEL", &requested_model);
         let response = router
-            .send(&fixture, false, &fixture.request.downstream)
+            .send_raw_post(
+                uri,
+                render_value(&fixture.request.downstream, &requested_model),
+                fixture.downstream_auth,
+            )
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         let _ = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1726,11 +1866,37 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
                 .is_some_and(|query| query.contains(PATCH_QUERY_SECRET)),
             "fixture must prove the raw query patch reached the selected upstream"
         );
+        assert_eq!(
+            captured[0]
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-baseline-secret"),
+            "provider credential must be applied after Header Patch"
+        );
+        assert!(
+            captured[0]
+                .headers
+                .get("authorization")
+                .is_none_or(|value| value != PATCH_AUTH_SECRET),
+            "Header Patch must not replace the provider credential"
+        );
 
         let log = router.wait_for_log(RequestStatus::Success).await;
+        router.app_state.flush_proxy_logs().await;
+        let persisted_log = RequestLog::get_by_id(log.id).expect("flushed request log exists");
+        assert_eq!(
+            persisted_log.resolved_patch_suffix.as_deref(),
+            Some("tool-use-v2")
+        );
+        assert_eq!(
+            persisted_log.base_requested_model_name.as_deref(),
+            Some(router.requested_model().as_str())
+        );
         let persisted = serde_json::to_string(&log).expect("request log should serialize");
         for secret in [
             PATCH_QUERY_SECRET,
+            PATCH_AUTH_SECRET,
             PROVIDER_SECRET,
             router.downstream_key.as_str(),
         ] {

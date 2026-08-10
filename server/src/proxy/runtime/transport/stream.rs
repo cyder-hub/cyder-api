@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
@@ -7,14 +7,12 @@ use axum::{
 };
 use chrono::Utc;
 use futures::StreamExt;
-use serde_json::{Value, json};
 use tokio::{
     sync::{Mutex as TokioMutex, mpsc},
     time::{Instant, timeout_at},
 };
 
 use super::{
-    ReasoningContinuationCaptureContext,
     body::{
         BODY_FRAME_CHANNEL_CAPACITY, BodyFrame, FrameDeliveryError, GuardedBodyStream,
         guarded_body, send_body_frame,
@@ -36,7 +34,6 @@ use crate::{
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{finalize_streaming_log_context, record_streaming_completion},
-            reasoning_content_repair::continuation_snapshot_from_parts,
         },
         source_governance::{
             record_source_failure_or_release_probe, record_source_success, release_source_probe,
@@ -46,37 +43,12 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        runtime::{ReasoningContinuationScope, SourceCircuitProbePermit},
+        runtime::SourceCircuitProbePermit,
         transform::StreamTransformer,
         upstream_response::{UpstreamContentEncoding, parse_content_encoding},
     },
     utils::sse::{SseEvent, SseFrame, SseParser},
 };
-
-#[derive(Clone, Debug)]
-pub(super) struct OpenAiReasoningStreamCapture {
-    request_id: RequestId,
-    scope: Option<ReasoningContinuationScope>,
-    feature_enabled: bool,
-    target_is_openai_compatible_generation: bool,
-    choices: BTreeMap<u32, StreamChoiceCapture>,
-    parse_failed_count: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-struct StreamChoiceCapture {
-    reasoning_content: String,
-    tool_calls: BTreeMap<u32, PartialToolCall>,
-    invalid: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-struct PartialToolCall {
-    id: Option<String>,
-    type_: Option<String>,
-    name: Option<String>,
-    arguments: String,
-}
 
 struct StreamReadFailure {
     operator_message: String,
@@ -113,215 +85,6 @@ fn validate_stream_chunk(
         ),
         response_visibility: response_visibility.clone(),
     })
-}
-
-impl OpenAiReasoningStreamCapture {
-    pub(super) fn new(
-        capture_context: Option<ReasoningContinuationCaptureContext>,
-        upstream_protocol: UpstreamProtocol,
-        request_id: RequestId,
-    ) -> Self {
-        let (scope, feature_enabled, source_is_openai_compatible_generation) = match capture_context
-        {
-            Some(context) => (
-                Some(context.scope),
-                context.feature_enabled,
-                context.target_is_openai_compatible_generation,
-            ),
-            None => (None, false, false),
-        };
-        let target_is_openai_compatible_generation =
-            source_is_openai_compatible_generation && upstream_protocol == UpstreamProtocol::Openai;
-        Self {
-            request_id,
-            scope,
-            feature_enabled,
-            target_is_openai_compatible_generation,
-            choices: BTreeMap::new(),
-            parse_failed_count: 0,
-        }
-    }
-
-    pub(super) fn observe_events(&mut self, events: &[SseEvent]) {
-        if !self.feature_enabled || !self.target_is_openai_compatible_generation {
-            return;
-        }
-
-        for event in events {
-            let data = event.data.trim();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(data) else {
-                self.parse_failed_count += 1;
-                continue;
-            };
-            self.observe_chunk_value(&value);
-        }
-    }
-
-    pub(super) async fn finish(self, app_state: &Arc<AppState>, observed_at_ms: i64) {
-        if !self.feature_enabled
-            || !self.target_is_openai_compatible_generation
-            || self.parse_failed_count > 0
-        {
-            return;
-        }
-
-        let Some(scope) = self.scope.clone() else {
-            return;
-        };
-        let request_id = self.request_id.clone();
-        let snapshots = self.snapshots(scope, observed_at_ms);
-        for snapshot in snapshots {
-            if let Err(err) = app_state
-                .reasoning_continuation_store
-                .insert(snapshot, observed_at_ms)
-                .await
-            {
-                crate::debug_event!(
-                    "proxy.reasoning_continuation_cache_failed",
-                    request_id = &request_id,
-                    error = err,
-                );
-            }
-        }
-    }
-
-    fn observe_chunk_value(&mut self, value: &Value) {
-        let Some(choices) = value
-            .as_object()
-            .and_then(|chunk| chunk.get("choices"))
-            .and_then(Value::as_array)
-        else {
-            self.parse_failed_count += 1;
-            return;
-        };
-
-        for choice in choices {
-            let choice_index = choice
-                .get("index")
-                .and_then(Value::as_u64)
-                .and_then(|index| u32::try_from(index).ok())
-                .unwrap_or(0);
-            let Some(delta) = choice.get("delta").and_then(Value::as_object) else {
-                continue;
-            };
-            let choice_capture = self.choices.entry(choice_index).or_default();
-
-            if let Some(reasoning_content) = delta
-                .get("reasoning_content")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-            {
-                choice_capture.reasoning_content.push_str(reasoning_content);
-            }
-
-            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for tool_call in tool_calls {
-                    if !choice_capture.observe_tool_call_delta(tool_call) {
-                        choice_capture.invalid = true;
-                    }
-                }
-            }
-        }
-    }
-
-    fn snapshots(
-        self,
-        scope: ReasoningContinuationScope,
-        observed_at_ms: i64,
-    ) -> Vec<crate::service::runtime::ReasoningContinuationSnapshot> {
-        let mut snapshots = Vec::new();
-        for choice in self.choices.into_values() {
-            if choice.reasoning_content.is_empty() || choice.invalid {
-                continue;
-            }
-            let Some(tool_calls) = choice.tool_calls_value() else {
-                continue;
-            };
-            match continuation_snapshot_from_parts(
-                scope.clone(),
-                &choice.reasoning_content,
-                &tool_calls,
-                observed_at_ms,
-            ) {
-                Ok(Some(snapshot)) => snapshots.push(snapshot),
-                Ok(None) | Err(_) => {}
-            }
-        }
-        snapshots
-    }
-}
-
-impl StreamChoiceCapture {
-    fn observe_tool_call_delta(&mut self, tool_call: &Value) -> bool {
-        let Some(index) = tool_call
-            .get("index")
-            .and_then(Value::as_u64)
-            .and_then(|index| u32::try_from(index).ok())
-        else {
-            return false;
-        };
-        let partial = self.tool_calls.entry(index).or_default();
-
-        if let Some(id) = tool_call
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        {
-            if partial.id.as_deref().is_some_and(|existing| existing != id) {
-                return false;
-            }
-            partial.id = Some(id.to_string());
-        }
-        if let Some(type_) = tool_call
-            .get("type")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        {
-            partial.type_ = Some(type_.to_string());
-        }
-        if let Some(function) = tool_call.get("function").and_then(Value::as_object) {
-            if let Some(name_delta) = function
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-            {
-                partial
-                    .name
-                    .get_or_insert_with(String::new)
-                    .push_str(name_delta);
-            }
-            if let Some(arguments_delta) = function.get("arguments").and_then(Value::as_str) {
-                partial.arguments.push_str(arguments_delta);
-            }
-        }
-
-        true
-    }
-
-    fn tool_calls_value(&self) -> Option<Value> {
-        if self.tool_calls.is_empty() {
-            return None;
-        }
-
-        let mut tool_calls = Vec::with_capacity(self.tool_calls.len());
-        for partial in self.tool_calls.values() {
-            let id = partial.id.as_deref().filter(|value| !value.is_empty())?;
-            let name = partial.name.as_deref().filter(|value| !value.is_empty())?;
-            tool_calls.push(json!({
-                "id": id,
-                "type": partial.type_.as_deref().unwrap_or("function"),
-                "function": {
-                    "name": name,
-                    "arguments": partial.arguments,
-                }
-            }));
-        }
-
-        Some(Value::Array(tool_calls))
-    }
 }
 
 pub(super) async fn sync_stream_usage_to_log_context(
@@ -586,7 +349,6 @@ async fn finalize_guarded_stream_success(
     coordinator: &ProxyTerminationCoordinator,
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     mut transformer: StreamTransformer,
-    reasoning_stream_capture: OpenAiReasoningStreamCapture,
     url: &str,
     status_code: StatusCode,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
@@ -595,9 +357,6 @@ async fn finalize_guarded_stream_success(
 ) {
     await_cleanup_with_total_watchdog(cancellation, coordinator, async {
         let completed_at = Utc::now().timestamp_millis();
-        reasoning_stream_capture
-            .finish(app_state, completed_at)
-            .await;
         let usage = transformer.parse_usage_info();
         let usage_normalization = transformer.parse_usage_normalization();
         let context_snapshot = {
@@ -656,7 +415,6 @@ async fn run_guarded_stream_worker(
     source_circuit_permit: Option<SourceCircuitProbePermit>,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
-    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     proxy_timeouts: ProxyTimeoutConfig,
     sse_response_limits: SseResponseConfig,
     response_visibility: ResponseVisibilityTracker,
@@ -667,8 +425,6 @@ async fn run_guarded_stream_worker(
     let mut stream = response.bytes_stream();
     let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
     let mut parser = SseParser::new(sse_response_limits.clone());
-    let mut reasoning_stream_capture =
-        OpenAiReasoningStreamCapture::new(reasoning_capture, upstream_protocol, request_id.clone());
     let mut saw_nonempty_raw_body = false;
     let mut active_read_deadline = None;
 
@@ -874,7 +630,6 @@ async fn run_guarded_stream_worker(
             };
 
             if let SseFrame::Event(event) = frame {
-                reasoning_stream_capture.observe_events(std::slice::from_ref(&event));
                 let transform_output = transformer.transform_event_with_observation(event);
                 if transform_output.meaningful_output_observed {
                     cancellation.timing().mark_first_token(
@@ -944,7 +699,6 @@ async fn run_guarded_stream_worker(
                             &coordinator,
                             &log_context,
                             transformer,
-                            reasoning_stream_capture,
                             &url,
                             status_code,
                             cost_catalog_version.as_ref(),
@@ -1035,7 +789,6 @@ async fn run_guarded_stream_worker(
         &coordinator,
         &log_context,
         transformer,
-        reasoning_stream_capture,
         &url,
         status_code,
         cost_catalog_version.as_ref(),
@@ -1059,7 +812,6 @@ pub(super) async fn handle_streaming_response_guarded(
     source_circuit_permit: Option<SourceCircuitProbePermit>,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
-    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     proxy_timeouts: ProxyTimeoutConfig,
     sse_response_limits: SseResponseConfig,
     response_visibility: ResponseVisibilityTracker,
@@ -1123,7 +875,6 @@ pub(super) async fn handle_streaming_response_guarded(
             source_circuit_permit,
             downstream_protocol,
             upstream_protocol,
-            reasoning_capture,
             proxy_timeouts,
             sse_response_limits,
             response_visibility.clone(),

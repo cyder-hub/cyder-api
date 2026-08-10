@@ -4,7 +4,6 @@ import { useI18n } from "vue-i18n";
 
 import * as modelService from "@/services/models";
 import * as providerService from "@/services/providers";
-import * as requestPatchService from "@/services/requestPatch";
 import { normalizeError } from "@/utils/error";
 import { toastController } from "@/services/uiFeedback";
 import { useProviderStore } from "@/store/providerStore";
@@ -18,7 +17,6 @@ import type {
   ModelSourceExplain,
   UpstreamSource,
 } from "@/services/types";
-import type { ReasoningConfigActions } from "@/components/reasoning/types";
 import type { EditingModelData } from "../types";
 import {
   createSourceConfigDraft,
@@ -57,23 +55,6 @@ export function useModelEdit(
   const costManager = useCostPage();
 
   let fetchSequence = 0;
-
-  const reasoningActions: ReasoningConfigActions = {
-    getCatalog: requestPatchService.getReasoningConfigCatalog,
-    getConfig: requestPatchService.getModelReasoningConfig,
-    previewSaved: requestPatchService.previewModelReasoningConfig,
-    previewDraft: (ownerId, payload) =>
-      requestPatchService.previewModelReasoningConfigDraft(
-        ownerId,
-        payload as import("@/services/types").ModelReasoningConfigPayload,
-      ),
-    updateConfig: (ownerId, payload) =>
-      requestPatchService.updateModelReasoningConfig(
-        ownerId,
-        payload as import("@/services/types").ModelReasoningConfigPayload,
-      ),
-    deleteConfig: requestPatchService.deleteModelReasoningConfig,
-  };
 
   const currentProvider = computed(() =>
     providerStore.getProviderById(editingData.value?.provider_id),
@@ -140,7 +121,6 @@ export function useModelEdit(
           model_name: detail.model.model_name,
           real_model_name: detail.model.real_model_name ?? "",
           is_enabled: detail.model.is_enabled,
-          request_patches: detail.request_patches || [],
         };
       }
     } catch (error: unknown) {
@@ -257,24 +237,6 @@ export function useModelEdit(
     }
   };
 
-  const handleReasoningConfigSaved = () => {
-    void Promise.all([
-      providerStore.fetchProviders(),
-      modelStore.fetchModels(),
-    ]).catch((error) => {
-      console.error("Failed to refresh stores after reasoning config save:", error);
-    });
-  };
-
-  const handleRuntimeFeatureConfigSaved = () => {
-    void Promise.all([
-      providerStore.fetchProviders(),
-      modelStore.fetchModels(),
-    ]).catch((error) => {
-      console.error("Failed to refresh stores after runtime feature config save:", error);
-    });
-  };
-
   const handleNavigateToModels = () => {
     void router.push("/model");
   };
@@ -354,13 +316,10 @@ export function useModelEdit(
     currentProvider,
     selectedCatalog,
     selectedCatalogVersions,
-    reasoningActions,
     fetchData,
     handleSaveModel,
     handleSaveSourceConfig,
     handleExplainSourceConfig,
-    handleReasoningConfigSaved,
-    handleRuntimeFeatureConfigSaved,
     handleNavigateToModels,
     handleNavigateToProviders,
     handleOpenSelectedCostCatalog,

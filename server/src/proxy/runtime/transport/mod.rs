@@ -34,7 +34,7 @@ use crate::{
         source_governance::record_source_failure_or_release_probe,
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
-    service::runtime::{ReasoningContinuationScope, SourceCircuitProbePermit},
+    service::runtime::SourceCircuitProbePermit,
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
         upstream_response::normalize_content_type,
@@ -84,13 +84,6 @@ pub(in crate::proxy) struct ProxyRequestFailure {
     pub log_context: RequestLogContext,
 }
 
-#[derive(Clone, Debug)]
-pub(in crate::proxy) struct ReasoningContinuationCaptureContext {
-    pub scope: ReasoningContinuationScope,
-    pub feature_enabled: bool,
-    pub target_is_openai_compatible_generation: bool,
-}
-
 fn finalize_send_failure_log_context(
     context: &mut RequestLogContext,
     url: &str,
@@ -122,7 +115,6 @@ pub(in crate::proxy) async fn send_materialized_request(
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
-    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     response_visibility: ResponseVisibilityTracker,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let coordinator = cancellation.coordinator();
@@ -260,7 +252,6 @@ pub(in crate::proxy) async fn send_materialized_request(
             source_circuit_permit,
             downstream_protocol,
             upstream_protocol,
-            reasoning_capture.clone(),
             proxy_timeouts.clone(),
             sse_response_limits,
             response_visibility.clone(),
@@ -292,7 +283,6 @@ pub(in crate::proxy) async fn send_materialized_request(
             api_key_request_lease,
             source_circuit_permit,
             response_mode,
-            reasoning_capture.as_ref(),
             upstream_error_body_limit_bytes,
             &client_bundle.proxy_request.non_stream_response,
             proxy_timeouts,

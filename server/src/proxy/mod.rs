@@ -7,7 +7,6 @@ mod handlers;
 pub(crate) mod logging;
 mod models;
 mod pipeline;
-pub(crate) mod reasoning_suffix;
 mod request;
 mod request_context;
 mod requested_model;
@@ -36,4 +35,4 @@ pub(crate) use error::{
 };
 pub(crate) use request_context::ProxyRequestContext;
 pub use router::create_proxy_router;
-pub(crate) use runtime::request_patch::{apply_request_patches, load_runtime_request_patch_trace};
+pub(crate) use runtime::request_patch::apply_request_patches;

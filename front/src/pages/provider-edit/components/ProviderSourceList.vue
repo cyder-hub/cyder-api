@@ -101,6 +101,16 @@
               <TableCell class="text-right">
                 <div class="flex items-center justify-end gap-1">
                   <Button
+                    variant="outline"
+                    size="sm"
+                    class="mr-1 text-gray-700"
+                    :aria-label="$t('providerEditPage.sources.requestPatchAction')"
+                    :disabled="isBusy(source.id)"
+                    @click="emit('requestPatch', source.id)"
+                  >
+                    {{ $t("providerEditPage.sources.requestPatchAction") }}
+                  </Button>
+                  <Button
                     variant="ghost"
                     size="icon-sm"
                     class="text-gray-600"
@@ -208,6 +218,9 @@
             <Button variant="ghost" size="sm" class="w-full justify-center" :disabled="isBusy(source.id)" @click="openEdit(source)">
               <Pencil class="mr-1.5 h-3.5 w-3.5" />
               {{ $t("common.edit") }}
+            </Button>
+            <Button variant="outline" size="sm" class="w-full justify-center" :disabled="isBusy(source.id)" @click="emit('requestPatch', source.id)">
+              {{ $t("providerEditPage.sources.requestPatchAction") }}
             </Button>
             <Button variant="ghost" size="sm" class="w-full justify-center text-gray-600" :disabled="isBusy(source.id)" @click="toggleDefault(source)">
               <Star class="mr-1.5 h-3.5 w-3.5" :class="source.is_default ? 'fill-current' : ''" />
@@ -352,6 +365,7 @@ const isDesktop = useMediaQuery("(min-width: 768px)");
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
 const emit = defineEmits<{
   checkSource: [sourceId: number];
+  requestPatch: [sourceId: number];
 }>();
 const {
   draft,

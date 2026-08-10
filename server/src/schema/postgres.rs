@@ -191,40 +191,15 @@ diesel::table! {
 }
 
 diesel::table! {
-    reasoning_config (id) {
-        id -> Int8,
-        scope_kind -> Text,
-        provider_id -> Nullable<Int8>,
-        model_id -> Nullable<Int8>,
-        mode -> Text,
-        family_key -> Nullable<Text>,
-        deleted_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
+    use diesel::sql_types::{Bool, Int8, Nullable, Text};
 
-diesel::table! {
-    reasoning_config_preset (id) {
+    request_patch_variant (id) {
         id -> Int8,
-        config_id -> Int8,
-        preset_key -> Text,
-        expose_in_models -> Bool,
-        is_enabled -> Bool,
-        deleted_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    runtime_feature_config (id) {
-        id -> Int8,
-        scope_kind -> Text,
-        provider_id -> Nullable<Int8>,
+        source_id -> Int8,
         model_id -> Nullable<Int8>,
-        feature_key -> Text,
+        suffix -> Nullable<Text>,
         enabled -> Bool,
+        expose_in_models -> Bool,
         deleted_at -> Nullable<Int8>,
         created_at -> Int8,
         updated_at -> Int8,
@@ -327,8 +302,7 @@ diesel::table! {
         api_key_id -> Int8,
         requested_model_name -> Nullable<Text>,
         base_requested_model_name -> Nullable<Text>,
-        resolved_reasoning_suffix -> Nullable<Text>,
-        resolved_reasoning_preset -> Nullable<Text>,
+        resolved_patch_suffix -> Nullable<Text>,
         request_received_at -> Int8,
         upstream_request_sent_at -> Nullable<Int8>,
         upstream_response_headers_at -> Nullable<Int8>,
@@ -450,14 +424,12 @@ diesel::table! {
 
     request_patch_rule (id) {
         id -> Int8,
-        provider_id -> Nullable<Int8>,
-        model_id -> Nullable<Int8>,
+        variant_id -> Int8,
         placement -> RequestPatchPlacementMapping,
         target -> Text,
         operation -> RequestPatchOperationMapping,
         value_json -> Nullable<Text>,
         description -> Nullable<Text>,
-        is_enabled -> Bool,
         deleted_at -> Nullable<Int8>,
         created_at -> Int8,
         updated_at -> Int8,
@@ -477,9 +449,6 @@ diesel::joinable!(model_source_binding -> model (model_id));
 diesel::joinable!(model_source_binding -> upstream_source (source_id));
 diesel::joinable!(manager_totp_recovery_code -> manager_credential (manager_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
-diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
-diesel::joinable!(runtime_feature_config -> model (model_id));
-diesel::joinable!(runtime_feature_config -> provider (provider_id));
 diesel::joinable!(request_log -> api_key (api_key_id));
 diesel::joinable!(request_log -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
@@ -487,8 +456,9 @@ diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
 diesel::joinable!(request_log -> upstream_source (source_id));
-diesel::joinable!(request_patch_rule -> model (model_id));
-diesel::joinable!(request_patch_rule -> provider (provider_id));
+diesel::joinable!(request_patch_rule -> request_patch_variant (variant_id));
+diesel::joinable!(request_patch_variant -> model (model_id));
+diesel::joinable!(request_patch_variant -> upstream_source (source_id));
 diesel::joinable!(upstream_source -> provider (provider_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
@@ -510,9 +480,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     model_source_binding,
     provider,
     provider_api_key,
-    reasoning_config,
-    reasoning_config_preset,
-    runtime_feature_config,
+    request_patch_variant,
     request_log,
     request_patch_rule,
     upstream_source,

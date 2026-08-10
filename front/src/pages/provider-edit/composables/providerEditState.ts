@@ -177,7 +177,6 @@ export function createEmptyEditingProviderData(): EditingProviderData {
     upstream_sources: [],
     models: [],
     provider_keys: [],
-    request_patches: [],
   };
 }
 

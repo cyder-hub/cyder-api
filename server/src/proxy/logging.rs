@@ -55,8 +55,7 @@ pub struct RequestLogContext {
     pub provider_api_key_id: Option<i64>,
     pub requested_model_name: String,
     pub base_requested_model_name: String,
-    pub resolved_reasoning_suffix: Option<String>,
-    pub resolved_reasoning_preset: Option<String>,
+    pub resolved_patch_suffix: Option<String>,
     pub model_name: String,
     pub real_model_name: String,
     pub downstream_protocol: DownstreamProtocol,
@@ -117,8 +116,7 @@ impl RequestLogContext {
             provider_api_key_id,
             requested_model_name: requested_model_name.to_string(),
             base_requested_model_name: requested_model_name.to_string(),
-            resolved_reasoning_suffix: None,
-            resolved_reasoning_preset: None,
+            resolved_patch_suffix: None,
             model_name: model.model_name.clone(),
             real_model_name: real_model_name.to_string(),
             downstream_protocol,
@@ -159,12 +157,10 @@ impl RequestLogContext {
     pub(super) fn set_model_resolution_trace(
         &mut self,
         base_requested_model_name: &str,
-        resolved_reasoning_suffix: Option<&str>,
-        resolved_reasoning_preset: Option<&str>,
+        resolved_patch_suffix: Option<&str>,
     ) {
         self.base_requested_model_name = base_requested_model_name.to_string();
-        self.resolved_reasoning_suffix = resolved_reasoning_suffix.map(str::to_string);
-        self.resolved_reasoning_preset = resolved_reasoning_preset.map(str::to_string);
+        self.resolved_patch_suffix = resolved_patch_suffix.map(str::to_string);
     }
 
     pub(crate) fn set_source_endpoint_snapshot(&mut self, normalized_endpoint: &str) {
@@ -445,8 +441,7 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         api_key_id: context.api_key_id,
         requested_model_name: Some(context.requested_model_name.clone()),
         base_requested_model_name: Some(context.base_requested_model_name.clone()),
-        resolved_reasoning_suffix: context.resolved_reasoning_suffix.clone(),
-        resolved_reasoning_preset: context.resolved_reasoning_preset.clone(),
+        resolved_patch_suffix: context.resolved_patch_suffix.clone(),
         downstream_protocol: context.downstream_protocol,
         overall_status: context.overall_status.clone(),
         final_error_code: context.final_error_code.clone(),

@@ -362,8 +362,7 @@ fn execution_plan_build_error(error: ExecutionPlanBuildError) -> ProxyError {
             ExecutionStage::Parse,
             Some(message.clone()),
         ),
-        ExecutionPlanBuildError::TargetNotFound(_)
-        | ExecutionPlanBuildError::UnsupportedCapability(_) => (
+        ExecutionPlanBuildError::TargetNotFound(_) => (
             ProxyErrorCode::UnsupportedCapabilityError,
             ExecutionStage::Capability,
             Some(message.clone()),
@@ -459,11 +458,6 @@ mod tests {
             ),
             (
                 ExecutionPlanBuildError::TargetNotFound("missing target".to_string()),
-                ProxyErrorCode::UnsupportedCapabilityError,
-                ExecutionStage::Capability,
-            ),
-            (
-                ExecutionPlanBuildError::UnsupportedCapability("unsupported reasoning".to_string()),
                 ProxyErrorCode::UnsupportedCapabilityError,
                 ExecutionStage::Capability,
             ),

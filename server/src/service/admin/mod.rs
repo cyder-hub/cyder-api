@@ -10,9 +10,7 @@ use self::cost::CostAdminService;
 use self::model::ModelAdminService;
 use self::mutation::AdminMutationRunner;
 use self::provider::ProviderAdminService;
-use self::reasoning_config::ReasoningConfigAdminService;
 use self::request_patch::RequestPatchAdminService;
-use self::runtime_feature_config::RuntimeFeatureConfigAdminService;
 
 pub mod api_key;
 pub mod audit;
@@ -21,9 +19,7 @@ pub mod cost;
 pub mod model;
 pub mod mutation;
 pub mod provider;
-pub mod reasoning_config;
 pub mod request_patch;
-pub mod runtime_feature_config;
 
 // Management write paths must be owned here. Controllers may parse HTTP payloads and
 // shape responses, but cache invalidation, audit emission, and write orchestration
@@ -35,8 +31,6 @@ pub struct AdminServices {
     pub model: Arc<ModelAdminService>,
     pub request_patch: Arc<RequestPatchAdminService>,
     pub cost: Arc<CostAdminService>,
-    pub reasoning_config: Arc<ReasoningConfigAdminService>,
-    pub runtime_feature_config: Arc<RuntimeFeatureConfigAdminService>,
     pub secret_encryption: Arc<SecretEncryptionService>,
 }
 
@@ -61,12 +55,6 @@ impl AdminServices {
             model: Arc::new(ModelAdminService::new(Arc::clone(&mutation_runner))),
             request_patch: Arc::new(RequestPatchAdminService::new(Arc::clone(&mutation_runner))),
             cost: Arc::new(CostAdminService::new(Arc::clone(&mutation_runner))),
-            reasoning_config: Arc::new(ReasoningConfigAdminService::new(Arc::clone(
-                &mutation_runner,
-            ))),
-            runtime_feature_config: Arc::new(RuntimeFeatureConfigAdminService::new(Arc::clone(
-                &mutation_runner,
-            ))),
             secret_encryption,
         }
     }
@@ -110,14 +98,6 @@ mod tests {
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
             services.cost.mutation_runner(),
-        ));
-        assert!(Arc::ptr_eq(
-            services.provider.mutation_runner(),
-            services.reasoning_config.mutation_runner(),
-        ));
-        assert!(Arc::ptr_eq(
-            services.provider.mutation_runner(),
-            services.runtime_feature_config.mutation_runner(),
         ));
         assert!(Arc::ptr_eq(&services.secret_encryption, &secret_encryption,));
         assert!(Arc::ptr_eq(

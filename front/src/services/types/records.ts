@@ -15,8 +15,7 @@ export interface RecordListItem {
   api_key_id: number;
   requested_model_name?: string | null;
   base_requested_model_name?: string | null;
-  resolved_reasoning_suffix?: string | null;
-  resolved_reasoning_preset?: string | null;
+  resolved_patch_suffix?: string | null;
   overall_status: string;
   request_received_at: number;
   upstream_request_sent_at: number | null;

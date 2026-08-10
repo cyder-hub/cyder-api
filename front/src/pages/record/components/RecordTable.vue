@@ -38,6 +38,12 @@
         <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
           <MobileField :label="$t('recordPage.table.provider')" :value="record.providerName" />
           <MobileField
+            v-if="record.resolved_patch_suffix"
+            :label="$t('recordPage.table.patchSuffix')"
+            :value="record.resolved_patch_suffix"
+            mono
+          />
+          <MobileField
             :label="$t('recordPage.table.source')"
             :value="record.sourceDisplay"
             mono
@@ -121,6 +127,9 @@
             <TableCell>
               <div class="max-w-[18rem]">
                 <div class="font-medium">{{ record.displayRequestedModelName }}</div>
+                <div v-if="record.resolved_patch_suffix" class="mt-1 font-mono text-[11px] text-gray-500">
+                  {{ $t("recordPage.table.patchSuffix") }}: {{ record.resolved_patch_suffix }}
+                </div>
                 <div class="mt-1 truncate font-mono text-[11px] text-gray-500">
                   {{ record.request_id }}
                 </div>

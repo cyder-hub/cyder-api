@@ -3,11 +3,8 @@ import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
 import * as providerService from "@/services/providers";
-import * as requestPatchService from "@/services/requestPatch";
 import { toastController } from "@/services/uiFeedback";
-import { useProviderStore } from "@/store/providerStore";
 import type { ProviderListItem } from "@/services/types";
-import type { ReasoningConfigActions } from "@/components/reasoning/types";
 import type { EditingProviderData } from "../types";
 import { createEmptyEditingProviderData } from "./providerEditState";
 import { mapProviderApiKeySummary } from "./providerEditState";
@@ -15,7 +12,6 @@ import { mapProviderApiKeySummary } from "./providerEditState";
 export function useProviderEdit() {
   const { t } = useI18n();
   const route = useRoute();
-  const providerStore = useProviderStore();
 
   const isLoading = ref(true);
   const errorMsg = ref<string | null>(null);
@@ -35,19 +31,6 @@ export function useProviderEdit() {
       ? t("providerEditPage.titleEdit")
       : t("providerEditPage.titleAdd"),
   );
-
-  const reasoningActions: ReasoningConfigActions = {
-    getCatalog: requestPatchService.getReasoningConfigCatalog,
-    getConfig: requestPatchService.getProviderReasoningConfig,
-    previewSaved: requestPatchService.previewProviderReasoningConfig,
-    previewDraft: requestPatchService.previewProviderReasoningConfigDraft,
-    updateConfig: (ownerId, payload) =>
-      requestPatchService.updateProviderReasoningConfig(
-        ownerId,
-        payload as import("@/services/types").ProviderReasoningConfigPayload,
-      ),
-    deleteConfig: requestPatchService.deleteProviderReasoningConfig,
-  };
 
   const fetchProviderDetail = async (
     id: number,
@@ -70,18 +53,6 @@ export function useProviderEdit() {
   const getEmptyProvider = (): EditingProviderData => ({
     ...createEmptyEditingProviderData(),
   });
-
-  const handleReasoningConfigSaved = () => {
-    void providerStore.fetchProviders().catch((error) => {
-      console.error("Failed to refresh providers after reasoning config save:", error);
-    });
-  };
-
-  const handleRuntimeFeatureConfigSaved = () => {
-    void providerStore.fetchProviders().catch((error) => {
-      console.error("Failed to refresh providers after runtime feature config save:", error);
-    });
-  };
 
   const loadProvider = async () => {
     isLoading.value = true;
@@ -120,7 +91,6 @@ export function useProviderEdit() {
           provider_keys: detail.provider_keys
             .map(mapProviderApiKeySummary)
             .filter((key): key is NonNullable<typeof key> => key !== null),
-          request_patches: detail.request_patches || [],
         };
       } else {
         errorMsg.value = t("providerEditPage.alert.loadDataFailed", {
@@ -144,9 +114,6 @@ export function useProviderEdit() {
     errorMsg,
     editingData,
     pageTitle,
-    reasoningActions,
-    handleReasoningConfigSaved,
-    handleRuntimeFeatureConfigSaved,
     loadProvider,
   };
 }

@@ -421,6 +421,7 @@
     },
     "table": {
       "model": "模型",
+      "patchSuffix": "Patch 后缀",
       "requestId": "网关请求 ID",
       "provider": "渠道",
       "source": "Source",
@@ -466,6 +467,7 @@
         "selectionReason": "Source 选择原因",
         "selectionReasonUnknown": "未知（历史记录或未选定 Source）",
         "model": "模型",
+        "patchSuffix": "Patch 后缀",
         "realModel": "真实模型",
         "downstreamProtocol": "下游协议",
         "upstreamProtocol": "上游协议",
@@ -837,129 +839,164 @@
       "explainFailed": "解释 Source 选择失败：{error}"
     }
   },
-  "reasoningConfigPanel": {
-    "titles": {
-      "provider": "渠道推理配置",
-      "model": "模型推理配置"
-    },
+  "requestPatchVariant": {
+    "title": "请求改写",
+    "description": "查看 Source 绑定的 Base/后缀 Variant、四层评估和模型覆盖。",
     "actions": {
-      "save": "保存推理配置",
-      "clearProvider": "清空渠道配置",
-      "clearModel": "清空模型覆盖"
+      "addRule": "新增规则",
+      "addVariant": "新增 Variant",
+      "addModelRule": "新增模型规则",
+      "addModelSuffix": "新增模型后缀",
+      "allowModel": "允许此模型",
+      "deleteRule": "删除规则",
+      "deleteVariant": "删除 Variant",
+      "details": "详情",
+      "editRule": "编辑规则",
+      "editVariant": "编辑 Variant",
+      "preview": "预览",
+      "refresh": "刷新",
+      "restore": "恢复"
     },
-    "summary": {
-      "ownerConfig": "当前配置",
-      "providerDefault": "渠道默认",
-      "effectiveConfig": "最终配置"
+    "alert": {
+      "created": "请求改写 Variant 已创建。",
+      "updated": "请求改写 Variant 已更新。",
+      "deleted": "请求改写 Variant 已删除。",
+      "restored": "请求改写后缀继承已恢复。",
+      "saveFailed": "保存请求改写 Variant 失败：{error}",
+      "deleteFailed": "删除请求改写 Variant 失败：{error}"
+    },
+    "delete": {
+      "title": "删除请求改写 Variant？",
+      "description": "删除 Variant {variant}？它的规则和暴露元数据将不再生效。"
+    },
+    "restore": {
+      "title": "恢复请求改写继承？",
+      "description": "移除 Variant {variant} 的停用无规则覆盖，让 Source 后缀重新可以被继承。",
+      "confirm": "恢复继承"
+    },
+    "editor": {
+      "addTitle": "新增请求改写 Variant",
+      "editTitle": "编辑请求改写 Variant",
+      "description": "Variant 与其中全部规则一次保存。保存前会预览冲突和敏感目标。",
+      "readOnlyDescription": "Source 规则只作为只读证据展示；模型规则仍可独立编辑。",
+      "suffixPlaceholder": "例如：reasoning",
+      "suffixHelp": "留空表示 Base Variant。后缀只允许小写字母、数字和单个连字符。",
+      "enabledHelp": "停用的后缀 Variant 可以作为模型 tombstone。",
+      "exposeHelp": "将启用的后缀 Variant 暴露给下游模型发现。",
+      "rulesHelp": "规则先在本地编辑，随后随完整 Variant 一次提交。",
+      "addRuleTitle": "新增请求改写规则",
+      "editRuleTitle": "编辑请求改写规则",
+      "ruleDescription": "选择位置和目标；使用 SET 时填写 JSON 值。",
+      "selectPlacement": "选择位置",
+      "selectOperation": "选择操作",
+      "targetPlaceholderHeader": "authorization",
+      "targetPlaceholderQuery": "api-version",
+      "targetPlaceholderBody": "/generationConfig/temperature",
+      "targetHelpHEADER": "填写请求头名称；后端会拒绝保留的传输层请求头。",
+      "targetHelpQUERY": "填写查询参数名，不要包含 ?, &, = 或空白字符。",
+      "targetHelpBODY": "填写 JSON Pointer，例如 /model 或 /generationConfig/temperature。",
+      "valueHelp": "请求头和查询参数接受 JSON 标量；请求体接受任意 JSON 值。",
+      "valuePlaceholder": "填写合法 JSON，例如：\"Bearer token\"、true、1、null",
+      "removeValuePlaceholder": "REMOVE 不接受值。",
+      "descriptionPlaceholder": "可选：给运维和后续排障留下备注。"
+    },
+    "emptyRules": "这个 Variant 没有规则。",
+    "errors": {
+      "target": "目标不能为空。",
+      "required": "SET 规则必须填写 JSON 值。",
+      "suffixRequired": "这个模型 Variant 必须填写后缀。",
+      "invalid": "值必须是合法 JSON。",
+      "previewInvalid": "预览未生成可执行的有效 Variant。"
     },
     "fields": {
-      "patchFamily": "Patch 类型",
-      "preset": "预设",
-      "suffix": "后缀",
-      "runtime": "运行时",
+      "description": "描述",
       "enabled": "启用",
-      "models": "/models",
-      "patch": "Patch",
-      "reasoning": "推理"
+      "expose": "暴露到模型",
+      "operation": "操作",
+      "placement": "位置",
+      "rules": "规则",
+      "status": "状态",
+      "suffix": "后缀",
+      "target": "目标",
+      "value": "值",
+      "variant": "Variant"
     },
-    "modes": {
-      "inherit": "继承渠道",
-      "disabled": "停用",
-      "custom": "自定义"
+    "manager": {
+      "eyebrow": "Source 绑定的请求改写",
+      "description": "管理这个 Source 的 Base 和后缀 Variant；规则、暴露状态和运行时证据保持在同一作用域。",
+      "loading": "正在加载请求改写 Variant……",
+      "empty": "尚未配置 Variant。",
+      "emptyDescription": "新增 Base 或后缀 Variant，开始记录这个 Source 的请求变换。",
+      "totalVariants": "Variant 数",
+      "totalRules": "规则数",
+      "suffixVariants": "后缀 Variant",
+      "ruleCount": "{count} 条规则"
+    },
+    "model": {
+      "noSources": "当前模型没有可用的 Provider Source。",
+      "sourceSummary": "这个 Source 作用域有 {variants} 个 Variant",
+      "baseDescription": "Base 层解析 Source Base 和 Model Base 配置。",
+      "suffixDescription": "后缀层解析 Source Suffix 和 Model Suffix 配置。",
+      "sourceRulesReadOnly": "Source 规则（只读）"
+    },
+    "origins": {
+      "SourceBase": "Source Base",
+      "ModelBase": "Model Base",
+      "SourceSuffix": "Source Suffix",
+      "ModelSuffix": "Model Suffix"
+    },
+    "operations": {
+      "SET": "设置",
+      "REMOVE": "移除"
+    },
+    "placements": {
+      "HEADER": "请求头",
+      "QUERY": "查询参数",
+      "BODY": "请求体 JSON"
+    },
+    "preview": {
+      "title": "Variant 预览",
+      "valid": "有效",
+      "invalid": "需要处理",
+      "layers": "四层结果",
+      "ruleCount": "规则数",
+      "effectiveRules": "最终规则",
+      "affectedModels": "受影响模型",
+      "conflicts": "冲突数",
+      "executable": "可执行",
+      "exposed": "公开到模型目录",
+      "yes": "是",
+      "no": "否",
+      "dangerousTargets": "敏感目标",
+      "dangerousTitle": "确认敏感目标",
+      "dangerousDescription": "这个 Variant 会修改上游敏感目标。最终保存前请确认下列目标。",
+      "confirm": "确认并保存"
+    },
+    "explain": {
+      "layers": "四层评估",
+      "effective": "最终规则",
+      "conflictTitle": "发现请求改写冲突",
+      "conflictDescription": "Source/模型评估存在 {count} 个冲突。解决前运行时会 fail closed。"
     },
     "states": {
-      "unsaved": "未保存",
-      "review": "预览",
-      "supported": "支持",
-      "blocked": "阻断"
-    },
-    "sources": {
-      "providerDefault": "渠道默认",
-      "modelCustom": "模型自定义",
-      "modelDisabled": "模型停用",
-      "missing": "未配置",
-      "unknown": "未知"
-    },
-    "messages": {
-      "saveOwnerFirst": "请先保存对象，再配置推理后缀。",
-      "loading": "正在加载推理配置",
-      "modelReasoningUnsupported": "当前模型标记为不支持推理。仍可保存需要推理的预设，但运行时预览会标记为不支持。",
-      "selectPatchFamily": "选择 Patch 类型",
-      "previewRefreshing": "正在刷新 Patch 预览。",
-      "familyTargets": "适用目标: {targets}。",
-      "familyIncompatible": "适用目标: {targets}；当前渠道解析为 {current}。",
-      "familyTargetsShort": "适用 {targets}",
-      "familyCompatibleShort": "兼容 {current}",
-      "presetUnsupported": "当前 Patch 类型不支持这个预设。",
-      "reviewOnly": "启用这个预设后，保存时才会在运行时应用。",
-      "presetDisabled": "这个预设未启用。",
-      "runtimeUnsupported": "运行时预览标记为不支持。",
-      "runtimeSupported": "运行时预览可用。",
-      "disabledMode": "当前模型已停用推理后缀。",
-      "none": "无"
-    },
-    "alert": {
-      "selectPatchFamily": "请先选择推理 Patch 类型。",
-      "previewFailed": "预览推理配置草稿失败。",
-      "savedPreviewFailed": "当前 Source 组合无法生成已保存配置预览；配置仍可编辑。",
-      "loadFailed": "加载推理配置失败。",
-      "saveFailed": "保存推理配置失败。",
-      "clearFailed": "清空推理配置失败。",
-      "saved": "推理配置已保存。",
-      "draftCleared": "推理配置草稿已清空。",
-      "cleared": "推理配置已清空。"
-    }
-  },
-  "runtimeFeatureConfigPanel": {
-    "titles": {
-      "provider": "渠道运行时特性",
-      "model": "模型运行时特性"
-    },
-    "features": {
-      "openaiReasoningContentRepair": {
-        "label": "Reasoning 回调",
-        "description": "为兼容 OpenAI 工具续写请求恢复缓存的 reasoning_content。"
-      }
-    },
-    "actions": {
-      "saveProvider": "保存渠道默认",
-      "saveModel": "保存模型覆盖",
-      "clearProvider": "清空渠道默认",
-      "clearModel": "继承渠道"
-    },
-    "summary": {
-      "ownerConfig": "当前配置",
-      "providerDefault": "渠道默认",
-      "effective": "最终值"
-    },
-    "fields": {
-      "providerDefault": "渠道默认",
-      "modelOverride": "模型覆盖"
-    },
-    "sources": {
-      "defaultFalse": "默认关闭",
-      "providerDefault": "渠道默认",
+      "base": "Base",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "sourceVariant": "Source",
       "modelOverride": "模型覆盖",
-      "unknown": "未知"
+      "metadataOverride": "元数据覆盖",
+      "metadataOverrideDescription": "已启用但没有模型规则；当前继承的最终集合包含 {count} 条规则。",
+      "tombstone": "停用 tombstone",
+      "tombstoneDescription": "这个停用且无规则的 Variant 会遮蔽继承的后缀；恢复操作会删除 tombstone。",
+      "sourceDisabled": "Source 已停用",
+      "unboundDormant": "未绑定 / dormant"
     },
-    "values": {
-      "enabled": "启用",
-      "disabled": "停用",
-      "missing": "未配置"
-    },
-    "messages": {
-      "reasoningIndependent": "推理后缀配置与运行时修复相互独立。启用 reasoning_config 不会自动启用 reasoning_content 修复。",
-      "saveOwnerFirst": "请先保存对象，再配置运行时特性。",
-      "loading": "正在加载运行时特性配置",
-      "providerDefaultHelp": "这个默认值会应用到未配置模型覆盖的下游模型。",
-      "modelOverrideHelp": "保存后会创建模型覆盖。清空后会重新继承渠道默认值。"
-    },
-    "alert": {
-      "loadFailed": "加载运行时特性配置失败。",
-      "saveFailed": "保存运行时特性配置失败。",
-      "clearFailed": "清空运行时特性配置失败。",
-      "saved": "运行时特性配置已保存。",
-      "cleared": "运行时特性配置已清空。"
+    "status": {
+      "Effective": "生效",
+      "Overridden": "已覆盖",
+      "Conflicted": "冲突",
+      "Masked": "已遮蔽",
+      "Dormant": "休眠"
     }
   },
   "apiKeyPage": {
@@ -1267,7 +1304,7 @@
       },
       "logicalProvider": {
         "title": "逻辑 Provider",
-        "description": "负责身份、模型、凭据以及 Provider 级配置。"
+        "description": "负责身份、模型、凭据以及 Source 绑定的配置。"
       },
       "initialSource": {
         "title": "初始 Source",
@@ -1275,12 +1312,7 @@
       },
       "advanced": {
         "title": "高级",
-        "description": "在这里管理额外 API Key、更多模型、request patch 和运行时检查。"
-      },
-      "advancedConfig": {
-        "title": "推理设置",
-        "description": "管理这个渠道的推理后缀和回调修复。",
-        "scopeDescription": "这里的推理、运行时特性和请求改写是临时的 Provider/Model 全局设置，不绑定任何 Source。"
+        "description": "在这里管理额外 API Key、更多模型和运行时检查。"
       },
       "modelsDescription": "这里可直接编辑模型名称、映射模型名称、Source 配置摘要和启用状态。完整配置仍然留在 ModelEdit。"
     },
@@ -1324,81 +1356,6 @@
       "mutationSuccess": "Provider 凭据已更新。",
       "mutationFailed": "凭据操作失败：{error}。由于持久化后可能发生运行时激活失败，页面已重新拉取保存状态。",
       "revealFailed": "查看 Provider 凭据失败：{error}"
-    },
-    "requestPatch": {
-      "title": "请求改写",
-      "description": "管理会被下游模型继承的渠道直接规则。模型级 explain 和冲突诊断仍在模型页面查看。",
-      "directTitle": "渠道直接规则",
-      "directDescription": "渠道规则会被下游模型继承；完全相同目标上的模型规则可以覆盖它们。",
-      "addRule": "新增规则",
-      "emptyDirect": "当前渠道还没有配置直接请求改写规则。",
-      "noDescription": "无描述",
-      "placements": {
-        "HEADER": "请求头",
-        "QUERY": "查询参数",
-        "BODY": "请求体 JSON"
-      },
-      "operations": {
-        "SET": "设置",
-        "REMOVE": "移除"
-      },
-      "fields": {
-        "value": "值",
-        "description": "描述",
-        "trace": "说明",
-        "enabled": "启用",
-        "ruleId": "规则 ID"
-      },
-      "states": {
-        "disabled": "已停用",
-        "enabled": "已启用"
-      },
-      "messages": {
-        "providerDirect": "渠道直接规则。继承、生效和冲突诊断请在对应模型页面查看。"
-      },
-      "editor": {
-        "addTitle": "新增渠道请求改写",
-        "editTitle": "编辑渠道请求改写",
-        "description": "为请求头、查询参数或请求体 JSON Pointer 目标创建渠道直接规则。",
-        "placement": "位置",
-        "operation": "操作",
-        "selectPlacement": "选择位置",
-        "selectOperation": "选择操作",
-        "target": "目标",
-        "targetPlaceholderHeader": "authorization",
-        "targetPlaceholderQuery": "api-version",
-        "targetPlaceholderBody": "/generationConfig/temperature",
-        "valueJson": "JSON 值",
-        "valueHelp": "请求头和查询参数只接受 JSON 标量值；请求体可以使用任意 JSON 值。",
-        "descriptionLabel": "描述",
-        "descriptionPlaceholder": "给运维或后续排障留下可读备注。",
-        "enabledTitle": "已启用",
-        "enabledDescription": "关闭后规则仍保留，但运行时不会应用。",
-        "targetHelpHeader": "填写请求头名称。保留的传输层请求头会被后端直接拒绝。",
-        "targetHelpQuery": "填写查询参数名，不要包含 ?, &, = 或空白字符。",
-        "targetHelpBody": "填写 JSON Pointer，例如 /model 或 /generationConfig/temperature。",
-        "removeValuePlaceholder": "移除操作不接受 value_json。",
-        "valuePlaceholder": "填写合法 JSON，例如: \"Bearer token\", true, 1, null",
-        "create": "创建规则",
-        "save": "保存修改",
-        "dangerousTitle": "确认危险目标",
-        "dangerousDescription": "这条规则会操作上游敏感目标，必须再次确认后才能保存。",
-        "saveAnyway": "仍然保存"
-      },
-      "alert": {
-        "saveBeforeEdit": "请先保存渠道，再编辑请求改写规则。",
-        "saveFailed": "保存请求改写规则失败。",
-        "createSuccess": "渠道请求改写已创建。",
-        "updateSuccess": "渠道请求改写已更新。",
-        "deleteSuccess": "渠道请求改写已删除。",
-        "deleteFailed": "删除渠道请求改写失败。",
-        "toggleFailed": "更新请求改写启停状态失败。",
-        "enableSuccess": "请求改写已启用。",
-        "disableSuccess": "请求改写已停用。",
-        "dangerousConfirmFailed": "确认危险请求改写目标失败。",
-        "targetRequired": "目标不能为空。",
-        "valueRequired": "设置规则必须填写 JSON 值。"
-      }
     },
     "labelName": "名称",
     "labelProviderKey": "渠道标识",
@@ -1457,6 +1414,7 @@
         "state": "状态"
       },
       "editAction": "编辑 Source",
+      "requestPatchAction": "请求改写",
       "checkAction": "检查 Source",
       "enableAction": "启用 Source",
       "disableAction": "停用 Source",
@@ -1503,15 +1461,11 @@
       "unknown": "未知渠道",
       "enabled": "启用",
       "disabled": "停用",
-      "description": "这个模型属于上方渠道。这里编辑模型基础字段，成本、推理和 request patch 由各自功能管理。"
+      "description": "这个模型属于上方渠道。这里统一管理模型基础字段、Source 配置、成本和 Source 绑定的请求改写。"
     },
     "labelModelName": "模型名称",
     "labelRealModelName": "真实模型名称",
     "labelEnabled": "已启用",
-    "advancedConfig": {
-      "title": "推理设置",
-      "description": "管理这个模型的推理后缀和回调修复。"
-    },
     "alert": {
       "missingId": "缺少模型ID，无法编辑。",
       "loadDataFailed": "加载模型数据失败，ID: {modelId}。",
@@ -1532,119 +1486,6 @@
       "enabled": "启用",
       "effectiveFrom": "生效开始",
       "effectiveUntil": "生效结束"
-    },
-    "requestPatch": {
-      "title": "请求改写",
-      "description": "在一个页面里直接编辑模型级规则，并同时查看渠道继承规则、最终生效结果和诊断信息。",
-      "refresh": "刷新",
-      "loading": "正在加载请求改写状态...",
-      "providerFallback": "渠道",
-      "directTitle": "模型直接规则",
-      "directDescription": "模型规则只会在完全相同的目标上覆盖渠道继承规则。",
-      "addRule": "新增规则",
-      "emptyDirect": "当前模型还没有配置直接请求改写规则。",
-      "inheritedTitle": "继承的渠道规则",
-      "inheritedDescription": "这些是从 {provider} 继承到当前模型的渠道直接规则。即使被覆盖，也会保留显示。",
-      "emptyInherited": "当前模型没有继承任何启用中的渠道请求改写规则。",
-      "effectiveTitle": "运行时生效结果",
-      "effectiveDescription": "这里展示的是该模型当前会尝试应用到运行时请求上的最终规则集。",
-      "emptyEffective": "当前模型没有任何有效的请求改写规则。",
-      "explainTitle": "诊断与冲突",
-      "explainDescription": "查看每条启用规则的最终状态、覆盖关系，以及是否存在不安全的跨作用域冲突。",
-      "emptyExplain": "当前模型还没有可展示的请求改写诊断信息。",
-      "details": "详情",
-      "noDescription": "无描述",
-      "conflictBannerTitle": "当前请求改写配置不安全",
-      "conflictBannerDescription": "这个模型当前存在渠道/模型跨作用域冲突。处理完成前，不应认为该模型可以安全生效。",
-      "conflictFields": {
-        "providerTarget": "渠道目标",
-        "modelTarget": "模型目标"
-      },
-      "placements": {
-        "HEADER": "请求头",
-        "QUERY": "查询参数",
-        "BODY": "请求体 JSON"
-      },
-      "operations": {
-        "SET": "设置",
-        "REMOVE": "移除"
-      },
-      "fields": {
-        "value": "值",
-        "description": "描述",
-        "source": "来源",
-        "trace": "说明",
-        "enabled": "启用",
-        "ruleId": "规则 ID",
-        "sourceRule": "来源规则",
-        "effectiveRule": "最终规则",
-        "conflictsWith": "冲突对象"
-      },
-      "states": {
-        "effective": "生效中",
-        "overridden": "已覆盖",
-        "conflicted": "冲突中",
-        "disabled": "已停用",
-        "enabled": "已启用"
-      },
-      "origin": {
-        "ProviderDirect": "渠道直接规则",
-        "ModelDirect": "模型直接规则"
-      },
-      "messages": {
-        "directEffective": "这条模型直接规则已经进入当前运行时生效集合。",
-        "disabledSkipped": "已停用规则会继续保留在模型上，但运行时会跳过。",
-        "inheritedEffective": "这条规则来自渠道，并且当前仍对该模型生效。",
-        "overriddenByRule": "已被模型规则 {id} 覆盖。",
-        "conflictsWithRules": "与规则 {ids} 存在冲突。",
-        "overridesProviderRules": "覆盖了渠道规则 {ids}。",
-        "effectiveFromOrigin": "当前由 {origin} 规则 {id} 生效。",
-        "noRuntimeTrace": "当前没有额外诊断信息。"
-      },
-      "editor": {
-        "addTitle": "新增模型请求改写",
-        "editTitle": "编辑模型请求改写",
-        "description": "为请求头、查询参数或请求体 JSON Pointer 目标创建模型直接规则。",
-        "placement": "位置",
-        "operation": "操作",
-        "selectPlacement": "选择位置",
-        "selectOperation": "选择操作",
-        "target": "目标",
-        "targetPlaceholderHeader": "authorization",
-        "targetPlaceholderQuery": "api-version",
-        "targetPlaceholderBody": "/generationConfig/temperature",
-        "valueJson": "JSON 值",
-        "valueHelp": "请求头和查询参数只接受 JSON 标量值；请求体可以使用任意 JSON 值。",
-        "descriptionLabel": "描述",
-        "descriptionPlaceholder": "给运维或后续排障留下可读备注。",
-        "enabledTitle": "已启用",
-        "enabledDescription": "关闭后规则仍保留，但运行时不会应用。",
-        "targetHelpHeader": "填写请求头名称。保留的传输层请求头会被后端直接拒绝。",
-        "targetHelpQuery": "填写查询参数名，不要包含 ?, &, = 或空白字符。",
-        "targetHelpBody": "填写 JSON Pointer，例如 /model 或 /generationConfig/temperature。",
-        "removeValuePlaceholder": "移除操作不接受 value_json。",
-        "valuePlaceholder": "填写合法 JSON，例如: \"Bearer token\", true, 1, null",
-        "create": "创建规则",
-        "save": "保存修改",
-        "dangerousTitle": "确认危险目标",
-        "dangerousDescription": "这条规则会操作上游敏感目标，必须再次确认后才能保存。",
-        "saveAnyway": "仍然保存"
-      },
-      "alert": {
-        "loadFailed": "加载请求改写状态失败。",
-        "saveBeforeEdit": "请先保存模型，再编辑请求改写规则。",
-        "saveFailed": "保存请求改写规则失败。",
-        "createSuccess": "模型请求改写已创建。",
-        "updateSuccess": "模型请求改写已更新。",
-        "deleteSuccess": "模型请求改写已删除。",
-        "deleteFailed": "删除请求改写规则失败。",
-        "toggleFailed": "更新请求改写启停状态失败。",
-        "enableSuccess": "请求改写已启用。",
-        "disableSuccess": "请求改写已停用。",
-        "dangerousConfirmFailed": "确认危险请求改写目标失败。",
-        "targetRequired": "目标不能为空。",
-        "valueRequired": "设置规则必须填写 JSON 值。"
-      }
     }
   },
   "costPage": {

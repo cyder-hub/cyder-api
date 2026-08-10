@@ -631,7 +631,12 @@ fn validate_upstream_source_contract(
         "r3-11-source-impact-and-check",
         "r3-11-request-log-reason",
     ];
-    if contract.owner != "R3.11"
+    const REQUIRED_R312_EVIDENCE: [&str; 3] = [
+        "r3-12-request-patch-contract",
+        "r3-12-request-patch-execution",
+        "r3-12-request-patch-migration",
+    ];
+    if contract.owner != "R3.12"
         || contract.source_cardinality != "zero_to_many"
         || contract.source_identity != "source_id_only"
         || contract.aggregate_field != "upstream_sources"
@@ -652,13 +657,15 @@ fn validate_upstream_source_contract(
         || contract.credential_representation != "opaque"
         || contract.model_scope != "model_source_selection_mode_and_visible_bindings"
         || contract.model_owner != "R3.11"
-        || contract.request_patch_scope != "provider_global"
-        || contract.reasoning_scope != "provider_global"
-        || contract.config_owner != "R3.11"
-        || contract.evidence != REQUIRED_EVIDENCE
+        || contract.request_patch_scope != "source_bound_variant"
+        || contract.reasoning_scope != "protocol_transform_only"
+        || contract.config_owner != "R3.12"
+        || contract.evidence.len() != REQUIRED_EVIDENCE.len() + REQUIRED_R312_EVIDENCE.len()
+        || contract.evidence[..REQUIRED_EVIDENCE.len()] != REQUIRED_EVIDENCE
+        || contract.evidence[REQUIRED_EVIDENCE.len()..] != REQUIRED_R312_EVIDENCE
     {
         return Err(
-            "upstream_source_contract must pin the R3.11 model-scoped selector while preserving the R3.10 zero-to-many Source and Provider-credential boundary"
+            "upstream_source_contract must pin the R3.12 Source-bound Variant scope while preserving the R3.10 zero-to-many Source and R3.11 model-scoped selector boundary"
                 .to_string(),
         );
     }

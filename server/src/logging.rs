@@ -111,6 +111,34 @@ pub(crate) fn log_proxy_error_event(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructuredEventLevel {
+    Debug,
+    Warning,
+    Error,
+}
+
+pub(crate) fn log_structured_event(
+    level: StructuredEventLevel,
+    event: &'static str,
+    fields: &[(&str, Option<String>)],
+) {
+    let message = event_message_with_fields(event, fields);
+    match level {
+        StructuredEventLevel::Debug => log::debug!(target: "cyder_api::proxy", "{message}"),
+        StructuredEventLevel::Warning => log::warn!(target: "cyder_api::proxy", "{message}"),
+        StructuredEventLevel::Error => log::error!(target: "cyder_api::proxy", "{message}"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn render_structured_event(
+    event: &'static str,
+    fields: &[(&str, Option<String>)],
+) -> String {
+    event_message_with_fields(event, fields).to_string()
+}
+
 pub fn init(level: &str) {
     log::set_logger(&LOGGER).expect("local logger init");
     let level = parse_level(level).unwrap_or(LevelFilter::Info);

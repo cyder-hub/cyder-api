@@ -67,8 +67,12 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
 
                 if let Some(tool_calls) = msg.tool_calls {
                     for tc in tool_calls {
-                        let args: Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                        let args: Value = if tc.function.arguments.trim().is_empty() {
+                            json!({})
+                        } else {
+                            serde_json::from_str(&tc.function.arguments)
+                                .expect("OpenAI tool arguments are validated by the adapter")
+                        };
                         content.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                             id: tc.id,
                             name: tc.function.name,
@@ -173,7 +177,6 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
             }),
             ..Default::default()
         }
-        .filter_empty() // Filter out empty content and messages
     }
 }
 
@@ -353,9 +356,10 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                     passthrough
                         .get("parallel_tool_calls")
                         .and_then(|v| v.as_bool()),
-                    passthrough
-                        .get("reasoning_effort")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                    passthrough.get("reasoning_effort").map(|value| {
+                        serde_json::from_value(value.clone())
+                            .expect("registered OpenAI reasoning_effort is source-validated")
+                    }),
                 )
             } else {
                 (None, None, None, None)

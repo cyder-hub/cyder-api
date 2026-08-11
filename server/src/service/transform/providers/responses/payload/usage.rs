@@ -101,6 +101,7 @@ pub struct Reasoning {
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     None,
+    Minimal,
     Low,
     Medium,
     High,

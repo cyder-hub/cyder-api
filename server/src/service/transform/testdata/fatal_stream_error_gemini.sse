@@ -1,0 +1,2 @@
+data: {"error":{"code":500,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cyder.gateway","metadata":{"request_id":"req-terminal-1"},"reason":"PROTOCOL_TRANSFORM_ERROR"}],"message":"The gateway could not safely transform the provider response.","status":"INTERNAL"}}
+

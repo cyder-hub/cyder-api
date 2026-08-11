@@ -1,5 +1,4 @@
 use chrono::Utc;
-use serde_json::Value;
 
 use super::payload::*;
 
@@ -7,26 +6,19 @@ use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::{
-    TransformProtocol, apply_transform_policy, build_stream_diagnostic_sse, unified::*,
+    TransformProtocol, apply_transform_policy, record_stream_diagnostic, unified::*,
 };
 use crate::utils::sse::SseEvent;
 
 fn build_openai_stream_diagnostic(
     stream_context: &mut StreamTransformContext<'_>,
     kind: TransformValueKind,
-    context_message: String,
-) -> SseEvent {
-    build_stream_diagnostic_sse(
+) {
+    record_stream_diagnostic(
         stream_context,
         TransformProtocol::Unified,
         TransformProtocol::Downstream(DownstreamProtocol::Openai),
         kind,
-        "openai_stream_encoding",
-        context_message,
-        None,
-        Some(
-            "Use a Responses or Anthropic target when structured reasoning/blob stream events must remain recoverable.".to_string(),
-        ),
     )
 }
 
@@ -108,7 +100,9 @@ impl From<UnifiedChunkResponse> for OpenAiChunkResponse {
             created: unified_chunk
                 .created
                 .unwrap_or_else(|| Utc::now().timestamp()),
-            model: unified_chunk.model.unwrap_or_default(),
+            model: unified_chunk
+                .model
+                .expect("audited OpenAI target chunks must retain a model"),
             system_fingerprint: None,
             choices,
             usage: unified_chunk.usage.map(|u| u.into()),
@@ -331,29 +325,29 @@ pub(crate) fn openai_chunk_to_unified_stream_events_with_state(
     events
 }
 
-pub(crate) fn transform_unified_stream_events_to_openai_events(
+pub(crate) fn try_transform_unified_stream_events_to_openai_events(
     stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut transformed = Vec::new();
 
     for event in stream_events {
-        if let Some(event) = transform_unified_stream_event_to_openai_event(event, context) {
+        if let Some(event) = transform_unified_stream_event_to_openai_event(event, context)? {
             transformed.push(event);
         }
     }
 
     if transformed.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(transformed)
+        Ok(Some(transformed))
     }
 }
 
 pub(crate) fn transform_unified_stream_event_to_openai_event(
     event: UnifiedStreamEvent,
     context: &mut StreamTransformContext<'_>,
-) -> Option<SseEvent> {
+) -> Result<Option<SseEvent>, serde_json::Error> {
     let id = context.get_or_generate_stream_id();
     let model = context.get_or_default_stream_model();
     let created = Utc::now().timestamp();
@@ -389,10 +383,11 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
                 }],
                 usage: None,
             })
-            .ok()
-            .map(|data| SseEvent {
-                data,
-                ..Default::default()
+            .map(|data| {
+                Some(SseEvent {
+                    data,
+                    ..Default::default()
+                })
             })
         }
         UnifiedStreamEvent::ContentBlockDelta { text, .. } => {
@@ -417,10 +412,11 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
                 }],
                 usage: None,
             })
-            .ok()
-            .map(|data| SseEvent {
-                data,
-                ..Default::default()
+            .map(|data| {
+                Some(SseEvent {
+                    data,
+                    ..Default::default()
+                })
             })
         }
         UnifiedStreamEvent::ToolCallStart {
@@ -456,10 +452,11 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
             }],
             usage: None,
         })
-        .ok()
-        .map(|data| SseEvent {
-            data,
-            ..Default::default()
+        .map(|data| {
+            Some(SseEvent {
+                data,
+                ..Default::default()
+            })
         }),
         UnifiedStreamEvent::ToolCallArgumentsDelta {
             index,
@@ -497,10 +494,11 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
             }],
             usage: None,
         })
-        .ok()
-        .map(|data| SseEvent {
-            data,
-            ..Default::default()
+        .map(|data| {
+            Some(SseEvent {
+                data,
+                ..Default::default()
+            })
         }),
         UnifiedStreamEvent::MessageDelta { finish_reason } => {
             serde_json::to_string(&OpenAiChunkResponse {
@@ -524,10 +522,11 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
                 }],
                 usage: None,
             })
-            .ok()
-            .map(|data| SseEvent {
-                data,
-                ..Default::default()
+            .map(|data| {
+                Some(SseEvent {
+                    data,
+                    ..Default::default()
+                })
             })
         }
         UnifiedStreamEvent::Usage { usage } => serde_json::to_string(&OpenAiChunkResponse {
@@ -551,56 +550,28 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
             }],
             usage: Some(usage.into()),
         })
-        .ok()
-        .map(|data| SseEvent {
-            data,
-            ..Default::default()
+        .map(|data| {
+            Some(SseEvent {
+                data,
+                ..Default::default()
+            })
         }),
-        UnifiedStreamEvent::ReasoningStart { index } => Some(build_openai_stream_diagnostic(
-            context,
-            TransformValueKind::ReasoningDelta,
-            format!(
-                "OpenAI chat completion chunks do not expose a native reasoning_start event; index={index} was downgraded to a structured transform diagnostic."
-            ),
-        )),
-        UnifiedStreamEvent::ReasoningDelta { index, text, .. } => {
-            Some(build_openai_stream_diagnostic(
-                context,
-                TransformValueKind::ReasoningDelta,
-                format!(
-                    "OpenAI chat completion chunks do not expose a native reasoning delta; index={index}, chars={} was downgraded to a structured transform diagnostic.",
-                    text.chars().count()
-                ),
-            ))
+        UnifiedStreamEvent::ReasoningStart { .. }
+        | UnifiedStreamEvent::ReasoningDelta { .. }
+        | UnifiedStreamEvent::ReasoningStop { .. } => {
+            build_openai_stream_diagnostic(context, TransformValueKind::ReasoningDelta);
+            Ok(None)
         }
-        UnifiedStreamEvent::ReasoningStop { index } => Some(build_openai_stream_diagnostic(
-            context,
-            TransformValueKind::ReasoningDelta,
-            format!(
-                "OpenAI chat completion chunks do not expose a native reasoning_stop event; index={index} was downgraded to a structured transform diagnostic."
-            ),
-        )),
-        UnifiedStreamEvent::BlobDelta { index, data } => Some(build_openai_stream_diagnostic(
-            context,
-            TransformValueKind::BlobDelta,
-            format!(
-                "OpenAI chat completion chunks do not expose a native blob delta; index={index:?}, json_type={} was downgraded to a structured transform diagnostic.",
-                match &data {
-                    Value::Null => "null",
-                    Value::Bool(_) => "bool",
-                    Value::Number(_) => "number",
-                    Value::String(_) => "string",
-                    Value::Array(_) => "array",
-                    Value::Object(_) => "object",
-                }
-            ),
-        )),
-        UnifiedStreamEvent::Error { error } => Some(SseEvent {
-            event: Some("error".to_string()),
-            data: serde_json::to_string(&error).unwrap_or_else(|_| {
-                "{\"type\":\"transform_error\",\"message\":\"serialization failure\"}".to_string()
-            }),
-            ..Default::default()
+        UnifiedStreamEvent::BlobDelta { .. } => {
+            build_openai_stream_diagnostic(context, TransformValueKind::BlobDelta);
+            Ok(None)
+        }
+        UnifiedStreamEvent::Error { error } => serde_json::to_string(&error).map(|data| {
+            Some(SseEvent {
+                event: Some("error".to_string()),
+                data,
+                ..Default::default()
+            })
         }),
         UnifiedStreamEvent::ItemAdded { .. }
         | UnifiedStreamEvent::ItemDone { .. }
@@ -611,30 +582,22 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
         | UnifiedStreamEvent::ContentBlockStop { .. }
         | UnifiedStreamEvent::ReasoningSummaryPartAdded { .. }
         | UnifiedStreamEvent::ReasoningSummaryPartDone { .. }
-        | UnifiedStreamEvent::ToolCallStop { .. } => None,
+        | UnifiedStreamEvent::ToolCallStop { .. } => Ok(None),
     }
 }
 
-pub(crate) fn transform_unified_chunk_to_openai_events(
+pub(crate) fn try_transform_unified_chunk_to_openai_events(
     mut unified_chunk: UnifiedChunkResponse,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut events = Vec::new();
 
     for choice in &mut unified_chunk.choices {
         let mut filtered = Vec::new();
         for part in std::mem::take(&mut choice.delta.content) {
             match part {
-                UnifiedContentPartDelta::ImageDelta { index, url, data } => {
-                    events.push(build_openai_stream_diagnostic(
-                        context,
-                        TransformValueKind::ImageDelta,
-                        format!(
-                            "OpenAI chat completion chunks do not expose native image deltas; index={index}, has_url={}, has_data={} was downgraded to a structured transform diagnostic.",
-                            url.as_ref().is_some_and(|value| !value.is_empty()),
-                            data.as_ref().is_some_and(|value| !value.is_empty())
-                        ),
-                    ));
+                UnifiedContentPartDelta::ImageDelta { .. } => {
+                    build_openai_stream_diagnostic(context, TransformValueKind::ImageDelta);
                 }
                 other => filtered.push(other),
             }
@@ -650,13 +613,30 @@ pub(crate) fn transform_unified_chunk_to_openai_events(
         });
 
     if has_chunk_payload {
-        if let Ok(data) = serde_json::to_string(&OpenAiChunkResponse::from(unified_chunk)) {
-            events.push(SseEvent {
-                data,
-                ..Default::default()
-            });
-        }
+        let data = serde_json::to_string(&OpenAiChunkResponse::from(unified_chunk))?;
+        events.push(SseEvent {
+            data,
+            ..Default::default()
+        });
     }
 
-    (!events.is_empty()).then_some(events)
+    Ok((!events.is_empty()).then_some(events))
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_stream_events_to_openai_events(
+    stream_events: Vec<UnifiedStreamEvent>,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_stream_events_to_openai_events(stream_events, context)
+        .expect("OpenAI test stream payloads must serialize")
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_chunk_to_openai_events(
+    unified_chunk: UnifiedChunkResponse,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_chunk_to_openai_events(unified_chunk, context)
+        .expect("OpenAI test stream payloads must serialize")
 }

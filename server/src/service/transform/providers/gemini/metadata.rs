@@ -3,11 +3,8 @@ use serde_json::{Value, json};
 use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::unified::*;
-use crate::service::transform::{
-    TransformProtocol, TransformValueKind, build_stream_diagnostic_sse,
-};
+use crate::service::transform::{TransformProtocol, TransformValueKind, record_stream_diagnostic};
 use crate::utils::ID_GENERATOR;
-use crate::utils::sse::SseEvent;
 
 use super::payload::*;
 
@@ -63,19 +60,12 @@ pub(crate) fn build_gemini_fallback_tool_name(tool_call_id: &str) -> String {
 pub(crate) fn build_gemini_stream_diagnostic(
     context: &mut StreamTransformContext<'_>,
     kind: TransformValueKind,
-    context_message: String,
-) -> SseEvent {
-    build_stream_diagnostic_sse(
+) {
+    record_stream_diagnostic(
         context,
         TransformProtocol::Unified,
         TransformProtocol::Downstream(DownstreamProtocol::Gemini),
         kind,
-        "gemini_stream_encoding",
-        context_message,
-        None,
-        Some(
-            "Use a Responses or Anthropic target when structured reasoning/blob stream events must remain recoverable.".to_string(),
-        ),
     )
 }
 
@@ -100,7 +90,8 @@ pub(crate) fn render_gemini_tool_call_text(call: &UnifiedToolCall) -> String {
     format!(
         "tool_call: {}\narguments: {}",
         call.name,
-        serde_json::to_string(&call.arguments).unwrap_or_default()
+        serde_json::to_string(&call.arguments)
+            .expect("serde_json::Value serialization is structurally infallible")
     )
 }
 
@@ -287,8 +278,11 @@ pub(crate) fn build_gemini_response_metadata(
 ) -> Option<UnifiedProviderResponseMetadata> {
     let candidates = candidates
         .iter()
-        .map(|candidate| UnifiedGeminiCandidateMetadata {
-            index: candidate.index.unwrap_or(0),
+        .enumerate()
+        .map(|(position, candidate)| UnifiedGeminiCandidateMetadata {
+            index: candidate
+                .index
+                .unwrap_or_else(|| u32::try_from(position).unwrap_or(u32::MAX)),
             safety_ratings: gemini_safety_ratings_to_unified(candidate.safety_ratings.clone()),
             citation_metadata: gemini_citation_metadata_to_unified(
                 candidate.citation_metadata.clone(),

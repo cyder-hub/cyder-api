@@ -30,7 +30,8 @@ pub(crate) use error::classify_upstream_status;
 pub(crate) use error::{
     ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode, ProxyLogLevel,
     ResponseVisibility, ResponseVisibilityTracker, RouterRejection, TimeoutPhase,
-    classify_reqwest_error, classify_upstream_status_captured, protocol_transform_error,
+    classify_reqwest_error, classify_transform_failure, classify_upstream_status_captured,
+    protocol_transform_error, proxy_error_category,
 };
 pub(crate) use request_context::ProxyRequestContext;
 pub use router::create_proxy_router;

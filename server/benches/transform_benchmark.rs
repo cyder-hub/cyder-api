@@ -365,8 +365,11 @@ fn print_report_summary(report: &TransformQualityReport) {
         .filter(|check| check.passed)
         .count();
     eprintln!(
-        "Transform quality gate: replay_passed={}, benchmark_checks={}/{}",
+        "Transform quality gate: replay_passed={}, contract_cases={}/{}, accounting_closed={}, benchmark_checks={}/{}",
         report.replay_summary.passed,
+        report.contract_summary.passed_case_count,
+        report.contract_summary.case_count,
+        report.contract_summary.accounting_closed,
         passed_checks,
         report.threshold_checks.len()
     );
@@ -471,10 +474,8 @@ fn build_scenarios() -> Vec<Scenario> {
     let response_openai_large = build_openai_response_large_text();
     let response_openai_large_bytes = serde_json::to_vec(&response_openai_large).unwrap().len();
 
-    let response_responses_reasoning = build_responses_response_reasoning_tool();
-    let response_responses_reasoning_bytes = serde_json::to_vec(&response_responses_reasoning)
-        .unwrap()
-        .len();
+    let response_responses_tool = build_responses_response_tool();
+    let response_responses_tool_bytes = serde_json::to_vec(&response_responses_tool).unwrap().len();
 
     let anthropic_stream = load_sse_fixture(include_str!(
         "../src/service/transform/testdata/anthropic_tool_use_json_delta.json"
@@ -500,7 +501,9 @@ fn build_scenarios() -> Vec<Scenario> {
                         DownstreamProtocol::Openai,
                         UpstreamProtocol::Gemini,
                         false,
-                    );
+                    )
+                    .expect("benchmark request transform must succeed")
+                    .value;
                     black_box(output);
                 }
             }),
@@ -517,7 +520,9 @@ fn build_scenarios() -> Vec<Scenario> {
                         DownstreamProtocol::Gemini,
                         UpstreamProtocol::Openai,
                         true,
-                    );
+                    )
+                    .expect("benchmark request transform must succeed")
+                    .value;
                     black_box(output);
                 }
             }),
@@ -533,23 +538,27 @@ fn build_scenarios() -> Vec<Scenario> {
                         black_box(response_openai_large.clone()),
                         UpstreamProtocol::Openai,
                         DownstreamProtocol::Gemini,
-                    );
+                    )
+                    .expect("benchmark response transform must succeed")
+                    .value;
                     black_box(output);
                 }
             }),
         },
         Scenario {
-            name: "responses_to_openai_reasoning_tool",
+            name: "responses_to_openai_tool",
             kind: ScenarioKind::Response,
             batch_size: 40,
-            input_bytes: response_responses_reasoning_bytes,
+            input_bytes: response_responses_tool_bytes,
             run: Box::new(move || {
                 for _ in 0..40 {
                     let output = transform_result(
-                        black_box(response_responses_reasoning.clone()),
+                        black_box(response_responses_tool.clone()),
                         UpstreamProtocol::Responses,
                         DownstreamProtocol::Openai,
-                    );
+                    )
+                    .expect("benchmark response transform must succeed")
+                    .value;
                     black_box(output);
                 }
             }),
@@ -570,7 +579,9 @@ fn build_scenarios() -> Vec<Scenario> {
                         .flat_map(|event| {
                             transformer
                                 .transform_event(event.clone())
-                                .unwrap_or_default()
+                                .expect("benchmark stream transform must succeed")
+                                .value
+                                .events
                         })
                         .collect();
                     black_box(output);
@@ -578,7 +589,7 @@ fn build_scenarios() -> Vec<Scenario> {
             }),
         },
         Scenario {
-            name: "responses_to_openai_long_session",
+            name: "responses_to_anthropic_long_session",
             kind: ScenarioKind::Stream,
             batch_size: 10,
             input_bytes: responses_stream_bytes,
@@ -586,14 +597,16 @@ fn build_scenarios() -> Vec<Scenario> {
                 for _ in 0..10 {
                     let mut transformer = StreamTransformer::new(
                         UpstreamProtocol::Responses,
-                        DownstreamProtocol::Openai,
+                        DownstreamProtocol::Anthropic,
                     );
                     let output: Vec<SseEvent> = responses_stream
                         .iter()
                         .flat_map(|event| {
                             transformer
                                 .transform_event(event.clone())
-                                .unwrap_or_default()
+                                .expect("benchmark stream transform must succeed")
+                                .value
+                                .events
                         })
                         .collect();
                     black_box(output);
@@ -616,7 +629,9 @@ fn build_scenarios() -> Vec<Scenario> {
                         .flat_map(|event| {
                             transformer
                                 .transform_event(event.clone())
-                                .unwrap_or_default()
+                                .expect("benchmark stream transform must succeed")
+                                .value
+                                .events
                         })
                         .collect();
                     black_box(output);
@@ -779,24 +794,18 @@ fn build_openai_response_large_text() -> Value {
     })
 }
 
-fn build_responses_response_reasoning_tool() -> Value {
+fn build_responses_response_tool() -> Value {
     json!({
         "id": "resp-bench-1",
         "object": "response",
         "created_at": 1_744_000_000u64,
+        "completed_at": 1_744_000_001u64,
         "status": "completed",
+        "incomplete_details": null,
         "model": "gpt-4.1",
+        "previous_response_id": null,
+        "instructions": null,
         "output": [
-            {
-                "type": "reasoning",
-                "id": "rs_1",
-                "summary": [
-                    {
-                        "type": "summary_text",
-                        "text": "Reviewing cached dashboard data before calling tools."
-                    }
-                ]
-            },
             {
                 "type": "function_call",
                 "id": "fc_1",
@@ -812,19 +821,44 @@ fn build_responses_response_reasoning_tool() -> Value {
                 "content": [
                     {
                         "type": "output_text",
-                        "text": "I gathered the analytics baseline and prepared the tool call."
+                        "text": "I gathered the analytics baseline and prepared the tool call.",
+                        "annotations": [],
+                        "logprobs": []
                     }
                 ]
             }
         ],
+        "error": null,
+        "tools": [],
+        "tool_choice": "auto",
+        "truncation": "disabled",
+        "parallel_tool_calls": true,
+        "text": {"format": {"type": "text"}},
+        "top_p": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "top_logprobs": 0,
+        "temperature": 1.0,
+        "reasoning": null,
         "usage": {
             "input_tokens": 256,
             "output_tokens": 96,
             "total_tokens": 352,
+            "input_tokens_details": {
+                "cached_tokens": 0
+            },
             "output_tokens_details": {
                 "reasoning_tokens": 48
             }
-        }
+        },
+        "max_output_tokens": null,
+        "max_tool_calls": null,
+        "store": true,
+        "background": false,
+        "service_tier": "default",
+        "metadata": {},
+        "safety_identifier": null,
+        "prompt_cache_key": null
     })
 }
 

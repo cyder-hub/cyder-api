@@ -1,5 +1,6 @@
 use super::TransformProtocol;
 use super::capability::{ProtocolCapabilityMatrix, TransformValueKind};
+use super::diagnostics::{TransformAction, TransformOutcomeKind, TransformReasonCode};
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 
 impl TransformProtocol {
@@ -39,33 +40,44 @@ impl TransformProtocol {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransformAction {
-    Send,
-    Drop,
-    Reject,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransformLossLevel {
-    Lossless,
-    LossyMinor,
-    LossyMajor,
-    Reject,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransformDiagnosticKind {
-    FatalTransformError,
-    LossyTransform,
-    CapabilityDowngrade,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PolicyDecision {
-    pub diagnostic_kind: TransformDiagnosticKind,
-    pub level: TransformLossLevel,
+    pub outcome: TransformOutcomeKind,
     pub action: TransformAction,
-    pub reason: &'static str,
+    pub reason_code: TransformReasonCode,
+}
+
+impl PolicyDecision {
+    const fn lossless() -> Self {
+        Self {
+            outcome: TransformOutcomeKind::Lossless,
+            action: TransformAction::Send,
+            reason_code: TransformReasonCode::LosslessConversion,
+        }
+    }
+
+    const fn minor_drop(reason_code: TransformReasonCode) -> Self {
+        Self {
+            outcome: TransformOutcomeKind::ControlledLossMinor,
+            action: TransformAction::Drop,
+            reason_code,
+        }
+    }
+
+    const fn major_reject(reason_code: TransformReasonCode) -> Self {
+        Self {
+            outcome: TransformOutcomeKind::ExplicitReject,
+            action: TransformAction::Reject,
+            reason_code,
+        }
+    }
+
+    const fn deterministic_text_downgrade() -> Self {
+        Self {
+            outcome: TransformOutcomeKind::ControlledLossMajor,
+            action: TransformAction::Send,
+            reason_code: TransformReasonCode::DeterministicTextDowngrade,
+        }
+    }
 }
 
 pub(crate) struct PolicyEngine;
@@ -90,79 +102,40 @@ impl PolicyEngine {
         let capabilities = Self::target_capabilities(target)?;
 
         match kind {
-            TransformValueKind::TopKParameter if !capabilities.request.top_k_parameter => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMinor,
-                    action: TransformAction::Drop,
-                    reason: "The target request capability matrix marks top_k as unsupported.",
-                })
-            }
-            TransformValueKind::ToolDefinitions if !capabilities.request.tool_definitions => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target request capability matrix marks tool definitions as unsupported.",
-                })
-            }
+            TransformValueKind::TopKParameter if !capabilities.request.top_k_parameter => Some(
+                PolicyDecision::minor_drop(TransformReasonCode::UnsupportedTopK),
+            ),
+            TransformValueKind::ToolDefinitions if !capabilities.request.tool_definitions => Some(
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedToolDefinitions),
+            ),
             TransformValueKind::ToolRoleMessage if !capabilities.request.tool_role_messages => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target request capability matrix marks tool role messages as unsupported.",
-                })
+                Some(PolicyDecision::major_reject(
+                    TransformReasonCode::UnsupportedToolRoleMessage,
+                ))
             }
-            TransformValueKind::ToolCallDelta if !capabilities.stream.tool_call_deltas => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target stream capability matrix marks tool call deltas as unsupported.",
-                })
-            }
-            TransformValueKind::ReasoningDelta if !capabilities.stream.reasoning_deltas => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target stream capability matrix marks reasoning deltas as unsupported.",
-                })
-            }
-            TransformValueKind::BlobDelta if !capabilities.stream.blob_deltas => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target stream capability matrix marks blob deltas as unsupported.",
-                })
-            }
-            TransformValueKind::StreamError if !capabilities.stream.structured_errors => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target stream capability matrix marks structured stream errors as unsupported.",
-                })
-            }
+            TransformValueKind::ToolCallDelta if !capabilities.stream.tool_call_deltas => Some(
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedToolCallDelta),
+            ),
+            TransformValueKind::ReasoningDelta if !capabilities.stream.reasoning_deltas => Some(
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedReasoning),
+            ),
+            TransformValueKind::BlobDelta if !capabilities.stream.blob_deltas => Some(
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedBlobDelta),
+            ),
+            TransformValueKind::StreamError if !capabilities.stream.structured_errors => Some(
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedStructuredError),
+            ),
             TransformValueKind::ReasoningContent if !capabilities.response.reasoning_content => {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target response capability matrix marks reasoning content as unsupported.",
-                })
+                Some(PolicyDecision::major_reject(
+                    TransformReasonCode::UnsupportedReasoning,
+                ))
             }
             TransformValueKind::Refusal
                 if !capabilities.response.refusal || !capabilities.structured_content.refusal =>
             {
-                Some(PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target capability matrix marks refusal content as unsupported.",
-                })
+                Some(PolicyDecision::major_reject(
+                    TransformReasonCode::UnsupportedRefusal,
+                ))
             }
             _ => None,
         }
@@ -184,47 +157,34 @@ impl PolicyEngine {
             | (_, target, TransformValueKind::ExecutableCode)
                 if target.is_anthropic() =>
             {
-                PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Send,
-                    reason: "Anthropic adapter preserves this request content with native image blocks or recoverable text downgrade.",
-                }
+                PolicyDecision::deterministic_text_downgrade()
             }
-            (_, target, TransformValueKind::ImageData) if target.is_anthropic() => PolicyDecision {
-                diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                level: TransformLossLevel::Lossless,
-                action: TransformAction::Send,
-                reason: "Anthropic adapter can preserve inline image data natively in request blocks.",
-            },
-            (_, target, TransformValueKind::ImageUrl) if target.is_gemini() => PolicyDecision {
-                diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                level: TransformLossLevel::LossyMajor,
-                action: TransformAction::Send,
-                reason: "Gemini adapter preserves remote image URLs as recoverable text when inline bytes are unavailable.",
-            },
+            (_, target, TransformValueKind::ImageUrl) if target.is_gemini() => {
+                PolicyDecision::deterministic_text_downgrade()
+            }
             (_, target, TransformValueKind::ImageData)
             | (_, target, TransformValueKind::FileUrl)
             | (_, target, TransformValueKind::FileData)
             | (_, target, TransformValueKind::ExecutableCode)
                 if target.is_responses() =>
             {
-                PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Send,
-                    reason: "Responses adapter preserves this content in item inputs or recoverable instruction text.",
-                }
+                PolicyDecision::deterministic_text_downgrade()
+            }
+            (_, target, TransformValueKind::ToolRoleMessage)
+            | (_, target, TransformValueKind::ToolCall)
+            | (_, target, TransformValueKind::ToolResult)
+            | (_, target, TransformValueKind::ImageUrl)
+            | (_, target, TransformValueKind::FileUrl)
+            | (_, target, TransformValueKind::FileData)
+            | (_, target, TransformValueKind::ExecutableCode)
+                if target.is_ollama() =>
+            {
+                PolicyDecision::deterministic_text_downgrade()
             }
             (source, TransformProtocol::Unified, TransformValueKind::ResponsesUnknownItem)
                 if source.is_responses() =>
             {
-                PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "Responses item is structured and not formally supported by the current unified response adapter.",
-                }
+                PolicyDecision::major_reject(TransformReasonCode::UnknownSemanticUnit)
             }
             (_, target, TransformValueKind::ImageData)
             | (_, target, TransformValueKind::FileUrl)
@@ -232,46 +192,14 @@ impl PolicyEngine {
             | (_, target, TransformValueKind::ExecutableCode)
                 if target.is_openai() =>
             {
-                PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "OpenAI chat adapter cannot encode this unified content type in this path.",
-                }
-            }
-            (_, target, TransformValueKind::ToolRoleMessage)
-            | (_, target, TransformValueKind::ToolCall)
-            | (_, target, TransformValueKind::ToolResult)
-            | (_, target, TransformValueKind::ImageUrl)
-            | (_, target, TransformValueKind::ImageData)
-            | (_, target, TransformValueKind::FileUrl)
-            | (_, target, TransformValueKind::FileData)
-            | (_, target, TransformValueKind::ExecutableCode)
-                if target.is_ollama() =>
-            {
-                PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Send,
-                    reason: "Ollama adapter preserves structured request content as base64 images plus recoverable plain text.",
-                }
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
             (_, target, TransformValueKind::ImageDelta)
                 if target.is_openai() || target.is_gemini() || target.is_anthropic() =>
             {
-                PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                    level: TransformLossLevel::LossyMajor,
-                    action: TransformAction::Drop,
-                    reason: "The target streaming adapter cannot express image deltas yet.",
-                }
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedImageDelta)
             }
-            _ => PolicyDecision {
-                diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                level: TransformLossLevel::Lossless,
-                action: TransformAction::Send,
-                reason: "lossless",
-            },
+            _ => PolicyDecision::lossless(),
         }
     }
 }
@@ -280,123 +208,56 @@ impl PolicyEngine {
 mod tests {
     use super::*;
 
-    fn assert_drop(
-        target: TransformProtocol,
-        kind: TransformValueKind,
-        expected_level: TransformLossLevel,
-        expected_reason: &'static str,
-    ) {
-        let decision = PolicyEngine::evaluate(TransformProtocol::Unified, target, kind);
-
-        assert_eq!(
-            decision.diagnostic_kind,
-            TransformDiagnosticKind::CapabilityDowngrade
-        );
-        assert_eq!(decision.level, expected_level);
-        assert_eq!(decision.action, TransformAction::Drop);
-        assert_eq!(decision.reason, expected_reason);
-    }
-
     #[test]
-    fn test_policy_engine_marks_top_k_as_lossy_minor_for_non_anthropic_targets() {
-        assert_drop(
-            TransformProtocol::Upstream(UpstreamProtocol::Openai),
-            TransformValueKind::TopKParameter,
-            TransformLossLevel::LossyMinor,
-            "The target request capability matrix marks top_k as unsupported.",
-        );
-    }
-
-    #[test]
-    fn test_policy_engine_uses_upstream_capability_matrix_for_tool_definitions() {
-        assert_drop(
-            TransformProtocol::Upstream(UpstreamProtocol::Ollama),
-            TransformValueKind::ToolDefinitions,
-            TransformLossLevel::LossyMajor,
-            "The target request capability matrix marks tool definitions as unsupported.",
-        );
-    }
-
-    #[test]
-    fn test_policy_engine_uses_capability_matrix_for_responses_reasoning_stream() {
+    fn unsupported_minor_parameter_is_dropped_with_a_stable_reason() {
         let decision = PolicyEngine::evaluate(
             TransformProtocol::Unified,
-            TransformProtocol::Downstream(DownstreamProtocol::Responses),
-            TransformValueKind::ReasoningDelta,
+            TransformProtocol::Upstream(UpstreamProtocol::Openai),
+            TransformValueKind::TopKParameter,
         );
-
-        assert_eq!(decision.level, TransformLossLevel::Lossless);
-        assert_eq!(decision.action, TransformAction::Send);
+        assert_eq!(decision.outcome, TransformOutcomeKind::ControlledLossMinor);
+        assert_eq!(decision.action, TransformAction::Drop);
+        assert_eq!(decision.reason_code, TransformReasonCode::UnsupportedTopK);
     }
 
     #[test]
-    fn test_policy_engine_uses_capability_matrix_for_response_refusal_and_reasoning() {
-        assert_drop(
-            TransformProtocol::Downstream(DownstreamProtocol::Gemini),
-            TransformValueKind::Refusal,
-            TransformLossLevel::LossyMajor,
-            "The target capability matrix marks refusal content as unsupported.",
-        );
-        assert_drop(
-            TransformProtocol::Downstream(DownstreamProtocol::Openai),
+    fn unsupported_major_capabilities_reject_by_default() {
+        for kind in [
+            TransformValueKind::ToolDefinitions,
+            TransformValueKind::ToolRoleMessage,
             TransformValueKind::ReasoningContent,
-            TransformLossLevel::LossyMajor,
-            "The target response capability matrix marks reasoning content as unsupported.",
-        );
-    }
-
-    #[test]
-    fn test_policy_engine_uses_capability_matrix_for_blob_delta_and_structured_stream_errors() {
-        assert_drop(
-            TransformProtocol::Downstream(DownstreamProtocol::Openai),
             TransformValueKind::BlobDelta,
-            TransformLossLevel::LossyMajor,
-            "The target stream capability matrix marks blob deltas as unsupported.",
-        );
-        assert_drop(
-            TransformProtocol::Downstream(DownstreamProtocol::Gemini),
-            TransformValueKind::StreamError,
-            TransformLossLevel::LossyMajor,
-            "The target stream capability matrix marks structured stream errors as unsupported.",
-        );
+        ] {
+            let decision = PolicyEngine::evaluate(
+                TransformProtocol::Unified,
+                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
+                kind,
+            );
+            assert_eq!(decision.outcome, TransformOutcomeKind::ExplicitReject);
+            assert_eq!(decision.action, TransformAction::Reject);
+        }
     }
 
     #[test]
-    fn test_policy_engine_tracks_image_file_and_executable_code_boundaries() {
-        let image_delta = PolicyEngine::evaluate(
+    fn only_registered_text_downgrades_may_send_major_loss() {
+        let allowed = PolicyEngine::evaluate(
             TransformProtocol::Unified,
-            TransformProtocol::Downstream(DownstreamProtocol::Openai),
-            TransformValueKind::ImageDelta,
+            TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
+            TransformValueKind::FileUrl,
         );
+        assert_eq!(allowed.outcome, TransformOutcomeKind::ControlledLossMajor);
+        assert_eq!(allowed.action, TransformAction::Send);
         assert_eq!(
-            image_delta.diagnostic_kind,
-            TransformDiagnosticKind::CapabilityDowngrade
+            allowed.reason_code,
+            TransformReasonCode::DeterministicTextDowngrade
         );
-        assert_eq!(image_delta.level, TransformLossLevel::LossyMajor);
-        assert_eq!(image_delta.action, TransformAction::Drop);
 
-        let file_data = PolicyEngine::evaluate(
+        let rejected = PolicyEngine::evaluate(
             TransformProtocol::Unified,
             TransformProtocol::Upstream(UpstreamProtocol::Openai),
-            TransformValueKind::FileData,
+            TransformValueKind::FileUrl,
         );
-        assert_eq!(
-            file_data.diagnostic_kind,
-            TransformDiagnosticKind::LossyTransform
-        );
-        assert_eq!(file_data.level, TransformLossLevel::LossyMajor);
-        assert_eq!(file_data.action, TransformAction::Drop);
-
-        let executable_code = PolicyEngine::evaluate(
-            TransformProtocol::Unified,
-            TransformProtocol::Upstream(UpstreamProtocol::Responses),
-            TransformValueKind::ExecutableCode,
-        );
-        assert_eq!(
-            executable_code.diagnostic_kind,
-            TransformDiagnosticKind::LossyTransform
-        );
-        assert_eq!(executable_code.level, TransformLossLevel::LossyMajor);
-        assert_eq!(executable_code.action, TransformAction::Send);
+        assert_eq!(rejected.outcome, TransformOutcomeKind::ExplicitReject);
+        assert_eq!(rejected.action, TransformAction::Reject);
     }
 }

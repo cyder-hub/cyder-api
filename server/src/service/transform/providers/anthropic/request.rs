@@ -17,14 +17,14 @@ fn build_anthropic_image_block(mime_type: &str, data: &str) -> Value {
     })
 }
 
-fn render_anthropic_image_reference_text(url: &str, detail: Option<&str>) -> String {
+pub(super) fn render_anthropic_image_reference_text(url: &str, detail: Option<&str>) -> String {
     match detail {
         Some(detail) if !detail.is_empty() => format!("image_url: {url}\ndetail: {detail}"),
         _ => format!("image_url: {url}"),
     }
 }
 
-fn render_anthropic_file_reference_text(
+pub(super) fn render_anthropic_file_reference_text(
     url: &str,
     mime_type: Option<&str>,
     filename: Option<&str>,
@@ -39,7 +39,7 @@ fn render_anthropic_file_reference_text(
     lines.join("\n")
 }
 
-fn render_anthropic_inline_file_data_text(
+pub(super) fn render_anthropic_inline_file_data_text(
     data: &str,
     mime_type: &str,
     filename: Option<&str>,
@@ -54,7 +54,7 @@ fn render_anthropic_inline_file_data_text(
     lines.join("\n")
 }
 
-fn render_anthropic_executable_code_text(language: &str, code: &str) -> String {
+pub(super) fn render_anthropic_executable_code_text(language: &str, code: &str) -> String {
     format!("```{language}\n{code}\n```")
 }
 
@@ -110,6 +110,40 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                                 });
                             }
                         }
+                        Some("image") => {
+                            let source = block
+                                .get("source")
+                                .expect("Anthropic image source is adapter-validated");
+                            match source.get("type").and_then(Value::as_str) {
+                                Some("base64") => {
+                                    content_parts.push(UnifiedContentPart::ImageData {
+                                        mime_type: source
+                                            .get("media_type")
+                                            .and_then(Value::as_str)
+                                            .expect(
+                                                "Anthropic image media type is adapter-validated",
+                                            )
+                                            .to_string(),
+                                        data: source
+                                            .get("data")
+                                            .and_then(Value::as_str)
+                                            .expect("Anthropic image data is adapter-validated")
+                                            .to_string(),
+                                    });
+                                }
+                                Some("url") => {
+                                    content_parts.push(UnifiedContentPart::ImageUrl {
+                                        url: source
+                                            .get("url")
+                                            .and_then(Value::as_str)
+                                            .expect("Anthropic image URL is adapter-validated")
+                                            .to_string(),
+                                        detail: None,
+                                    });
+                                }
+                                _ => unreachable!("Anthropic image source is adapter-validated"),
+                            }
+                        }
                         Some("tool_use") if role == UnifiedRole::Assistant => {
                             if let (Some(id), Some(name), Some(input)) = (
                                 block.get("id").and_then(|v| v.as_str()),
@@ -127,10 +161,13 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                             }
                         }
                         Some("tool_result") if role == UnifiedRole::User => {
-                            if let (Some(tool_use_id), Some(content_val)) = (
-                                block.get("tool_use_id").and_then(|v| v.as_str()),
-                                block.get("content"),
-                            ) {
+                            if let Some(tool_use_id) =
+                                block.get("tool_use_id").and_then(|v| v.as_str())
+                            {
+                                let content_val = block
+                                    .get("content")
+                                    .cloned()
+                                    .unwrap_or_else(|| Value::String(String::new()));
                                 // Look up the tool name from our mapping
                                 let tool_name = tool_id_to_name
                                     .get(tool_use_id)
@@ -142,9 +179,7 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                                     UnifiedToolResult {
                                         tool_call_id: tool_use_id.to_string(),
                                         name: tool_name,
-                                        output: unified_tool_result_output_from_value(
-                                            content_val.clone(),
-                                        ),
+                                        output: unified_tool_result_output_from_value(content_val),
                                     },
                                 ));
                             }
@@ -208,7 +243,6 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
             }),
             ..Default::default()
         }
-        .filter_empty() // Filter out empty content and messages
     }
 }
 
@@ -224,12 +258,38 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
         for msg in unified_req.messages {
             match msg.role {
                 UnifiedRole::System => {
-                    // Combine all text parts from the system message content
+                    // Anthropic system instructions are text-only. Rich parts admitted by the
+                    // adapter policy are rendered deterministically before reaching this point.
                     let system_text = msg
                         .content
                         .iter()
                         .filter_map(|part| match part {
-                            UnifiedContentPart::Text { text } => Some(text.as_str()),
+                            UnifiedContentPart::Text { text }
+                            | UnifiedContentPart::Reasoning { text } => Some(text.clone()),
+                            UnifiedContentPart::ImageUrl { url, detail } => Some(
+                                render_anthropic_image_reference_text(url, detail.as_deref()),
+                            ),
+                            UnifiedContentPart::FileUrl {
+                                url,
+                                mime_type,
+                                filename,
+                            } => Some(render_anthropic_file_reference_text(
+                                url,
+                                mime_type.as_deref(),
+                                filename.as_deref(),
+                            )),
+                            UnifiedContentPart::FileData {
+                                data,
+                                mime_type,
+                                filename,
+                            } => Some(render_anthropic_inline_file_data_text(
+                                data,
+                                mime_type,
+                                filename.as_deref(),
+                            )),
+                            UnifiedContentPart::ExecutableCode { language, code } => {
+                                Some(render_anthropic_executable_code_text(language, code))
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>()

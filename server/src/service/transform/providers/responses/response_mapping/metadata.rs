@@ -112,12 +112,17 @@ pub(in crate::service::transform::providers::responses) fn build_responses_respo
                 refusals,
                 files,
                 metadata,
-                reasoning: reasoning_metadata.and_then(|value| serde_json::to_value(value).ok()),
+                reasoning: reasoning_metadata.map(|value| {
+                    serde_json::to_value(value).expect(
+                        "Responses reasoning metadata serialization is structurally infallible",
+                    )
+                }),
                 status: Some(
                     serde_json::to_value(status)
-                        .ok()
-                        .and_then(|value| value.as_str().map(ToString::to_string))
-                        .unwrap_or_else(|| "completed".to_string()),
+                        .expect("Responses status serialization is structurally infallible")
+                        .as_str()
+                        .expect("Responses status enum serializes as a string")
+                        .to_string(),
                 ),
                 incomplete_details: incomplete_details.map(|details| {
                     UnifiedResponsesIncompleteDetails {
@@ -170,7 +175,10 @@ pub(in crate::service::transform::providers::responses) fn unified_responses_met
                 metadata.prompt_cache_key,
                 metadata
                     .status
-                    .and_then(|status| serde_json::from_value(json!(status)).ok())
+                    .map(|status| {
+                        serde_json::from_value(json!(status))
+                            .expect("Responses status metadata is source-validated")
+                    })
                     .unwrap_or(ResponseStatus::Completed),
                 metadata
                     .incomplete_details

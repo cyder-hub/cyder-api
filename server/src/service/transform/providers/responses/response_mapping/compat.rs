@@ -12,9 +12,18 @@ pub(in crate::service::transform::providers::responses) fn convert_openai_tool_c
             "none" => Some(ToolChoice::Value(ToolChoiceValue::None)),
             "auto" => Some(ToolChoice::Value(ToolChoiceValue::Auto)),
             "required" => Some(ToolChoice::Value(ToolChoiceValue::Required)),
-            _ => None,
+            _ => unreachable!("OpenAI tool_choice is adapter-validated"),
         },
-        other => serde_json::from_value(other).ok(),
+        Value::Object(value) => Some(ToolChoice::Specific(SpecificToolChoice {
+            _type: "function".to_string(),
+            name: value
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .expect("OpenAI function tool_choice is adapter-validated")
+                .to_string(),
+        })),
+        _ => unreachable!("OpenAI tool_choice is adapter-validated"),
     }
 }
 
@@ -40,9 +49,9 @@ pub(in crate::service::transform::providers::responses) fn convert_openai_respon
                 })
             }
             Some("text") => Some(TextResponseFormat::Text),
-            _ => serde_json::from_value(Value::Object(map)).ok(),
+            _ => unreachable!("OpenAI response_format is adapter-validated"),
         },
-        other => serde_json::from_value(other).ok(),
+        _ => unreachable!("OpenAI response_format is adapter-validated"),
     }
 }
 
@@ -51,7 +60,10 @@ pub(in crate::service::transform::providers::responses) fn convert_openai_passth
 ) -> Option<Reasoning> {
     let effort = value.get("reasoning_effort")?;
     Some(Reasoning {
-        effort: serde_json::from_value(effort.clone()).ok(),
+        effort: Some(
+            serde_json::from_value(effort.clone())
+                .expect("OpenAI reasoning_effort is adapter-validated"),
+        ),
         summary: None,
     })
 }
@@ -62,13 +74,21 @@ pub(in crate::service::transform::providers::responses) fn parse_function_argume
     serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.to_string()))
 }
 
+pub(in crate::service::transform::providers::responses) fn parse_validated_function_arguments(
+    arguments: &str,
+) -> Value {
+    if arguments.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(arguments).expect("Responses tool arguments are adapter-validated")
+    }
+}
+
 pub(in crate::service::transform::providers::responses) fn stringify_function_arguments(
     arguments: Value,
 ) -> String {
-    match arguments {
-        Value::String(value) => value,
-        other => serde_json::to_string(&other).unwrap_or_default(),
-    }
+    serde_json::to_string(&arguments)
+        .expect("serde_json::Value serialization is structurally infallible")
 }
 
 pub(in crate::service::transform::providers::responses) fn function_output_payload_to_unified(
@@ -253,7 +273,8 @@ pub(in crate::service::transform::providers::responses) fn render_responses_inst
         UnifiedContentPart::ToolCall(call) => Some(format!(
             "tool_call: {}\narguments: {}",
             call.name,
-            serde_json::to_string(&call.arguments).unwrap_or_default()
+            serde_json::to_string(&call.arguments)
+                .expect("serde_json::Value serialization is structurally infallible")
         )),
         UnifiedContentPart::ToolResult(result) => Some(match result.name {
             Some(ref name) if !name.is_empty() => format!(

@@ -8,14 +8,14 @@ use axum::{
 use chrono::Utc;
 use futures::StreamExt;
 use tokio::{
-    sync::{Mutex as TokioMutex, mpsc},
+    sync::{Mutex as TokioMutex, mpsc, oneshot},
     time::{Instant, timeout_at},
 };
 
 use super::{
     body::{
         BODY_FRAME_CHANNEL_CAPACITY, BodyFrame, FrameDeliveryError, GuardedBodyStream,
-        guarded_body, send_body_frame,
+        guarded_body, send_body_frame, send_terminal_body_event,
     },
     lifecycle::{
         ProxyTerminationCause, ProxyTerminationCoordinator, TotalWatchdogResult,
@@ -29,7 +29,11 @@ use crate::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
         TimeoutPhase,
         cancellation::ProxyCancellationContext,
-        logging::RequestLogContext,
+        classify_transform_failure,
+        logging::{
+            RequestLogContext, TransformLogStage, log_transform_failure, log_transform_summary,
+        },
+        proxy_error_category,
         request_context::RequestId,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
@@ -40,7 +44,10 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        transform::StreamTransformer,
+        transform::{
+            FatalStreamEncodeError, FatalStreamErrorFact, StreamTransformer, TransformFailure,
+            encode_fatal_stream_error,
+        },
         upstream_response::{UpstreamContentEncoding, parse_content_encoding},
     },
     utils::sse::{SseEvent, SseFrame, SseParser},
@@ -98,17 +105,6 @@ pub(super) async fn sync_stream_usage_to_log_context(
     context.usage_normalization = usage_normalization;
 }
 
-fn mark_body_started_if_nonempty(
-    transformed_chunk: &Bytes,
-    response_visibility: &ResponseVisibilityTracker,
-) -> bool {
-    if transformed_chunk.is_empty() {
-        return false;
-    }
-    response_visibility.advance_to(ResponseVisibility::BodyStarted);
-    true
-}
-
 fn upstream_stream_error(
     code: ProxyErrorCode,
     response_visibility: &ResponseVisibilityTracker,
@@ -130,6 +126,31 @@ fn upstream_stream_error(
             operator_message,
         )
     }
+}
+
+fn transform_failure_to_proxy_error(
+    failure: &TransformFailure,
+    visibility: ResponseVisibility,
+) -> ProxyError {
+    classify_transform_failure(failure, visibility)
+}
+
+fn encode_guarded_transform_terminal(
+    downstream_protocol: DownstreamProtocol,
+    request_id: &str,
+    proxy_error: &ProxyError,
+) -> Result<Bytes, FatalStreamEncodeError> {
+    encode_fatal_stream_error(
+        downstream_protocol,
+        FatalStreamErrorFact {
+            request_id,
+            code: proxy_error.code().as_str(),
+            category: proxy_error_category(proxy_error.code(), downstream_protocol),
+            public_message: proxy_error.public_message(),
+            http_status: proxy_error.status_code().as_u16(),
+        },
+    )
+    .map(|event| event.to_bytes().freeze())
 }
 
 fn downstream_response_build_error(
@@ -250,29 +271,103 @@ async fn finalize_guarded_stream_failure(
     api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
     proxy_error: &ProxyError,
 ) {
+    finalize_guarded_stream_failure_delivery(
+        app_state,
+        cancellation,
+        coordinator,
+        sender,
+        log_context,
+        url,
+        status_code,
+        cost_catalog_version,
+        response_visibility,
+        api_key_request_lease,
+        proxy_error,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_guarded_transform_failure(
+    app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+    sender: &mpsc::Sender<BodyFrame>,
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    url: &str,
+    status_code: StatusCode,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    response_visibility: &ResponseVisibilityTracker,
+    api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
+    downstream_protocol: DownstreamProtocol,
+    request_id: &RequestId,
+    proxy_error: &ProxyError,
+) {
+    let terminal_event =
+        encode_guarded_transform_terminal(downstream_protocol, request_id.as_str(), proxy_error);
+    let terminal_bytes = match terminal_event {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            crate::warn_event!(
+                "proxy.stream_terminal_encode_failed",
+                request_id = request_id.as_str(),
+                error_code = proxy_error.code().as_str(),
+                downstream_protocol = format!("{downstream_protocol:?}"),
+                encoder_error = error.to_string(),
+            );
+            None
+        }
+    };
+
+    finalize_guarded_stream_failure_delivery(
+        app_state,
+        cancellation,
+        coordinator,
+        sender,
+        log_context,
+        url,
+        status_code,
+        cost_catalog_version,
+        response_visibility,
+        api_key_request_lease,
+        proxy_error,
+        terminal_bytes,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_guarded_stream_failure_delivery(
+    app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+    sender: &mpsc::Sender<BodyFrame>,
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    url: &str,
+    status_code: StatusCode,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    response_visibility: &ResponseVisibilityTracker,
+    api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
+    proxy_error: &ProxyError,
+    terminal_bytes: Option<Bytes>,
+) {
     if coordinator.terminal().is_some() {
-        finalize_streaming_error_and_release(
-            app_state,
-            cancellation,
-            coordinator,
-            log_context,
-            url,
-            status_code,
-            cost_catalog_version,
-            api_key_request_lease,
-            proxy_error,
-        )
-        .await;
         return;
     }
 
-    let delivery = send_body_frame(
-        sender,
-        Err(stream_io_error(proxy_error)),
-        cancellation,
-        coordinator,
-    )
-    .await;
+    let delivery = match terminal_bytes {
+        Some(bytes) => send_terminal_body_event(sender, bytes, cancellation, coordinator).await,
+        None => {
+            send_body_frame(
+                sender,
+                Err(stream_io_error(proxy_error)),
+                cancellation,
+                coordinator,
+            )
+            .await
+        }
+    };
     match delivery {
         Ok(()) => {
             coordinator.try_terminate_error(proxy_error);
@@ -320,6 +415,26 @@ async fn finalize_guarded_stream_failure(
     }
 }
 
+async fn log_stream_transform_summary_once(
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    transformer: &StreamTransformer,
+) {
+    let summary = transformer.diagnostics_snapshot();
+    let context = log_context.lock().await;
+    log_transform_summary(TransformLogStage::Stream, &context, &summary);
+}
+
+async fn log_stream_transform_failure_once(
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    transformer: &StreamTransformer,
+    failure: &TransformFailure,
+) {
+    let mut aggregate_failure = failure.clone();
+    aggregate_failure.summary = transformer.diagnostics_snapshot();
+    let context = log_context.lock().await;
+    log_transform_failure(TransformLogStage::Stream, &context, &aggregate_failure);
+}
+
 async fn finalize_guarded_stream_success(
     app_state: &Arc<AppState>,
     cancellation: &ProxyCancellationContext,
@@ -336,6 +451,7 @@ async fn finalize_guarded_stream_success(
         let completed_at = Utc::now().timestamp_millis();
         let usage = transformer.parse_usage_info();
         let usage_normalization = transformer.parse_usage_normalization();
+        let transform_summary = transformer.diagnostics_snapshot();
         let context_snapshot = {
             let mut context = log_context.lock().await;
             finalize_streaming_log_context(
@@ -349,6 +465,7 @@ async fn finalize_guarded_stream_success(
             );
             context.usage = usage;
             context.usage_normalization = usage_normalization;
+            log_transform_summary(TransformLogStage::Stream, &context, &transform_summary);
             if context.usage.is_none() {
                 crate::debug_event!(
                     "proxy.stream_usage_missing_debug",
@@ -393,10 +510,20 @@ async fn run_guarded_stream_worker(
     proxy_timeouts: ProxyTimeoutConfig,
     sse_response_limits: SseResponseConfig,
     response_visibility: ResponseVisibilityTracker,
+    headers_committed: oneshot::Receiver<()>,
     sender: mpsc::Sender<BodyFrame>,
     request_id: RequestId,
     log_id: i64,
 ) {
+    if headers_committed.await.is_err() {
+        api_key_request_lease.release().await;
+        return;
+    }
+    debug_assert!(
+        response_visibility.current() >= ResponseVisibility::HeadersCommitted,
+        "guarded stream worker must not consume upstream bytes before downstream headers commit"
+    );
+
     let mut stream = response.bytes_stream();
     let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
     let mut parser = SseParser::new(sse_response_limits.clone());
@@ -419,7 +546,10 @@ async fn run_guarded_stream_worker(
         );
         let read_result = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return,
+            _ = cancellation.cancelled() => {
+                log_stream_transform_summary_once(&log_context, &transformer).await;
+                return;
+            },
             result = timeout_at(read_deadline, stream.next()) => match result {
                 Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
                 Ok(Some(Err(error))) => {
@@ -460,6 +590,7 @@ async fn run_guarded_stream_worker(
                     format!("LLM stream exceeded the {phase:?} timeout"),
                 )),
                 None => {
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
                     return;
                 }
             },
@@ -482,7 +613,7 @@ async fn run_guarded_stream_worker(
                             None,
                             failure.operator_message,
                         );
-                        coordinator.try_terminate_error(&proxy_error);
+                        log_stream_transform_summary_once(&log_context, &transformer).await;
                         finalize_guarded_stream_failure(
                             &app_state,
                             &cancellation,
@@ -515,7 +646,7 @@ async fn run_guarded_stream_worker(
             }
             Ok(None) => parser.finish(),
             Err(proxy_error) => {
-                coordinator.try_terminate_error(&proxy_error);
+                log_stream_transform_summary_once(&log_context, &transformer).await;
                 finalize_guarded_stream_failure(
                     &app_state,
                     &cancellation,
@@ -544,7 +675,7 @@ async fn run_guarded_stream_worker(
                         &response_visibility,
                         format!("SSE response parsing failed: {parse_error}"),
                     );
-                    coordinator.try_terminate_error(&proxy_error);
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
                     finalize_guarded_stream_failure(
                         &app_state,
                         &cancellation,
@@ -564,14 +695,41 @@ async fn run_guarded_stream_worker(
             };
 
             if let SseFrame::Event(event) = frame {
-                let transform_output = transformer.transform_event_with_observation(event);
-                if transform_output.meaningful_output_observed {
+                let transform_output = match transformer.transform_event_with_observation(event) {
+                    Ok(output) => output,
+                    Err(failure) => {
+                        let proxy_error = transform_failure_to_proxy_error(
+                            &failure,
+                            response_visibility.current(),
+                        );
+                        log_stream_transform_failure_once(&log_context, &transformer, &failure)
+                            .await;
+                        finalize_guarded_transform_failure(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &sender,
+                            &log_context,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &response_visibility,
+                            &mut api_key_request_lease,
+                            downstream_protocol,
+                            &request_id,
+                            &proxy_error,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                if transform_output.value.meaningful_output_observed {
                     cancellation.timing().mark_first_token(
                         Utc::now().timestamp_millis(),
                         tokio::time::Instant::now(),
                     );
                 }
-                let transformed_events = transform_output.events.unwrap_or_default();
+                let transformed_events = transform_output.value.events;
                 sync_stream_usage_to_log_context(&log_context, &mut transformer).await;
                 for transformed_event in transformed_events {
                     let downstream_openai_done =
@@ -588,6 +746,7 @@ async fn run_guarded_stream_worker(
                         let proxy_error = match delivery_error {
                             FrameDeliveryError::ClientCancelled
                             | FrameDeliveryError::DownstreamDropped => {
+                                log_stream_transform_summary_once(&log_context, &transformer).await;
                                 cancellation.cancel_now(
                                     "downstream stopped consuming the guarded stream body",
                                 );
@@ -600,6 +759,7 @@ async fn run_guarded_stream_worker(
                                 format!("guarded stream body exceeded the {phase:?} timeout"),
                             ),
                         };
+                        log_stream_transform_summary_once(&log_context, &transformer).await;
                         coordinator.try_terminate_error(&proxy_error);
                         finalize_streaming_error_and_release(
                             &app_state,
@@ -646,6 +806,7 @@ async fn run_guarded_stream_worker(
     }
 
     if cancellation.is_cancelled() {
+        log_stream_transform_summary_once(&log_context, &transformer).await;
         return;
     }
     if downstream_protocol == DownstreamProtocol::Openai
@@ -668,6 +829,7 @@ async fn run_guarded_stream_worker(
         if let Err(delivery_error) = delivery {
             match delivery_error {
                 FrameDeliveryError::ClientCancelled | FrameDeliveryError::DownstreamDropped => {
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
                     cancellation.cancel_now("downstream stopped consuming the guarded stream body");
                 }
                 FrameDeliveryError::Timeout { phase } => {
@@ -677,6 +839,7 @@ async fn run_guarded_stream_worker(
                         response_visibility.current(),
                         format!("guarded stream body exceeded the {phase:?} timeout"),
                     );
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
                     coordinator.try_terminate_error(&proxy_error);
                     finalize_streaming_error_and_release(
                         &app_state,
@@ -759,6 +922,7 @@ pub(super) async fn handle_streaming_response_guarded(
 
     let coordinator = cancellation.coordinator();
     let (sender, receiver) = mpsc::channel(BODY_FRAME_CHANNEL_CAPACITY);
+    let (headers_committed_sender, headers_committed_receiver) = oneshot::channel();
     let worker = app_state
         .infra
         .spawn_background_task(run_guarded_stream_worker(
@@ -777,6 +941,7 @@ pub(super) async fn handle_streaming_response_guarded(
             proxy_timeouts,
             sse_response_limits,
             response_visibility.clone(),
+            headers_committed_receiver,
             sender,
             request_id,
             log_id,
@@ -797,6 +962,7 @@ pub(super) async fn handle_streaming_response_guarded(
     match build_response_builder(status_code, &response_headers).body(body) {
         Ok(response) => {
             response_visibility.advance_to(ResponseVisibility::HeadersCommitted);
+            let _ = headers_committed_sender.send(());
             Ok(response)
         }
         Err(error) => Err(downstream_response_build_error(
@@ -812,30 +978,36 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header::CONTENT_ENCODING};
 
     use super::{
-        downstream_response_build_error, mark_body_started_if_nonempty, upstream_stream_error,
+        downstream_response_build_error, encode_guarded_transform_terminal, upstream_stream_error,
         validate_sse_content_encoding, validate_stream_chunk,
     };
     use crate::proxy::{
         ExecutionStage, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
     };
     use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
+    use crate::service::transform::FatalStreamEncodeError;
     use crate::service::transform::StreamTransformer;
     use crate::utils::sse::SseEvent;
     use tokio::time::Instant;
 
     #[test]
-    fn downstream_body_visibility_advances_only_for_non_empty_chunks() {
-        let tracker = ResponseVisibilityTracker::new();
-        tracker.advance_to(ResponseVisibility::HeadersCommitted);
-
-        assert!(!mark_body_started_if_nonempty(&Bytes::new(), &tracker));
-        assert_eq!(tracker.current(), ResponseVisibility::HeadersCommitted);
-
-        assert!(mark_body_started_if_nonempty(
-            &Bytes::from_static(b"data: chunk\n\n"),
-            &tracker,
-        ));
-        assert_eq!(tracker.current(), ResponseVisibility::BodyStarted);
+    fn terminal_encoder_failure_remains_an_explicit_body_error_fallback_signal() {
+        let error = crate::proxy::ProxyError::gateway(
+            ProxyErrorCode::ProtocolTransformError,
+            ExecutionStage::Transform,
+            ResponseVisibility::HeadersCommitted,
+            None,
+            "private transform detail",
+        );
+        let result = encode_guarded_transform_terminal(
+            DownstreamProtocol::Responses,
+            "invalid\nrequest-id",
+            &error,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            FatalStreamEncodeError::InvalidRequestIdentity
+        );
     }
 
     #[test]
@@ -886,17 +1058,20 @@ mod tests {
         let base = Instant::now();
         assert!(timing.mark_upstream_request_sent(1_000, base));
 
-        let role = transformer.transform_event_with_observation(SseEvent {
-            data: "{\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}"
-                .to_string(),
-            ..Default::default()
-        });
-        assert!(!role.meaningful_output_observed);
+        let role = transformer
+            .transform_event_with_observation(SseEvent {
+                data:
+                    "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}"
+                        .to_string(),
+                ..Default::default()
+            })
+            .expect("role observation transform must succeed");
+        assert!(!role.value.meaningful_output_observed);
         let content = transformer.transform_event_with_observation(SseEvent {
             data: "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}".to_string(),
             ..Default::default()
-        });
-        assert!(content.meaningful_output_observed);
+        }).expect("content observation transform must succeed");
+        assert!(content.value.meaningful_output_observed);
         assert!(timing.mark_first_token(1_120, base + std::time::Duration::from_millis(120)));
         assert!(!timing.mark_first_token(1_130, base + std::time::Duration::from_millis(130)));
         assert_eq!(timing.snapshot().first_token_at, Some(1_120));

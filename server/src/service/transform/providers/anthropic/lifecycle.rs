@@ -12,7 +12,13 @@ fn parse_anthropic_tool_arguments(arguments: &str) -> Value {
     if arguments.trim().is_empty() {
         Value::Object(Default::default())
     } else {
-        serde_json::from_str(arguments).unwrap_or(Value::String(arguments.to_string()))
+        let value: Value = serde_json::from_str(arguments)
+            .expect("Anthropic tool arguments must be validated before lifecycle conversion");
+        assert!(
+            value.is_object(),
+            "Anthropic tool arguments must remain an object"
+        );
+        value
     }
 }
 
@@ -70,9 +76,10 @@ fn anthropic_block_stop_events(
             tool_call_id,
             tool_name,
         }) => {
-            let id = tool_call_id
-                .unwrap_or_else(|| format!("toolu_{}", crate::utils::ID_GENERATOR.generate_id()));
-            let name = tool_name.unwrap_or_else(|| "tool".to_string());
+            let id =
+                tool_call_id.expect("Anthropic tool block must retain its validated tool-use id");
+            let name =
+                tool_name.expect("Anthropic tool block must retain its validated tool-use name");
             vec![
                 UnifiedStreamEvent::ToolCallStop {
                     index,
@@ -159,6 +166,7 @@ impl From<AnthropicEvent> for UnifiedChunkResponse {
                 }
                 AnthropicContentDelta::SignatureDelta { .. } => {}
             },
+            AnthropicEvent::Unknown => {}
             AnthropicEvent::MessageDelta { delta, usage } => {
                 if let Some(stop_reason) = &delta.stop_reason {
                     choice.finish_reason = Some(
@@ -324,7 +332,9 @@ fn anthropic_event_to_unified_stream_events_inner(
                             );
                             state.tool_call_id = Some(id.clone());
                             state.tool_name = Some(name.clone());
-                            state.text = serde_json::to_string(&input).unwrap_or_default();
+                            state.text = serde_json::to_string(&input).expect(
+                                "serde_json::Value serialization is structurally infallible",
+                            );
                             events.push(UnifiedStreamEvent::ItemAdded {
                                 item_index: Some(index),
                                 item_id: Some(id.clone()),
@@ -343,7 +353,9 @@ fn anthropic_event_to_unified_stream_events_inner(
                                 id: id.clone(),
                                 name: name.clone(),
                             });
-                            let arguments = serde_json::to_string(&input).unwrap_or_default();
+                            let arguments = serde_json::to_string(&input).expect(
+                                "serde_json::Value serialization is structurally infallible",
+                            );
                             if !arguments.is_empty() {
                                 events.push(UnifiedStreamEvent::ToolCallArgumentsDelta {
                                     index,
@@ -453,7 +465,6 @@ fn anthropic_event_to_unified_stream_events_inner(
                     anthropic_start_block_state(session, index, AnthropicActiveBlockKind::ToolUse);
                 state.tool_call_id = Some(id.clone());
                 state.tool_name = Some(name.clone());
-                state.text = serde_json::to_string(&input).unwrap_or_default();
                 vec![
                     UnifiedStreamEvent::ItemAdded {
                         item_index: Some(index),
@@ -469,14 +480,6 @@ fn anthropic_event_to_unified_stream_events_inner(
                         kind: UnifiedBlockKind::ToolCall,
                     },
                     UnifiedStreamEvent::ToolCallStart { index, id, name },
-                    UnifiedStreamEvent::ToolCallArgumentsDelta {
-                        index,
-                        item_index: None,
-                        item_id: None,
-                        id: state.tool_call_id.clone(),
-                        name: state.tool_name.clone(),
-                        arguments: serde_json::to_string(&input).unwrap_or_default(),
-                    },
                 ]
             }
         },
@@ -554,7 +557,7 @@ fn anthropic_event_to_unified_stream_events_inner(
         }
         AnthropicEvent::MessageStop => vec![UnifiedStreamEvent::MessageStop],
         AnthropicEvent::Error { error } => vec![UnifiedStreamEvent::Error { error }],
-        AnthropicEvent::Ping => Vec::new(),
+        AnthropicEvent::Ping | AnthropicEvent::Unknown => Vec::new(),
     }
 }
 

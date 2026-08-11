@@ -13,7 +13,7 @@ use cyder_api::{
 };
 use serde::Deserialize;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const SOURCE_RELATIVE_PATH: &str = "docs/protocol-compatibility.yaml";
 const GENERATED_RELATIVE_PATH: &str = "docs/protocol-compatibility.md";
 
@@ -25,6 +25,7 @@ struct CompatibilityMatrix {
     upstream_protocols: Vec<UpstreamProtocol>,
     downstream_error_contracts: DownstreamErrorContracts,
     evidence: Vec<Evidence>,
+    transform_runtime_contract: TransformRuntimeContract,
     upstream_source_contract: UpstreamSourceContract,
     upstream_source_profiles: Vec<UpstreamSourceProfileContract>,
     routes: Vec<RouteContract>,
@@ -96,6 +97,64 @@ struct Evidence {
     kind: EvidenceKind,
     reference: String,
     summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransformRuntimeContract {
+    owner: String,
+    same_wire_behavior: String,
+    same_wire_observation_failure: String,
+    cross_wire_pipeline: Vec<String>,
+    cross_wire_failure_behavior: String,
+    unknown_semantic_behavior: String,
+    loss_policy: TransformLossPolicy,
+    header_boundary: TransformHeaderBoundary,
+    diagnostics: TransformDiagnosticsContract,
+    persistence: TransformPersistenceContract,
+    advanced_cell_owners: Vec<TransformAdvancedCellOwner>,
+    final_matrix_owner: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransformLossPolicy {
+    minor: String,
+    major: String,
+    deterministic_text_downgrade: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransformHeaderBoundary {
+    before_commit: String,
+    after_commit: String,
+    normal_terminal_after_failure: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransformDiagnosticsContract {
+    visibility: String,
+    max_retained_facts: usize,
+    overflow_accounted: bool,
+    payload_free: bool,
+    public_extensions: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransformPersistenceContract {
+    enabled: bool,
+    owner: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TransformAdvancedCellOwner {
+    upstream_protocol: UpstreamProtocol,
+    owner: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -420,12 +479,111 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
 
     let evidence = validate_evidence(&matrix.evidence)?;
     validate_downstream_error_contracts(&matrix.downstream_error_contracts, &evidence)?;
+    validate_transform_runtime_contract(&matrix.transform_runtime_contract, &evidence)?;
     validate_upstream_source_contract(&matrix.upstream_source_contract, &evidence)?;
     validate_upstream_source_profiles(&matrix.upstream_source_profiles)?;
     validate_routes(&matrix.routes)?;
     validate_generation_cells(&matrix.generation_cells, &evidence)?;
     validate_utilities(&matrix.utilities, &evidence)?;
     Ok(())
+}
+
+const REQUIRED_TRANSFORM_RUNTIME_EVIDENCE: [(&str, &str); 6] = [
+    (
+        "r3-15-transform-quality-contract",
+        "service::transform::quality::tests::test_transform_contract_summary_covers_failures_outcomes_and_accounting",
+    ),
+    (
+        "r3-15-transform-payload-free-contract",
+        "service::transform::quality::tests::test_transform_contract_report_omits_payload_and_safe_summary",
+    ),
+    (
+        "r3-15-same-wire-passthrough",
+        "proxy::direct_execution_regression::same_wire_non_stream_observation_failure_preserves_upstream_bytes",
+    ),
+    (
+        "r3-15-minor-loss-runtime",
+        "proxy::direct_execution_regression::cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata",
+    ),
+    (
+        "r3-15-four-protocol-stream-failure",
+        "proxy::direct_execution_regression::four_public_protocols_emit_one_native_terminal_on_cross_wire_stream_decode_failure",
+    ),
+    (
+        "r3-15-target-stream-failure",
+        "proxy::direct_execution_regression::cross_wire_target_stream_rejection_emits_one_native_terminal_and_releases_resources",
+    ),
+];
+
+fn validate_transform_runtime_contract(
+    contract: &TransformRuntimeContract,
+    evidence: &HashMap<&str, &Evidence>,
+) -> Result<(), String> {
+    if contract != &expected_transform_runtime_contract() {
+        return Err(
+            "transform_runtime_contract must pin the R3.15 passthrough, fail-closed, loss, header-boundary, internal-only diagnostic, R4.6 persistence, and R3.16-R3.21 owner contract"
+                .to_string(),
+        );
+    }
+    for (id, reference) in REQUIRED_TRANSFORM_RUNTIME_EVIDENCE {
+        let item = evidence
+            .get(id)
+            .ok_or_else(|| format!("transform_runtime_contract requires evidence '{id}'"))?;
+        if item.kind != EvidenceKind::Test || item.reference != reference {
+            return Err(format!(
+                "transform runtime evidence '{id}' must reference stable automated test '{reference}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expected_transform_runtime_contract() -> TransformRuntimeContract {
+    TransformRuntimeContract {
+        owner: "R3.15".to_string(),
+        same_wire_behavior: "byte_preserving_passthrough".to_string(),
+        same_wire_observation_failure: "observation_degraded".to_string(),
+        cross_wire_pipeline: vec![
+            "source_decode".to_string(),
+            "unified_ir".to_string(),
+            "target_encode".to_string(),
+        ],
+        cross_wire_failure_behavior: "fail_closed".to_string(),
+        unknown_semantic_behavior: "explicit_reject".to_string(),
+        loss_policy: TransformLossPolicy {
+            minor: "controlled_loss_with_internal_fact".to_string(),
+            major: "explicit_reject".to_string(),
+            deterministic_text_downgrade: "fixture_backed_controlled_loss".to_string(),
+        },
+        header_boundary: TransformHeaderBoundary {
+            before_commit: "downstream_native_error_envelope".to_string(),
+            after_commit: "single_downstream_native_error_terminal_or_body_error".to_string(),
+            normal_terminal_after_failure: false,
+        },
+        diagnostics: TransformDiagnosticsContract {
+            visibility: "internal_only".to_string(),
+            max_retained_facts: 32,
+            overflow_accounted: true,
+            payload_free: true,
+            public_extensions: false,
+        },
+        persistence: TransformPersistenceContract {
+            enabled: false,
+            owner: "R4.6".to_string(),
+        },
+        advanced_cell_owners: UpstreamProtocol::ALL
+            .into_iter()
+            .map(|upstream_protocol| TransformAdvancedCellOwner {
+                upstream_protocol,
+                owner: generation_owner(upstream_protocol).to_string(),
+            })
+            .collect(),
+        final_matrix_owner: "R3.21".to_string(),
+        evidence: REQUIRED_TRANSFORM_RUNTIME_EVIDENCE
+            .iter()
+            .map(|(id, _)| (*id).to_string())
+            .collect(),
+    }
 }
 
 const REQUIRED_ERROR_EVIDENCE: [(&str, &str); 8] = [
@@ -826,10 +984,10 @@ fn validate_generation_cells(
         for (dimension, assessment) in cell.advanced.entries() {
             validate_assessment_evidence(
                 &format!("{:?}->{:?} {dimension}", cell.downstream, cell.upstream),
-                assessment.status == AdvancedStatus::Full,
+                assessment.status != AdvancedStatus::NotVerified,
                 &assessment.evidence,
                 assessment.owner.as_deref(),
-                Some(transform_owner()),
+                Some(owner),
                 evidence,
             )?;
             if assessment.status == AdvancedStatus::ExplicitReject
@@ -926,10 +1084,6 @@ fn generation_owner(upstream: UpstreamProtocol) -> &'static str {
         UpstreamProtocol::Gemini => "R3.19",
         UpstreamProtocol::Ollama => "R3.20",
     }
-}
-
-fn transform_owner() -> &'static str {
-    "R3.15"
 }
 
 fn utility_owner(utility: &UtilityContract) -> &'static str {
@@ -1242,6 +1396,79 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
         )
         .unwrap();
     }
+
+    let transform_contract = &matrix.transform_runtime_contract;
+    writeln!(output, "\n## Transform runtime contract\n").unwrap();
+    writeln!(
+        output,
+        "- Owner: `{}`. Same-wire behavior is `{}`; observation failure is `{}`.",
+        transform_contract.owner,
+        transform_contract.same_wire_behavior,
+        transform_contract.same_wire_observation_failure
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Cross-wire pipeline: `{}`; any pipeline failure is `{}`; unknown semantics are `{}`.",
+        transform_contract.cross_wire_pipeline.join(" -> "),
+        transform_contract.cross_wire_failure_behavior,
+        transform_contract.unknown_semantic_behavior
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Loss policy: minor `{}`, major `{}`, deterministic text downgrade `{}`.",
+        transform_contract.loss_policy.minor,
+        transform_contract.loss_policy.major,
+        transform_contract.loss_policy.deterministic_text_downgrade
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Header boundary: before commit `{}`; after commit `{}`; normal terminal after failure `{}`.",
+        transform_contract.header_boundary.before_commit,
+        transform_contract.header_boundary.after_commit,
+        transform_contract
+            .header_boundary
+            .normal_terminal_after_failure
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Diagnostics: visibility `{}`, retained fact cap `{}`, overflow accounted `{}`, payload-free `{}`, public extensions `{}`.",
+        transform_contract.diagnostics.visibility,
+        transform_contract.diagnostics.max_retained_facts,
+        transform_contract.diagnostics.overflow_accounted,
+        transform_contract.diagnostics.payload_free,
+        transform_contract.diagnostics.public_extensions
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Persistence active in R3.15: `{}`; persistence owner `{}`; final matrix owner `{}`.",
+        transform_contract.persistence.enabled,
+        transform_contract.persistence.owner,
+        transform_contract.final_matrix_owner
+    )
+    .unwrap();
+    writeln!(output, "\n### Advanced cell owners\n").unwrap();
+    writeln!(output, "| Upstream protocol | Owner |").unwrap();
+    writeln!(output, "| --- | --- |").unwrap();
+    for owner in &transform_contract.advanced_cell_owners {
+        writeln!(
+            output,
+            "| {} | `{}` |",
+            upstream_label(owner.upstream_protocol),
+            owner.owner
+        )
+        .unwrap();
+    }
+    writeln!(
+        output,
+        "\nEvidence: {}.",
+        transform_contract.evidence.join(", ")
+    )
+    .unwrap();
 
     let source_contract = &matrix.upstream_source_contract;
     writeln!(output, "\n## Upstream Source contract\n").unwrap();
@@ -1779,7 +2006,78 @@ mod tests {
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.15")
+                .contains("must be owned by R3.16")
+        );
+    }
+
+    #[test]
+    fn transform_runtime_contract_drift_and_missing_evidence_are_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.transform_runtime_contract.diagnostics.payload_free = false;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("transform_runtime_contract must pin")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix
+            .evidence
+            .retain(|item| item.id != "r3-15-target-stream-failure");
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("requires evidence 'r3-15-target-stream-failure'")
+        );
+    }
+
+    #[test]
+    fn advanced_final_statuses_remove_owner_and_require_test_evidence() {
+        let matrix = canonical_matrix();
+        let evidence = validate_evidence(&matrix.evidence).expect("evidence should validate");
+        let ids = vec!["r3-15-minor-loss-runtime".to_string()];
+        for status in [
+            AdvancedStatus::Full,
+            AdvancedStatus::ControlledLoss,
+            AdvancedStatus::ExplicitReject,
+        ] {
+            assert!(
+                validate_assessment_evidence(
+                    status.label(),
+                    true,
+                    &ids,
+                    None,
+                    Some("R3.16"),
+                    &evidence,
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_assessment_evidence(
+                "advanced controlled loss",
+                true,
+                &ids,
+                Some("R3.16"),
+                Some("R3.16"),
+                &evidence,
+            )
+            .unwrap_err()
+            .contains("must not have an owner")
+        );
+
+        let code_only = vec!["reachable-materializers-without-cell-regression".to_string()];
+        assert!(
+            validate_assessment_evidence(
+                "advanced explicit reject",
+                true,
+                &code_only,
+                None,
+                Some("R3.16"),
+                &evidence,
+            )
+            .unwrap_err()
+            .contains("requires test evidence")
         );
     }
 
@@ -1827,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_and_transform_owners_follow_r3_15_to_r3_20() {
+    fn protocol_and_advanced_owners_follow_r3_16_to_r3_20() {
         let mut matrix = canonical_matrix();
         matrix.generation_cells[3].base.non_stream_text.owner = Some("R3.19".to_string());
         assert!(validate_matrix(&matrix).is_ok());
@@ -1836,7 +2134,7 @@ mod tests {
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.15")
+                .contains("must be owned by R3.19")
         );
 
         let mut matrix = canonical_matrix();
@@ -1849,11 +2147,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_v1_and_provider_profile_fields_are_not_accepted() {
-        let v1 = CANONICAL_SOURCE.replacen("schema_version: 3", "schema_version: 1", 1);
-        let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v1)
+    fn schema_v3_and_provider_profile_fields_are_not_accepted() {
+        let v3 = CANONICAL_SOURCE.replacen("schema_version: 4", "schema_version: 3", 1);
+        let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v3)
             .expect("schema number should parse before validation");
-        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 3"));
+        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 4"));
 
         let legacy = CANONICAL_SOURCE
             .replacen("upstream_source_profiles:", "provider_profiles:", 1)

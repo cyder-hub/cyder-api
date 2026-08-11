@@ -154,7 +154,8 @@ pub(super) fn item_field_to_formal_responses_item(
             id: item_id.to_string(),
             call_id: call.id.clone(),
             name: call.name.clone(),
-            arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+            arguments: serde_json::to_string(&call.arguments)
+                .expect("serde_json::Value serialization is structurally infallible"),
             status: MessageStatus::InProgress,
         })),
         UnifiedItem::FunctionCallOutput(output) => {
@@ -318,7 +319,8 @@ pub(super) fn encode_formal_responses_stream_event(
                     id: item_id.clone(),
                     call_id: call.id,
                     name: call.name,
-                    arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                    arguments: serde_json::to_string(&call.arguments)
+                        .expect("serde_json::Value serialization is structurally infallible"),
                     status: MessageStatus::Completed,
                 }),
                 UnifiedItem::FunctionCallOutput(output) => {
@@ -402,7 +404,7 @@ pub(super) fn encode_formal_responses_stream_event(
             text,
         } => {
             let output_index = item_index.unwrap_or(state.responses_mut().current_output_index);
-            let response_item_id = item_id
+            let mut response_item_id = item_id
                 .or_else(|| {
                     state
                         .responses_mut()
@@ -411,7 +413,46 @@ pub(super) fn encode_formal_responses_stream_event(
                         .cloned()
                 })
                 .or_else(|| state.responses_mut().current_item_id.clone());
+            if response_item_id.is_none() {
+                if !state.responses_mut().created_sent {
+                    state.responses_mut().created_sent = true;
+                    frames.push(json!({
+                        "type": "response.created",
+                        "response": build_formal_responses_response(
+                            state,
+                            ResponseStatus::InProgress,
+                            None,
+                            Vec::new()
+                        )
+                    }));
+                }
+                let item_id = format!("msg_{}", crate::utils::ID_GENERATOR.generate_id());
+                let output_index = item_index.unwrap_or_else(|| {
+                    let next = state.responses_mut().next_output_index;
+                    state.responses_mut().next_output_index = next.saturating_add(1);
+                    next
+                });
+                state.responses_mut().current_output_index = output_index;
+                state.responses_mut().current_item_id = Some(item_id.clone());
+                state.responses_mut().current_item_role = Some(UnifiedRole::Assistant);
+                state
+                    .responses_mut()
+                    .output_item_ids
+                    .insert(output_index, item_id.clone());
+                frames.push(json!({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": build_formal_responses_message_item(
+                        &item_id,
+                        UnifiedRole::Assistant,
+                        "",
+                        MessageStatus::InProgress
+                    )
+                }));
+                response_item_id = Some(item_id);
+            }
             if let Some(item_id) = response_item_id {
+                let output_index = item_index.unwrap_or(state.responses_mut().current_output_index);
                 state.responses_mut().output_text.push_str(&text);
                 let content_index = part_index
                     .or(state.current_content_part_index())
@@ -443,7 +484,10 @@ pub(super) fn encode_formal_responses_stream_event(
                 .or_else(|| state.responses_mut().current_item_id.clone());
             if let Some(item_id) = item_id {
                 let part = part
-                    .and_then(|part| serde_json::to_value(part).ok())
+                    .map(|part| {
+                        serde_json::to_value(part)
+                            .expect("Unified content serialization is structurally infallible")
+                    })
                     .unwrap_or_else(|| default_text_output_part(""));
                 frames.push(json!({
                     "type": "response.content_part.added",
@@ -551,6 +595,28 @@ pub(super) fn encode_formal_responses_stream_event(
             name,
             arguments,
         } => {
+            if !state.responses_mut().active_tool_calls.contains_key(&index) {
+                if let (Some(call_id), Some(name)) = (id.clone(), name.clone()) {
+                    let response_item_id = item_id.clone().unwrap_or_else(|| call_id.clone());
+                    let function_call = FunctionCall {
+                        _type: "function_call".to_string(),
+                        id: response_item_id.clone(),
+                        call_id,
+                        name,
+                        arguments: String::new(),
+                        status: MessageStatus::InProgress,
+                    };
+                    state
+                        .responses_mut()
+                        .active_tool_calls
+                        .insert(index, function_call.clone());
+                    frames.push(json!({
+                        "type": "response.output_item.added",
+                        "output_index": item_index.unwrap_or(index),
+                        "item": ItemField::FunctionCall(function_call)
+                    }));
+                }
+            }
             let mut response_item_id = item_id
                 .clone()
                 .or_else(|| {
@@ -619,7 +685,18 @@ pub(super) fn encode_formal_responses_stream_event(
             part_index,
             ..
         } => {
-            let output_index = item_index.unwrap_or_default();
+            let output_index = item_index.or_else(|| {
+                item_id.as_ref().and_then(|item_id| {
+                    state
+                        .responses()
+                        .reasoning_item_ids
+                        .iter()
+                        .find_map(|(index, known_id)| (known_id == item_id).then_some(*index))
+                })
+            });
+            let Some(output_index) = output_index else {
+                return frames;
+            };
             let item_id = item_id.or_else(|| {
                 state
                     .responses_mut()
@@ -645,6 +722,34 @@ pub(super) fn encode_formal_responses_stream_event(
             text,
         } => {
             let output_index = item_index.unwrap_or(index);
+            if !state
+                .responses_mut()
+                .reasoning_item_ids
+                .contains_key(&output_index)
+            {
+                let item_id = item_id
+                    .clone()
+                    .unwrap_or_else(|| format!("rs_{}", crate::utils::ID_GENERATOR.generate_id()));
+                state
+                    .responses_mut()
+                    .reasoning_item_ids
+                    .insert(output_index, item_id.clone());
+                state
+                    .responses_mut()
+                    .reasoning_summaries
+                    .insert(output_index, String::new());
+                frames.push(json!({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": ItemField::Reasoning(ReasoningBody {
+                        _type: "reasoning".to_string(),
+                        id: item_id,
+                        content: None,
+                        summary: Vec::new(),
+                        encrypted_content: None,
+                    })
+                }));
+            }
             state
                 .responses_mut()
                 .reasoning_summaries
@@ -661,20 +766,33 @@ pub(super) fn encode_formal_responses_stream_event(
                     .get(&output_index)
                     .cloned()
             });
-            frames.push(json!({
-                "type": "response.reasoning_summary_text.delta",
-                "item_id": response_item_id.unwrap_or_default(),
-                "output_index": output_index,
-                "summary_index": summary_index,
-                "delta": text
-            }));
+            if let Some(response_item_id) = response_item_id {
+                frames.push(json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": response_item_id,
+                    "output_index": output_index,
+                    "summary_index": summary_index,
+                    "delta": text
+                }));
+            }
         }
         UnifiedStreamEvent::ReasoningSummaryPartDone {
             item_index,
             item_id,
             part_index,
         } => {
-            let output_index = item_index.unwrap_or_default();
+            let output_index = item_index.or_else(|| {
+                item_id.as_ref().and_then(|item_id| {
+                    state
+                        .responses()
+                        .reasoning_item_ids
+                        .iter()
+                        .find_map(|(index, known_id)| (known_id == item_id).then_some(*index))
+                })
+            });
+            let Some(output_index) = output_index else {
+                return frames;
+            };
             let item_id = item_id.or_else(|| {
                 state
                     .responses_mut()
@@ -804,10 +922,15 @@ pub(super) fn encode_formal_responses_stream_event(
                 }));
             }
 
+            let output_index = index.unwrap_or_else(|| {
+                let next = state.responses_mut().next_output_index;
+                state.responses_mut().next_output_index = next.saturating_add(1);
+                next
+            });
             frames.push(json!({
-                "type": "response.output_item.added",
-                "output_index": index.unwrap_or_default(),
-                "item": data
+                "type": "response.blob",
+                "index": output_index,
+                "data": data
             }));
         }
     }

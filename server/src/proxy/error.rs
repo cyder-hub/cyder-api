@@ -2,6 +2,7 @@ use axum::http::HeaderValue;
 use reqwest::{Error as ReqwestError, StatusCode};
 use std::fmt;
 
+use crate::service::transform::{TransformFailure, TransformFailureOrigin};
 use crate::service::upstream_response::UpstreamHttpErrorKind;
 
 pub(crate) mod fact;
@@ -14,7 +15,7 @@ pub(crate) use fact::{
     ErrorResponseHints, ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel,
     RetryAfterSeconds, TimeoutPhase,
 };
-pub(crate) use response::{ProtocolErrorResponseAdapter, RouterRejection};
+pub(crate) use response::{ProtocolErrorResponseAdapter, RouterRejection, proxy_error_category};
 pub(crate) use upstream::UpstreamErrorPayload;
 pub(crate) use visibility::{ResponseVisibility, ResponseVisibilityTracker};
 
@@ -53,6 +54,41 @@ pub(crate) fn protocol_transform_error(
         response_visibility,
         None,
         format!("{operation}: {err}"),
+    )
+}
+
+pub(crate) fn classify_transform_failure(
+    failure: &TransformFailure,
+    response_visibility: ResponseVisibility,
+) -> ProxyError {
+    let (code, stage) = match failure.origin {
+        TransformFailureOrigin::DownstreamInput => {
+            (ProxyErrorCode::InvalidRequestError, ExecutionStage::Parse)
+        }
+        TransformFailureOrigin::TargetCapability => (
+            ProxyErrorCode::UnsupportedCapabilityError,
+            ExecutionStage::Capability,
+        ),
+        TransformFailureOrigin::UpstreamPayload => (
+            ProxyErrorCode::UpstreamResponseError,
+            ExecutionStage::UpstreamResponse,
+        ),
+        TransformFailureOrigin::TargetEncoding | TransformFailureOrigin::InternalInvariant => (
+            ProxyErrorCode::ProtocolTransformError,
+            ExecutionStage::Transform,
+        ),
+    };
+    ProxyError::gateway(
+        code,
+        stage,
+        response_visibility,
+        None,
+        format!(
+            "Transform failed at {} for {}: {}",
+            failure.phase.as_str(),
+            failure.semantic_unit.as_str(),
+            failure.reason_code.as_str()
+        ),
     )
 }
 
@@ -234,9 +270,16 @@ mod tests {
     use super::{
         ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode, ProxyLogLevel,
         ResponseVisibility, classify_request_body_error, classify_reqwest_error,
-        classify_upstream_status, protocol_transform_error,
+        classify_transform_failure, classify_upstream_status, protocol_transform_error,
     };
-    use crate::{proxy::request_context::RequestId, schema::enum_def::DownstreamProtocol};
+    use crate::{
+        proxy::request_context::RequestId,
+        schema::enum_def::DownstreamProtocol,
+        service::transform::{
+            TransformFailureOrigin, TransformPhase, TransformReasonCode, TransformSemanticUnit,
+            diagnostics::transform_failure,
+        },
+    };
     use axum::{body::to_bytes, http::HeaderValue};
     use reqwest::StatusCode;
     use tokio::net::TcpListener;
@@ -368,6 +411,59 @@ mod tests {
             "The gateway could not transform the request or response."
         );
         assert!(error.operator_message().contains("secret detail"));
+    }
+
+    #[test]
+    fn transform_failure_origin_has_one_stable_proxy_classification() {
+        for (origin, expected_code, expected_stage, expected_status) in [
+            (
+                TransformFailureOrigin::DownstreamInput,
+                ProxyErrorCode::InvalidRequestError,
+                ExecutionStage::Parse,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                TransformFailureOrigin::TargetCapability,
+                ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                TransformFailureOrigin::UpstreamPayload,
+                ProxyErrorCode::UpstreamResponseError,
+                ExecutionStage::UpstreamResponse,
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                TransformFailureOrigin::TargetEncoding,
+                ProxyErrorCode::ProtocolTransformError,
+                ExecutionStage::Transform,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                TransformFailureOrigin::InternalInvariant,
+                ProxyErrorCode::ProtocolTransformError,
+                ExecutionStage::Transform,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let failure = transform_failure(
+                origin,
+                TransformPhase::RequestEncode,
+                TransformSemanticUnit::RequestEnvelope,
+                TransformReasonCode::TargetEncodeFailed,
+                None,
+            );
+            let error = classify_transform_failure(&failure, ResponseVisibility::NotVisible);
+
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(error.stage(), expected_stage);
+            assert_eq!(error.status_code(), expected_status);
+            assert_eq!(
+                error.public_message(),
+                expected_code.default_public_message()
+            );
+        }
     }
 
     #[test]

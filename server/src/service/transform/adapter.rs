@@ -1,33 +1,46 @@
 use cyder_tools::log::warn;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use super::audit::{
+    audit_target_request, audit_target_response, validate_downstream_request,
+    validate_upstream_response,
+};
+use super::diagnostics::{transform_failure, transform_success};
 use super::providers::{anthropic, gemini, ollama, openai, responses};
 use super::request::apply_stream_options;
 use super::stream::StreamTransformContext;
+use super::stream_audit::{
+    SourceStreamSemanticError, audit_target_legacy_chunk, audit_target_stream_events,
+    validate_anthropic_stream_event, validate_openai_stream_chunk, validate_responses_stream_chunk,
+    validate_upstream_stream_frame,
+};
 use super::unified::{
     UnifiedChunkResponse, UnifiedRequest, UnifiedResponse, UnifiedStreamEvent,
     meaningful_output_from_legacy_chunk, meaningful_output_from_stream_events,
+};
+use super::{
+    TransformAction, TransformFailureOrigin, TransformOutcomeKind, TransformPhase,
+    TransformReasonCode, TransformResult, TransformSafeSummary, TransformSemanticUnit,
 };
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 use crate::utils::sse::SseEvent;
 
 pub(in crate::service::transform) type RequestDecodeFn =
-    fn(Value) -> Result<UnifiedRequest, serde_json::Error>;
+    fn(Value) -> TransformResult<UnifiedRequest>;
 pub(in crate::service::transform) type RequestEncodeFn =
-    fn(UnifiedRequest) -> Result<Value, serde_json::Error>;
+    fn(UnifiedRequest) -> TransformResult<Value>;
 pub(in crate::service::transform) type ResponseDecodeFn =
-    fn(Value) -> Result<UnifiedResponse, serde_json::Error>;
+    fn(Value) -> TransformResult<UnifiedResponse>;
 pub(in crate::service::transform) type ResponseEncodeFn =
-    fn(UnifiedResponse) -> Result<Value, serde_json::Error>;
+    fn(UnifiedResponse) -> TransformResult<Value>;
 pub(in crate::service::transform) type SourceStreamDecodeFn =
-    fn(
-        &str,
-        &mut StreamTransformContext<'_>,
-    ) -> Result<DecodedSourceStreamFrame, serde_json::Error>;
+    fn(&str, &mut StreamTransformContext<'_>) -> TransformResult<DecodedSourceStreamFrame>;
 pub(in crate::service::transform) type TargetStreamEventsEncodeFn =
-    fn(Vec<UnifiedStreamEvent>, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
+    fn(Vec<UnifiedStreamEvent>, &mut StreamTransformContext<'_>) -> TransformResult<Vec<SseEvent>>;
 pub(in crate::service::transform) type TargetLegacyChunkEncodeFn =
-    fn(UnifiedChunkResponse, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
+    fn(UnifiedChunkResponse, &mut StreamTransformContext<'_>) -> TransformResult<Vec<SseEvent>>;
 pub(in crate::service::transform) type RequestFinalizeFn =
     fn(Value, &UpstreamProfileType, &str) -> Value;
 
@@ -56,7 +69,6 @@ pub(in crate::service::transform) struct UpstreamResponseCodec {
 pub(in crate::service::transform) struct DownstreamStreamCodec {
     pub(in crate::service::transform) encode_events: TargetStreamEventsEncodeFn,
     pub(in crate::service::transform) encode_legacy_chunk: TargetLegacyChunkEncodeFn,
-    pub(in crate::service::transform) requires_legacy_bridge_for_events: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -126,140 +138,574 @@ fn finalize_openai_request(
     data
 }
 
-fn decode_openai_request(data: Value) -> Result<UnifiedRequest, serde_json::Error> {
-    serde_json::from_value::<openai::OpenAiRequestPayload>(data).map(Into::into)
+fn decode_json<T, U>(
+    data: Value,
+    origin: TransformFailureOrigin,
+    phase: TransformPhase,
+    semantic_unit: TransformSemanticUnit,
+) -> TransformResult<U>
+where
+    T: DeserializeOwned,
+    U: From<T>,
+{
+    let safe_summary = TransformSafeSummary::from_json(&data);
+    match serde_json::from_value::<T>(data) {
+        Ok(value) => Ok(transform_success(
+            value.into(),
+            phase,
+            semantic_unit,
+            TransformOutcomeKind::Lossless,
+            TransformAction::Send,
+            TransformReasonCode::LosslessConversion,
+        )),
+        Err(_) => Err(transform_failure(
+            origin,
+            phase,
+            semantic_unit,
+            if matches!(origin, TransformFailureOrigin::DownstreamInput) {
+                TransformReasonCode::InvalidProtocolShape
+            } else {
+                TransformReasonCode::SourceDecodeFailed
+            },
+            Some(safe_summary),
+        )),
+    }
 }
 
-fn encode_openai_request(unified: UnifiedRequest) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(openai::OpenAiRequestPayload::from(unified))
+fn encode_json<T: Serialize>(
+    value: T,
+    phase: TransformPhase,
+    semantic_unit: TransformSemanticUnit,
+) -> TransformResult<Value> {
+    match serde_json::to_value(value) {
+        Ok(value) => Ok(transform_success(
+            value,
+            phase,
+            semantic_unit,
+            TransformOutcomeKind::Lossless,
+            TransformAction::Send,
+            TransformReasonCode::LosslessConversion,
+        )),
+        Err(_) => Err(transform_failure(
+            TransformFailureOrigin::TargetEncoding,
+            phase,
+            semantic_unit,
+            TransformReasonCode::TargetEncodeFailed,
+            None,
+        )),
+    }
 }
 
-fn decode_gemini_request(data: Value) -> Result<UnifiedRequest, serde_json::Error> {
-    serde_json::from_value::<gemini::GeminiRequestPayload>(data).map(Into::into)
+fn decode_openai_request(data: Value) -> TransformResult<UnifiedRequest> {
+    validate_request_source(DownstreamProtocol::Openai, &data)?;
+    decode_json::<openai::OpenAiRequestPayload, _>(
+        data,
+        TransformFailureOrigin::DownstreamInput,
+        TransformPhase::RequestDecode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn encode_gemini_request(unified: UnifiedRequest) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(gemini::GeminiRequestPayload::from(unified))
+fn encode_openai_request(unified: UnifiedRequest) -> TransformResult<Value> {
+    audit_target_request(UpstreamProtocol::Openai, &unified);
+    encode_json(
+        openai::OpenAiRequestPayload::from(unified),
+        TransformPhase::RequestEncode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn encode_ollama_request(unified: UnifiedRequest) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(ollama::OllamaRequestPayload::from(unified))
+fn decode_gemini_request(data: Value) -> TransformResult<UnifiedRequest> {
+    validate_request_source(DownstreamProtocol::Gemini, &data)?;
+    decode_json::<gemini::GeminiRequestPayload, _>(
+        data,
+        TransformFailureOrigin::DownstreamInput,
+        TransformPhase::RequestDecode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn decode_anthropic_request(data: Value) -> Result<UnifiedRequest, serde_json::Error> {
-    serde_json::from_value::<anthropic::AnthropicRequestPayload>(data).map(Into::into)
+fn encode_gemini_request(unified: UnifiedRequest) -> TransformResult<Value> {
+    audit_target_request(UpstreamProtocol::Gemini, &unified);
+    encode_json(
+        gemini::GeminiRequestPayload::from(unified),
+        TransformPhase::RequestEncode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn encode_anthropic_request(unified: UnifiedRequest) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(anthropic::AnthropicRequestPayload::from(unified))
+fn encode_ollama_request(unified: UnifiedRequest) -> TransformResult<Value> {
+    audit_target_request(UpstreamProtocol::Ollama, &unified);
+    encode_json(
+        ollama::OllamaRequestPayload::from(unified),
+        TransformPhase::RequestEncode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn decode_responses_request(data: Value) -> Result<UnifiedRequest, serde_json::Error> {
-    serde_json::from_value::<responses::ResponsesRequestPayload>(data).map(Into::into)
+fn decode_anthropic_request(data: Value) -> TransformResult<UnifiedRequest> {
+    validate_request_source(DownstreamProtocol::Anthropic, &data)?;
+    decode_json::<anthropic::AnthropicRequestPayload, _>(
+        data,
+        TransformFailureOrigin::DownstreamInput,
+        TransformPhase::RequestDecode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn encode_responses_request(unified: UnifiedRequest) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(responses::ResponsesRequestPayload::from(unified))
+fn encode_anthropic_request(unified: UnifiedRequest) -> TransformResult<Value> {
+    audit_target_request(UpstreamProtocol::Anthropic, &unified);
+    encode_json(
+        anthropic::AnthropicRequestPayload::from(unified),
+        TransformPhase::RequestEncode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn decode_openai_response(data: Value) -> Result<UnifiedResponse, serde_json::Error> {
-    serde_json::from_value::<openai::OpenAiResponse>(data).map(Into::into)
+fn decode_responses_request(data: Value) -> TransformResult<UnifiedRequest> {
+    validate_request_source(DownstreamProtocol::Responses, &data)?;
+    decode_json::<responses::ResponsesRequestPayload, _>(
+        data,
+        TransformFailureOrigin::DownstreamInput,
+        TransformPhase::RequestDecode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn encode_openai_response(unified: UnifiedResponse) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(openai::OpenAiResponse::from(unified))
+fn encode_responses_request(unified: UnifiedRequest) -> TransformResult<Value> {
+    audit_target_request(UpstreamProtocol::Responses, &unified);
+    encode_json(
+        responses::ResponsesRequestPayload::from(unified),
+        TransformPhase::RequestEncode,
+        TransformSemanticUnit::RequestEnvelope,
+    )
 }
 
-fn decode_gemini_response(data: Value) -> Result<UnifiedResponse, serde_json::Error> {
-    serde_json::from_value::<gemini::GeminiResponse>(data).map(Into::into)
+fn decode_openai_response(data: Value) -> TransformResult<UnifiedResponse> {
+    validate_response_source(UpstreamProtocol::Openai, &data)?;
+    decode_json::<openai::OpenAiResponse, _>(
+        data,
+        TransformFailureOrigin::UpstreamPayload,
+        TransformPhase::ResponseDecode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
 }
 
-fn encode_gemini_response(unified: UnifiedResponse) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(gemini::GeminiResponse::from(unified))
+fn encode_openai_response(unified: UnifiedResponse) -> TransformResult<Value> {
+    audit_target_response(DownstreamProtocol::Openai, &unified);
+    if unified.choices.iter().any(|choice| {
+        choice.logprobs.as_ref().is_some_and(|logprobs| {
+            serde_json::from_value::<openai::OpenAiLogProbs>(logprobs.clone()).is_err()
+        })
+    }) {
+        return Err(transform_failure(
+            TransformFailureOrigin::TargetEncoding,
+            TransformPhase::ResponseEncode,
+            TransformSemanticUnit::Metadata,
+            TransformReasonCode::TargetEncodeFailed,
+            None,
+        ));
+    }
+    encode_json(
+        openai::OpenAiResponse::from(unified),
+        TransformPhase::ResponseEncode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
 }
 
-fn decode_ollama_response(data: Value) -> Result<UnifiedResponse, serde_json::Error> {
-    serde_json::from_value::<ollama::OllamaResponse>(data).map(Into::into)
+fn decode_gemini_response(data: Value) -> TransformResult<UnifiedResponse> {
+    validate_response_source(UpstreamProtocol::Gemini, &data)?;
+    decode_json::<gemini::GeminiResponse, _>(
+        data,
+        TransformFailureOrigin::UpstreamPayload,
+        TransformPhase::ResponseDecode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
 }
 
-fn decode_anthropic_response(data: Value) -> Result<UnifiedResponse, serde_json::Error> {
-    serde_json::from_value::<anthropic::AnthropicResponse>(data).map(Into::into)
+fn encode_gemini_response(unified: UnifiedResponse) -> TransformResult<Value> {
+    audit_target_response(DownstreamProtocol::Gemini, &unified);
+    encode_json(
+        gemini::GeminiResponse::from(unified),
+        TransformPhase::ResponseEncode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
 }
 
-fn encode_anthropic_response(unified: UnifiedResponse) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(anthropic::AnthropicResponse::from(unified))
+fn decode_ollama_response(data: Value) -> TransformResult<UnifiedResponse> {
+    validate_response_source(UpstreamProtocol::Ollama, &data)?;
+    decode_json::<ollama::OllamaResponse, _>(
+        data,
+        TransformFailureOrigin::UpstreamPayload,
+        TransformPhase::ResponseDecode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
 }
 
-fn decode_responses_response(data: Value) -> Result<UnifiedResponse, serde_json::Error> {
-    serde_json::from_value::<responses::ResponsesResponse>(data).map(Into::into)
+fn decode_anthropic_response(data: Value) -> TransformResult<UnifiedResponse> {
+    validate_response_source(UpstreamProtocol::Anthropic, &data)?;
+    decode_json::<anthropic::AnthropicResponse, _>(
+        data,
+        TransformFailureOrigin::UpstreamPayload,
+        TransformPhase::ResponseDecode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
 }
 
-fn encode_responses_response(unified: UnifiedResponse) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(responses::ResponsesResponse::from(unified))
+fn encode_anthropic_response(unified: UnifiedResponse) -> TransformResult<Value> {
+    audit_target_response(DownstreamProtocol::Anthropic, &unified);
+    encode_json(
+        anthropic::AnthropicResponse::from(unified),
+        TransformPhase::ResponseEncode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
+}
+
+fn decode_responses_response(data: Value) -> TransformResult<UnifiedResponse> {
+    validate_response_source(UpstreamProtocol::Responses, &data)?;
+    decode_json::<responses::ResponsesResponse, _>(
+        data,
+        TransformFailureOrigin::UpstreamPayload,
+        TransformPhase::ResponseDecode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
+}
+
+fn encode_responses_response(unified: UnifiedResponse) -> TransformResult<Value> {
+    audit_target_response(DownstreamProtocol::Responses, &unified);
+    encode_json(
+        responses::ResponsesResponse::from(unified),
+        TransformPhase::ResponseEncode,
+        TransformSemanticUnit::ResponseEnvelope,
+    )
+}
+
+fn validate_request_source(protocol: DownstreamProtocol, data: &Value) -> TransformResult<()> {
+    match validate_downstream_request(protocol, data) {
+        Ok(()) => Ok(transform_success(
+            (),
+            TransformPhase::RequestDecode,
+            TransformSemanticUnit::RequestEnvelope,
+            TransformOutcomeKind::Lossless,
+            TransformAction::Send,
+            TransformReasonCode::LosslessConversion,
+        )),
+        Err(error) => Err(transform_failure(
+            TransformFailureOrigin::DownstreamInput,
+            TransformPhase::RequestDecode,
+            error.semantic_unit,
+            error.reason_code,
+            Some(TransformSafeSummary::from_json(data)),
+        )),
+    }
+}
+
+fn validate_response_source(protocol: UpstreamProtocol, data: &Value) -> TransformResult<()> {
+    match validate_upstream_response(protocol, data) {
+        Ok(()) => Ok(transform_success(
+            (),
+            TransformPhase::ResponseDecode,
+            TransformSemanticUnit::ResponseEnvelope,
+            TransformOutcomeKind::Lossless,
+            TransformAction::Send,
+            TransformReasonCode::LosslessConversion,
+        )),
+        Err(error) => Err(transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::ResponseDecode,
+            error.semantic_unit,
+            if error.reason_code == TransformReasonCode::InvalidProtocolShape {
+                TransformReasonCode::SourceDecodeFailed
+            } else {
+                error.reason_code
+            },
+            Some(TransformSafeSummary::from_json(data)),
+        )),
+    }
 }
 
 fn decode_openai_stream_frame(
     raw: &str,
     context: &mut StreamTransformContext<'_>,
-) -> Result<DecodedSourceStreamFrame, serde_json::Error> {
-    serde_json::from_str::<openai::OpenAiChunkResponse>(raw)
-        .map(|chunk| openai::openai_chunk_to_unified_stream_events_with_state(chunk, context))
-        .map(DecodedSourceStreamFrame::Events)
+) -> TransformResult<DecodedSourceStreamFrame> {
+    let chunk = match decode_stream_payload::<openai::OpenAiChunkResponse>(raw) {
+        Ok(chunk) => chunk,
+        Err(decode_failure) => {
+            if let Err(semantic_failure) =
+                validate_stream_source(UpstreamProtocol::Openai, raw, context)
+            {
+                return Err(semantic_failure);
+            }
+            return Err(decode_failure);
+        }
+    };
+    validate_typed_stream_source(raw, validate_openai_stream_chunk(&chunk, context))?;
+    Ok(stream_decode_success(DecodedSourceStreamFrame::Events(
+        openai::openai_chunk_to_unified_stream_events_with_state(chunk, context),
+    )))
 }
 
 fn decode_gemini_stream_frame(
     raw: &str,
-    _context: &mut StreamTransformContext<'_>,
-) -> Result<DecodedSourceStreamFrame, serde_json::Error> {
-    serde_json::from_str::<gemini::GeminiChunkResponse>(raw)
-        .map(Into::into)
-        .map(DecodedSourceStreamFrame::LegacyChunk)
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<DecodedSourceStreamFrame> {
+    validate_stream_source(UpstreamProtocol::Gemini, raw, context)?;
+    decode_stream_result(
+        raw,
+        serde_json::from_str::<gemini::GeminiChunkResponse>(raw)
+            .map(Into::into)
+            .map(DecodedSourceStreamFrame::LegacyChunk),
+    )
 }
 
 fn decode_ollama_stream_frame(
     raw: &str,
-    _context: &mut StreamTransformContext<'_>,
-) -> Result<DecodedSourceStreamFrame, serde_json::Error> {
-    serde_json::from_str::<ollama::OllamaChunkResponse>(raw)
-        .map(Into::into)
-        .map(DecodedSourceStreamFrame::LegacyChunk)
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<DecodedSourceStreamFrame> {
+    validate_stream_source(UpstreamProtocol::Ollama, raw, context)?;
+    decode_stream_result(
+        raw,
+        serde_json::from_str::<ollama::OllamaChunkResponse>(raw)
+            .map(Into::into)
+            .map(DecodedSourceStreamFrame::LegacyChunk),
+    )
 }
 
 fn decode_anthropic_stream_frame(
     raw: &str,
     context: &mut StreamTransformContext<'_>,
-) -> Result<DecodedSourceStreamFrame, serde_json::Error> {
-    serde_json::from_str::<anthropic::AnthropicEvent>(raw)
-        .map(|event| {
-            anthropic::anthropic_event_to_unified_stream_events_with_state(
-                event,
-                context.anthropic_session_mut(),
-            )
-        })
-        .map(DecodedSourceStreamFrame::Events)
+) -> TransformResult<DecodedSourceStreamFrame> {
+    let event = match decode_stream_payload::<anthropic::AnthropicEvent>(raw) {
+        Ok(event) => event,
+        Err(decode_failure) => {
+            if let Err(semantic_failure) =
+                validate_stream_source(UpstreamProtocol::Anthropic, raw, context)
+            {
+                return Err(semantic_failure);
+            }
+            return Err(decode_failure);
+        }
+    };
+    validate_typed_stream_source(raw, validate_anthropic_stream_event(&event, context))?;
+    Ok(stream_decode_success(DecodedSourceStreamFrame::Events(
+        anthropic::anthropic_event_to_unified_stream_events_with_state(
+            event,
+            context.anthropic_session_mut(),
+        ),
+    )))
 }
 
 fn decode_responses_stream_frame(
     raw: &str,
-    _context: &mut StreamTransformContext<'_>,
-) -> Result<DecodedSourceStreamFrame, serde_json::Error> {
-    serde_json::from_str::<responses::ResponsesChunkResponse>(raw)
-        .map(responses::responses_chunk_to_unified_stream_events)
-        .map(DecodedSourceStreamFrame::Events)
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<DecodedSourceStreamFrame> {
+    let chunk = decode_stream_payload::<responses::ResponsesChunkResponse>(raw)?;
+    validate_typed_stream_source(raw, validate_responses_stream_chunk(&chunk, context))?;
+    Ok(stream_decode_success(DecodedSourceStreamFrame::Events(
+        responses::responses_chunk_to_unified_stream_events(chunk),
+    )))
+}
+
+fn validate_typed_stream_source(
+    raw: &str,
+    result: Result<(), SourceStreamSemanticError>,
+) -> Result<(), super::TransformFailure> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::StreamDecode,
+            error.semantic_unit,
+            error.reason_code,
+            Some(TransformSafeSummary::from_bytes(raw.as_bytes())),
+        )),
+    }
+}
+
+fn validate_stream_source(
+    protocol: UpstreamProtocol,
+    raw: &str,
+    context: &mut StreamTransformContext<'_>,
+) -> Result<(), super::TransformFailure> {
+    match validate_upstream_stream_frame(protocol, raw, context) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::StreamDecode,
+            error.semantic_unit,
+            error.reason_code,
+            Some(TransformSafeSummary::from_bytes(raw.as_bytes())),
+        )),
+    }
+}
+
+fn decode_stream_result(
+    raw: &str,
+    result: Result<DecodedSourceStreamFrame, serde_json::Error>,
+) -> TransformResult<DecodedSourceStreamFrame> {
+    match result {
+        Ok(value) => Ok(transform_success(
+            value,
+            TransformPhase::StreamDecode,
+            TransformSemanticUnit::StreamFrame,
+            TransformOutcomeKind::Lossless,
+            TransformAction::Send,
+            TransformReasonCode::LosslessConversion,
+        )),
+        Err(_) => Err(transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::StreamDecode,
+            TransformSemanticUnit::StreamFrame,
+            TransformReasonCode::SourceDecodeFailed,
+            Some(TransformSafeSummary::from_bytes(raw.as_bytes())),
+        )),
+    }
+}
+
+fn decode_stream_payload<T: DeserializeOwned>(raw: &str) -> Result<T, super::TransformFailure> {
+    serde_json::from_str(raw).map_err(|_| {
+        transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::StreamDecode,
+            TransformSemanticUnit::StreamFrame,
+            TransformReasonCode::SourceDecodeFailed,
+            Some(TransformSafeSummary::from_bytes(raw.as_bytes())),
+        )
+    })
+}
+
+fn stream_decode_success(
+    value: DecodedSourceStreamFrame,
+) -> super::TransformSuccess<DecodedSourceStreamFrame> {
+    transform_success(
+        value,
+        TransformPhase::StreamDecode,
+        TransformSemanticUnit::StreamFrame,
+        TransformOutcomeKind::Lossless,
+        TransformAction::Send,
+        TransformReasonCode::LosslessConversion,
+    )
+}
+
+fn encode_stream_result(
+    result: Result<Option<Vec<SseEvent>>, serde_json::Error>,
+) -> TransformResult<Vec<SseEvent>> {
+    let result = result.map_err(|_| {
+        transform_failure(
+            TransformFailureOrigin::TargetEncoding,
+            TransformPhase::StreamEncode,
+            TransformSemanticUnit::StreamFrame,
+            TransformReasonCode::TargetSerializeFailed,
+            None,
+        )
+    })?;
+    let (events, action, reason_code) = match result {
+        Some(events) => (
+            events,
+            TransformAction::Send,
+            TransformReasonCode::LosslessConversion,
+        ),
+        None => (
+            Vec::new(),
+            TransformAction::Drop,
+            TransformReasonCode::NoSemanticOutput,
+        ),
+    };
+    Ok(transform_success(
+        events,
+        TransformPhase::StreamEncode,
+        TransformSemanticUnit::StreamFrame,
+        TransformOutcomeKind::Lossless,
+        action,
+        reason_code,
+    ))
+}
+
+fn encode_openai_stream_events(
+    stream_events: Vec<UnifiedStreamEvent>,
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_stream_events(DownstreamProtocol::Openai, &stream_events, context);
+    encode_stream_result(
+        openai::try_transform_unified_stream_events_to_openai_events(stream_events, context),
+    )
+}
+
+fn encode_openai_legacy_chunk(
+    mut unified_chunk: UnifiedChunkResponse,
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_legacy_chunk(DownstreamProtocol::Openai, &unified_chunk);
+    if unified_chunk.model.as_deref().is_none_or(str::is_empty) {
+        unified_chunk.model = Some(context.get_or_default_stream_model());
+    }
+    encode_stream_result(openai::try_transform_unified_chunk_to_openai_events(
+        unified_chunk,
+        context,
+    ))
+}
+
+fn encode_gemini_stream_events(
+    stream_events: Vec<UnifiedStreamEvent>,
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_stream_events(DownstreamProtocol::Gemini, &stream_events, context);
+    encode_stream_result(
+        gemini::try_transform_unified_stream_events_to_gemini_events(stream_events, context),
+    )
+}
+
+fn encode_gemini_legacy_chunk(
+    unified_chunk: UnifiedChunkResponse,
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_legacy_chunk(DownstreamProtocol::Gemini, &unified_chunk);
+    encode_stream_result(gemini::try_transform_unified_chunk_to_gemini_events(
+        unified_chunk,
+        context,
+    ))
 }
 
 fn encode_anthropic_stream_events(
     stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
-    anthropic::transform_unified_stream_events_to_anthropic_events(stream_events, context)
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_stream_events(DownstreamProtocol::Anthropic, &stream_events, context);
+    encode_stream_result(
+        anthropic::try_transform_unified_stream_events_to_anthropic_events(stream_events, context),
+    )
 }
 
 fn encode_anthropic_legacy_chunk(
     unified_chunk: UnifiedChunkResponse,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
-    anthropic::transform_unified_chunk_to_anthropic_events(unified_chunk, context)
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_legacy_chunk(DownstreamProtocol::Anthropic, &unified_chunk);
+    encode_stream_result(anthropic::try_transform_unified_chunk_to_anthropic_events(
+        unified_chunk,
+        context,
+    ))
+}
+
+fn encode_responses_stream_events(
+    stream_events: Vec<UnifiedStreamEvent>,
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_stream_events(DownstreamProtocol::Responses, &stream_events, context);
+    encode_stream_result(
+        responses::try_transform_unified_stream_events_to_responses_events(stream_events, context),
+    )
+}
+
+fn encode_responses_legacy_chunk(
+    unified_chunk: UnifiedChunkResponse,
+    context: &mut StreamTransformContext<'_>,
+) -> TransformResult<Vec<SseEvent>> {
+    audit_target_legacy_chunk(DownstreamProtocol::Responses, &unified_chunk);
+    encode_stream_result(responses::try_transform_unified_chunk_to_responses_events(
+        unified_chunk,
+        context,
+    ))
 }
 
 const OPENAI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
@@ -272,9 +718,8 @@ const OPENAI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
         encode: encode_openai_response,
     },
     stream: DownstreamStreamCodec {
-        encode_events: openai::transform_unified_stream_events_to_openai_events,
-        encode_legacy_chunk: openai::transform_unified_chunk_to_openai_events,
-        requires_legacy_bridge_for_events: false,
+        encode_events: encode_openai_stream_events,
+        encode_legacy_chunk: encode_openai_legacy_chunk,
     },
 };
 
@@ -288,9 +733,8 @@ const GEMINI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
         encode: encode_gemini_response,
     },
     stream: DownstreamStreamCodec {
-        encode_events: gemini::transform_unified_stream_events_to_gemini_events,
-        encode_legacy_chunk: gemini::transform_unified_chunk_to_gemini_events,
-        requires_legacy_bridge_for_events: false,
+        encode_events: encode_gemini_stream_events,
+        encode_legacy_chunk: encode_gemini_legacy_chunk,
     },
 };
 
@@ -306,7 +750,6 @@ const ANTHROPIC_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
     stream: DownstreamStreamCodec {
         encode_events: encode_anthropic_stream_events,
         encode_legacy_chunk: encode_anthropic_legacy_chunk,
-        requires_legacy_bridge_for_events: false,
     },
 };
 
@@ -320,9 +763,8 @@ const RESPONSES_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
         encode: encode_responses_response,
     },
     stream: DownstreamStreamCodec {
-        encode_events: responses::transform_unified_stream_events_to_responses_events,
-        encode_legacy_chunk: responses::transform_unified_chunk_to_responses_events,
-        requires_legacy_bridge_for_events: false,
+        encode_events: encode_responses_stream_events,
+        encode_legacy_chunk: encode_responses_legacy_chunk,
     },
 };
 
@@ -455,22 +897,6 @@ mod tests {
             let adapter = upstream_adapter_for(protocol);
             assert_eq!(adapter.protocol, protocol);
             assert_eq!(adapter.name, expected_name);
-        }
-    }
-
-    #[test]
-    fn all_downstream_stream_encoders_are_event_native() {
-        for protocol in [
-            DownstreamProtocol::Openai,
-            DownstreamProtocol::Gemini,
-            DownstreamProtocol::Anthropic,
-            DownstreamProtocol::Responses,
-        ] {
-            assert!(
-                !downstream_adapter_for(protocol)
-                    .stream
-                    .requires_legacy_bridge_for_events
-            );
         }
     }
 

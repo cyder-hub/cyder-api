@@ -7,7 +7,7 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 ## Protocol boundaries
 
-- Matrix schema: v3
+- Matrix schema: v4
 - Downstream: OpenAI, Responses, Anthropic, Gemini
 - Upstream: OpenAI, Responses, Anthropic, Gemini, Ollama
 - Ollama is an upstream-only protocol and has no public downstream router.
@@ -35,6 +35,27 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 | --- | --- | --- |
 | `route_not_found_error` | 404 | — |
 | `method_not_allowed_error` | 405 | Allow |
+
+## Transform runtime contract
+
+- Owner: `R3.15`. Same-wire behavior is `byte_preserving_passthrough`; observation failure is `observation_degraded`.
+- Cross-wire pipeline: `source_decode -> unified_ir -> target_encode`; any pipeline failure is `fail_closed`; unknown semantics are `explicit_reject`.
+- Loss policy: minor `controlled_loss_with_internal_fact`, major `explicit_reject`, deterministic text downgrade `fixture_backed_controlled_loss`.
+- Header boundary: before commit `downstream_native_error_envelope`; after commit `single_downstream_native_error_terminal_or_body_error`; normal terminal after failure `false`.
+- Diagnostics: visibility `internal_only`, retained fact cap `32`, overflow accounted `true`, payload-free `true`, public extensions `false`.
+- Persistence active in R3.15: `false`; persistence owner `R4.6`; final matrix owner `R3.21`.
+
+### Advanced cell owners
+
+| Upstream protocol | Owner |
+| --- | --- |
+| OpenAI | `R3.16` |
+| Responses | `R3.17` |
+| Anthropic | `R3.18` |
+| Gemini | `R3.19` |
+| Ollama | `R3.20` |
+
+Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contract, r3-15-same-wire-passthrough, r3-15-minor-loss-runtime, r3-15-four-protocol-stream-failure, r3-15-target-stream-failure.
 
 ## Upstream Source contract
 
@@ -103,26 +124,26 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 | Downstream | Upstream | Tools | Reasoning | Multimodal | Structured output | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenAI | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| OpenAI | Responses | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| OpenAI | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| OpenAI | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| OpenAI | Ollama | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Responses | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Responses | Responses | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Responses | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Responses | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Responses | Ollama | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Anthropic | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Anthropic | Responses | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Anthropic | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Anthropic | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Anthropic | Ollama | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Gemini | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Gemini | Responses | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Gemini | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Gemini | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
-| Gemini | Ollama | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
+| OpenAI | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+| OpenAI | Responses | not_verified | not_verified | not_verified | not_verified | R3.17 | advanced-transform-only |
+| OpenAI | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.18 | advanced-transform-only |
+| OpenAI | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| OpenAI | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
+| Responses | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+| Responses | Responses | not_verified | not_verified | not_verified | not_verified | R3.17 | advanced-transform-only |
+| Responses | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.18 | advanced-transform-only |
+| Responses | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| Responses | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
+| Anthropic | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+| Anthropic | Responses | not_verified | not_verified | not_verified | not_verified | R3.17 | advanced-transform-only |
+| Anthropic | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.18 | advanced-transform-only |
+| Anthropic | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| Anthropic | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
+| Gemini | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+| Gemini | Responses | not_verified | not_verified | not_verified | not_verified | R3.17 | advanced-transform-only |
+| Gemini | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.18 | advanced-transform-only |
+| Gemini | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| Gemini | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 
 ## Utility contracts
 
@@ -177,6 +198,12 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 | `r3-12-request-patch-contract` | test | `controller::request_patch::tests::request_patch_openapi_matches_aggregate_routes_and_current_detail_shapes` | Pins Source and Model+Source aggregate Request Patch routes, current DTO shapes, old route negatives, no-store responses, and ownership errors. |
 | `r3-12-request-patch-execution` | test | `proxy::direct_execution_regression::request_patch_query_value_reaches_upstream_but_not_request_log` | Pins the Source-bound Variant through real request materialization and upstream execution while keeping patched values out of the persisted request log. |
 | `r3-12-request-patch-migration` | test | `database::migration_smoke_tests::sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract` | Pins the R3.11-to-R3.12 destructive migration, historical suffix rename, preserved governance/metrics, removed configuration tables, and new Source-bound constraints. |
+| `r3-15-transform-quality-contract` | test | `service::transform::quality::tests::test_transform_contract_summary_covers_failures_outcomes_and_accounting` | Pins eleven production-entry transform outcomes, failure origins, semantic accounting, diagnostic overflow, and Gate closure. |
+| `r3-15-transform-payload-free-contract` | test | `service::transform::quality::tests::test_transform_contract_report_omits_payload_and_safe_summary` | Pins the quality report to payload-free aggregate facts without fixture content, hashes, or per-payload safe summaries. |
+| `r3-15-same-wire-passthrough` | test | `proxy::direct_execution_regression::same_wire_non_stream_observation_failure_preserves_upstream_bytes` | Pins byte-preserving same-wire response passthrough when best-effort observation degrades. |
+| `r3-15-minor-loss-runtime` | test | `proxy::direct_execution_regression::cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata` | Pins cross-wire controlled minor loss, one upstream call, internal-only diagnostics, Request Log success, and resource release. |
+| `r3-15-four-protocol-stream-failure` | test | `proxy::direct_execution_regression::four_public_protocols_emit_one_native_terminal_on_cross_wire_stream_decode_failure` | Pins one protocol-native terminal after headers for source transform failure across all four public downstream protocols. |
+| `r3-15-target-stream-failure` | test | `proxy::direct_execution_regression::cross_wire_target_stream_rejection_emits_one_native_terminal_and_releases_resources` | Pins target transform rejection after headers to one native terminal, an error Request Log, one upstream call, and released resources. |
 
 ## Status semantics
 

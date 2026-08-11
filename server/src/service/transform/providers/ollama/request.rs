@@ -52,7 +52,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
         let messages = unified_req
             .messages
             .into_iter()
-            .filter_map(|msg| {
+            .map(|msg| {
                 let role = match msg.role {
                     UnifiedRole::System => "system",
                     UnifiedRole::User => "user",
@@ -185,7 +185,9 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                                     format!(
                                         "tool_call: {}\narguments: {}",
                                         call.name,
-                                        serde_json::to_string(&call.arguments).unwrap_or_default()
+                                        serde_json::to_string(&call.arguments).expect(
+                                            "serde_json::Value serialization is structurally infallible",
+                                        )
                                     ),
                                 );
                             }
@@ -222,11 +224,11 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                     // Assuming we send what we have.
                 }
 
-                Some(OllamaMessage {
+                OllamaMessage {
                     role,
                     content: final_content,
                     images: (!images.is_empty()).then_some(images),
-                })
+                }
             })
             .collect();
 

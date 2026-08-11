@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, RwLock},
     time::Duration,
@@ -31,6 +32,10 @@ use crate::{
         },
         provider_http::normalize_provider_endpoint,
         runtime::ApiKeyCompletionDelta,
+        transform::{
+            TransformAction, TransformFailure, TransformOutcomeKind, TransformOutcomeSummary,
+            TransformSemanticUnit, TransformSeverity,
+        },
     },
     utils::{ID_GENERATOR, usage::UsageInfo},
 };
@@ -77,7 +82,6 @@ pub struct RequestLogContext {
     pub final_error_stage: Option<ExecutionStage>,
     pub response_visibility: ResponseVisibility,
     pub(crate) completion_coordinator: Option<ProxyTerminationCoordinator>,
-    pub(crate) completion_deferred: bool,
 }
 
 impl RequestLogContext {
@@ -138,7 +142,6 @@ impl RequestLogContext {
             final_error_stage: None,
             response_visibility: request_context.response_visibility.current(),
             completion_coordinator: None,
-            completion_deferred: false,
         }
     }
 
@@ -148,10 +151,6 @@ impl RequestLogContext {
 
     pub(crate) fn attach_transport_timing(&mut self, timing: TransportTimingState) {
         self.transport_timing = Some(timing);
-    }
-
-    pub(crate) fn defer_completion(&mut self) {
-        self.completion_deferred = true;
     }
 
     pub(super) fn set_model_resolution_trace(
@@ -166,6 +165,272 @@ impl RequestLogContext {
     pub(crate) fn set_source_endpoint_snapshot(&mut self, normalized_endpoint: &str) {
         self.source_endpoint = safe_source_endpoint_snapshot(normalized_endpoint);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::proxy) enum TransformLogStage {
+    Request,
+    Response,
+    Stream,
+}
+
+impl TransformLogStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransformSummaryLogFields {
+    stage: &'static str,
+    request_id: String,
+    log_id: i64,
+    source_id: i64,
+    downstream_protocol: &'static str,
+    upstream_protocol: &'static str,
+    selection_reason: Option<String>,
+    transform_applied: bool,
+    total_fact_count: u64,
+    retained_fact_count: usize,
+    dropped_diagnostic_count: u64,
+    max_severity: &'static str,
+    outcome_counts: String,
+    action_counts: String,
+    semantic_counts: String,
+    safe_summary_count: usize,
+    safe_summary_bytes: usize,
+    safe_summary_top_level_fields: usize,
+    safe_summary_event_count: usize,
+    safe_summary_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransformLogIdentity<'a> {
+    request_id: &'a str,
+    log_id: i64,
+    source_id: i64,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+    selection_reason: Option<&'a str>,
+}
+
+impl<'a> From<&'a RequestLogContext> for TransformLogIdentity<'a> {
+    fn from(context: &'a RequestLogContext) -> Self {
+        Self {
+            request_id: context.request_id.as_str(),
+            log_id: context.id,
+            source_id: context.source_id,
+            downstream_protocol: context.downstream_protocol,
+            upstream_protocol: context.upstream_protocol,
+            selection_reason: context.source_selection_reason.as_deref(),
+        }
+    }
+}
+
+fn transform_summary_log_fields(
+    stage: TransformLogStage,
+    identity: TransformLogIdentity<'_>,
+    summary: &TransformOutcomeSummary,
+) -> TransformSummaryLogFields {
+    let safe_summaries = summary
+        .facts
+        .iter()
+        .filter_map(|fact| fact.safe_summary.as_ref())
+        .collect::<Vec<_>>();
+    TransformSummaryLogFields {
+        stage: stage.as_str(),
+        request_id: identity.request_id.to_string(),
+        log_id: identity.log_id,
+        source_id: identity.source_id,
+        downstream_protocol: downstream_protocol_name(identity.downstream_protocol),
+        upstream_protocol: upstream_protocol_name(identity.upstream_protocol),
+        selection_reason: identity.selection_reason.map(str::to_string),
+        transform_applied: !protocols_share_wire(
+            identity.downstream_protocol,
+            identity.upstream_protocol,
+        ),
+        total_fact_count: summary.total_fact_count,
+        retained_fact_count: summary.facts.len(),
+        dropped_diagnostic_count: summary.dropped_diagnostic_count,
+        max_severity: summary
+            .max_severity
+            .map(TransformSeverity::as_str)
+            .unwrap_or("none"),
+        outcome_counts: format_transform_counts(
+            &summary.outcome_counts,
+            |value: TransformOutcomeKind| value.as_str(),
+        ),
+        action_counts: format_transform_counts(&summary.action_counts, |value: TransformAction| {
+            value.as_str()
+        }),
+        semantic_counts: format_transform_counts(
+            &summary.semantic_counts,
+            |value: TransformSemanticUnit| value.as_str(),
+        ),
+        safe_summary_count: safe_summaries.len(),
+        safe_summary_bytes: safe_summaries
+            .iter()
+            .fold(0usize, |total, value| total.saturating_add(value.bytes)),
+        safe_summary_top_level_fields: safe_summaries.iter().fold(0usize, |total, value| {
+            total.saturating_add(value.top_level_field_count)
+        }),
+        safe_summary_event_count: safe_summaries.iter().fold(0usize, |total, value| {
+            total.saturating_add(value.event_count)
+        }),
+        safe_summary_sha256: safe_summaries.first().map(|value| value.sha256.clone()),
+    }
+}
+
+fn format_transform_counts<K: Copy + Ord>(
+    counts: &BTreeMap<K, u64>,
+    key: impl Fn(K) -> &'static str,
+) -> String {
+    counts
+        .iter()
+        .map(|(value, count)| format!("{}:{count}", key(*value)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn downstream_protocol_name(protocol: DownstreamProtocol) -> &'static str {
+    match protocol {
+        DownstreamProtocol::Openai => "openai",
+        DownstreamProtocol::Responses => "responses",
+        DownstreamProtocol::Anthropic => "anthropic",
+        DownstreamProtocol::Gemini => "gemini",
+    }
+}
+
+fn upstream_protocol_name(protocol: UpstreamProtocol) -> &'static str {
+    match protocol {
+        UpstreamProtocol::Openai => "openai",
+        UpstreamProtocol::Responses => "responses",
+        UpstreamProtocol::Anthropic => "anthropic",
+        UpstreamProtocol::Gemini => "gemini",
+        UpstreamProtocol::Ollama => "ollama",
+    }
+}
+
+fn protocols_share_wire(
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+) -> bool {
+    matches!(
+        (downstream_protocol, upstream_protocol),
+        (DownstreamProtocol::Openai, UpstreamProtocol::Openai)
+            | (DownstreamProtocol::Responses, UpstreamProtocol::Responses)
+            | (DownstreamProtocol::Anthropic, UpstreamProtocol::Anthropic)
+            | (DownstreamProtocol::Gemini, UpstreamProtocol::Gemini)
+    )
+}
+
+fn transform_summary_event_fields(
+    fields: &TransformSummaryLogFields,
+) -> Vec<(&'static str, Option<String>)> {
+    vec![
+        ("request_id", Some(fields.request_id.clone())),
+        ("log_id", Some(fields.log_id.to_string())),
+        ("source_id", Some(fields.source_id.to_string())),
+        ("stage", Some(fields.stage.to_string())),
+        (
+            "downstream_protocol",
+            Some(fields.downstream_protocol.to_string()),
+        ),
+        (
+            "upstream_protocol",
+            Some(fields.upstream_protocol.to_string()),
+        ),
+        ("selection_reason", fields.selection_reason.clone()),
+        (
+            "transform_applied",
+            Some(fields.transform_applied.to_string()),
+        ),
+        (
+            "total_fact_count",
+            Some(fields.total_fact_count.to_string()),
+        ),
+        (
+            "retained_fact_count",
+            Some(fields.retained_fact_count.to_string()),
+        ),
+        (
+            "dropped_diagnostic_count",
+            Some(fields.dropped_diagnostic_count.to_string()),
+        ),
+        ("max_severity", Some(fields.max_severity.to_string())),
+        ("outcome_counts", Some(fields.outcome_counts.clone())),
+        ("action_counts", Some(fields.action_counts.clone())),
+        ("semantic_counts", Some(fields.semantic_counts.clone())),
+        (
+            "safe_summary_count",
+            Some(fields.safe_summary_count.to_string()),
+        ),
+        (
+            "safe_summary_bytes",
+            Some(fields.safe_summary_bytes.to_string()),
+        ),
+        (
+            "safe_summary_top_level_fields",
+            Some(fields.safe_summary_top_level_fields.to_string()),
+        ),
+        (
+            "safe_summary_event_count",
+            Some(fields.safe_summary_event_count.to_string()),
+        ),
+        ("safe_summary_sha256", fields.safe_summary_sha256.clone()),
+    ]
+}
+
+pub(in crate::proxy) fn log_transform_summary(
+    stage: TransformLogStage,
+    context: &RequestLogContext,
+    summary: &TransformOutcomeSummary,
+) {
+    let fields = transform_summary_log_fields(stage, context.into(), summary);
+    let event_fields = transform_summary_event_fields(&fields);
+    let level = match summary.max_severity.unwrap_or(TransformSeverity::Debug) {
+        TransformSeverity::Debug => crate::logging::StructuredEventLevel::Debug,
+        TransformSeverity::Warning => crate::logging::StructuredEventLevel::Warning,
+        TransformSeverity::Error => crate::logging::StructuredEventLevel::Error,
+    };
+    crate::logging::log_structured_event(level, "proxy.transform_summary", &event_fields);
+}
+
+pub(in crate::proxy) fn log_transform_failure(
+    stage: TransformLogStage,
+    context: &RequestLogContext,
+    failure: &TransformFailure,
+) {
+    let fields = transform_summary_log_fields(stage, context.into(), &failure.summary);
+    let mut event_fields = transform_summary_event_fields(&fields);
+    event_fields.extend([
+        ("failure_origin", Some(failure.origin.as_str().to_string())),
+        ("failure_phase", Some(failure.phase.as_str().to_string())),
+        (
+            "semantic_unit",
+            Some(failure.semantic_unit.as_str().to_string()),
+        ),
+        (
+            "reason_code",
+            Some(failure.reason_code.as_str().to_string()),
+        ),
+    ]);
+    let level = match failure.origin {
+        crate::service::transform::TransformFailureOrigin::DownstreamInput
+        | crate::service::transform::TransformFailureOrigin::TargetCapability => {
+            crate::logging::StructuredEventLevel::Debug
+        }
+        crate::service::transform::TransformFailureOrigin::UpstreamPayload
+        | crate::service::transform::TransformFailureOrigin::TargetEncoding
+        | crate::service::transform::TransformFailureOrigin::InternalInvariant => {
+            crate::logging::StructuredEventLevel::Error
+        }
+    };
+    crate::logging::log_structured_event(level, "proxy.transform_failure", &event_fields);
 }
 
 fn safe_source_endpoint_snapshot(endpoint: &str) -> Option<String> {
@@ -593,7 +858,11 @@ fn build_cost_outcome(context: &RequestLogContext) -> CostOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_source_endpoint_snapshot;
+    use super::*;
+    use crate::service::transform::{
+        TransformDiagnosticCollector, TransformDiagnosticFact, TransformPhase, TransformReasonCode,
+        TransformSafeSummary,
+    };
 
     #[test]
     fn source_endpoint_snapshot_is_normalized_and_rejects_secret_bearing_urls() {
@@ -604,5 +873,100 @@ mod tests {
         assert!(safe_source_endpoint_snapshot("https://user:secret@api.example.com/v1").is_none());
         assert!(safe_source_endpoint_snapshot("https://api.example.com/v1?key=secret").is_none());
         assert!(safe_source_endpoint_snapshot("https://api.example.com/v1#secret").is_none());
+    }
+
+    #[test]
+    fn transform_summary_context_covers_all_selection_reasons_without_inferring_application() {
+        let summary = TransformOutcomeSummary::default();
+        for selection_reason in [
+            "protocol_match",
+            "provider_default_transform",
+            "model_default_transform",
+        ] {
+            let fields = transform_summary_log_fields(
+                TransformLogStage::Request,
+                TransformLogIdentity {
+                    request_id: "req-safe",
+                    log_id: 41,
+                    source_id: 42,
+                    downstream_protocol: DownstreamProtocol::Openai,
+                    upstream_protocol: UpstreamProtocol::Openai,
+                    selection_reason: Some(selection_reason),
+                },
+                &summary,
+            );
+            assert_eq!(fields.selection_reason.as_deref(), Some(selection_reason));
+            assert!(!fields.transform_applied);
+        }
+
+        let fields = transform_summary_log_fields(
+            TransformLogStage::Response,
+            TransformLogIdentity {
+                request_id: "req-safe",
+                log_id: 41,
+                source_id: 42,
+                downstream_protocol: DownstreamProtocol::Openai,
+                upstream_protocol: UpstreamProtocol::Responses,
+                selection_reason: Some("protocol_match"),
+            },
+            &summary,
+        );
+        assert!(fields.transform_applied);
+    }
+
+    #[test]
+    fn transform_summary_log_is_bounded_aggregated_and_payload_free() {
+        let mut collector = TransformDiagnosticCollector::default();
+        for index in 0..35 {
+            collector.record(TransformDiagnosticFact {
+                sequence: 0,
+                phase: TransformPhase::ResponseObserve,
+                semantic_unit: TransformSemanticUnit::ResponseEnvelope,
+                outcome: if index == 34 {
+                    TransformOutcomeKind::ObservationDegraded
+                } else {
+                    TransformOutcomeKind::Passthrough
+                },
+                action: TransformAction::PassThrough,
+                reason_code: TransformReasonCode::ObservationParseFailed,
+                safe_summary: (index == 0).then(|| {
+                    TransformSafeSummary::from_json(&serde_json::json!({
+                        "secret": "must-not-appear",
+                        "tool_arguments": {"private": true}
+                    }))
+                }),
+            });
+        }
+        let summary = collector.into_summary();
+        let fields = transform_summary_log_fields(
+            TransformLogStage::Response,
+            TransformLogIdentity {
+                request_id: "req-safe",
+                log_id: 41,
+                source_id: 42,
+                downstream_protocol: DownstreamProtocol::Openai,
+                upstream_protocol: UpstreamProtocol::Openai,
+                selection_reason: Some("protocol_match"),
+            },
+            &summary,
+        );
+        let rendered = crate::logging::render_structured_event(
+            "proxy.transform_summary",
+            &transform_summary_event_fields(&fields),
+        );
+
+        assert_eq!(fields.total_fact_count, 35);
+        assert_eq!(fields.retained_fact_count, 32);
+        assert_eq!(fields.dropped_diagnostic_count, 3);
+        assert_eq!(fields.safe_summary_count, 1);
+        assert_eq!(
+            fields.safe_summary_sha256.as_deref().map(str::len),
+            Some(64)
+        );
+        assert!(fields.outcome_counts.contains("passthrough:34"));
+        assert!(fields.outcome_counts.contains("observation_degraded:1"));
+        for forbidden in ["must-not-appear", "tool_arguments", "private"] {
+            assert!(!rendered.contains(forbidden));
+        }
     }
 }

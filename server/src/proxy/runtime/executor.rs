@@ -8,6 +8,7 @@ use crate::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
         auth::{admit_api_key_request, check_access_control},
         cancellation::ProxyCancellationContext,
+        logging::{TransformLogStage, log_transform_failure, log_transform_summary},
         request_context::ProxyRequestContext,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
@@ -17,7 +18,7 @@ use crate::{
             },
             materializer::{
                 apply_gateway_request_identity, materialize_generation_request,
-                materialize_utility_request,
+                materialize_utility_request, preflight_generation_request,
             },
             request_patch::resolve_runtime_request_patch_trace,
             route_resolver::ExecutionPlan,
@@ -100,7 +101,7 @@ pub(in crate::proxy) async fn execute_request(
         original_headers,
         client_ip_addr,
         request_context,
-        kind,
+        mut kind,
     } = input;
     let mut target = execution_plan.target.clone();
     let downstream_protocol = match &kind {
@@ -155,6 +156,37 @@ pub(in crate::proxy) async fn execute_request(
         }
         if let Err(error) = validate_utility_target(operation, target.upstream_protocol) {
             return fail_before_send(&app_state, log_context, error).await;
+        }
+    }
+
+    if let RequestExecutionKind::Generation {
+        downstream_protocol,
+        is_stream,
+        data,
+    } = &mut kind
+    {
+        match preflight_generation_request(
+            &target,
+            std::mem::take(data),
+            *downstream_protocol,
+            *is_stream,
+        ) {
+            Ok(transformed) => {
+                log_transform_summary(
+                    TransformLogStage::Request,
+                    &log_context,
+                    &transformed.summary,
+                );
+                *data = transformed.value;
+            }
+            Err(failure) => {
+                log_transform_failure(
+                    TransformLogStage::Request,
+                    &log_context,
+                    &failure.transform_failure,
+                );
+                return fail_before_send(&app_state, log_context, failure.proxy_error).await;
+            }
         }
     }
 
@@ -327,7 +359,7 @@ pub(in crate::proxy) async fn execute_request(
     .await
     {
         Ok(outcome) => {
-            if !outcome.log_context.is_stream && !outcome.log_context.completion_deferred {
+            if !outcome.log_context.is_stream {
                 record_completion(&app_state, outcome.log_context).await;
             }
             Ok(outcome.response)

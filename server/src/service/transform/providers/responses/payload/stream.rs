@@ -542,7 +542,10 @@ impl ResponsesStreamEvent {
                 id,
                 arguments,
             } => TypedResponsesStreamEvent::FunctionCallArgumentsDone {
-                item_id: item_id.clone().or_else(|| id.clone()).unwrap_or_default(),
+                item_id: item_id
+                    .clone()
+                    .or_else(|| id.clone())
+                    .expect("audited Responses tool arguments done must retain an item id"),
                 output_index: item_index.unwrap_or(*index),
                 call_id: id.clone(),
                 arguments: arguments.clone(),
@@ -577,11 +580,15 @@ impl ResponsesStreamEvent {
             Self::Error { error } => TypedResponsesStreamEvent::Error {
                 error: error.clone(),
             },
-            Self::Item(item) => return serde_json::to_value(item).unwrap_or(Value::Null),
+            Self::Item(item) => {
+                return serde_json::to_value(item)
+                    .expect("Responses item serialization is structurally infallible");
+            }
             Self::Unknown(value) => return value.clone(),
         };
 
-        serde_json::to_value(typed).unwrap_or(Value::Null)
+        serde_json::to_value(typed)
+            .expect("Responses stream event serialization is structurally infallible")
     }
 }
 

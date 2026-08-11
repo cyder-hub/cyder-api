@@ -163,7 +163,10 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
         let tool_choice = responses_extension
             .tool_choice
-            .and_then(|value| serde_json::from_value(value).ok())
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("Responses tool_choice extension is source-validated")
+            })
             .or_else(|| {
                 openai_extension
                     .tool_choice
@@ -172,7 +175,10 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
         let text = responses_extension
             .text_format
-            .and_then(|value| serde_json::from_value(value).ok())
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("Responses text format extension is source-validated")
+            })
             .or_else(|| {
                 openai_extension
                     .response_format
@@ -185,7 +191,10 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
         let reasoning = responses_extension
             .reasoning
-            .and_then(|value| serde_json::from_value(value).ok())
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("Responses reasoning extension is source-validated")
+            })
             .or_else(|| {
                 openai_extension
                     .passthrough
@@ -258,8 +267,17 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
                 .into_iter()
                 .filter_map(|item| match item {
                     ItemField::Message(item) => {
-                        let (content, annotations, files) =
+                        let (mut content, annotations, files) =
                             message_content_parts_to_unified(item.content);
+                        content.extend(files.iter().filter_map(|file| {
+                            file.file_url
+                                .clone()
+                                .map(|url| UnifiedContentPart::FileUrl {
+                                    url,
+                                    mime_type: file.mime_type.clone(),
+                                    filename: file.filename.clone(),
+                                })
+                        }));
                         if !content.is_empty() || !annotations.is_empty() {
                             request_items.push(UnifiedItem::Message(UnifiedMessageItem {
                                 role: message_role_to_unified(item.role.clone()),
@@ -275,7 +293,7 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
                         })
                     }
                     ItemField::FunctionCall(call) => {
-                        let arguments = parse_function_arguments(&call.arguments);
+                        let arguments = parse_validated_function_arguments(&call.arguments);
                         request_items.push(UnifiedItem::FunctionCall(UnifiedFunctionCallItem {
                             id: call.call_id.clone(),
                             name: call.name.clone(),
@@ -357,9 +375,18 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
 
         let responses_extension = UnifiedResponsesRequestExtension {
             instructions,
-            tool_choice: tool_choice.and_then(|value| serde_json::to_value(value).ok()),
-            text_format: text.and_then(|value| serde_json::to_value(value.format).ok()),
-            reasoning: reasoning.and_then(|value| serde_json::to_value(value).ok()),
+            tool_choice: tool_choice.map(|value| {
+                serde_json::to_value(value)
+                    .expect("Responses tool_choice serialization is structurally infallible")
+            }),
+            text_format: text.map(|value| {
+                serde_json::to_value(value.format)
+                    .expect("Responses text format serialization is structurally infallible")
+            }),
+            reasoning: reasoning.map(|value| {
+                serde_json::to_value(value)
+                    .expect("Responses reasoning serialization is structurally infallible")
+            }),
             parallel_tool_calls,
         };
 

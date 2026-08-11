@@ -12,7 +12,8 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     proxy::{
-        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, protocol_transform_error,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, classify_transform_failure,
+        protocol_transform_error,
         request_context::{ProxyRequestContext, X_CLIENT_REQUEST_ID, X_REQUEST_ID},
         runtime::{
             request_patch::apply_request_patches, route_resolver::ExecutionTarget,
@@ -27,7 +28,9 @@ use crate::{
             CacheModel, CacheProvider, CacheUpstreamSource, RuntimeResolvedRequestPatch,
         },
         provider_credential::{ProviderCredential, apply_provider_request_auth_header},
-        transform::{finalize_request_data, transform_request_data},
+        transform::{
+            TransformFailure, TransformSuccess, finalize_request_data, transform_request_data,
+        },
         upstream_response::apply_upstream_accept_encoding,
     },
 };
@@ -39,6 +42,11 @@ pub(in crate::proxy) struct MaterializedRequest {
     pub final_body: Bytes,
     pub model_str: String,
     pub response_mode: ProxyResponseMode,
+}
+
+pub(in crate::proxy) struct PreflightGenerationFailure {
+    pub transform_failure: TransformFailure,
+    pub proxy_error: ProxyError,
 }
 
 struct PreparedGenerationRequest {
@@ -358,7 +366,7 @@ async fn prepare_gemini_llm_request(
 
 pub(in crate::proxy) async fn materialize_generation_request(
     target: &ExecutionTarget,
-    mut data: Value,
+    data: Value,
     downstream_protocol: DownstreamProtocol,
     is_stream: bool,
     original_headers: &HeaderMap,
@@ -367,7 +375,6 @@ pub(in crate::proxy) async fn materialize_generation_request(
     provider_credential: &ProviderCredential,
 ) -> Result<MaterializedRequest, ProxyError> {
     let upstream_protocol = target.upstream_protocol;
-    data = transform_request_data(data, downstream_protocol, upstream_protocol, is_stream);
     let mut prepared_request = prepare_generation_request(
         &target.provider,
         &target.upstream_source,
@@ -405,6 +412,24 @@ pub(in crate::proxy) async fn materialize_generation_request(
             downstream_protocol,
             upstream_protocol,
         },
+    })
+}
+
+pub(in crate::proxy) fn preflight_generation_request(
+    target: &ExecutionTarget,
+    data: Value,
+    downstream_protocol: DownstreamProtocol,
+    is_stream: bool,
+) -> Result<TransformSuccess<Value>, PreflightGenerationFailure> {
+    transform_request_data(
+        data,
+        downstream_protocol,
+        target.upstream_protocol,
+        is_stream,
+    )
+    .map_err(|transform_failure| PreflightGenerationFailure {
+        proxy_error: classify_transform_failure(&transform_failure, ResponseVisibility::NotVisible),
+        transform_failure,
     })
 }
 

@@ -19,7 +19,8 @@ impl From<GeminiResponse> for UnifiedResponse {
 
         let choices = candidates
             .into_iter()
-            .map(|candidate| {
+            .enumerate()
+            .map(|(candidate_position, candidate)| {
                 let mut content_parts = Vec::new();
                 let mut items = Vec::new();
                 let mut role = UnifiedRole::Assistant;
@@ -32,19 +33,18 @@ impl From<GeminiResponse> for UnifiedResponse {
                         _ => UnifiedRole::Assistant,
                     };
 
-                    let candidate_index = candidate.index.unwrap_or(0);
+                    let candidate_index = candidate
+                        .index
+                        .unwrap_or_else(|| u32::try_from(candidate_position).unwrap_or(u32::MAX));
                     for (part_index, p) in content.parts.into_iter().enumerate() {
                         match p {
                             GeminiPart::Text { text } => {
-                                if !text.is_empty() {
-                                    content_parts
-                                        .push(UnifiedContentPart::Text { text: text.clone() });
-                                    items.push(UnifiedItem::Message(UnifiedMessageItem {
-                                        role: role.clone(),
-                                        content: vec![UnifiedContentPart::Text { text }],
-                                        annotations: Vec::new(),
-                                    }));
-                                }
+                                content_parts.push(UnifiedContentPart::Text { text: text.clone() });
+                                items.push(UnifiedItem::Message(UnifiedMessageItem {
+                                    role: role.clone(),
+                                    content: vec![UnifiedContentPart::Text { text }],
+                                    annotations: Vec::new(),
+                                }));
                             }
                             GeminiPart::InlineData { inline_data } => {
                                 let part = gemini_inline_data_to_unified_content(inline_data);
@@ -165,7 +165,9 @@ impl From<GeminiResponse> for UnifiedResponse {
                 });
 
                 UnifiedChoice {
-                    index: candidate.index.unwrap_or(0),
+                    index: candidate
+                        .index
+                        .unwrap_or_else(|| u32::try_from(candidate_position).unwrap_or(u32::MAX)),
                     message,
                     items,
                     finish_reason,
@@ -207,11 +209,11 @@ impl From<GeminiResponse> for UnifiedResponse {
         });
 
         let synthetic_id = true;
-        let synthetic_model = false;
+        let synthetic_model = true;
 
         UnifiedResponse {
             id: build_gemini_synthetic_response_id("response"),
-            model: None,
+            model: Some("gemini".to_string()),
             choices,
             usage,
             created: Some(Utc::now().timestamp()),

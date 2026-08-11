@@ -715,7 +715,7 @@ fn test_unified_chunk_to_openai() {
 }
 
 #[test]
-fn test_transform_unified_chunk_to_openai_events_emits_diagnostic_for_image_delta() {
+fn test_transform_unified_chunk_to_openai_events_keeps_diagnostic_internal_for_image_delta() {
     let unified_chunk = UnifiedChunkResponse {
         id: "cmpl-123".to_string(),
         model: Some("gpt-4.1".to_string()),
@@ -746,13 +746,16 @@ fn test_transform_unified_chunk_to_openai_events_emits_diagnostic_for_image_delt
         transform_unified_chunk_to_openai_events(unified_chunk, &mut transformer.stream_context())
             .expect("openai chunk events");
 
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].event.as_deref(), Some("transform_diagnostic"));
-    let diagnostic: Value = serde_json::from_str(&events[0].data).unwrap();
-    assert_eq!(diagnostic["semantic_unit"], json!("ImageDelta"));
-
-    let chunk: Value = serde_json::from_str(&events[1].data).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_ne!(events[0].event.as_deref(), Some("transform_diagnostic"));
+    let chunk: Value = serde_json::from_str(&events[0].data).unwrap();
     assert_eq!(chunk["choices"][0]["delta"]["content"], json!("caption"));
+    let summary = transformer.diagnostics_snapshot();
+    assert_eq!(summary.total_fact_count, 1);
+    assert_eq!(
+        summary.facts[0].semantic_unit,
+        crate::service::transform::TransformSemanticUnit::ImageDelta
+    );
 }
 
 #[test]

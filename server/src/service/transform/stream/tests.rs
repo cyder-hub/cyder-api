@@ -2,6 +2,10 @@ use super::*;
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::providers::{anthropic, openai, responses};
 use crate::service::transform::unified::*;
+use crate::service::transform::{
+    TransformAction, TransformFailureOrigin, TransformOutcomeKind, TransformPhase,
+    TransformReasonCode, TransformSemanticUnit,
+};
 use crate::utils::sse::SseEvent;
 use crate::utils::usage::UsageInfo;
 use serde_json::{Value, json};
@@ -25,15 +29,17 @@ fn meaningful_output_observation_is_shared_by_four_source_protocols_and_targets(
         DownstreamProtocol::Gemini,
     ] {
         let mut transformer = StreamTransformer::new(UpstreamProtocol::Openai, downstream);
-        let output = transformer.transform_event_with_observation(sse(openai_text));
-        assert!(output.meaningful_output_observed);
+        let output = transformer
+            .transform_event_with_observation(sse(openai_text))
+            .expect("same-wire observation must succeed");
+        assert!(output.value.meaningful_output_observed);
     }
 
     for (upstream, source_frame) in [
         (UpstreamProtocol::Openai, openai_text),
         (
             UpstreamProtocol::Responses,
-            "{\"type\":\"response.output_text.delta\",\"item_id\":\"item\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\",\"sequence_number\":1}",
+            "{\"type\":\"response.content_block.delta\",\"index\":0,\"text\":\"hello\",\"sequence_number\":1}",
         ),
         (
             UpstreamProtocol::Anthropic,
@@ -45,9 +51,19 @@ fn meaningful_output_observation_is_shared_by_four_source_protocols_and_targets(
         ),
     ] {
         let mut transformer = StreamTransformer::new(upstream, DownstreamProtocol::Openai);
-        let output = transformer.transform_event_with_observation(sse(source_frame));
+        if upstream == UpstreamProtocol::Anthropic {
+            transformer
+                .transform_event(sse("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\"}}"))
+                .expect("Anthropic message lifecycle must start");
+            transformer
+                .transform_event(sse("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}"))
+                .expect("Anthropic text block lifecycle must start");
+        }
+        let output = transformer
+            .transform_event_with_observation(sse(source_frame))
+            .expect("cross-wire observation must succeed");
         assert!(
-            output.meaningful_output_observed,
+            output.value.meaningful_output_observed,
             "source protocol {upstream:?} must classify text at the typed source layer"
         );
     }
@@ -57,14 +73,75 @@ fn meaningful_output_observation_is_shared_by_four_source_protocols_and_targets(
 fn meaningful_output_observation_ignores_passthrough_lifecycle_and_decode_failure() {
     let mut transformer =
         StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Openai);
-    let role_only = transformer.transform_event_with_observation(sse(
-        "{\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}",
-    ));
-    assert!(!role_only.meaningful_output_observed);
+    let role_only = transformer
+        .transform_event_with_observation(sse(
+            "{\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}",
+        ))
+        .expect("same-wire role observation must succeed");
+    assert!(!role_only.value.meaningful_output_observed);
 
-    let invalid = transformer.transform_event_with_observation(sse("{not-json}"));
-    assert!(!invalid.meaningful_output_observed);
-    assert_eq!(invalid.events.unwrap()[0].data, "{not-json}");
+    let invalid = transformer
+        .transform_event_with_observation(sse("{not-json}"))
+        .expect("same-wire observation failure must preserve the event");
+    assert!(!invalid.value.meaningful_output_observed);
+    assert_eq!(invalid.value.events[0].data, "{not-json}");
+    assert_eq!(
+        invalid.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    assert_eq!(
+        invalid.summary.facts[0].outcome,
+        TransformOutcomeKind::ObservationDegraded
+    );
+}
+
+#[test]
+fn same_wire_openai_done_is_a_clean_lifecycle_marker() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Openai);
+
+    let output = transformer
+        .transform_event(sse("[DONE]"))
+        .expect("same-wire OpenAI completion marker must pass through");
+
+    assert_eq!(output.value.events, vec![sse("[DONE]")]);
+    assert_eq!(
+        output.value.disposition,
+        StreamFrameDisposition::LifecycleSent
+    );
+    assert!(
+        !output
+            .summary
+            .outcome_counts
+            .contains_key(&TransformOutcomeKind::ObservationDegraded)
+    );
+    assert!(output.summary.facts.iter().any(|fact| {
+        fact.semantic_unit == TransformSemanticUnit::Lifecycle
+            && fact.reason_code == TransformReasonCode::LosslessConversion
+    }));
+}
+
+#[test]
+fn gemini_usage_without_candidate_tokens_defaults_output_to_zero() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+
+    let output = transformer
+        .transform_event(sse(json!({
+            "candidates": [],
+            "usageMetadata": {
+                "promptTokenCount": 7,
+                "totalTokenCount": 7
+            }
+        })
+        .to_string()))
+        .expect("Gemini may omit candidate tokens for a zero-output stream frame");
+
+    assert_eq!(output.value.events.len(), 1);
+    let payload: Value = serde_json::from_str(&output.value.events[0].data).unwrap();
+    assert_eq!(payload["usage"]["prompt_tokens"], 7);
+    assert_eq!(payload["usage"]["completion_tokens"], 0);
+    assert_eq!(payload["usage"]["total_tokens"], 7);
 }
 
 fn load_sse_fixture(raw: &str) -> Vec<SseEvent> {
@@ -82,7 +159,8 @@ fn replay_fixture_through_transformer(
         .flat_map(|event| {
             transformer
                 .transform_event(event.clone())
-                .unwrap_or_default()
+                .expect("fixture event transform must succeed")
+                .value
         })
         .collect()
 }
@@ -96,7 +174,8 @@ fn test_openai_chunk_to_gemini_streamer_preserves_supported_events() {
         .transform_event(sse(
             "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}",
         ))
-        .unwrap();
+        .unwrap()
+        .value;
     assert_eq!(transformed.len(), 1);
     assert_eq!(
         serde_json::from_str::<Value>(&transformed[0].data).unwrap(),
@@ -115,17 +194,32 @@ fn test_openai_chunk_to_gemini_streamer_preserves_supported_events() {
         .transform_event(sse(
             "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
         ))
-        .unwrap();
+        .unwrap()
+        .value;
     let finish_payload: Value = serde_json::from_str(&transformed_finish[0].data).unwrap();
     assert_eq!(finish_payload["candidates"][0]["finishReason"], "STOP");
 
-    assert!(transformer.transform_event(sse("[DONE]")).is_none());
+    assert!(
+        transformer
+            .transform_event(sse("[DONE]"))
+            .expect("done marker must be explicitly accounted")
+            .value
+            .is_empty()
+    );
 
-    let transformed_tool = transformer
+    let transformed_tool_start = transformer
         .transform_event(sse(
             "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\": \\\"Boston\\\"}\"}}]}}]}",
         ))
-        .unwrap();
+        .unwrap()
+        .value;
+    assert!(transformed_tool_start.is_empty());
+    let transformed_tool = transformer
+        .transform_event(sse(
+            "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}"
+        ))
+        .unwrap()
+        .value;
     assert_eq!(
         serde_json::from_str::<Value>(&transformed_tool[0].data).unwrap(),
         json!({
@@ -149,7 +243,9 @@ fn test_openai_chunk_to_gemini_streamer_preserves_supported_events() {
             .transform_event(sse(
                 "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"}}]}"
             ))
-            .is_none()
+            .expect("empty semantic frame must be explicitly accounted")
+            .value
+            .is_empty()
     );
 }
 
@@ -160,8 +256,8 @@ fn test_gemini_streamer_keeps_tool_ids_stable_and_advances_after_finish() {
     let gemini_tool = "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"location\":\"Boston\"}}}]},\"index\":0}]}";
     let gemini_finish = "{\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"}]}";
 
-    let first = transformer.transform_event(sse(gemini_tool)).unwrap();
-    let second = transformer.transform_event(sse(gemini_tool)).unwrap();
+    let first = transformer.transform_event(sse(gemini_tool)).unwrap().value;
+    let second = transformer.transform_event(sse(gemini_tool)).unwrap().value;
     let first_json: Value = serde_json::from_str(&first[0].data).unwrap();
     let second_json: Value = serde_json::from_str(&second[0].data).unwrap();
 
@@ -171,7 +267,7 @@ fn test_gemini_streamer_keeps_tool_ids_stable_and_advances_after_finish() {
     );
 
     transformer.transform_event(sse(gemini_finish)).unwrap();
-    let after_finish = transformer.transform_event(sse(gemini_tool)).unwrap();
+    let after_finish = transformer.transform_event(sse(gemini_tool)).unwrap().value;
     let after_finish_json: Value = serde_json::from_str(&after_finish[0].data).unwrap();
 
     assert_ne!(
@@ -189,7 +285,8 @@ fn test_gemini_openai_done_to_anthropic_emits_terminal_lifecycle() {
         .transform_event(sse(
             "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gemini-2.5-flash-lite\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}",
         ))
-        .unwrap();
+        .unwrap()
+        .value;
     assert_eq!(transformed_content.len(), 3);
     assert_eq!(
         transformed_content[0].event.as_deref(),
@@ -204,7 +301,7 @@ fn test_gemini_openai_done_to_anthropic_emits_terminal_lifecycle() {
         Some("content_block_delta")
     );
 
-    let transformed_done = transformer.transform_event(sse("[DONE]")).unwrap();
+    let transformed_done = transformer.transform_event(sse("[DONE]")).unwrap().value;
     assert_eq!(transformed_done.len(), 2);
     assert_eq!(
         transformed_done[0].event.as_deref(),
@@ -220,10 +317,10 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
         StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
 
     for index in 0..40 {
-        let _ = transformer.transform_event(sse(format!(
+        transformer.transform_event(sse(format!(
             "{{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}}}}]}}",
             index
-        )));
+        ))).expect("bounded window fixture must transform");
     }
 
     assert_eq!(
@@ -245,6 +342,19 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
 
     let mut usage_transformer =
         StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
+    usage_transformer
+        .transform_event(sse(json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_usage",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-test"
+            }
+        })
+        .to_string()))
+        .expect("Anthropic usage lifecycle must start with a message");
     let transformed = usage_transformer
         .transform_event(sse(json!({
             "type": "message_delta",
@@ -258,7 +368,8 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
             }
         })
         .to_string()))
-        .unwrap();
+        .unwrap()
+        .value;
 
     assert_eq!(transformed.len(), 2);
     assert_eq!(
@@ -294,6 +405,27 @@ fn test_anthropic_stream_event_bridge_matches_legacy_text_delta_output() {
 
     let mut transformer =
         StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
+    transformer
+        .transform_event(sse(json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_bridge",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-test"
+            }
+        })
+        .to_string()))
+        .unwrap();
+    transformer
+        .transform_event(sse(json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""}
+        })
+        .to_string()))
+        .unwrap();
     let transformed = transformer
         .transform_event(sse(json!({
             "type": "content_block_delta",
@@ -301,82 +433,12 @@ fn test_anthropic_stream_event_bridge_matches_legacy_text_delta_output() {
             "delta": {"type": "text_delta", "text": "Hello"}
         })
         .to_string()))
-        .unwrap();
+        .unwrap()
+        .value;
 
     assert_eq!(transformed.len(), 1);
     let bridged_openai: Value = serde_json::from_str(&transformed[0].data).unwrap();
     assert_eq!(bridged_openai["choices"], legacy_openai["choices"]);
-}
-
-#[test]
-fn test_openai_native_stream_encoder_matches_legacy_bridge_for_supported_events() {
-    let events = vec![
-        UnifiedStreamEvent::MessageStart {
-            id: Some("chatcmpl-native".to_string()),
-            model: Some("gpt-test".to_string()),
-            role: UnifiedRole::Assistant,
-        },
-        UnifiedStreamEvent::ContentBlockDelta {
-            index: 0,
-            item_index: None,
-            item_id: None,
-            part_index: None,
-            text: "Hello".to_string(),
-        },
-        UnifiedStreamEvent::ToolCallStart {
-            index: 0,
-            id: "call_123".to_string(),
-            name: "lookup".to_string(),
-        },
-        UnifiedStreamEvent::ToolCallArgumentsDelta {
-            index: 0,
-            item_index: None,
-            item_id: None,
-            id: Some("call_123".to_string()),
-            name: Some("lookup".to_string()),
-            arguments: "{\"city\":\"Boston\"}".to_string(),
-        },
-        UnifiedStreamEvent::MessageDelta {
-            finish_reason: Some("tool_calls".to_string()),
-        },
-        UnifiedStreamEvent::Usage {
-            usage: UnifiedUsage {
-                input_tokens: 7,
-                output_tokens: 11,
-                total_tokens: 18,
-                ..Default::default()
-            },
-        },
-    ];
-
-    let mut native_transformer =
-        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
-    native_transformer.update_session_from_stream_events(&events);
-    let native = openai::transform_unified_stream_events_to_openai_events(
-        events.clone(),
-        &mut native_transformer.stream_context(),
-    )
-    .unwrap();
-
-    let mut legacy_transformer =
-        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
-    legacy_transformer.update_session_from_stream_events(&events);
-    let legacy = legacy_transformer
-        .bridge_stream_events_to_legacy_chunks(events)
-        .into_iter()
-        .map(|chunk| serde_json::to_value(openai::OpenAiChunkResponse::from(chunk)).unwrap())
-        .collect::<Vec<_>>();
-
-    let native_values = native
-        .into_iter()
-        .map(|event| serde_json::from_str::<Value>(&event.data).unwrap())
-        .collect::<Vec<_>>();
-
-    assert_eq!(native_values.len(), legacy.len());
-    for (native_value, legacy_value) in native_values.iter().zip(legacy.iter()) {
-        assert_eq!(native_value["choices"], legacy_value["choices"]);
-        assert_eq!(native_value["usage"], legacy_value["usage"]);
-    }
 }
 
 #[test]
@@ -398,7 +460,7 @@ fn test_responses_source_stream_fast_path_matches_unified_openai_path() {
 
     let mut optimized =
         StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
-    let optimized_events = optimized.transform_event(event).unwrap();
+    let optimized_events = optimized.transform_event(event).unwrap().value;
 
     let parsed: responses::ResponsesChunkResponse = serde_json::from_value(raw).unwrap();
     let stream_events = responses::responses_chunk_to_unified_stream_events(parsed);
@@ -424,30 +486,136 @@ fn test_responses_source_stream_fast_path_matches_unified_openai_path() {
 }
 
 #[test]
-fn test_stream_transformer_deserialize_failure_returns_controlled_error_event() {
+fn test_stream_transformer_deserialize_failure_is_typed_and_payload_free() {
     let mut transformer =
         StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
 
-    let transformed = transformer.transform_event(sse("{not-json}")).unwrap();
+    let failure = transformer
+        .transform_event(sse("{not-json}"))
+        .expect_err("cross-wire source decode must fail");
 
-    assert_eq!(transformed.len(), 1);
-    assert_eq!(transformed[0].event.as_deref(), Some("error"));
-    let payload: Value = serde_json::from_str(&transformed[0].data).unwrap();
-    assert_eq!(payload["type"], "transform_error");
-    assert_eq!(payload["diagnostic_kind"], "fatal_transform_error");
-    assert_eq!(payload["stage"], "deserialize_source_chunk");
-    assert_eq!(payload["provider"], "upstream:Openai");
-    assert_eq!(payload["target_provider"], "downstream:Gemini");
-    assert_eq!(payload["loss_level"], "reject");
-    assert_eq!(payload["semantic_unit"], "StreamError");
-    assert!(
-        payload["raw_data_summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("bytes=") && summary.contains("sha256="))
+    assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+    assert_eq!(failure.phase, TransformPhase::StreamDecode);
+    assert_eq!(failure.summary.total_fact_count, 1);
+    let fact = &failure.summary.facts[0];
+    assert_eq!(fact.phase, TransformPhase::StreamDecode);
+    assert_eq!(fact.outcome, TransformOutcomeKind::FatalError);
+    assert_eq!(fact.action, TransformAction::Terminate);
+    assert_eq!(fact.reason_code, TransformReasonCode::SourceDecodeFailed);
+    assert_eq!(fact.safe_summary.as_ref().unwrap().sha256.len(), 64);
+    assert_ne!(fact.safe_summary.as_ref().unwrap().sha256, "{not-json}");
+}
+
+#[test]
+fn stream_batch_accounts_every_input_without_defaulting_failures() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
+    let output = transformer
+        .transform_events(vec![
+            sse(""),
+            sse("{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}"),
+            sse("[DONE]"),
+        ])
+        .expect("valid batch must transform");
+
+    assert_eq!(output.value.input_event_count, 3);
+    assert_eq!(output.value.accounted_input_count, 3);
+    assert_eq!(
+        output.value.accounted_input_count,
+        output.value.disposition_counts.values().sum::<usize>()
     );
-    assert_ne!(payload["raw_data_summary"], "{not-json}");
-    assert!(transformer.session.last_error_is_some());
-    assert_eq!(transformer.session.diagnostics_len(), 1);
+    assert_eq!(
+        output.value.disposition_counts[&StreamFrameDisposition::EmptyFrame],
+        1
+    );
+    assert_eq!(
+        output.value.disposition_counts[&StreamFrameDisposition::Sent],
+        1
+    );
+    assert_eq!(
+        output.value.disposition_counts[&StreamFrameDisposition::LifecycleNoOutput],
+        1
+    );
+    assert!(!output.value.events.is_empty());
+}
+
+#[test]
+fn fatal_stream_failure_rolls_back_session_and_refuses_follow_up_frames() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
+    let first = transformer
+        .transform_event(sse("{not-json}"))
+        .expect_err("invalid source frame must fail");
+
+    assert!(transformer.session.original_events_is_empty());
+    assert!(transformer.cached_usage_info().is_none());
+    assert!(transformer.session.finish_reason_cache().is_none());
+
+    let second = transformer
+        .transform_event(sse(
+            "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"must-not-send\"}}]}",
+        ))
+        .expect_err("terminal transformer must reject follow-up frames");
+    assert_eq!(second.origin, first.origin);
+    assert_eq!(second.reason_code, first.reason_code);
+    assert!(transformer.session.original_events_is_empty());
+    assert!(transformer.cached_usage_info().is_none());
+}
+
+#[test]
+fn semantic_stream_failure_rolls_back_partially_inferred_tool_state() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
+    let failure = transformer
+        .transform_event(sse(
+            r#"{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"city\":"}}]},"finish_reason":"tool_calls"}]}"#,
+        ))
+        .expect_err("malformed terminal tool arguments must reject");
+
+    assert_eq!(failure.semantic_unit, TransformSemanticUnit::ToolCallDelta);
+    assert!(transformer.session.original_events_is_empty());
+    assert!(transformer.session.openai_source_tool_calls().is_empty());
+}
+
+#[test]
+fn same_wire_observation_failure_rolls_back_inference_but_preserves_frame() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Openai);
+    let raw = r#"{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"city\":"}}]},"finish_reason":"tool_calls"}]}"#;
+    let output = transformer
+        .transform_event(sse(raw))
+        .expect("same-wire observation failure must pass the original frame through");
+
+    assert_eq!(output.value.events[0].data, raw);
+    assert_eq!(
+        output.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    assert!(transformer.session.openai_source_tool_calls().is_empty());
+    assert_eq!(transformer.session.original_events().len(), 1);
+}
+
+#[test]
+fn disposition_classification_separates_controlled_loss_from_no_output() {
+    let mut collector = crate::service::transform::TransformDiagnosticCollector::default();
+    collector.record(crate::service::transform::TransformDiagnosticFact {
+        sequence: 0,
+        phase: TransformPhase::StreamEncode,
+        semantic_unit: TransformSemanticUnit::ImageDelta,
+        outcome: TransformOutcomeKind::ControlledLossMinor,
+        action: TransformAction::Drop,
+        reason_code: TransformReasonCode::UnsupportedImageDelta,
+        safe_summary: None,
+    });
+    assert_eq!(
+        super::transformer::classify_stream_disposition(
+            false,
+            false,
+            &[],
+            &collector.into_summary(),
+        ),
+        StreamFrameDisposition::ControlledLoss
+    );
 }
 
 #[test]
@@ -479,15 +647,15 @@ fn test_parse_usage_info_fallback_and_cache_miss_diagnostics() {
     assert!(cache_miss.parse_usage_info().is_none());
     assert_eq!(cache_miss.session.diagnostics_len(), 1);
     let diagnostic = cache_miss.session.latest_diagnostic().unwrap();
-    assert_eq!(diagnostic.type_, "transform_diagnostic");
+    assert_eq!(diagnostic.phase, TransformPhase::ResponseObserve);
+    assert_eq!(diagnostic.semantic_unit, TransformSemanticUnit::Usage);
     assert_eq!(
-        diagnostic.diagnostic_kind,
-        UnifiedTransformDiagnosticKind::CapabilityDowngrade
+        diagnostic.outcome,
+        TransformOutcomeKind::ObservationDegraded
     );
-    assert_eq!(diagnostic.stage.as_deref(), Some("parse_usage_info"));
     assert_eq!(
-        diagnostic.loss_level,
-        UnifiedTransformDiagnosticLossLevel::LossyMinor
+        diagnostic.reason_code,
+        TransformReasonCode::ObservationParseFailed
     );
 }
 
@@ -606,27 +774,35 @@ fn test_gemini_openai_text_fixture_to_anthropic_emits_terminal_lifecycle() {
 }
 
 #[test]
-fn test_anthropic_unsupported_thinking_fixture_yields_controlled_error() {
+fn test_anthropic_unsupported_thinking_fixture_yields_typed_failure() {
     let fixture = load_sse_fixture(include_str!(
         "../testdata/anthropic_unsupported_thinking_stream.json"
     ));
 
-    let transformed = replay_fixture_through_transformer(
-        UpstreamProtocol::Anthropic,
-        DownstreamProtocol::Responses,
-        &fixture,
-    );
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Responses);
+    let failure = transformer
+        .transform_event(fixture[0].clone())
+        .expect_err("unsupported thinking must fail explicitly");
 
-    assert_eq!(transformed.len(), 1);
-    assert_eq!(transformed[0].event.as_deref(), Some("error"));
-    let payload: Value = serde_json::from_str(&transformed[0].data).expect("error payload");
+    assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+    assert_eq!(failure.phase, TransformPhase::StreamDecode);
     assert_eq!(
-        payload.get("type").and_then(Value::as_str),
-        Some("transform_error")
+        failure.reason_code,
+        TransformReasonCode::InvalidProtocolShape
+    );
+    assert_eq!(failure.summary.total_fact_count, 1);
+    assert_eq!(
+        failure.summary.facts[0].outcome,
+        TransformOutcomeKind::FatalError
     );
     assert_eq!(
-        payload.get("stage").and_then(Value::as_str),
-        Some("deserialize_source_chunk")
+        failure.summary.facts[0]
+            .safe_summary
+            .as_ref()
+            .expect("safe summary")
+            .sha256
+            .len(),
+        64
     );
-    assert!(payload.get("raw_data_summary").is_some());
 }

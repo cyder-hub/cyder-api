@@ -217,11 +217,35 @@ fn print_report_summary(report: &TransformQualityReport) {
         .filter(|check| check.passed)
         .count();
     eprintln!(
-        "Transform quality gate: replay_passed={}, benchmark_checks={}/{}",
+        "Transform quality gate: replay_passed={}, contract_cases={}/{}, accounting_closed={}, benchmark_checks={}/{}",
         report.replay_summary.passed,
+        report.contract_summary.passed_case_count,
+        report.contract_summary.case_count,
+        report.contract_summary.accounting_closed,
         passed_checks,
         report.threshold_checks.len()
     );
+
+    for case in report
+        .contract_summary
+        .cases
+        .iter()
+        .filter(|case| !case.passed)
+    {
+        eprintln!(
+            "transform contract regression: {} expected={}/{}/{}/{} observed={:?}/{:?}/{:?}/{:?} accounting_closed={}",
+            case.contract_name,
+            case.expected_phase,
+            case.expected_semantic_unit,
+            case.expected_outcome,
+            case.expected_reason_code,
+            case.observed_origin,
+            case.observed_phase,
+            case.observed_semantic_unit,
+            case.observed_reason_code,
+            case.accounting_closed,
+        );
+    }
 
     for check in report.threshold_checks.iter().filter(|check| !check.passed) {
         eprintln!(

@@ -1,23 +1,25 @@
+use std::collections::BTreeMap;
+
 use cyder_tools::log::{debug, warn};
 use serde_json::Value;
 
-use super::error;
 use super::session::{SessionContext, StreamTransformContext};
 use super::usage::UsageMergeStrategy;
 use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
-use crate::service::transform::TransformProtocol;
 use crate::service::transform::adapter::{
     DecodedSourceStreamFrame, DownstreamAdapter, UpstreamAdapter, downstream_adapter_for,
     upstream_adapter_for,
 };
-use crate::service::transform::capability::TransformValueKind;
-use crate::service::transform::diagnostics::build_transform_diagnostic;
-use crate::service::transform::policy::{
-    PolicyDecision, TransformAction, TransformDiagnosticKind, TransformLossLevel,
+use crate::service::transform::diagnostics::{
+    capture_transform_diagnostics, merge_transform_summaries, transform_failure, transform_success,
 };
-use crate::service::transform::providers::responses;
 use crate::service::transform::unified::*;
+use crate::service::transform::{
+    TransformAction, TransformDiagnosticFact, TransformFailureOrigin, TransformOutcomeKind,
+    TransformOutcomeSummary, TransformPhase, TransformReasonCode, TransformResult,
+    TransformSemanticUnit, TransformSuccess,
+};
 use crate::utils::sse::SseEvent;
 use crate::utils::usage::{self, UsageInfo};
 
@@ -26,11 +28,51 @@ pub struct StreamTransformer {
     pub(in crate::service::transform) downstream_protocol: DownstreamProtocol,
     pub(in crate::service::transform) session: SessionContext,
     last_meaningful_output_observed: bool,
+    terminal_failure: Option<crate::service::transform::TransformFailure>,
+    stream_summary: crate::service::transform::TransformDiagnosticCollector,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StreamFrameDisposition {
+    EmptyFrame,
+    LifecycleSent,
+    LifecycleNoOutput,
+    SemanticNoOutput,
+    Passthrough,
+    ObservationDegraded,
+    ControlledLoss,
+    Sent,
+}
+
+#[derive(Debug)]
 pub struct StreamTransformOutput {
-    pub events: Option<Vec<SseEvent>>,
+    pub events: Vec<SseEvent>,
     pub meaningful_output_observed: bool,
+    pub disposition: StreamFrameDisposition,
+}
+
+impl std::ops::Deref for StreamTransformOutput {
+    type Target = [SseEvent];
+
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+impl IntoIterator for StreamTransformOutput {
+    type Item = SseEvent;
+    type IntoIter = std::vec::IntoIter<SseEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.into_iter()
+    }
+}
+
+pub struct StreamBatchTransformOutput {
+    pub events: Vec<SseEvent>,
+    pub input_event_count: usize,
+    pub accounted_input_count: usize,
+    pub disposition_counts: BTreeMap<StreamFrameDisposition, usize>,
 }
 
 impl StreamTransformer {
@@ -43,22 +85,53 @@ impl StreamTransformer {
             downstream_protocol,
             session: SessionContext::default(),
             last_meaningful_output_observed: false,
+            terminal_failure: None,
+            stream_summary: Default::default(),
         }
     }
 
-    pub fn transform_event_with_observation(&mut self, event: SseEvent) -> StreamTransformOutput {
-        let events = self.transform_event(event);
-        StreamTransformOutput {
-            events,
-            meaningful_output_observed: self.last_meaningful_output_observed,
-        }
+    pub fn transform_event_with_observation(
+        &mut self,
+        event: SseEvent,
+    ) -> TransformResult<StreamTransformOutput> {
+        self.transform_event(event)
     }
 
-    pub fn transform_events(&mut self, events: Vec<SseEvent>) -> Vec<SseEvent> {
-        events
-            .into_iter()
-            .flat_map(|event| self.transform_event(event).unwrap_or_default())
-            .collect()
+    pub fn transform_events(
+        &mut self,
+        events: Vec<SseEvent>,
+    ) -> TransformResult<StreamBatchTransformOutput> {
+        let input_event_count = events.len();
+        let mut transformed = Vec::new();
+        let mut summaries = Vec::with_capacity(input_event_count);
+        let mut accounted_input_count = 0;
+        let mut disposition_counts = BTreeMap::new();
+        for event in events {
+            match self.transform_event(event) {
+                Ok(success) => {
+                    transformed.extend(success.value.events);
+                    *disposition_counts
+                        .entry(success.value.disposition)
+                        .or_default() += 1;
+                    summaries.push(success.summary);
+                    accounted_input_count += 1;
+                }
+                Err(mut failure) => {
+                    summaries.push(failure.summary);
+                    failure.summary = merge_transform_summaries(summaries);
+                    return Err(failure);
+                }
+            }
+        }
+        Ok(TransformSuccess {
+            value: StreamBatchTransformOutput {
+                events: transformed,
+                input_event_count,
+                accounted_input_count,
+                disposition_counts,
+            },
+            summary: merge_transform_summaries(summaries),
+        })
     }
 
     fn source_adapter(&self) -> &'static UpstreamAdapter {
@@ -94,24 +167,15 @@ impl StreamTransformer {
         }
 
         if self.session.original_events_is_empty() {
-            let decision = PolicyDecision {
-                diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                level: TransformLossLevel::LossyMinor,
+            self.record_post_transform_diagnostic(TransformDiagnosticFact {
+                sequence: 0,
+                phase: TransformPhase::ResponseObserve,
+                semantic_unit: TransformSemanticUnit::Usage,
+                outcome: TransformOutcomeKind::ObservationDegraded,
                 action: TransformAction::Drop,
-                reason: "Usage cache miss and empty diagnostic window prevented usage recovery.",
-            };
-            self.session.record_diagnostic(build_transform_diagnostic(
-                TransformDiagnosticKind::CapabilityDowngrade,
-                TransformProtocol::Upstream(self.upstream_protocol),
-                TransformProtocol::Downstream(self.downstream_protocol),
-                TransformValueKind::StreamError,
-                decision,
-                self.session.stream_id_clone(),
-                Some("parse_usage_info"),
-                Some("Unable to recover usage because no original stream events were retained."),
-                Some("recent_original_events=0".to_string()),
-                Some("Preserve upstream usage frames or widen the diagnostic window for this stream.".to_string()),
-            ));
+                reason_code: TransformReasonCode::ObservationParseFailed,
+                safe_summary: None,
+            });
             debug!(
                 "[transform][usage] stream_id={:?} provider={:?} no cached usage and no diagnostic events available",
                 self.session.stream_id_clone(),
@@ -156,27 +220,15 @@ impl StreamTransformer {
         };
 
         if parsed.is_none() {
-            let decision = PolicyDecision {
-                diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
-                level: TransformLossLevel::LossyMinor,
+            self.record_post_transform_diagnostic(TransformDiagnosticFact {
+                sequence: 0,
+                phase: TransformPhase::ResponseObserve,
+                semantic_unit: TransformSemanticUnit::Usage,
+                outcome: TransformOutcomeKind::ObservationDegraded,
                 action: TransformAction::Drop,
-                reason: "Usage cache miss forced a best-effort diagnostic fallback, but no recoverable usage payload was found.",
-            };
-            self.session.record_diagnostic(build_transform_diagnostic(
-                TransformDiagnosticKind::CapabilityDowngrade,
-                TransformProtocol::Upstream(self.upstream_protocol),
-                TransformProtocol::Downstream(self.downstream_protocol),
-                TransformValueKind::StreamError,
-                decision,
-                self.session.stream_id_clone(),
-                Some("parse_usage_info"),
-                Some("Unable to recover usage from cached stream diagnostics."),
-                Some(format!(
-                    "recent_original_events={}",
-                    self.session.original_events_len()
-                )),
-                Some("Inspect upstream provider SSE usage frames or preserve a wider diagnostic window.".to_string()),
-            ));
+                reason_code: TransformReasonCode::ObservationParseFailed,
+                safe_summary: None,
+            });
             warn!(
                 "[transform][usage] stream_id={:?} provider={:?} usage cache miss and diagnostic fallback failed; recent_original_events={}",
                 self.session.stream_id_clone(),
@@ -200,8 +252,18 @@ impl StreamTransformer {
         self.session.usage_normalization_cache_clone()
     }
 
-    pub fn diagnostics_snapshot(&self) -> Vec<UnifiedTransformDiagnostic> {
-        self.session.diagnostics_snapshot()
+    pub fn diagnostics_snapshot(&self) -> TransformOutcomeSummary {
+        let summary = self.stream_summary.snapshot();
+        if summary.total_fact_count == 0 {
+            self.session.diagnostics_snapshot()
+        } else {
+            summary
+        }
+    }
+
+    fn record_post_transform_diagnostic(&mut self, fact: TransformDiagnosticFact) {
+        self.session.record_diagnostic(fact.clone());
+        self.stream_summary.record(fact);
     }
 
     pub(crate) fn get_or_generate_stream_id(&mut self) -> String {
@@ -262,79 +324,129 @@ impl StreamTransformer {
         self.session.update_from_stream_event(event, strategy);
     }
 
-    fn controlled_error_sse(
-        &mut self,
-        stage: &'static str,
-        message: String,
-        raw_data: &str,
-    ) -> Vec<SseEvent> {
-        error::controlled_error_sse(self, stage, message, raw_data)
-    }
-
-    pub(in crate::service::transform) fn bridge_stream_events_to_legacy_chunks(
-        &mut self,
-        events: Vec<UnifiedStreamEvent>,
-    ) -> Vec<UnifiedChunkResponse> {
-        super::bridge::bridge_stream_events_to_legacy_chunks(self, events)
-    }
-
     fn stream_events_to_target_events(
         &mut self,
         stream_events: Vec<UnifiedStreamEvent>,
-    ) -> Option<Vec<SseEvent>> {
-        let mut transformed = Vec::new();
-        let mut passthrough_events = Vec::new();
-
-        for event in stream_events {
-            match event {
-                UnifiedStreamEvent::Error { error } => {
-                    self.session.set_last_error(error.clone());
-                    transformed.push(SseEvent {
-                        event: Some("error".to_string()),
-                        data: serde_json::to_string(&error).unwrap_or_else(|_| {
-                            "{\"type\":\"transform_error\",\"message\":\"serialization failure\"}"
-                                .to_string()
-                        }),
-                        ..Default::default()
-                    });
-                }
-                other => passthrough_events.push(other),
-            }
+    ) -> TransformResult<Vec<SseEvent>> {
+        if let Some(error) = stream_events.iter().find_map(|event| match event {
+            UnifiedStreamEvent::Error { error } => Some(error),
+            _ => None,
+        }) {
+            self.session.set_last_error(error.clone());
+            return Err(transform_failure(
+                TransformFailureOrigin::UpstreamPayload,
+                TransformPhase::StreamDecode,
+                TransformSemanticUnit::StreamError,
+                TransformReasonCode::InvalidProtocolShape,
+                None,
+            ));
         }
 
         let target_adapter = self.target_adapter();
-        let native_events = if target_adapter.stream.requires_legacy_bridge_for_events {
-            let unified_chunks = self.bridge_stream_events_to_legacy_chunks(passthrough_events);
-            let mut events = Vec::new();
-            for unified_chunk in unified_chunks {
-                let chunk_events = {
-                    let mut context = self.stream_context();
-                    (target_adapter.stream.encode_legacy_chunk)(unified_chunk, &mut context)
-                };
-                if let Some(chunk_events) = chunk_events {
-                    events.extend(chunk_events);
-                }
-            }
-            (!events.is_empty()).then_some(events)
-        } else {
-            let mut context = self.stream_context();
-            (target_adapter.stream.encode_events)(passthrough_events, &mut context)
-        };
-
-        if let Some(events) = native_events {
-            transformed.extend(events);
-        }
-
-        (!transformed.is_empty()).then_some(transformed)
+        let mut context = self.stream_context();
+        (target_adapter.stream.encode_events)(stream_events, &mut context)
     }
 
-    pub fn transform_event(&mut self, event: SseEvent) -> Option<Vec<SseEvent>> {
-        self.last_meaningful_output_observed = false;
-        if event.data.is_empty() {
-            return None;
+    pub fn transform_event(&mut self, event: SseEvent) -> TransformResult<StreamTransformOutput> {
+        if let Some(failure) = &self.terminal_failure {
+            return Err(failure.clone());
         }
 
-        self.session.push_original_event(event.clone());
+        let input_is_empty = event.data.is_empty();
+        let input_is_done = event.data == "[DONE]";
+        let original_event = (!input_is_empty).then(|| event.clone());
+        let session_before = self.session.semantic_snapshot();
+        let (result, captured_summary) =
+            capture_transform_diagnostics(|| self.transform_event_inner(event));
+        match result {
+            Ok(mut success) => {
+                success.summary = merge_transform_summaries([success.summary, captured_summary]);
+                if let Some(fact) = success.summary.control_fact() {
+                    let failure = crate::service::transform::TransformFailure {
+                        origin: if fact.action == TransformAction::Reject {
+                            TransformFailureOrigin::TargetCapability
+                        } else {
+                            TransformFailureOrigin::TargetEncoding
+                        },
+                        phase: fact.phase,
+                        semantic_unit: fact.semantic_unit,
+                        reason_code: fact.reason_code,
+                        summary: success.summary,
+                    };
+                    self.session.restore_semantic_snapshot(session_before);
+                    self.stream_summary.absorb(failure.summary.clone());
+                    self.terminal_failure = Some(failure.clone());
+                    return Err(failure);
+                }
+                let disposition = classify_stream_disposition(
+                    input_is_empty,
+                    input_is_done,
+                    &success.value,
+                    &success.summary,
+                );
+                if let Some(original_event) = original_event {
+                    self.session.push_original_event(original_event);
+                }
+                self.record_transformed_events(&success.value);
+                self.stream_summary.absorb(success.summary.clone());
+                Ok(TransformSuccess {
+                    value: StreamTransformOutput {
+                        events: success.value,
+                        meaningful_output_observed: self.last_meaningful_output_observed,
+                        disposition,
+                    },
+                    summary: success.summary,
+                })
+            }
+            Err(mut failure) => {
+                failure.summary = merge_transform_summaries([failure.summary, captured_summary]);
+                self.session.restore_semantic_snapshot(session_before);
+                self.stream_summary.absorb(failure.summary.clone());
+                self.terminal_failure = Some(failure.clone());
+                Err(failure)
+            }
+        }
+    }
+
+    fn transform_event_inner(&mut self, event: SseEvent) -> TransformResult<Vec<SseEvent>> {
+        self.last_meaningful_output_observed = false;
+        if event.data.is_empty() {
+            return Ok(transform_success(
+                Vec::new(),
+                TransformPhase::StreamDecode,
+                TransformSemanticUnit::StreamFrame,
+                TransformOutcomeKind::Lossless,
+                TransformAction::Drop,
+                TransformReasonCode::NoSemanticOutput,
+            ));
+        }
+
+        // Handle OpenAI-compatible stream termination before same-wire observation,
+        // because `[DONE]` is a valid marker rather than a JSON source frame.
+        if self.upstream_protocol == UpstreamProtocol::Openai && event.data == "[DONE]" {
+            let transformed = match self.downstream_protocol {
+                DownstreamProtocol::Anthropic => {
+                    self.stream_events_to_target_events(vec![UnifiedStreamEvent::MessageStop])
+                }
+                DownstreamProtocol::Gemini => Ok(transform_success(
+                    Vec::new(),
+                    TransformPhase::StreamDecode,
+                    TransformSemanticUnit::Lifecycle,
+                    TransformOutcomeKind::Lossless,
+                    TransformAction::Drop,
+                    TransformReasonCode::NoSemanticOutput,
+                )),
+                _ => Ok(transform_success(
+                    vec![event],
+                    TransformPhase::StreamDecode,
+                    TransformSemanticUnit::Lifecycle,
+                    TransformOutcomeKind::Lossless,
+                    TransformAction::Send,
+                    TransformReasonCode::LosslessConversion,
+                )),
+            };
+            return transformed;
+        }
 
         if matches!(
             (self.upstream_protocol, self.downstream_protocol),
@@ -344,74 +456,64 @@ impl StreamTransformer {
                 | (UpstreamProtocol::Gemini, DownstreamProtocol::Gemini)
         ) {
             // Best effort to update session state from passthrough events (e.g. usage info)
+            // is transactional as an observation: a rejected DTO must not retain
+            // partially inferred lifecycle state, while the original frame remains
+            // available for usage/diagnostic fallback.
+            let observation_session_before = self.session.semantic_snapshot();
             let source_adapter = self.source_adapter();
             let decoded_frame = {
                 let mut context = self.stream_context();
                 (source_adapter.stream.decode_source)(&event.data, &mut context)
             };
-            if let Ok(frame) = decoded_frame {
-                self.last_meaningful_output_observed = frame.meaningful_output_observed();
-                match frame {
-                    DecodedSourceStreamFrame::Events(stream_events) => {
-                        self.update_session_from_stream_events(&stream_events);
+            let observation_summary = match decoded_frame {
+                Ok(success) => {
+                    self.last_meaningful_output_observed =
+                        success.value.meaningful_output_observed();
+                    match success.value {
+                        DecodedSourceStreamFrame::Events(stream_events) => {
+                            self.update_session_from_stream_events(&stream_events);
+                        }
+                        DecodedSourceStreamFrame::LegacyChunk(mut unified_chunk) => {
+                            self.normalize_unified_chunk_session_state(&mut unified_chunk);
+                        }
                     }
-                    DecodedSourceStreamFrame::LegacyChunk(mut unified_chunk) => {
-                        self.normalize_unified_chunk_session_state(&mut unified_chunk);
-                    }
+                    success.summary
                 }
-            }
-            return Some(vec![event]);
-        }
-
-        // Handle OpenAI-compatible stream termination marker.
-        if self.upstream_protocol == UpstreamProtocol::Openai && event.data == "[DONE]" {
-            return match self.downstream_protocol {
-                DownstreamProtocol::Anthropic => {
-                    let transformed =
-                        self.stream_events_to_target_events(vec![UnifiedStreamEvent::MessageStop]);
-                    if let Some(events) = &transformed {
-                        self.record_transformed_events(events);
-                    }
-                    transformed
+                Err(failure) => {
+                    self.session
+                        .restore_semantic_snapshot(observation_session_before);
+                    let fact = TransformDiagnosticFact {
+                        sequence: 0,
+                        phase: TransformPhase::ResponseObserve,
+                        semantic_unit: TransformSemanticUnit::StreamFrame,
+                        outcome: TransformOutcomeKind::ObservationDegraded,
+                        action: TransformAction::PassThrough,
+                        reason_code: TransformReasonCode::ObservationParseFailed,
+                        safe_summary: failure
+                            .summary
+                            .facts
+                            .first()
+                            .and_then(|fact| fact.safe_summary.clone()),
+                    };
+                    self.session.record_diagnostic(fact.clone());
+                    let mut collector =
+                        crate::service::transform::TransformDiagnosticCollector::default();
+                    collector.record(fact);
+                    collector.into_summary()
                 }
-                DownstreamProtocol::Gemini => None,
-                _ => Some(vec![event]),
             };
-        }
-
-        if self.upstream_protocol == UpstreamProtocol::Responses
-            && self.downstream_protocol == DownstreamProtocol::Openai
-        {
-            let transformed =
-                match serde_json::from_str::<responses::ResponsesChunkResponse>(&event.data) {
-                    Ok(chunk) => {
-                        let source_events =
-                            responses::responses_chunk_to_unified_stream_events(chunk.clone());
-                        self.last_meaningful_output_observed =
-                            meaningful_output_from_stream_events(&source_events);
-                        let mut context = self.stream_context();
-                        responses::transform_responses_chunk_to_openai_events(chunk, &mut context)
-                    }
-                    Err(e) => {
-                        let events = self.controlled_error_sse(
-                            "deserialize_source_chunk",
-                            format!(
-                                "failed to deserialize {:?} chunk: {}",
-                                UpstreamProtocol::Responses,
-                                e
-                            ),
-                            &event.data,
-                        );
-                        self.record_transformed_events(&events);
-                        return Some(events);
-                    }
-                };
-
-            if let Some(events) = &transformed {
-                self.record_transformed_events(events);
-            }
-
-            return transformed;
+            let passthrough = transform_success(
+                vec![event],
+                TransformPhase::StreamDecode,
+                TransformSemanticUnit::StreamFrame,
+                TransformOutcomeKind::Passthrough,
+                TransformAction::PassThrough,
+                TransformReasonCode::SameWirePassthrough,
+            );
+            return Ok(TransformSuccess {
+                value: passthrough.value,
+                summary: merge_transform_summaries([observation_summary, passthrough.summary]),
+            });
         }
 
         let source_adapter = self.source_adapter();
@@ -422,40 +524,75 @@ impl StreamTransformer {
             (source_adapter.stream.decode_source)(&event.data, &mut context)
         };
 
-        self.last_meaningful_output_observed = decoded_frame
-            .as_ref()
-            .is_ok_and(DecodedSourceStreamFrame::meaningful_output_observed);
-
-        let transformed = match decoded_frame {
-            Ok(DecodedSourceStreamFrame::Events(stream_events)) => {
+        let decoded = decoded_frame?;
+        self.last_meaningful_output_observed = decoded.value.meaningful_output_observed();
+        let decoded_summary = decoded.summary;
+        let transformed = match decoded.value {
+            DecodedSourceStreamFrame::Events(stream_events) => {
                 self.update_session_from_stream_events(&stream_events);
                 self.stream_events_to_target_events(stream_events)
             }
-            Ok(DecodedSourceStreamFrame::LegacyChunk(mut unified_chunk)) => {
+            DecodedSourceStreamFrame::LegacyChunk(mut unified_chunk) => {
                 let consistent_id = self.get_or_generate_stream_id();
                 unified_chunk.id = consistent_id;
                 self.normalize_unified_chunk_session_state(&mut unified_chunk);
                 let mut context = self.stream_context();
                 (target_adapter.stream.encode_legacy_chunk)(unified_chunk, &mut context)
             }
-            Err(e) => {
-                let events = self.controlled_error_sse(
-                    "deserialize_source_chunk",
-                    format!(
-                        "failed to deserialize {:?} chunk: {}",
-                        source_adapter.protocol, e
-                    ),
-                    &event.data,
-                );
-                self.record_transformed_events(&events);
-                return Some(events);
-            }
         };
 
-        if let Some(events) = &transformed {
-            self.record_transformed_events(events);
+        match transformed {
+            Ok(mut success) => {
+                success.summary = merge_transform_summaries([decoded_summary, success.summary]);
+                Ok(success)
+            }
+            Err(mut failure) => {
+                failure.summary = merge_transform_summaries([decoded_summary, failure.summary]);
+                Err(failure)
+            }
         }
+    }
+}
 
-        transformed
+pub(super) fn classify_stream_disposition(
+    input_is_empty: bool,
+    input_is_done: bool,
+    events: &[SseEvent],
+    summary: &TransformOutcomeSummary,
+) -> StreamFrameDisposition {
+    if summary
+        .outcome_counts
+        .contains_key(&TransformOutcomeKind::ObservationDegraded)
+    {
+        return StreamFrameDisposition::ObservationDegraded;
+    }
+    if summary.outcome_counts.keys().any(|outcome| {
+        matches!(
+            outcome,
+            TransformOutcomeKind::ControlledLossMinor | TransformOutcomeKind::ControlledLossMajor
+        )
+    }) {
+        return StreamFrameDisposition::ControlledLoss;
+    }
+    if input_is_empty {
+        return StreamFrameDisposition::EmptyFrame;
+    }
+    if input_is_done {
+        return if events.is_empty() {
+            StreamFrameDisposition::LifecycleNoOutput
+        } else {
+            StreamFrameDisposition::LifecycleSent
+        };
+    }
+    if events.is_empty() {
+        return StreamFrameDisposition::SemanticNoOutput;
+    }
+    if summary
+        .outcome_counts
+        .contains_key(&TransformOutcomeKind::Passthrough)
+    {
+        StreamFrameDisposition::Passthrough
+    } else {
+        StreamFrameDisposition::Sent
     }
 }

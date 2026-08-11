@@ -196,7 +196,7 @@ impl ProtocolCapabilityMatrix {
                 },
                 response: ResponseCapabilityMatrix {
                     reasoning_content: true,
-                    refusal: true,
+                    refusal: false,
                     citations: false,
                     file_output: false,
                 },
@@ -211,7 +211,7 @@ impl ProtocolCapabilityMatrix {
                 structured_content: StructuredContentCapabilityMatrix {
                     images: true,
                     tool_results: true,
-                    refusal: true,
+                    refusal: false,
                     citations: false,
                     file_references: true,
                     json_schema_strict: true,

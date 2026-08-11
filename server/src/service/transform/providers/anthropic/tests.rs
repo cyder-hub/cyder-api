@@ -2,7 +2,7 @@ use super::*;
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::{AnthropicSessionState, StreamTransformer, unified::*};
 use crate::utils::sse::SseEvent;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[test]
 fn test_anthropic_request_to_unified() {
@@ -426,14 +426,6 @@ fn test_anthropic_event_to_unified_stream_events_preserves_tool_use_lifecycle() 
                 id: "toolu_123".to_string(),
                 name: "lookup_weather".to_string(),
             },
-            UnifiedStreamEvent::ToolCallArgumentsDelta {
-                index: 2,
-                item_index: None,
-                item_id: None,
-                id: Some("toolu_123".to_string()),
-                name: Some("lookup_weather".to_string()),
-                arguments: "{\"city\":\"Boston\"}".to_string(),
-            },
         ]
     );
 }
@@ -554,11 +546,7 @@ fn test_transform_unified_chunk_to_anthropic_events() {
     .unwrap();
     assert_eq!(events_role.len(), 1);
     assert_eq!(events_role[0].event.as_deref(), Some("message_start"));
-    assert!(
-        events_role[0]
-            .data
-            .contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}")
-    );
+    assert!(!events_role[0].data.contains("\"usage\""));
     assert!(state.session.anthropic_message_started());
     assert!(state.session.anthropic_active_blocks_is_empty());
 
@@ -630,11 +618,7 @@ fn test_transform_unified_chunk_to_anthropic_events() {
             .data
             .contains("\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}")
     );
-    assert!(
-        events_finish[1]
-            .data
-            .contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}")
-    );
+    assert!(!events_finish[1].data.contains("\"usage\""));
     assert_eq!(events_finish[2].event.as_deref(), Some("message_stop"));
 
     // Thinking content chunk - NOTE: This behavior is no longer supported directly
@@ -931,13 +915,18 @@ fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_block
 
     let events: Vec<SseEvent> = frames
         .into_iter()
-        .flat_map(|event| transformer.transform_event(event).unwrap_or_default())
+        .flat_map(|event| {
+            transformer
+                .transform_event(event)
+                .expect("Anthropic replay event must transform")
+                .value
+        })
         .collect();
 
     assert_eq!(events[0].event.as_deref(), Some("message_start"));
     assert_eq!(events[1].event.as_deref(), Some("content_block_start"));
     assert!(events[1].data.contains("\"type\":\"thinking\""));
-    assert!(events[1].data.contains("\"signature\":\"\""));
+    assert!(!events[1].data.contains("\"signature\""));
     assert_eq!(events[2].event.as_deref(), Some("content_block_delta"));
     assert!(events[2].data.contains("\"type\":\"thinking_delta\""));
     assert!(events[2].data.contains("\"thinking\":\"嗯\""));
@@ -960,7 +949,7 @@ fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_block
 }
 
 #[test]
-fn test_transform_unified_chunk_to_anthropic_events_emits_diagnostic_for_image_delta() {
+fn test_transform_unified_chunk_to_anthropic_events_keeps_diagnostic_internal_for_image_delta() {
     let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
     let unified_chunk = UnifiedChunkResponse {
         id: "cmpl-123".to_string(),
@@ -984,12 +973,18 @@ fn test_transform_unified_chunk_to_anthropic_events_emits_diagnostic_for_image_d
         transform_unified_chunk_to_anthropic_events(unified_chunk, &mut state.stream_context())
             .unwrap();
 
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert_eq!(events[0].event.as_deref(), Some("message_start"));
-    assert_eq!(events[1].event.as_deref(), Some("transform_diagnostic"));
-    let diagnostic: Value = serde_json::from_str(&events[1].data).unwrap();
-    assert_eq!(diagnostic["semantic_unit"], json!("ImageDelta"));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event.as_deref() != Some("transform_diagnostic"))
+    );
     assert_eq!(state.session.diagnostics_len(), 1);
+    assert_eq!(
+        state.session.latest_diagnostic().unwrap().semantic_unit,
+        crate::service::transform::TransformSemanticUnit::ImageDelta
+    );
 }
 
 #[test]

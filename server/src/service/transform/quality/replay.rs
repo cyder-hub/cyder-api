@@ -97,9 +97,9 @@ pub(super) fn stage2_replay_fixture_cases() -> Vec<ReplayFixtureCase> {
         ReplayFixtureCase {
             fixture_name: "responses_reasoning_function_call",
             upstream_protocol: UpstreamProtocol::Responses,
-            downstream_protocol: DownstreamProtocol::Openai,
-            expected_min_transformed_frame_count: 9,
-            expect_reasoning_preserved: false,
+            downstream_protocol: DownstreamProtocol::Responses,
+            expected_min_transformed_frame_count: 13,
+            expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/responses_reasoning_function_call.json"),
         },
         ReplayFixtureCase {
@@ -381,7 +381,9 @@ pub(super) fn replay_fixture_through_transformer(
         .flat_map(|event| {
             transformer
                 .transform_event(event.clone())
-                .unwrap_or_default()
+                .expect("quality replay transform must succeed")
+                .value
+                .events
         })
         .collect()
 }

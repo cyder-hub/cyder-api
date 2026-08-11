@@ -485,10 +485,10 @@ fn test_gemini_response_to_unified() {
     assert_eq!(usage.output_tokens, 20);
     assert_eq!(usage.total_tokens, 30);
     assert!(unified_res.id.starts_with("gemini-response-"));
-    assert_eq!(unified_res.model, None);
+    assert_eq!(unified_res.model.as_deref(), Some("gemini"));
     let synthetic = unified_res.synthetic_metadata().unwrap();
     assert!(synthetic.id);
-    assert!(!synthetic.model);
+    assert!(synthetic.model);
     assert!(!synthetic.gemini_safety_ratings);
     let metadata = unified_res.provider_response_metadata().unwrap();
     let gemini_metadata = metadata.gemini.as_ref().unwrap();
@@ -839,10 +839,10 @@ fn test_gemini_chunk_to_unified() {
     );
     assert!(choice.finish_reason.is_none());
     assert!(unified_chunk.id.starts_with("gemini-chunk-"));
-    assert_eq!(unified_chunk.model, None);
+    assert_eq!(unified_chunk.model.as_deref(), Some("gemini"));
     let synthetic = unified_chunk.synthetic_metadata().unwrap();
     assert!(synthetic.id);
-    assert!(!synthetic.model);
+    assert!(synthetic.model);
     assert!(!synthetic.gemini_safety_ratings);
 }
 
@@ -1006,7 +1006,7 @@ fn test_unified_response_to_gemini_with_thinking() {
 }
 
 #[test]
-fn test_transform_unified_chunk_to_gemini_events_emits_diagnostic_for_image_delta() {
+fn test_transform_unified_chunk_to_gemini_events_keeps_diagnostic_internal_for_image_delta() {
     let unified_chunk = UnifiedChunkResponse {
         id: "cmpl-123".to_string(),
         model: Some("gemini-2.0-flash".to_string()),
@@ -1037,15 +1037,18 @@ fn test_transform_unified_chunk_to_gemini_events_emits_diagnostic_for_image_delt
         transform_unified_chunk_to_gemini_events(unified_chunk, &mut transformer.stream_context())
             .expect("gemini chunk events");
 
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].event.as_deref(), Some("transform_diagnostic"));
-    let diagnostic: Value = serde_json::from_str(&events[0].data).unwrap();
-    assert_eq!(diagnostic["semantic_unit"], json!("ImageDelta"));
-
-    let chunk: Value = serde_json::from_str(&events[1].data).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_ne!(events[0].event.as_deref(), Some("transform_diagnostic"));
+    let chunk: Value = serde_json::from_str(&events[0].data).unwrap();
     assert_eq!(
         chunk["candidates"][0]["content"]["parts"][0]["text"],
         json!("caption")
+    );
+    let summary = transformer.diagnostics_snapshot();
+    assert_eq!(summary.total_fact_count, 1);
+    assert_eq!(
+        summary.facts[0].semantic_unit,
+        crate::service::transform::TransformSemanticUnit::ImageDelta
     );
 }
 
@@ -1091,6 +1094,7 @@ fn test_gemini_chunk_to_unified_with_thinking() {
 
     match &choice.delta.content[1] {
         UnifiedContentPartDelta::ToolCallDelta(tc) => {
+            assert!(tc.id.as_deref().is_some_and(|id| id.starts_with("call_")));
             assert_eq!(tc.name, Some("search".to_string()));
         }
         _ => panic!("Expected tool call delta"),

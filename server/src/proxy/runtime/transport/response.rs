@@ -3,16 +3,18 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE, response::Builder as HttpResponseBuilder},
     response::Response,
 };
-use cyder_tools::log::error;
 use serde_json::Value;
 
 use crate::{
     cost::UsageNormalization,
-    proxy::util::{json_top_level_field_count_from_bytes, sha256_hex},
     schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
     service::{
+        transform::diagnostics::transform_failure,
         transform::{
-            transform_result_with_cost_and_diagnostics, unified::UnifiedTransformDiagnostic,
+            TransformAction, TransformDiagnosticCollector, TransformDiagnosticFact,
+            TransformFailure, TransformFailureOrigin, TransformOutcomeKind,
+            TransformOutcomeSummary, TransformPhase, TransformReasonCode, TransformSafeSummary,
+            TransformSemanticUnit, transform_result_with_cost,
         },
         upstream_response::normalize_content_type,
     },
@@ -38,19 +40,19 @@ pub(crate) fn process_success_response_body(
     decompressed_body: &Bytes,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
-) -> (
-    Bytes,
-    Option<UsageInfo>,
-    Option<UsageNormalization>,
-    Vec<UnifiedTransformDiagnostic>,
-) {
+) -> Result<
+    (
+        Bytes,
+        Option<UsageInfo>,
+        Option<UsageNormalization>,
+        TransformOutcomeSummary,
+    ),
+    TransformFailure,
+> {
     match serde_json::from_slice::<Value>(decompressed_body) {
         Ok(original_value) => {
-            let output = transform_result_with_cost_and_diagnostics(
-                original_value,
-                upstream_protocol,
-                downstream_protocol,
-            );
+            let output =
+                transform_result_with_cost(original_value, upstream_protocol, downstream_protocol)?;
 
             let body_bytes = if matches!(
                 (upstream_protocol, downstream_protocol),
@@ -61,35 +63,57 @@ pub(crate) fn process_success_response_body(
             ) {
                 decompressed_body.clone()
             } else {
-                match serde_json::to_vec(&output.value) {
-                    Ok(b) => Bytes::from(b),
-                    Err(e) => {
-                        error!(
-                            "Failed to serialize transformed response: {}. Returning original body.",
-                            e
-                        );
-                        decompressed_body.clone()
-                    }
-                }
+                Bytes::from(
+                    serde_json::to_vec(&output.value.value)
+                        .expect("serde_json::Value serialization is structurally infallible"),
+                )
             };
-            (
+            Ok((
                 body_bytes,
-                output.usage_info,
-                output.usage_normalization,
-                output.diagnostics,
-            )
+                output.value.usage_info,
+                output.value.usage_normalization,
+                output.summary,
+            ))
         }
-        Err(e) => {
-            crate::debug_event!(
-                "proxy.response_non_json_passthrough",
-                response_body_bytes = decompressed_body.len(),
-                response_body_sha256 = sha256_hex(decompressed_body),
-                parse_error = e,
-                json_top_level_fields = json_top_level_field_count_from_bytes(decompressed_body),
-            );
-            (decompressed_body.clone(), None, None, Vec::new())
+        Err(_) if protocols_share_wire_format(upstream_protocol, downstream_protocol) => {
+            let mut collector = TransformDiagnosticCollector::default();
+            collector.record(TransformDiagnosticFact {
+                sequence: 0,
+                phase: TransformPhase::ResponseObserve,
+                semantic_unit: TransformSemanticUnit::ResponseEnvelope,
+                outcome: TransformOutcomeKind::ObservationDegraded,
+                action: TransformAction::PassThrough,
+                reason_code: TransformReasonCode::ObservationParseFailed,
+                safe_summary: Some(TransformSafeSummary::from_bytes(decompressed_body)),
+            });
+            Ok((
+                decompressed_body.clone(),
+                None,
+                None,
+                collector.into_summary(),
+            ))
         }
+        Err(_) => Err(transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::ResponseDecode,
+            TransformSemanticUnit::ResponseEnvelope,
+            TransformReasonCode::SourceDecodeFailed,
+            Some(TransformSafeSummary::from_bytes(decompressed_body)),
+        )),
     }
+}
+
+fn protocols_share_wire_format(
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: DownstreamProtocol,
+) -> bool {
+    matches!(
+        (upstream_protocol, downstream_protocol),
+        (UpstreamProtocol::Openai, DownstreamProtocol::Openai)
+            | (UpstreamProtocol::Responses, DownstreamProtocol::Responses)
+            | (UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic)
+            | (UpstreamProtocol::Gemini, DownstreamProtocol::Gemini)
+    )
 }
 
 #[cfg(test)]
@@ -166,5 +190,78 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert!(response.headers().is_empty());
+    }
+
+    #[test]
+    fn same_wire_observation_preserves_exact_bytes_and_extracts_usage() {
+        let body = Bytes::from_static(
+            br#"{
+  "id":"chatcmpl-observe","object":"chat.completion","created":1,"model":"m",
+  "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+  "usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}
+}"#,
+        );
+
+        let (output, usage, normalization, summary) = process_success_response_body(
+            &body,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Openai,
+        )
+        .expect("same-wire observation must not affect success");
+
+        assert_eq!(output, body);
+        assert_eq!(usage.expect("usage").total_tokens, 8);
+        let normalization = normalization.expect("normalization");
+        assert_eq!(normalization.total_input_tokens, 3);
+        assert_eq!(normalization.total_output_tokens, 5);
+        assert!(
+            summary
+                .outcome_counts
+                .contains_key(&TransformOutcomeKind::Passthrough)
+        );
+    }
+
+    #[test]
+    fn same_wire_observation_failures_preserve_valid_and_invalid_json_bytes() {
+        for body in [
+            Bytes::from_static(br#"{"choices":"not-an-array"}"#),
+            Bytes::from_static(b"{not-json}"),
+        ] {
+            let (output, usage, normalization, summary) = process_success_response_body(
+                &body,
+                DownstreamProtocol::Openai,
+                UpstreamProtocol::Openai,
+            )
+            .expect("same-wire observation failure must be non-fatal");
+
+            assert_eq!(output, body);
+            assert!(usage.is_none());
+            assert!(normalization.is_none());
+            assert!(summary.facts.iter().any(|fact| {
+                fact.outcome == TransformOutcomeKind::ObservationDegraded
+                    && fact.action == TransformAction::PassThrough
+                    && fact.reason_code == TransformReasonCode::ObservationParseFailed
+            }));
+        }
+    }
+
+    #[test]
+    fn cross_wire_invalid_upstream_body_is_a_typed_failure_without_passthrough() {
+        for body in [
+            Bytes::from_static(br#"{"choices":"not-an-array"}"#),
+            Bytes::from_static(b"upstream-secret-not-json"),
+        ] {
+            let failure = process_success_response_body(
+                &body,
+                DownstreamProtocol::Responses,
+                UpstreamProtocol::Openai,
+            )
+            .expect_err("cross-wire malformed response must fail");
+
+            assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+            assert_eq!(failure.phase, TransformPhase::ResponseDecode);
+            assert_eq!(failure.reason_code, TransformReasonCode::SourceDecodeFailed);
+            assert!(failure.summary.facts[0].safe_summary.is_some());
+        }
     }
 }

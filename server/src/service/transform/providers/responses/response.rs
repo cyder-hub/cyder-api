@@ -39,12 +39,12 @@ impl From<ResponsesResponse> for UnifiedResponse {
                     response_items.push(UnifiedItem::FunctionCall(UnifiedFunctionCallItem {
                         id: call.call_id.clone(),
                         name: call.name.clone(),
-                        arguments: parse_function_arguments(&call.arguments),
+                        arguments: parse_validated_function_arguments(&call.arguments),
                     }));
                     content.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                         id: call.call_id,
                         name: call.name,
-                        arguments: parse_function_arguments(&call.arguments),
+                        arguments: parse_validated_function_arguments(&call.arguments),
                     }));
                 }
                 ItemField::FunctionCallOutput(output) => {
@@ -105,9 +105,10 @@ impl From<ResponsesResponse> for UnifiedResponse {
             created: Some(responses_res.created_at),
             object: Some(
                 serde_json::to_value(responses_res.object)
-                    .ok()
-                    .and_then(|value| value.as_str().map(ToString::to_string))
-                    .unwrap_or_else(|| "response".to_string()),
+                    .expect("Responses object serialization is structurally infallible")
+                    .as_str()
+                    .expect("Responses object enum serializes as a string")
+                    .to_string(),
             ),
             system_fingerprint: None,
             provider_response_metadata,
@@ -125,7 +126,10 @@ impl From<UnifiedResponse> for ResponsesResponse {
         let reasoning_metadata = responses_metadata
             .as_ref()
             .and_then(|metadata| metadata.reasoning.clone())
-            .and_then(|value| serde_json::from_value(value).ok());
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("Responses reasoning metadata is source-validated")
+            });
         let refusals = responses_metadata
             .as_ref()
             .map(|metadata| metadata.refusals.clone())

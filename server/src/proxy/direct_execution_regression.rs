@@ -193,6 +193,18 @@ pub(super) fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
         .collect()
 }
 
+fn ollama_non_stream_response() -> Value {
+    json!({
+        "model": UPSTREAM_MODEL,
+        "created_at": "2026-08-11T00:00:00Z",
+        "message": {"role": "assistant", "content": "baseline pong"},
+        "done": true,
+        "done_reason": "stop",
+        "prompt_eval_count": 11,
+        "eval_count": 7
+    })
+}
+
 fn validate_fixture(name: &str, fixture: &DirectExecutionFixture) {
     assert!(
         !fixture.downstream_path.is_empty(),
@@ -318,6 +330,11 @@ enum ScriptedReply {
         status: StatusCode,
         body: Value,
     },
+    JsonByPath {
+        status: StatusCode,
+        default_body: Value,
+        path_bodies: BTreeMap<String, Value>,
+    },
     Raw {
         status: StatusCode,
         content_type: Option<String>,
@@ -375,9 +392,10 @@ impl TestUpstream {
                     let body = axum::body::to_bytes(body, usize::MAX)
                         .await
                         .expect("upstream request body should be readable");
+                    let request_path = parts.uri.path().to_string();
                     captured.lock().await.push(CapturedRequest {
                         method: parts.method,
-                        path: parts.uri.path().to_string(),
+                        path: request_path.clone(),
                         query: parts.uri.query().map(ToString::to_string),
                         headers: parts.headers,
                         body,
@@ -391,6 +409,20 @@ impl TestUpstream {
                             .header(&X_CLIENT_REQUEST_ID, "upstream-forged-client-id")
                             .body(Body::from(serde_json::to_vec(&body).unwrap()))
                             .unwrap(),
+                        ScriptedReply::JsonByPath {
+                            status,
+                            default_body,
+                            path_bodies,
+                        } => {
+                            let body = path_bodies
+                                .get(&request_path)
+                                .unwrap_or(&default_body);
+                            Response::builder()
+                                .status(status)
+                                .header(CONTENT_TYPE, "application/json")
+                                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                                .unwrap()
+                        }
                         ScriptedReply::Raw {
                             status,
                             content_type,
@@ -726,6 +758,61 @@ impl RouterFixture {
             .await,
         );
         self.app_state = Arc::new(app_state);
+    }
+
+    async fn replace_default_source_profile(
+        &self,
+        base_url: &str,
+        profile_type: UpstreamProfileType,
+    ) -> i64 {
+        let endpoint = match &profile_type {
+            UpstreamProfileType::Gemini => format!("{base_url}/v1beta/models"),
+            UpstreamProfileType::Ollama => base_url.to_string(),
+            _ => format!("{base_url}/v1"),
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let source = UpstreamSource::create(&NewUpstreamSource {
+            id: ID_GENERATOR.generate_id(),
+            provider_id: self.provider_id,
+            profile_type,
+            endpoint,
+            use_proxy: false,
+            is_enabled: true,
+            is_default: false,
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("replacement Source should be created");
+        UpstreamSource::update(
+            self.source_id,
+            self.provider_id,
+            &UpdateUpstreamSourceData {
+                endpoint: None,
+                use_proxy: None,
+                is_enabled: Some(false),
+                is_default: Some(false),
+                updated_at: now.saturating_add(1),
+            },
+        )
+        .expect("original Source should be disabled");
+        UpstreamSource::update(
+            source.id,
+            self.provider_id,
+            &UpdateUpstreamSourceData {
+                endpoint: None,
+                use_proxy: None,
+                is_enabled: Some(true),
+                is_default: Some(true),
+                updated_at: now.saturating_add(1),
+            },
+        )
+        .expect("replacement Source should become default");
+        self.app_state
+            .catalog
+            .invalidate_provider(self.provider_id, Some(&self.provider_key))
+            .await
+            .expect("Source replacement should invalidate catalog");
+        source.id
     }
 
     fn install_recording_persisted_sink(&self) -> Arc<RecordingPersistedSink> {
@@ -1375,6 +1462,101 @@ fn downstream_error_message(body: &Value) -> Option<&str> {
     body["error"]["message"].as_str()
 }
 
+fn assert_no_public_transform_diagnostics(response: &Response<Body>) {
+    assert!(
+        response
+            .headers()
+            .keys()
+            .all(|name| !name.as_str().starts_with("x-cyder-")),
+        "internal transform facts must not use downstream headers"
+    );
+}
+
+fn assert_payload_free_transform_bytes(bytes: &[u8], private_marker: &str) {
+    let rendered = String::from_utf8_lossy(bytes);
+    for forbidden in [
+        private_marker,
+        "transform_diagnostic",
+        "safe_summary",
+        "sha256",
+        "outcome_counts",
+        "action_counts",
+        "semantic_counts",
+        "failure_origin",
+        "reason_code",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "downstream bytes must not expose {forbidden}"
+        );
+    }
+}
+
+fn assert_native_fatal_stream_event(
+    protocol: DownstreamProtocol,
+    event: &GoldenEvent,
+    request_id: &str,
+) {
+    const CODE: &str = "upstream_response_error";
+    const MESSAGE: &str = "The gateway could not read a valid response from the upstream provider.";
+    match protocol {
+        DownstreamProtocol::Openai => {
+            assert_eq!(event.event, None);
+            assert_eq!(event.data["error"]["code"], CODE);
+            assert_eq!(event.data["error"]["type"], "server_error");
+            assert_eq!(event.data["error"]["message"], MESSAGE);
+            assert_eq!(event.data["request_id"], request_id);
+        }
+        DownstreamProtocol::Responses => {
+            assert_eq!(event.event, None);
+            assert_eq!(event.data["type"], "response.error");
+            assert_eq!(event.data["error"]["code"], CODE);
+            assert_eq!(event.data["error"]["type"], "server_error");
+            assert_eq!(event.data["error"]["message"], MESSAGE);
+            assert_eq!(event.data["request_id"], request_id);
+        }
+        DownstreamProtocol::Anthropic => {
+            assert_eq!(event.event.as_deref(), Some("error"));
+            assert_eq!(event.data["type"], "error");
+            assert_eq!(event.data["error"]["code"], CODE);
+            assert_eq!(event.data["error"]["type"], "api_error");
+            assert_eq!(event.data["error"]["message"], MESSAGE);
+            assert_eq!(event.data["request_id"], request_id);
+        }
+        DownstreamProtocol::Gemini => {
+            assert_eq!(event.event, None);
+            assert_eq!(event.data["error"]["code"], 502);
+            assert_eq!(event.data["error"]["status"], "UNKNOWN");
+            assert_eq!(event.data["error"]["message"], MESSAGE);
+            assert_eq!(
+                event.data["error"]["details"][0]["reason"],
+                "UPSTREAM_RESPONSE_ERROR"
+            );
+            assert_eq!(
+                event.data["error"]["details"][0]["metadata"]["request_id"],
+                request_id
+            );
+        }
+    }
+
+    let encoded = serde_json::to_string(&event.data).expect("terminal event should serialize");
+    for forbidden in [
+        "[DONE]",
+        "message_stop",
+        "response.completed",
+        "transform_diagnostic",
+        "operator_message",
+        "safe_summary",
+        "sha256",
+        "malformed-upstream-private-marker",
+    ] {
+        assert!(
+            !encoded.contains(forbidden),
+            "forbidden terminal field: {forbidden}"
+        );
+    }
+}
+
 #[test]
 fn direct_execution_regression_fixtures_define_four_complete_protocols() {
     let fixtures = fixtures();
@@ -1413,6 +1595,170 @@ fn malformed_request_is_rejected_before_request_record_or_upstream_call() {
         );
         assert!(router.request_logs().await.is_empty());
         assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn cross_protocol_shape_failure_is_rejected_before_credential_or_upstream_use() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("responses fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let persisted_sink = router.install_recording_persisted_sink();
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(
+                &fixture,
+                false,
+                &json!({"model": "$REQUESTED_MODEL", "input": 42}),
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("transform rejection response should read");
+        let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+        assert_eq!(
+            downstream_error_code(&body, fixture.protocol),
+            Some("invalid_request_error")
+        );
+        assert_eq!(
+            router.app_state.secret_encryption.decrypt_call_count(),
+            0,
+            "request transform must precede provider credential decryption"
+        );
+        assert!(upstream.requests().await.is_empty());
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("invalid_request_error")
+        );
+        assert_single_persisted_terminal_fact(
+            &persisted_sink,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+        )
+        .await;
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn major_capability_rejection_is_zero_call_and_precedes_credential_use() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new_deepseek(context, &fixture, &upstream.base_url).await;
+        let ollama_source = UpstreamSource::create(&NewUpstreamSource {
+            id: ID_GENERATOR.generate_id(),
+            provider_id: router.provider_id,
+            profile_type: UpstreamProfileType::Ollama,
+            endpoint: upstream.base_url.clone(),
+            use_proxy: false,
+            is_enabled: true,
+            is_default: false,
+            created_at: 2,
+            updated_at: 2,
+        })
+        .expect("Ollama default Source should be created");
+        let mutation_time = chrono::Utc::now().timestamp_millis();
+        UpstreamSource::update(
+            router.source_id,
+            router.provider_id,
+            &UpdateUpstreamSourceData {
+                endpoint: None,
+                use_proxy: None,
+                is_enabled: Some(false),
+                is_default: Some(false),
+                updated_at: mutation_time,
+            },
+        )
+        .expect("exact OpenAI Source should be disabled");
+        UpstreamSource::update(
+            ollama_source.id,
+            router.provider_id,
+            &UpdateUpstreamSourceData {
+                endpoint: None,
+                use_proxy: None,
+                is_enabled: Some(true),
+                is_default: Some(true),
+                updated_at: mutation_time,
+            },
+        )
+        .expect("Ollama Source should become default");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("Source mutation should invalidate catalog");
+        let persisted_sink = router.install_recording_persisted_sink();
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+        let mut body = fixture.request.downstream.clone();
+        body.as_object_mut().expect("request object").insert(
+            "tools".to_string(),
+            json!([{
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"type": "object"}}
+            }]),
+        );
+
+        let response = router.send(&fixture, false, &body).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("capability rejection response should read");
+        let response_body: Value =
+            serde_json::from_slice(&response_body).expect("response should be JSON");
+        assert_eq!(
+            downstream_error_code(&response_body, fixture.protocol),
+            Some("unsupported_capability_error")
+        );
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        let log = router
+            .wait_for_log_for_source(ollama_source.id, RequestStatus::Error)
+            .await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("unsupported_capability_error")
+        );
+        assert_eq!(
+            log.source_selection_reason.as_deref(),
+            Some("provider_default_transform")
+        );
+        assert_single_persisted_terminal_fact(
+            &persisted_sink,
+            ExecutionStage::Capability,
+            ResponseVisibility::NotVisible,
+        )
+        .await;
+        router.wait_for_api_key_lease_release().await;
         upstream.shutdown().await;
     });
 }
@@ -1489,6 +1835,162 @@ fn tool_request_is_not_rejected_by_model_capability_flags() {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(router.app_state.secret_encryption.decrypt_call_count() > 0);
         assert_eq!(upstream.requests().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn same_wire_non_stream_observation_failure_preserves_upstream_bytes() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let original = b"same-wire-not-json\n".to_vec();
+        let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+            status: StatusCode::OK,
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: original.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("same-wire response body should read");
+        assert_eq!(body.as_ref(), original.as_slice());
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert!(log.final_error_code.is_none());
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(upstream.requests().await.len(), 1);
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn cross_wire_non_stream_decode_failure_returns_502_without_provider_body() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("responses fixture");
+    run_case(name, move |context| async move {
+        let marker = "cross-wire-provider-secret";
+        let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+            status: StatusCode::OK,
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: marker.as_bytes().to_vec(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let persisted_sink = router.install_recording_persisted_sink();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_no_public_transform_diagnostics(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("cross-wire transform error response should read");
+        assert_payload_free_transform_bytes(&body, marker);
+        assert!(
+            !body
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes())
+        );
+        let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+        assert_eq!(
+            downstream_error_code(&body, fixture.protocol),
+            Some("upstream_response_error")
+        );
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_response_error")
+        );
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(upstream.requests().await.len(), 1, "no retry or fallback");
+        assert_single_persisted_terminal_fact(
+            &persisted_sink,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::NotVisible,
+        )
+        .await;
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        const PRIVATE_MARKER: &str = "minor-loss-private-operator-tag";
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: ollama_non_stream_response(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let source_id = router
+            .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Ollama)
+            .await;
+        let persisted_sink = router.install_recording_persisted_sink();
+        let mut request = fixture.request.downstream.clone();
+        request
+            .as_object_mut()
+            .expect("OpenAI request fixture must be an object")
+            .insert("user".to_string(), json!(PRIVATE_MARKER));
+
+        let response = router.send(&fixture, false, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_no_public_transform_diagnostics(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("minor-loss response should be readable");
+        assert_payload_free_transform_bytes(&body, PRIVATE_MARKER);
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "minor loss must not retry or fall back");
+        assert_eq!(captured[0].path, "/api/chat");
+        let upstream_body: Value = serde_json::from_slice(&captured[0].body)
+            .expect("Ollama upstream request should be JSON");
+        assert!(upstream_body.get("user").is_none());
+        assert!(
+            !String::from_utf8_lossy(&captured[0].body).contains(PRIVATE_MARKER),
+            "the audited metadata field must be dropped before upstream send"
+        );
+        let log = router
+            .wait_for_log_for_source(source_id, RequestStatus::Success)
+            .await;
+        assert_eq!(
+            log.source_selection_reason.as_deref(),
+            Some("provider_default_transform")
+        );
+        assert!(log.final_error_code.is_none());
+        {
+            let contexts = persisted_sink.contexts.lock().await;
+            assert_eq!(contexts.len(), 1);
+            assert_eq!(contexts[0].request_log_id, log.id);
+            assert!(contexts[0].final_error_stage.is_none());
+            assert_eq!(
+                contexts[0].response_visibility,
+                ResponseVisibility::NotVisible
+            );
+        }
+        router.wait_for_api_key_lease_release().await;
         upstream.shutdown().await;
     });
 }
@@ -2057,18 +2559,33 @@ fn four_public_downstream_generation_paths_call_upstream_at_most_once() {
 fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_public_downstreams() {
     for (name, fixture) in fixtures() {
         run_case(name, move |context| async move {
-            let upstream = TestUpstream::spawn(ScriptedReply::Json {
-                status: StatusCode::OK,
-                body: fixture.non_stream.upstream_response.clone(),
-            })
-            .await;
-            let router = RouterFixture::new_deepseek(context, &fixture, &upstream.base_url).await;
             let alternate_profile = match fixture.protocol {
                 DownstreamProtocol::Gemini => UpstreamProfileType::Openai,
                 DownstreamProtocol::Openai
                 | DownstreamProtocol::Responses
                 | DownstreamProtocol::Anthropic => UpstreamProfileType::Ollama,
             };
+            let (alternate_path, alternate_response) = match alternate_profile {
+                UpstreamProfileType::Openai => (
+                    "/v1/chat/completions".to_string(),
+                    fixtures()
+                        .into_iter()
+                        .find(|(fixture_name, _)| *fixture_name == "openai")
+                        .map(|(_, fixture)| fixture.non_stream.upstream_response)
+                        .expect("OpenAI response fixture"),
+                ),
+                UpstreamProfileType::Ollama => {
+                    ("/api/chat".to_string(), ollama_non_stream_response())
+                }
+                _ => unreachable!("the DeepSeek regression uses OpenAI/Ollama alternates"),
+            };
+            let upstream = TestUpstream::spawn(ScriptedReply::JsonByPath {
+                status: StatusCode::OK,
+                default_body: fixture.non_stream.upstream_response.clone(),
+                path_bodies: BTreeMap::from([(alternate_path, alternate_response)]),
+            })
+            .await;
+            let router = RouterFixture::new_deepseek(context, &fixture, &upstream.base_url).await;
             let alternate_endpoint = match alternate_profile {
                 UpstreamProfileType::Openai => format!("{}/v1", upstream.base_url),
                 UpstreamProfileType::Ollama => upstream.base_url.clone(),
@@ -2484,7 +3001,7 @@ fn direct_execution_model_default_selection_reason_is_persisted_after_flush() {
     run_case(name, move |context| async move {
         let upstream = TestUpstream::spawn(ScriptedReply::Json {
             status: StatusCode::OK,
-            body: fixture.non_stream.upstream_response.clone(),
+            body: ollama_non_stream_response(),
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
@@ -2727,6 +3244,179 @@ fn four_public_protocols_reject_sse_encoding_before_headers() {
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn four_public_protocols_emit_one_native_terminal_on_cross_wire_stream_decode_failure() {
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            let dropped = Arc::new(DropSignal::default());
+            let upstream = TestUpstream::spawn(ScriptedReply::HangingSse {
+                first_event: GoldenEvent {
+                    event: None,
+                    data: Value::String("malformed-upstream-private-marker".to_string()),
+                },
+                dropped: Arc::clone(&dropped),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let source_id = match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    router
+                        .replace_default_source_profile(
+                            &upstream.base_url,
+                            UpstreamProfileType::Gemini,
+                        )
+                        .await
+                }
+                DownstreamProtocol::Gemini => {
+                    router
+                        .replace_default_source_profile(
+                            &upstream.base_url,
+                            UpstreamProfileType::Openai,
+                        )
+                        .await
+                }
+                DownstreamProtocol::Responses | DownstreamProtocol::Anthropic => router.source_id,
+            };
+            let persisted_sink = router.install_recording_persisted_sink();
+
+            let response = router
+                .send(&fixture, true, &fixture.cancellation.downstream_request)
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_no_public_transform_diagnostics(&response);
+            let request_id = assert_downstream_request_identity(&response);
+            let mut body = response.into_body().into_data_stream();
+            let terminal_chunk = timeout(WAIT_TIMEOUT, body.next())
+                .await
+                .expect("fatal terminal should arrive before deadline")
+                .expect("fatal stream should contain one terminal chunk")
+                .expect("native fatal terminal should close the Body normally");
+            assert!(
+                timeout(WAIT_TIMEOUT, body.next()).await.unwrap().is_none(),
+                "{name}: native fatal must be the only Body terminal"
+            );
+            let terminal_events = parse_downstream_events(fixture.protocol, &terminal_chunk);
+            assert_eq!(terminal_events.len(), 1, "{name}");
+            assert_native_fatal_stream_event(fixture.protocol, &terminal_events[0], &request_id);
+            dropped.wait().await;
+
+            let log = router
+                .wait_for_log_for_source(source_id, RequestStatus::Error)
+                .await;
+            assert_eq!(log.request_id, request_id, "{name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{name}"
+            );
+            assert_single_persisted_terminal_fact(
+                &persisted_sink,
+                ExecutionStage::UpstreamResponse,
+                ResponseVisibility::HeadersCommitted,
+            )
+            .await;
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(
+                upstream.requests().await.len(),
+                1,
+                "{name}: no retry or fallback"
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn cross_wire_target_stream_rejection_emits_one_native_terminal_and_releases_resources() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        const PRIVATE_MARKER: &str = "target-image-private-marker";
+        const CODE: &str = "unsupported_capability_error";
+        const MESSAGE: &str = "The selected target does not support the requested capability.";
+        let dropped = Arc::new(DropSignal::default());
+        let upstream = TestUpstream::spawn(ScriptedReply::HangingSse {
+            first_event: GoldenEvent {
+                event: None,
+                data: json!({
+                    "candidates":[{
+                        "index":0,
+                        "content":{
+                            "role":"model",
+                            "parts":[{
+                                "inlineData":{
+                                    "mimeType":"image/png",
+                                    "data":PRIVATE_MARKER
+                                }
+                            }]
+                        }
+                    }]
+                }),
+            },
+            dropped: Arc::clone(&dropped),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let source_id = router
+            .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Gemini)
+            .await;
+        let persisted_sink = router.install_recording_persisted_sink();
+
+        let response = router
+            .send(&fixture, true, &fixture.cancellation.downstream_request)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let mut body = response.into_body().into_data_stream();
+        let terminal_chunk = timeout(WAIT_TIMEOUT, body.next())
+            .await
+            .expect("target rejection terminal should arrive before deadline")
+            .expect("target rejection should emit one terminal chunk")
+            .expect("native target rejection terminal should close normally");
+        assert!(
+            timeout(WAIT_TIMEOUT, body.next()).await.unwrap().is_none(),
+            "target rejection terminal must be the only downstream chunk"
+        );
+        assert_payload_free_transform_bytes(&terminal_chunk, PRIVATE_MARKER);
+        let terminal_events = parse_downstream_events(fixture.protocol, &terminal_chunk);
+        assert_eq!(terminal_events.len(), 1);
+        let event = &terminal_events[0];
+        assert_eq!(event.event, None);
+        assert_eq!(event.data["error"]["code"], CODE);
+        assert_eq!(event.data["error"]["type"], "invalid_request_error");
+        assert_eq!(event.data["error"]["message"], MESSAGE);
+        assert_eq!(event.data["request_id"], request_id);
+        dropped.wait().await;
+
+        let log = router
+            .wait_for_log_for_source(source_id, RequestStatus::Error)
+            .await;
+        assert_eq!(log.request_id, request_id);
+        assert_eq!(log.final_error_code.as_deref(), Some(CODE));
+        assert_eq!(
+            log.source_selection_reason.as_deref(),
+            Some("provider_default_transform")
+        );
+        assert_single_persisted_terminal_fact(
+            &persisted_sink,
+            ExecutionStage::Capability,
+            ResponseVisibility::HeadersCommitted,
+        )
+        .await;
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(
+            upstream.requests().await.len(),
+            1,
+            "target rejection must not switch Source, retry, or fall back"
+        );
+        upstream.shutdown().await;
+    });
 }
 
 #[test]
@@ -3453,11 +4143,16 @@ fn direct_execution_non_stream_body_interruption_is_an_upstream_response_error()
         let response = router
             .send(&fixture, false, &fixture.request.downstream)
             .await;
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_downstream_request_identity(&response);
-        axum::body::to_bytes(response.into_body(), usize::MAX)
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect_err("interrupted successful response body should surface an I/O error");
+            .expect("interrupted response error envelope should read");
+        let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+        assert_eq!(
+            downstream_error_code(&body, fixture.protocol),
+            Some("upstream_response_error")
+        );
         assert_eq!(upstream.requests().await.len(), 1);
 
         let log = router.wait_for_log(RequestStatus::Error).await;
@@ -3509,14 +4204,28 @@ fn direct_execution_non_stream_identity_and_gzip_enforce_exact_and_plus_one_limi
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
-            let body_result = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+            assert_eq!(
+                response.status(),
+                if succeeds {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                "{case_name}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("non-stream response should be a complete envelope");
             if succeeds {
-                let body = body_result.unwrap();
                 let body: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(body, response_value, "{case_name}");
             } else {
-                body_result.expect_err("{case_name}: guarded body should surface an I/O error");
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    downstream_error_code(&body, fixture.protocol),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
             }
 
             let captured = upstream.requests().await;
@@ -3565,11 +4274,17 @@ fn four_public_protocols_use_existing_envelopes_for_non_stream_response_limit() 
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}");
             assert_downstream_request_identity(&response);
-            axum::body::to_bytes(response.into_body(), usize::MAX)
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect_err("{name}: response limit should surface through the guarded body");
+                .expect("{name}: response limit envelope should read");
+            let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("upstream_response_error"),
+                "{name}"
+            );
             assert_eq!(upstream.requests().await.len(), 1, "{name}: no retry");
             let log = router.wait_for_log(RequestStatus::Error).await;
             assert_eq!(
@@ -3613,13 +4328,17 @@ fn four_public_protocols_use_existing_envelopes_for_decoded_response_limit() {
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}");
             assert_downstream_request_identity(&response);
-            axum::body::to_bytes(response.into_body(), usize::MAX)
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
-                .expect_err(
-                    "{name}: decoded response limit should surface through the guarded body",
-                );
+                .expect("{name}: decoded response limit envelope should read");
+            let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("upstream_response_error"),
+                "{name}"
+            );
             assert_eq!(upstream.requests().await.len(), 1, "{name}: no retry");
             let log = router.wait_for_log(RequestStatus::Error).await;
             assert_eq!(
@@ -3859,24 +4578,17 @@ fn direct_execution_invalid_gzip_never_falls_back_to_compressed_bytes() {
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            if upstream_status.is_success() {
-                assert_eq!(response.status(), StatusCode::OK, "{case_name}");
-                axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .expect_err("{case_name}: invalid gzip should fail in the guarded body");
-            } else {
-                assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
-                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(
-                    downstream_error_code(&body, fixture.protocol),
-                    Some("upstream_response_error"),
-                    "{case_name}"
-                );
-                assert!(body.get("upstream_error").is_none(), "{case_name}");
-            }
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert!(body.get("upstream_error").is_none(), "{case_name}");
             assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
             let log = router.wait_for_log(RequestStatus::Error).await;
             assert_eq!(

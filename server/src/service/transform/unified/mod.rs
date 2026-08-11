@@ -1,11 +1,9 @@
-pub mod diagnostic;
 pub mod extensions;
 pub mod request;
 pub mod response;
 pub mod stream;
 pub mod usage;
 
-pub use diagnostic::*;
 pub use extensions::*;
 pub use request::*;
 pub use response::*;

@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 
 downstream_protocols:
   - OPENAI
@@ -213,6 +213,63 @@ evidence:
     kind: test
     reference: "database::migration_smoke_tests::sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract"
     summary: "Pins the R3.11-to-R3.12 destructive migration, historical suffix rename, preserved governance/metrics, removed configuration tables, and new Source-bound constraints."
+  - id: r3-15-transform-quality-contract
+    kind: test
+    reference: "service::transform::quality::tests::test_transform_contract_summary_covers_failures_outcomes_and_accounting"
+    summary: "Pins eleven production-entry transform outcomes, failure origins, semantic accounting, diagnostic overflow, and Gate closure."
+  - id: r3-15-transform-payload-free-contract
+    kind: test
+    reference: "service::transform::quality::tests::test_transform_contract_report_omits_payload_and_safe_summary"
+    summary: "Pins the quality report to payload-free aggregate facts without fixture content, hashes, or per-payload safe summaries."
+  - id: r3-15-same-wire-passthrough
+    kind: test
+    reference: "proxy::direct_execution_regression::same_wire_non_stream_observation_failure_preserves_upstream_bytes"
+    summary: "Pins byte-preserving same-wire response passthrough when best-effort observation degrades."
+  - id: r3-15-minor-loss-runtime
+    kind: test
+    reference: "proxy::direct_execution_regression::cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata"
+    summary: "Pins cross-wire controlled minor loss, one upstream call, internal-only diagnostics, Request Log success, and resource release."
+  - id: r3-15-four-protocol-stream-failure
+    kind: test
+    reference: "proxy::direct_execution_regression::four_public_protocols_emit_one_native_terminal_on_cross_wire_stream_decode_failure"
+    summary: "Pins one protocol-native terminal after headers for source transform failure across all four public downstream protocols."
+  - id: r3-15-target-stream-failure
+    kind: test
+    reference: "proxy::direct_execution_regression::cross_wire_target_stream_rejection_emits_one_native_terminal_and_releases_resources"
+    summary: "Pins target transform rejection after headers to one native terminal, an error Request Log, one upstream call, and released resources."
+
+transform_runtime_contract:
+  owner: R3.15
+  same_wire_behavior: byte_preserving_passthrough
+  same_wire_observation_failure: observation_degraded
+  cross_wire_pipeline: [source_decode, unified_ir, target_encode]
+  cross_wire_failure_behavior: fail_closed
+  unknown_semantic_behavior: explicit_reject
+  loss_policy:
+    minor: controlled_loss_with_internal_fact
+    major: explicit_reject
+    deterministic_text_downgrade: fixture_backed_controlled_loss
+  header_boundary:
+    before_commit: downstream_native_error_envelope
+    after_commit: single_downstream_native_error_terminal_or_body_error
+    normal_terminal_after_failure: false
+  diagnostics:
+    visibility: internal_only
+    max_retained_facts: 32
+    overflow_accounted: true
+    payload_free: true
+    public_extensions: false
+  persistence:
+    enabled: false
+    owner: R4.6
+  advanced_cell_owners:
+    - { upstream_protocol: OPENAI, owner: R3.16 }
+    - { upstream_protocol: RESPONSES, owner: R3.17 }
+    - { upstream_protocol: ANTHROPIC, owner: R3.18 }
+    - { upstream_protocol: GEMINI, owner: R3.19 }
+    - { upstream_protocol: OLLAMA, owner: R3.20 }
+  final_matrix_owner: R3.21
+  evidence: [r3-15-transform-quality-contract, r3-15-transform-payload-free-contract, r3-15-same-wire-passthrough, r3-15-minor-loss-runtime, r3-15-four-protocol-stream-failure, r3-15-target-stream-failure]
 
 upstream_source_contract:
   owner: R3.12
@@ -323,10 +380,10 @@ generation_cells:
       upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
       cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
   - downstream: OPENAI
     upstream: RESPONSES
     base:
@@ -337,10 +394,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
   - downstream: OPENAI
     upstream: ANTHROPIC
     base:
@@ -351,10 +408,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
   - downstream: OPENAI
     upstream: GEMINI
     base:
@@ -365,10 +422,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
       cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
   - downstream: OPENAI
     upstream: OLLAMA
     base:
@@ -379,10 +436,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
       cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
 
   - downstream: RESPONSES
     upstream: OPENAI
@@ -394,10 +451,10 @@ generation_cells:
       upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
       cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
   - downstream: RESPONSES
     upstream: RESPONSES
     base:
@@ -408,10 +465,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
   - downstream: RESPONSES
     upstream: ANTHROPIC
     base:
@@ -422,10 +479,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
   - downstream: RESPONSES
     upstream: GEMINI
     base:
@@ -436,10 +493,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
       cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
   - downstream: RESPONSES
     upstream: OLLAMA
     base:
@@ -450,10 +507,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
       cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
 
   - downstream: ANTHROPIC
     upstream: OPENAI
@@ -465,10 +522,10 @@ generation_cells:
       upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
       cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
   - downstream: ANTHROPIC
     upstream: RESPONSES
     base:
@@ -479,10 +536,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
   - downstream: ANTHROPIC
     upstream: ANTHROPIC
     base:
@@ -493,10 +550,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
   - downstream: ANTHROPIC
     upstream: GEMINI
     base:
@@ -507,10 +564,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
       cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
   - downstream: ANTHROPIC
     upstream: OLLAMA
     base:
@@ -521,10 +578,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
       cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
 
   - downstream: GEMINI
     upstream: OPENAI
@@ -536,10 +593,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
       cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
   - downstream: GEMINI
     upstream: RESPONSES
     base:
@@ -550,10 +607,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
   - downstream: GEMINI
     upstream: ANTHROPIC
     base:
@@ -564,10 +621,10 @@ generation_cells:
       upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
       cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.18 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.18 }
   - downstream: GEMINI
     upstream: GEMINI
     base:
@@ -578,10 +635,10 @@ generation_cells:
       upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
       cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
   - downstream: GEMINI
     upstream: OLLAMA
     base:
@@ -592,10 +649,10 @@ generation_cells:
       upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
       cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.15 }
+      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
+      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
 
 utilities:
   - name: models

@@ -1,5 +1,3 @@
-use chrono::Utc;
-
 use super::payload::OllamaResponse;
 
 use crate::service::transform::unified::*;
@@ -21,12 +19,10 @@ impl From<OllamaResponse> for UnifiedResponse {
         };
 
         // Map Ollama's done_reason to unified finish_reason
-        let finish_reason = finish_reason.map(|reason| {
-            match reason.as_str() {
-                "stop" => "stop".to_string(),
-                "length" => "length".to_string(),
-                _ => "stop".to_string(), // Default to stop for other reasons
-            }
+        let finish_reason = finish_reason.map(|reason| match reason.as_str() {
+            "stop" => "stop".to_string(),
+            "length" => "length".to_string(),
+            _ => reason,
         });
 
         let choice = UnifiedChoice {
@@ -55,7 +51,11 @@ impl From<OllamaResponse> for UnifiedResponse {
             model: Some(ollama_res.model),
             choices: vec![choice],
             usage,
-            created: Some(Utc::now().timestamp()),
+            created: Some(
+                chrono::DateTime::parse_from_rfc3339(&ollama_res.created_at)
+                    .expect("Ollama created_at is validated by the adapter")
+                    .timestamp(),
+            ),
             object: Some("chat.completion".to_string()),
             system_fingerprint: None,
             provider_response_metadata: None,

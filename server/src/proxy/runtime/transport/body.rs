@@ -28,6 +28,7 @@ pub(crate) const BODY_FRAME_CHANNEL_CAPACITY: usize = 1;
 
 pub(crate) struct BodyFrame {
     pub(crate) result: Result<bytes::Bytes, io::Error>,
+    terminal: bool,
     ack: oneshot::Sender<()>,
 }
 
@@ -44,9 +45,30 @@ pub(crate) async fn send_body_frame(
     cancellation: &ProxyCancellationContext,
     coordinator: &ProxyTerminationCoordinator,
 ) -> Result<(), FrameDeliveryError> {
+    let terminal = result.is_err();
+    send_body_frame_with_terminal(sender, result, terminal, cancellation, coordinator).await
+}
+
+pub(crate) async fn send_terminal_body_event(
+    sender: &mpsc::Sender<BodyFrame>,
+    bytes: bytes::Bytes,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+) -> Result<(), FrameDeliveryError> {
+    send_body_frame_with_terminal(sender, Ok(bytes), true, cancellation, coordinator).await
+}
+
+async fn send_body_frame_with_terminal(
+    sender: &mpsc::Sender<BodyFrame>,
+    result: Result<bytes::Bytes, io::Error>,
+    terminal: bool,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+) -> Result<(), FrameDeliveryError> {
     let (ack_sender, ack_receiver) = oneshot::channel();
     let frame = BodyFrame {
         result,
+        terminal,
         ack: ack_sender,
     };
     let watchdog = total_watchdog(cancellation, coordinator);
@@ -107,6 +129,17 @@ fn frame_delivery_error(
             },
         },
     }
+}
+
+fn mark_body_started_if_nonempty(
+    bytes: &bytes::Bytes,
+    response_visibility: &ResponseVisibilityTracker,
+) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    response_visibility.advance_to(ResponseVisibility::BodyStarted);
+    true
 }
 
 struct BodyCancellationFinalizer {
@@ -270,11 +303,9 @@ impl GuardedBodyStream {
     }
 
     fn observe_downstream_body(&self, bytes: &bytes::Bytes) {
-        if bytes.is_empty() {
+        if !mark_body_started_if_nonempty(bytes, &self.response_visibility) {
             return;
         }
-        self.response_visibility
-            .advance_to(ResponseVisibility::BodyStarted);
         let now = Utc::now().timestamp_millis();
         self.timing
             .mark_first_response_body(now, tokio::time::Instant::now());
@@ -298,14 +329,16 @@ impl Stream for GuardedBodyStream {
             Poll::Ready(Some(frame)) => {
                 if let Ok(bytes) = &frame.result {
                     this.observe_downstream_body(bytes);
-                    this.pending_ack = Some(frame.ack);
-                } else {
+                }
+                if frame.terminal {
                     this.terminal_frame_delivered = true;
                     this.completed = true;
                     if let Some(finalizer) = this.cancellation_finalizer.as_mut() {
                         finalizer.disarm();
                     }
                     let _ = frame.ack.send(());
+                } else {
+                    this.pending_ack = Some(frame.ack);
                 }
                 Poll::Ready(Some(frame.result))
             }
@@ -328,9 +361,10 @@ impl Drop for GuardedBodyStream {
             return;
         }
         self.cancellation.cancel_now(self.drop_reason.clone());
-        if let Some(worker) = self.worker.take() {
-            worker.abort();
-        }
+        // Let the cancellation-aware worker observe the token, emit its final
+        // transform summary, and drop its upstream response/lease owner. The
+        // request-log cancellation finalizer remains the exactly-once owner.
+        self.worker.take();
     }
 }
 
@@ -345,7 +379,7 @@ mod tests {
     use super::super::lifecycle::{ProxyTerminationCause, ProxyTerminationCoordinator};
     use super::{
         BODY_FRAME_CHANNEL_CAPACITY, BodyFrame, FrameDeliveryError, GuardedBodyStream,
-        send_body_frame,
+        mark_body_started_if_nonempty, send_body_frame, send_terminal_body_event,
     };
     use crate::proxy::cancellation::ProxyCancellationContext;
     use tokio::sync::mpsc;
@@ -372,6 +406,30 @@ mod tests {
         assert!(!task.is_finished(), "worker must wait for downstream ack");
         let _ = frame.ack.send(());
         assert_eq!(task.await.unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn downstream_body_visibility_advances_only_for_non_empty_chunks() {
+        let tracker = crate::proxy::ResponseVisibilityTracker::new();
+        tracker.advance_to(crate::proxy::ResponseVisibility::HeadersCommitted);
+
+        assert!(!mark_body_started_if_nonempty(
+            &bytes::Bytes::new(),
+            &tracker
+        ));
+        assert_eq!(
+            tracker.current(),
+            crate::proxy::ResponseVisibility::HeadersCommitted
+        );
+
+        assert!(mark_body_started_if_nonempty(
+            &bytes::Bytes::from_static(b"data: chunk\n\n"),
+            &tracker,
+        ));
+        assert_eq!(
+            tracker.current(),
+            crate::proxy::ResponseVisibility::BodyStarted
+        );
     }
 
     #[tokio::test]
@@ -403,6 +461,66 @@ mod tests {
                 phase: crate::proxy::TimeoutPhase::Total,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_event_is_acknowledged_without_waiting_for_another_body_poll() {
+        let cancellation = ProxyCancellationContext::new();
+        let coordinator = ProxyTerminationCoordinator::default();
+        assert!(cancellation.set_total_deadline(Instant::now() + Duration::from_secs(60)));
+        let (sender, mut receiver) = mpsc::channel(BODY_FRAME_CHANNEL_CAPACITY);
+        let task_cancellation = cancellation.clone();
+        let task_coordinator = coordinator.clone();
+        let task = tokio::spawn(async move {
+            send_terminal_body_event(
+                &sender,
+                bytes::Bytes::from_static(b"data: terminal\n\n"),
+                &task_cancellation,
+                &task_coordinator,
+            )
+            .await
+        });
+
+        let frame = receiver.recv().await.expect("terminal frame should arrive");
+        assert!(frame.terminal);
+        assert_eq!(frame.result.unwrap(), "data: terminal\n\n");
+        let _ = frame.ack.send(());
+        assert_eq!(task.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn unconsumed_terminal_event_reports_total_timeout_instead_of_success() {
+        let cancellation = ProxyCancellationContext::new();
+        let coordinator = ProxyTerminationCoordinator::default();
+        assert!(cancellation.set_total_deadline(Instant::now() + Duration::from_millis(20)));
+        let (sender, mut receiver) = mpsc::channel(BODY_FRAME_CHANNEL_CAPACITY);
+        let task_cancellation = cancellation.clone();
+        let task_coordinator = coordinator.clone();
+        let task = tokio::spawn(async move {
+            send_terminal_body_event(
+                &sender,
+                bytes::Bytes::from_static(b"data: terminal\n\n"),
+                &task_cancellation,
+                &task_coordinator,
+            )
+            .await
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("terminal delivery should observe total timeout")
+            .unwrap();
+        assert_eq!(
+            result,
+            Err(FrameDeliveryError::Timeout {
+                phase: crate::proxy::TimeoutPhase::Total,
+            })
+        );
+        let queued = receiver
+            .recv()
+            .await
+            .expect("unacknowledged terminal frame remains queued for supervisor arbitration");
+        assert!(queued.terminal);
     }
 
     #[test]

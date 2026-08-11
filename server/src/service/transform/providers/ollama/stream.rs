@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::DateTime;
 
 use super::payload::OllamaChunkResponse;
 
@@ -27,14 +27,8 @@ impl From<OllamaChunkResponse> for UnifiedChunkResponse {
             None
         };
 
-        // Map Ollama's done_reason to unified finish_reason
-        let finish_reason = finish_reason.map(|reason| {
-            match reason.as_str() {
-                "stop" => "stop".to_string(),
-                "length" => "length".to_string(),
-                _ => "stop".to_string(), // Default to stop for other reasons
-            }
-        });
+        // Preserve the provider reason. The source audit rejects unknown values
+        // before this conversion, so no semantic reason is rewritten to `stop`.
 
         let choice = UnifiedChunkChoice {
             index: 0,
@@ -60,7 +54,11 @@ impl From<OllamaChunkResponse> for UnifiedChunkResponse {
             model: Some(ollama_chunk.model),
             choices: vec![choice],
             usage,
-            created: Some(Utc::now().timestamp()),
+            created: Some(
+                DateTime::parse_from_rfc3339(&ollama_chunk.created_at)
+                    .expect("Ollama stream created_at must be validated before conversion")
+                    .timestamp(),
+            ),
             object: Some("chat.completion.chunk".to_string()),
             provider_session_metadata: None,
             synthetic_metadata: None,

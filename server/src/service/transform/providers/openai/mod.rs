@@ -10,7 +10,10 @@ mod tests;
 pub(crate) use payload::*;
 pub(crate) use sanitize::*;
 pub(crate) use stream::{
-    openai_chunk_to_unified_stream_events_with_state, transform_unified_chunk_to_openai_events,
-    transform_unified_stream_event_to_openai_event,
-    transform_unified_stream_events_to_openai_events,
+    openai_chunk_to_unified_stream_events_with_state, try_transform_unified_chunk_to_openai_events,
+    try_transform_unified_stream_events_to_openai_events,
+};
+#[cfg(test)]
+pub(crate) use stream::{
+    transform_unified_chunk_to_openai_events, transform_unified_stream_events_to_openai_events,
 };

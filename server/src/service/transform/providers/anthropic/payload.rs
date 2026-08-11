@@ -124,8 +124,9 @@ pub enum AnthropicEvent {
     Error {
         error: Value,
     },
-    #[serde(other)]
     Ping,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

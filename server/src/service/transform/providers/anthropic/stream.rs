@@ -7,71 +7,70 @@ use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::{
     AnthropicActiveBlockKind, AnthropicActiveBlockState, TransformProtocol,
-    build_stream_diagnostic_sse, unified::*,
+    record_stream_diagnostic, unified::*,
 };
 use crate::utils::sse::SseEvent;
 
 fn build_anthropic_stream_diagnostic(
     context: &mut StreamTransformContext<'_>,
     kind: TransformValueKind,
-    context_message: String,
-) -> SseEvent {
-    build_stream_diagnostic_sse(
+) {
+    record_stream_diagnostic(
         context,
         TransformProtocol::Unified,
         TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
         kind,
-        "anthropic_stream_encoding",
-        context_message,
-        None,
-        Some(
-            "Use Responses or Gemini event-native streaming when multimodal deltas must remain recoverable.".to_string(),
-        ),
     )
 }
 
-fn anthropic_start_block_event(index: u32, content_block: AnthropicContentBlock) -> SseEvent {
+fn anthropic_start_block_event(
+    index: u32,
+    content_block: AnthropicContentBlock,
+) -> Result<SseEvent, serde_json::Error> {
     let event = json!({
         "type": "content_block_start",
         "index": index,
         "content_block": content_block,
     });
-    SseEvent {
+    Ok(SseEvent {
         event: Some("content_block_start".to_string()),
-        data: serde_json::to_string(&event).unwrap(),
+        data: serde_json::to_string(&event)?,
         ..Default::default()
-    }
+    })
 }
 
-fn anthropic_block_delta_event(index: u32, delta: AnthropicContentDelta) -> SseEvent {
+fn anthropic_block_delta_event(
+    index: u32,
+    delta: AnthropicContentDelta,
+) -> Result<SseEvent, serde_json::Error> {
     let event = json!({
         "type": "content_block_delta",
         "index": index,
         "delta": delta,
     });
-    SseEvent {
+    Ok(SseEvent {
         event: Some("content_block_delta".to_string()),
-        data: serde_json::to_string(&event).unwrap(),
+        data: serde_json::to_string(&event)?,
         ..Default::default()
-    }
+    })
 }
 
-fn anthropic_block_stop_event(index: u32) -> SseEvent {
+fn anthropic_block_stop_event(index: u32) -> Result<SseEvent, serde_json::Error> {
     let event = json!({
         "type": "content_block_stop",
         "index": index,
     });
-    SseEvent {
+    Ok(SseEvent {
         event: Some("content_block_stop".to_string()),
-        data: serde_json::to_string(&event).unwrap(),
+        data: serde_json::to_string(&event)?,
         ..Default::default()
-    }
+    })
 }
 
 fn close_active_anthropic_blocks(
     context: &mut StreamTransformContext<'_>,
     events: &mut Vec<SseEvent>,
-) {
+) -> Result<(), serde_json::Error> {
     let mut active_indices = context
         .anthropic_active_blocks()
         .keys()
@@ -85,15 +84,16 @@ fn close_active_anthropic_blocks(
             .remove(&index)
             .is_some()
         {
-            events.push(anthropic_block_stop_event(index));
+            events.push(anthropic_block_stop_event(index)?);
         }
     }
+    Ok(())
 }
 
-pub(crate) fn transform_unified_stream_events_to_anthropic_events(
+pub(crate) fn try_transform_unified_stream_events_to_anthropic_events(
     stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut events = Vec::new();
 
     for stream_event in stream_events {
@@ -101,23 +101,28 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
             UnifiedStreamEvent::MessageStart { id, model, .. } => {
                 if !context.anthropic_message_started() {
                     context.mark_anthropic_message_started();
+                    let mut message = json!({
+                        "id": id.unwrap_or_else(|| context.get_or_generate_stream_id()),
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": model
+                            .filter(|model| !model.is_empty())
+                            .unwrap_or_else(|| context.get_or_default_stream_model()),
+                    });
+                    if let Some(usage) = context.usage_cache() {
+                        message["usage"] = json!(AnthropicUsage {
+                            input_tokens: usage.input_tokens as u32,
+                            output_tokens: usage.output_tokens as u32,
+                        });
+                    }
                     let event = json!({
                         "type": "message_start",
-                        "message": {
-                            "id": id.unwrap_or_else(|| context.get_or_generate_stream_id()),
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [],
-                            "model": model.unwrap_or_else(|| context.stream_model_clone().unwrap_or_default()),
-                            "usage": AnthropicUsage {
-                                input_tokens: context.usage_cache().map(|u| u.input_tokens as u32).unwrap_or(0),
-                                output_tokens: context.usage_cache().map(|u| u.output_tokens as u32).unwrap_or(0),
-                            }
-                        }
+                        "message": message
                     });
                     events.push(SseEvent {
                         event: Some("message_start".to_string()),
-                        data: serde_json::to_string(&event).unwrap(),
+                        data: serde_json::to_string(&event)?,
                         ..Default::default()
                     });
                 }
@@ -133,7 +138,7 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                         AnthropicContentBlock::Text {
                             text: String::new(),
                         },
-                    ));
+                    )?);
                 }
                 UnifiedBlockKind::ToolCall | UnifiedBlockKind::Blob => {}
                 UnifiedBlockKind::Reasoning => {
@@ -145,9 +150,9 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                         index,
                         AnthropicContentBlock::Thinking {
                             thinking: String::new(),
-                            signature: Some(String::new()),
+                            signature: None,
                         },
-                    ));
+                    )?);
                 }
             },
             UnifiedStreamEvent::ContentBlockDelta { index, text, .. } => {
@@ -167,12 +172,12 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                         AnthropicContentBlock::Text {
                             text: String::new(),
                         },
-                    ));
+                    )?);
                 }
                 events.push(anthropic_block_delta_event(
                     index,
                     AnthropicContentDelta::TextDelta { text },
-                ));
+                )?);
             }
             UnifiedStreamEvent::ContentBlockStop { index } => {
                 if matches!(
@@ -183,7 +188,7 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                     Some(AnthropicActiveBlockKind::Text)
                 ) {
                     context.anthropic_active_blocks_mut().remove(&index);
-                    events.push(anthropic_block_stop_event(index));
+                    events.push(anthropic_block_stop_event(index)?);
                 }
             }
             UnifiedStreamEvent::ToolCallStart { index, id, name } => {
@@ -203,7 +208,7 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                         name,
                         input: Value::Object(Default::default()),
                     },
-                ));
+                )?);
             }
             UnifiedStreamEvent::ToolCallArgumentsDelta {
                 index,
@@ -229,16 +234,16 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                     events.push(anthropic_start_block_event(
                         index,
                         AnthropicContentBlock::ToolUse {
-                            id: block.tool_call_id.clone().unwrap_or_else(|| {
-                                format!("toolu_{}", crate::utils::ID_GENERATOR.generate_id())
-                            }),
-                            name: block
-                                .tool_name
+                            id: block
+                                .tool_call_id
                                 .clone()
-                                .unwrap_or_else(|| "tool".to_string()),
+                                .expect("audited Anthropic synthetic tool start must retain an id"),
+                            name: block.tool_name.clone().expect(
+                                "audited Anthropic synthetic tool start must retain a name",
+                            ),
                             input: Value::Object(Default::default()),
                         },
-                    ));
+                    )?);
                 }
                 block.text.push_str(&arguments);
                 events.push(anthropic_block_delta_event(
@@ -246,7 +251,7 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                     AnthropicContentDelta::InputJsonDelta {
                         partial_json: arguments,
                     },
-                ));
+                )?);
             }
             UnifiedStreamEvent::ToolCallStop { index, .. } => {
                 if matches!(
@@ -257,7 +262,7 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                     Some(AnthropicActiveBlockKind::ToolUse)
                 ) {
                     context.anthropic_active_blocks_mut().remove(&index);
-                    events.push(anthropic_block_stop_event(index));
+                    events.push(anthropic_block_stop_event(index)?);
                 }
             }
             UnifiedStreamEvent::ReasoningStart { index } => {
@@ -269,9 +274,9 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                     index,
                     AnthropicContentBlock::Thinking {
                         thinking: String::new(),
-                        signature: Some(String::new()),
+                        signature: None,
                     },
-                ));
+                )?);
             }
             UnifiedStreamEvent::ReasoningDelta { index, text, .. } => {
                 let block_exists = context.anthropic_active_blocks().contains_key(&index);
@@ -288,14 +293,14 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                         index,
                         AnthropicContentBlock::Thinking {
                             thinking: String::new(),
-                            signature: Some(String::new()),
+                            signature: None,
                         },
-                    ));
+                    )?);
                 }
                 events.push(anthropic_block_delta_event(
                     index,
                     AnthropicContentDelta::ThinkingDelta { thinking: text },
-                ));
+                )?);
             }
             UnifiedStreamEvent::ReasoningStop { index } => {
                 if matches!(
@@ -306,7 +311,7 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                     Some(AnthropicActiveBlockKind::Thinking)
                 ) {
                     context.anthropic_active_blocks_mut().remove(&index);
-                    events.push(anthropic_block_stop_event(index));
+                    events.push(anthropic_block_stop_event(index)?);
                 }
             }
             UnifiedStreamEvent::BlobDelta {
@@ -321,7 +326,7 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
                         AnthropicContentDelta::SignatureDelta {
                             signature: signature.to_string(),
                         },
-                    ));
+                    )?);
                 }
             }
             UnifiedStreamEvent::Usage { usage } => {
@@ -329,55 +334,41 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
             }
             UnifiedStreamEvent::MessageDelta { finish_reason } => {
                 if let Some(finish_reason) = finish_reason {
-                    close_active_anthropic_blocks(context, &mut events);
-                    let event = json!({
+                    close_active_anthropic_blocks(context, &mut events)?;
+                    let mut event = json!({
                         "type": "message_delta",
                         "delta": {
                             "stop_reason": crate::service::transform::unified::map_openai_finish_reason_to_anthropic(&finish_reason),
                             "stop_sequence": null,
-                        },
-                        "usage": context.usage_cache().map(|usage| AnthropicUsage {
+                        }
+                    });
+                    if let Some(usage) = context.usage_cache() {
+                        event["usage"] = json!(AnthropicUsage {
                             input_tokens: usage.input_tokens as u32,
                             output_tokens: usage.output_tokens as u32,
-                        }).unwrap_or(AnthropicUsage {
-                            input_tokens: 0,
-                            output_tokens: 0,
-                        }),
-                    });
+                        });
+                    }
                     events.push(SseEvent {
                         event: Some("message_delta".to_string()),
-                        data: serde_json::to_string(&event).unwrap(),
+                        data: serde_json::to_string(&event)?,
                         ..Default::default()
                     });
                 }
             }
             UnifiedStreamEvent::MessageStop => {
-                close_active_anthropic_blocks(context, &mut events);
+                close_active_anthropic_blocks(context, &mut events)?;
                 events.push(SseEvent {
                     event: Some("message_stop".to_string()),
                     data: "{\"type\":\"message_stop\"}".to_string(),
                     ..Default::default()
                 });
             }
-            UnifiedStreamEvent::ReasoningSummaryPartAdded { item_index, .. }
-            | UnifiedStreamEvent::ReasoningSummaryPartDone { item_index, .. } => {
-                events.push(build_anthropic_stream_diagnostic(
-                    context,
-                    TransformValueKind::ReasoningDelta,
-                    format!(
-                        "Anthropic SSE does not expose reasoning summary part lifecycle natively; item_index={item_index:?} was downgraded to a structured transform diagnostic."
-                    ),
-                ));
+            UnifiedStreamEvent::ReasoningSummaryPartAdded { .. }
+            | UnifiedStreamEvent::ReasoningSummaryPartDone { .. } => {
+                build_anthropic_stream_diagnostic(context, TransformValueKind::ReasoningDelta);
             }
-            UnifiedStreamEvent::BlobDelta { index, data } => {
-                events.push(build_anthropic_stream_diagnostic(
-                    context,
-                    TransformValueKind::BlobDelta,
-                    format!(
-                        "Anthropic SSE only preserves provider-native signature deltas; index={index:?}, json_type={} was downgraded to a structured transform diagnostic.",
-                        data.get("type").and_then(Value::as_str).unwrap_or("unknown"),
-                    ),
-                ));
+            UnifiedStreamEvent::BlobDelta { .. } => {
+                build_anthropic_stream_diagnostic(context, TransformValueKind::BlobDelta);
             }
             UnifiedStreamEvent::ItemAdded { .. }
             | UnifiedStreamEvent::ItemDone { .. }
@@ -387,15 +378,14 @@ pub(crate) fn transform_unified_stream_events_to_anthropic_events(
         }
     }
 
-    (!events.is_empty()).then_some(events)
+    Ok((!events.is_empty()).then_some(events))
 }
 
-pub fn transform_unified_chunk_to_anthropic_events(
+pub(crate) fn try_transform_unified_chunk_to_anthropic_events(
     unified_chunk: UnifiedChunkResponse,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut stream_events = Vec::new();
-    let mut diagnostics = Vec::new();
 
     if let Some(usage) = unified_chunk.usage.clone() {
         context.set_usage(usage.clone());
@@ -441,16 +431,8 @@ pub fn transform_unified_chunk_to_anthropic_events(
                         });
                     }
                 }
-                UnifiedContentPartDelta::ImageDelta { index, url, data } => {
-                    diagnostics.push(build_anthropic_stream_diagnostic(
-                        context,
-                        TransformValueKind::ImageDelta,
-                        format!(
-                            "Anthropic SSE content blocks do not expose native image deltas; index={index}, has_url={}, has_data={} was downgraded to a structured transform diagnostic.",
-                            url.as_ref().is_some_and(|value| !value.is_empty()),
-                            data.as_ref().is_some_and(|value| !value.is_empty())
-                        ),
-                    ));
+                UnifiedContentPartDelta::ImageDelta { .. } => {
+                    build_anthropic_stream_diagnostic(context, TransformValueKind::ImageDelta);
                 }
             }
         }
@@ -490,13 +472,30 @@ pub fn transform_unified_chunk_to_anthropic_events(
         }
     }
 
-    let mut encoded = transform_unified_stream_events_to_anthropic_events(stream_events, context)
+    let encoded = try_transform_unified_stream_events_to_anthropic_events(stream_events, context)?
         .unwrap_or_default();
-    encoded.extend(diagnostics);
 
     if encoded.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(encoded)
+        Ok(Some(encoded))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_stream_events_to_anthropic_events(
+    stream_events: Vec<UnifiedStreamEvent>,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_stream_events_to_anthropic_events(stream_events, context)
+        .expect("Anthropic test stream payloads must serialize")
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_chunk_to_anthropic_events(
+    unified_chunk: UnifiedChunkResponse,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_chunk_to_anthropic_events(unified_chunk, context)
+        .expect("Anthropic test stream payloads must serialize")
 }

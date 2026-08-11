@@ -261,7 +261,7 @@ pub(crate) struct OpenAiChunkChoice {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) struct OpenAiChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) role: Option<String>,

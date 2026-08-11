@@ -81,17 +81,39 @@ impl IdGenerator {
     }
 
     pub fn generate_id(&self) -> i64 {
-        self.generate_id_with_timestamp(Self::current_timestamp(), Self::wait_next_millis)
+        let mut sequence = self.sequence.lock().unwrap();
+        let mut last_timestamp = self.last_timestamp.lock().unwrap();
+        self.generate_id_locked(
+            Self::current_timestamp(),
+            Self::wait_next_millis,
+            &mut sequence,
+            &mut last_timestamp,
+        )
     }
 
+    #[cfg(test)]
     fn generate_id_with_timestamp(
         &self,
-        mut timestamp: u64,
+        timestamp: u64,
         wait_next_millis: impl FnOnce(u64) -> u64,
     ) -> i64 {
         let mut sequence = self.sequence.lock().unwrap();
         let mut last_timestamp = self.last_timestamp.lock().unwrap();
+        self.generate_id_locked(
+            timestamp,
+            wait_next_millis,
+            &mut sequence,
+            &mut last_timestamp,
+        )
+    }
 
+    fn generate_id_locked(
+        &self,
+        mut timestamp: u64,
+        wait_next_millis: impl FnOnce(u64) -> u64,
+        sequence: &mut u64,
+        last_timestamp: &mut u64,
+    ) -> i64 {
         if timestamp < *last_timestamp {
             panic!("system clock moved backwards while generating an id");
         }

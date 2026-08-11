@@ -1,6 +1,10 @@
 use chrono::Utc;
 
 use super::payload::*;
+use super::request::{
+    render_anthropic_executable_code_text, render_anthropic_file_reference_text,
+    render_anthropic_image_reference_text, render_anthropic_inline_file_data_text,
+};
 
 use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::capability::TransformValueKind;
@@ -129,11 +133,19 @@ impl From<UnifiedResponse> for AnthropicResponse {
                     UnifiedContentPart::Reasoning { text } => {
                         Some(AnthropicContentBlock::Text { text })
                     }
-                    UnifiedContentPart::ImageUrl { .. }
-                    | UnifiedContentPart::ImageData { .. }
-                    | UnifiedContentPart::FileUrl { .. }
-                    | UnifiedContentPart::FileData { .. }
-                    | UnifiedContentPart::ExecutableCode { .. } => {
+                    UnifiedContentPart::ImageUrl { url, detail } => Some(AnthropicContentBlock::Text {
+                        text: render_anthropic_image_reference_text(&url, detail.as_deref()),
+                    }),
+                    UnifiedContentPart::FileUrl { url, mime_type, filename } => Some(AnthropicContentBlock::Text {
+                        text: render_anthropic_file_reference_text(&url, mime_type.as_deref(), filename.as_deref()),
+                    }),
+                    UnifiedContentPart::FileData { data, mime_type, filename } => Some(AnthropicContentBlock::Text {
+                        text: render_anthropic_inline_file_data_text(&data, &mime_type, filename.as_deref()),
+                    }),
+                    UnifiedContentPart::ExecutableCode { language, code } => Some(AnthropicContentBlock::Text {
+                        text: render_anthropic_executable_code_text(&language, &code),
+                    }),
+                    UnifiedContentPart::ImageData { .. } => {
                         apply_transform_policy(
                             TransformProtocol::Unified,
                             TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
@@ -190,14 +202,23 @@ impl From<UnifiedResponse> for AnthropicResponse {
                     );
                     vec![]
                 }
-                UnifiedItem::FileReference(_) => {
+                UnifiedItem::FileReference(file) => {
                     apply_transform_policy(
                         TransformProtocol::Unified,
                         TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
                         TransformValueKind::FileUrl,
                         "Dropping file reference from Anthropic assistant response conversion.",
                     );
-                    vec![]
+                    file.file_url
+                        .map(|url| AnthropicContentBlock::Text {
+                            text: render_anthropic_file_reference_text(
+                                &url,
+                                file.mime_type.as_deref(),
+                                file.filename.as_deref(),
+                            ),
+                        })
+                        .into_iter()
+                        .collect()
                 }
             })
             .collect();

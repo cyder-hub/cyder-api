@@ -108,8 +108,12 @@ impl From<OpenAiResponse> for UnifiedResponse {
 
                 if let Some(tool_calls) = choice.message.tool_calls {
                     for tc in tool_calls {
-                        let args: Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                        let args: Value = if tc.function.arguments.trim().is_empty() {
+                            json!({})
+                        } else {
+                            serde_json::from_str(&tc.function.arguments)
+                                .expect("OpenAI tool arguments are validated by the adapter")
+                        };
                         content.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                             id: tc.id,
                             name: tc.function.name,
@@ -151,9 +155,10 @@ impl From<OpenAiResponse> for UnifiedResponse {
                     message,
                     items: Vec::new(),
                     finish_reason: choice.finish_reason,
-                    logprobs: choice
-                        .logprobs
-                        .map(|lp| serde_json::to_value(lp).unwrap_or(Value::Null)),
+                    logprobs: choice.logprobs.map(|lp| {
+                        serde_json::to_value(lp)
+                            .expect("OpenAI logprobs serialization is structurally infallible")
+                    }),
                 }
             })
             .collect();
@@ -302,7 +307,10 @@ impl From<UnifiedResponse> for OpenAiResponse {
                     index: choice.index,
                     message,
                     finish_reason: choice.finish_reason,
-                    logprobs: choice.logprobs.and_then(|v| serde_json::from_value(v).ok()),
+                    logprobs: choice.logprobs.map(|value| {
+                        serde_json::from_value(value)
+                            .expect("OpenAI target logprobs are adapter-validated")
+                    }),
                 }
             })
             .collect();

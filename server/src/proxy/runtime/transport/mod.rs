@@ -22,9 +22,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 pub(crate) use client::send_with_deadline;
 
-use self::{
-    non_stream::handle_non_streaming_response_guarded, stream::handle_streaming_response_guarded,
-};
+use self::{non_stream::handle_non_streaming_response, stream::handle_streaming_response_guarded};
 use crate::{
     proxy::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
@@ -256,8 +254,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             }),
         }
     } else {
-        handle_non_streaming_response_guarded(
-            &app_state,
+        handle_non_streaming_response(
             &cancellation,
             log_context,
             model_str,
@@ -268,8 +265,8 @@ pub(in crate::proxy) async fn send_materialized_request(
             response_mode,
             upstream_error_body_limit_bytes,
             &client_bundle.proxy_request.non_stream_response,
-            proxy_timeouts,
             response_visibility,
+            &proxy_timeouts,
         )
         .await
     };

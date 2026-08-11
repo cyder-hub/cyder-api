@@ -144,9 +144,7 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                 for p in parts {
                     match p {
                         GeminiPart::Text { text } => {
-                            if !text.is_empty() {
-                                content_parts.push(UnifiedContentPart::Text { text });
-                            }
+                            content_parts.push(UnifiedContentPart::Text { text });
                         }
                         GeminiPart::InlineData { inline_data } => {
                             content_parts.push(gemini_inline_data_to_unified_content(inline_data));
@@ -220,7 +218,6 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
             frequency_penalty: None,
             ..Default::default()
         }
-        .filter_empty() // Filter out empty content and messages
     }
 }
 
@@ -238,6 +235,9 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                         .iter()
                         .filter_map(|part| match part {
                             UnifiedContentPart::Text { text } => Some(text.clone()),
+                            UnifiedContentPart::ImageUrl { url, detail } => {
+                                Some(render_gemini_image_reference_text(url, detail.as_deref()))
+                            }
                             _ => None,
                         })
                         .collect();

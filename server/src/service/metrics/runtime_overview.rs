@@ -4,8 +4,6 @@ use super::provider_runtime::{ProviderRuntimeItem, ProviderRuntimeLevel};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DashboardOperationalSignalsReadModel {
-    pub open_providers: Vec<DashboardProviderSignalReadItem>,
-    pub half_open_providers: Vec<DashboardProviderSignalReadItem>,
     pub degraded_providers: Vec<DashboardProviderSignalReadItem>,
     pub top_error_providers: Vec<DashboardProviderSignalReadItem>,
     pub top_cost_providers: Vec<DashboardCostProviderReadItem>,
@@ -59,20 +57,6 @@ pub fn operational_signals_from_runtime_items(
 ) -> DashboardOperationalSignalsReadModel {
     let provider_items = aggregate_provider_runtime_items(items);
 
-    let mut open_providers = provider_items
-        .iter()
-        .filter(|item| item.runtime_level == ProviderRuntimeLevel::Open)
-        .map(signal_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    sort_provider_signals(&mut open_providers);
-
-    let mut half_open_providers = provider_items
-        .iter()
-        .filter(|item| item.runtime_level == ProviderRuntimeLevel::HalfOpen)
-        .map(signal_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    sort_provider_signals(&mut half_open_providers);
-
     let mut degraded_providers = provider_items
         .iter()
         .filter(|item| item.runtime_level == ProviderRuntimeLevel::Degraded)
@@ -108,8 +92,6 @@ pub fn operational_signals_from_runtime_items(
     top_cost_providers.truncate(5);
 
     DashboardOperationalSignalsReadModel {
-        open_providers,
-        half_open_providers,
         degraded_providers,
         top_error_providers,
         top_cost_providers,
@@ -245,19 +227,11 @@ fn merge_provider_runtime_item(existing: &mut ProviderRuntimeItem, incoming: &Pr
     );
 
     existing.runtime_level = worse_runtime_level(existing.runtime_level, incoming.runtime_level);
-    existing.health_status = worse_health_status(existing.health_status, incoming.health_status);
-    existing.consecutive_failures = existing
-        .consecutive_failures
-        .max(incoming.consecutive_failures);
-    existing.half_open_probe_in_flight |= incoming.half_open_probe_in_flight;
     existing.runtime_state_backend_degraded |= incoming.runtime_state_backend_degraded;
     if existing.runtime_state_backend_error.is_none() {
         existing.runtime_state_backend_error = incoming.runtime_state_backend_error.clone();
     }
 
-    max_optional(&mut existing.opened_at, incoming.opened_at);
-    max_optional(&mut existing.last_failure_at, incoming.last_failure_at);
-    max_optional(&mut existing.last_recovered_at, incoming.last_recovered_at);
     max_optional(&mut existing.last_request_at, incoming.last_request_at);
     max_optional(&mut existing.last_success_at, incoming.last_success_at);
 
@@ -268,7 +242,6 @@ fn merge_provider_runtime_item(existing: &mut ProviderRuntimeItem, incoming: &Pr
     if incoming_is_newer_error || incoming_fills_same_error {
         existing.last_error_at = incoming.last_error_at;
         existing.last_error_summary = incoming.last_error_summary.clone();
-        existing.last_error = incoming.last_error.clone();
     }
 
     existing.enabled_model_count = existing
@@ -360,28 +333,9 @@ fn worse_runtime_level(
 
 fn runtime_level_priority(level: ProviderRuntimeLevel) -> u8 {
     match level {
-        ProviderRuntimeLevel::Open => 5,
-        ProviderRuntimeLevel::HalfOpen => 4,
         ProviderRuntimeLevel::Degraded => 3,
         ProviderRuntimeLevel::Healthy => 2,
         ProviderRuntimeLevel::NoTraffic => 1,
-    }
-}
-
-fn worse_health_status(
-    left: crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus,
-    right: crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus,
-) -> crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus {
-    use crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus;
-
-    match (left, right) {
-        (ProviderRuntimeHealthStatus::Open, _) | (_, ProviderRuntimeHealthStatus::Open) => {
-            ProviderRuntimeHealthStatus::Open
-        }
-        (ProviderRuntimeHealthStatus::HalfOpen, _) | (_, ProviderRuntimeHealthStatus::HalfOpen) => {
-            ProviderRuntimeHealthStatus::HalfOpen
-        }
-        _ => ProviderRuntimeHealthStatus::Healthy,
     }
 }
 
@@ -390,21 +344,27 @@ mod tests {
     use super::*;
     use crate::schema::enum_def::UpstreamProfileType;
     use crate::service::metrics::provider_runtime::{
-        ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeStatusCodeStat,
+        ProviderRuntimeCostStat, ProviderRuntimeStatusCodeStat,
     };
 
     #[test]
     fn dashboard_runtime_overview_is_stateless_and_sorted() {
         let items = vec![
-            runtime_item(1, ProviderRuntimeLevel::Open, 10, 5, 500),
-            runtime_item(2, ProviderRuntimeLevel::HalfOpen, 8, 2, 200),
+            runtime_item(1, ProviderRuntimeLevel::Degraded, 10, 5, 500),
+            runtime_item(2, ProviderRuntimeLevel::Degraded, 8, 2, 200),
             runtime_item(3, ProviderRuntimeLevel::Healthy, 30, 1, 900),
         ];
 
         let read_model = operational_signals_from_runtime_items(&items);
 
-        assert_eq!(read_model.open_providers[0].provider_id, 1);
-        assert_eq!(read_model.half_open_providers[0].provider_id, 2);
+        assert_eq!(
+            read_model
+                .degraded_providers
+                .iter()
+                .map(|item| item.provider_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         assert_eq!(
             read_model
                 .top_cost_providers
@@ -424,10 +384,10 @@ mod tests {
 
     #[test]
     fn dashboard_provider_views_aggregate_source_rows_before_ranking() {
-        let mut open_source = runtime_item(7, ProviderRuntimeLevel::Open, 10, 4, 500);
-        open_source.source_id = 71;
-        open_source.last_error_at = Some(100);
-        open_source.last_error_summary = Some("source 71 failed".to_string());
+        let mut degraded_source = runtime_item(7, ProviderRuntimeLevel::Degraded, 10, 4, 500);
+        degraded_source.source_id = 71;
+        degraded_source.last_error_at = Some(100);
+        degraded_source.last_error_summary = Some("source 71 failed".to_string());
 
         let mut healthy_source = runtime_item(7, ProviderRuntimeLevel::Healthy, 30, 1, 700);
         healthy_source.source_id = 72;
@@ -436,14 +396,14 @@ mod tests {
         healthy_source.last_error_at = Some(200);
         healthy_source.last_error_summary = Some("source 72 failed".to_string());
 
-        let signals = operational_signals_from_runtime_items(&[open_source, healthy_source]);
-        assert_eq!(signals.open_providers.len(), 1);
-        assert_eq!(signals.open_providers[0].provider_id, 7);
-        assert_eq!(signals.open_providers[0].request_count, 40);
-        assert_eq!(signals.open_providers[0].error_count, 5);
-        assert_eq!(signals.open_providers[0].last_error_at, Some(200));
+        let signals = operational_signals_from_runtime_items(&[degraded_source, healthy_source]);
+        assert_eq!(signals.degraded_providers.len(), 1);
+        assert_eq!(signals.degraded_providers[0].provider_id, 7);
+        assert_eq!(signals.degraded_providers[0].request_count, 40);
+        assert_eq!(signals.degraded_providers[0].error_count, 5);
+        assert_eq!(signals.degraded_providers[0].last_error_at, Some(200));
         assert_eq!(
-            signals.open_providers[0].last_error_summary.as_deref(),
+            signals.degraded_providers[0].last_error_summary.as_deref(),
             Some("source 72 failed")
         );
         assert_eq!(signals.top_cost_providers.len(), 1);
@@ -455,7 +415,7 @@ mod tests {
         );
 
         let top = top_providers_from_runtime_items(&[
-            runtime_item(7, ProviderRuntimeLevel::Open, 10, 4, 500),
+            runtime_item(7, ProviderRuntimeLevel::Degraded, 10, 4, 500),
             runtime_item(7, ProviderRuntimeLevel::Healthy, 30, 1, 700),
         ]);
         assert_eq!(top.len(), 1);
@@ -486,14 +446,7 @@ mod tests {
             source_is_default: true,
             enabled_model_count: 1,
             enabled_provider_key_count: 1,
-            health_status: ProviderRuntimeHealthStatus::Healthy,
             runtime_level,
-            consecutive_failures: 0,
-            half_open_probe_in_flight: false,
-            opened_at: None,
-            last_failure_at: None,
-            last_recovered_at: None,
-            last_error: None,
             runtime_state_backend_degraded: false,
             runtime_state_backend_error: None,
             request_count,

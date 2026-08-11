@@ -285,15 +285,6 @@ impl ProviderAdminService {
                 })
             })
             .transpose()?;
-        let clear_required = endpoint
-            .as_ref()
-            .is_some_and(|value| value != &before.endpoint)
-            || input
-                .use_proxy
-                .is_some_and(|value| value != before.use_proxy)
-            || input
-                .is_enabled
-                .is_some_and(|value| value != before.is_enabled);
         if input.is_enabled == Some(true) && !before.is_enabled {
             RequestPatchVariantRepository::validate_source_reactivation(source_id)?;
         }
@@ -309,18 +300,13 @@ impl ProviderAdminService {
                 updated_at: now,
             },
         )?;
-        let mut effects = vec![AdminMutationEffect::catalog_invalidation(
-            AdminCatalogInvalidation::Provider {
+        let effects = vec![
+            AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
                 id: provider_id,
                 key: None,
-            },
-        )];
-        if clear_required {
-            effects.push(AdminMutationEffect::source_circuit_clear(source.id));
-        }
-        effects.push(AdminMutationEffect::audit(source_audit_event(
-            "update", &source,
-        )));
+            }),
+            AdminMutationEffect::audit(source_audit_event("update", &source)),
+        ];
         self.run_runtime_refresh_post_commit(effects).await?;
         Ok(source)
     }
@@ -332,7 +318,6 @@ impl ProviderAdminService {
                 id: provider_id,
                 key: None,
             }),
-            AdminMutationEffect::source_circuit_clear(source.id),
             AdminMutationEffect::audit(source_audit_event("delete", &source)),
         ])
         .await?;
@@ -673,12 +658,6 @@ impl ProviderAdminService {
                 provider_id: id,
             }),
         ];
-        effects.extend(
-            provider_to_delete
-                .upstream_sources
-                .iter()
-                .map(|source| AdminMutationEffect::source_circuit_clear(source.id)),
-        );
         effects.push(AdminMutationEffect::audit(provider_audit_event(
             "delete",
             &provider_to_delete,
@@ -768,7 +747,7 @@ impl ProviderAdminService {
         effects: Vec<AdminMutationEffect>,
     ) -> Result<(), BaseError> {
         let report = self.mutation_runner.execute(&effects).await;
-        if report.has_catalog_failures() || report.has_source_circuit_clear_failures() {
+        if report.has_catalog_failures() {
             return Err(BaseError::ProviderRuntimeRefreshFailed);
         }
         Ok(())
@@ -913,7 +892,6 @@ mod tests {
     };
     use crate::service::admin::mutation::AdminMutationRunner;
     use crate::service::catalog::CatalogService;
-    use crate::service::runtime::SourceCircuitService;
     use crate::service::secret_encryption::SecretEncryptionService;
     use serde_json::json;
 
@@ -1020,10 +998,7 @@ mod tests {
                 .expect("disabled source should accept preconfigured Variant");
 
                 let catalog = Arc::new(CatalogService::new(true).await);
-                let runner = Arc::new(AdminMutationRunner::new(
-                    Arc::clone(&catalog),
-                    Arc::new(SourceCircuitService::new_memory()),
-                ));
+                let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
                 let service = ProviderAdminService::new(
                     Arc::clone(&runner),
                     Arc::new(SecretEncryptionService::from_config(

@@ -59,14 +59,6 @@ fn log_auth_request_rejected(
             response_visibility = proxy_error.response_visibility().as_str(),
             source = source,
         ),
-        ProxyLogLevel::Warn => crate::warn_event!(
-            "auth.request_rejected",
-            protocol = protocol,
-            error_code = proxy_error.code().as_str(),
-            stage = proxy_error.stage().as_str(),
-            response_visibility = proxy_error.response_visibility().as_str(),
-            source = source,
-        ),
         ProxyLogLevel::Error => crate::error_event!(
             "auth.request_rejected",
             protocol = protocol,
@@ -651,11 +643,10 @@ mod tests {
                 )
                 .expect("one-time config should parse");
                 let encryption = Arc::new(SecretEncryptionService::from_config(&config));
-                let admin = Arc::new(AdminServices::new(
-                    Arc::clone(&base.catalog),
-                    Arc::clone(&encryption),
-                    Arc::clone(&base.source_circuit),
-                ));
+    let admin = Arc::new(AdminServices::new(
+        Arc::clone(&base.catalog),
+        Arc::clone(&encryption),
+    ));
                 let mut configured = (*base).clone();
                 configured.admin = admin;
                 configured.secret_encryption = encryption;

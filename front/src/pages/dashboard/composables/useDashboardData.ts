@@ -61,14 +61,10 @@ export function buildEmptyDashboard(): DashboardResponse {
       enabled_source_count: 0,
       healthy_count: 0,
       degraded_count: 0,
-      half_open_count: 0,
-      open_count: 0,
       no_traffic_count: 0,
     },
     runtime_state_backend: buildDefaultRuntimeStateBackendStatus(),
     operational_signals: {
-      open_providers: [],
-      half_open_providers: [],
       degraded_providers: [],
       top_error_providers: [],
       top_cost_providers: [],
@@ -231,10 +227,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
 
   const runtimeBadgeClass = (key: string) => {
     switch (key) {
-      case "open_count":
-        return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-      case "half_open_count":
-        return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
       case "degraded_count":
         return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
       case "healthy_count":
@@ -246,10 +238,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
 
   const runtimeLevelBadgeClass = (level: ProviderRuntimeLevel) => {
     switch (level) {
-      case "open":
-        return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-      case "half_open":
-        return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
       case "degraded":
         return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
       case "healthy":
@@ -386,11 +374,7 @@ export function useDashboardData(options: UseDashboardDataOptions) {
     {
       key: "runtime_issues",
       label: t("dashboard.kpi.runtimeIssues"),
-      value: formatCount(
-        kpiSection.value.runtime.open_count +
-          kpiSection.value.runtime.half_open_count +
-          kpiSection.value.runtime.degraded_count,
-      ),
+      value: formatCount(kpiSection.value.runtime.degraded_count),
       description: `${t("dashboard.kpi.runtimeWindow")} ${runtimeWindowLabel(
         kpiSection.value.runtime.window,
       )}`,
@@ -472,18 +456,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
       label: t("providerRuntimePage.summary.degraded"),
       value: formatCount(resourcesSection.value.runtime.degraded_count),
       description: t("dashboard.runtime.degradedHint"),
-    },
-    {
-      key: "half_open_count",
-      label: t("providerRuntimePage.summary.halfOpen"),
-      value: formatCount(resourcesSection.value.runtime.half_open_count),
-      description: t("dashboard.runtime.halfOpenHint"),
-    },
-    {
-      key: "open_count",
-      label: t("providerRuntimePage.summary.open"),
-      value: formatCount(resourcesSection.value.runtime.open_count),
-      description: t("dashboard.runtime.openHint"),
     },
     {
       key: "no_traffic_count",

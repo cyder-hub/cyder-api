@@ -305,13 +305,15 @@ mod tests {
     }
 
     #[test]
-    fn effective_config_ignores_unknown_nested_fields() {
+    fn effective_config_ignores_retired_provider_governance_fields() {
         let config = load_user_yaml(
             "provider_governance:\n  open_cooldown_seconds: 17\n  unknown_policy: true\n",
         )
-        .expect("unknown nested fields should be ignored");
+        .expect("retired provider governance fields should be ignored");
 
-        assert_eq!(config.provider_governance.open_cooldown_seconds, 17);
+        let serialized = serde_yaml::to_string(&config).expect("effective config should serialize");
+        assert!(!serialized.contains("provider_governance"));
+        assert!(!serialized.contains("open_cooldown_seconds"));
     }
 
     #[test]

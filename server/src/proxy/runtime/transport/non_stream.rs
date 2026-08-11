@@ -30,9 +30,6 @@ use crate::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{apply_final_error_fact, finalize_non_streaming_log_context},
         },
-        source_governance::{
-            record_source_failure_or_release_probe, record_source_success, release_source_probe,
-        },
         util::{
             json_top_level_field_count_from_bytes, parse_utility_usage_normalization, sha256_hex,
         },
@@ -41,7 +38,6 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        runtime::SourceCircuitProbePermit,
         upstream_response::parse_content_encoding,
         upstream_response::{
             ResponseBodyReadTimeouts, UpstreamResponseReadError,
@@ -52,16 +48,13 @@ use crate::{
 use tokio::sync::Mutex as TokioMutex;
 
 pub(super) async fn handle_non_streaming_response(
-    app_state: &Arc<AppState>,
     cancellation: &ProxyCancellationContext,
-    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     upstream_error_body_limit_bytes: usize,
     non_stream_response_limits: &NonStreamResponseConfig,
@@ -107,15 +100,6 @@ pub(super) async fn handle_non_streaming_response(
         Ok(body) => body,
         Err(proxy_error) => {
             cancellation.try_terminate_error(&proxy_error);
-            record_source_failure_or_release_probe(
-                app_state,
-                cancellation,
-                source_id,
-                &model_str,
-                &proxy_error,
-                source_circuit_permit.as_ref(),
-            )
-            .await;
             let completed_at = Utc::now().timestamp_millis();
 
             let mut context = log_context.lock().await;
@@ -185,15 +169,6 @@ pub(super) async fn handle_non_streaming_response(
             parsed_usage_info,
             parsed_usage_normalization,
         );
-        if cancellation.try_provider_success() {
-            record_source_success(
-                app_state,
-                source_id,
-                &model_str,
-                source_circuit_permit.as_ref(),
-            )
-            .await;
-        }
         crate::debug_event!(
             "proxy.request_succeeded_debug",
             request_id = &context.request_id,
@@ -235,7 +210,6 @@ pub(super) async fn handle_non_streaming_response(
             unreachable!("failed upstream response must use capture mode")
         };
         let disclosure_truncated = captured_body.truncated;
-        let hard_limit_reached = captured_body.hard_limit_reached.is_some();
         let hard_limit = captured_body.hard_limit_reached.map(|limit| limit.as_str());
         let decompressed_body = captured_body.captured;
         let mut context = log_context.lock().await;
@@ -274,37 +248,6 @@ pub(super) async fn handle_non_streaming_response(
             ResponseVisibility::NotVisible,
         );
         cancellation.try_terminate_error(&proxy_error);
-        if hard_limit_reached {
-            let governance_error = ProxyError::gateway(
-                ProxyErrorCode::UpstreamResponseError,
-                ExecutionStage::UpstreamResponse,
-                ResponseVisibility::NotVisible,
-                None,
-                format!(
-                    "Provider error response reached the configured {} body limit",
-                    hard_limit.unwrap_or("response")
-                ),
-            );
-            record_source_failure_or_release_probe(
-                app_state,
-                cancellation,
-                source_id,
-                &model_str,
-                &governance_error,
-                source_circuit_permit.as_ref(),
-            )
-            .await;
-        } else {
-            record_source_failure_or_release_probe(
-                app_state,
-                cancellation,
-                source_id,
-                &model_str,
-                &proxy_error,
-                source_circuit_permit.as_ref(),
-            )
-            .await;
-        }
         api_key_request_lease.release().await;
         Err(ProxyRequestFailure {
             error: proxy_error,
@@ -488,7 +431,6 @@ async fn run_guarded_non_stream_worker(
     app_state: Arc<AppState>,
     cancellation: ProxyCancellationContext,
     coordinator: ProxyTerminationCoordinator,
-    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
@@ -496,7 +438,6 @@ async fn run_guarded_non_stream_worker(
     status_code: axum::http::StatusCode,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     proxy_timeouts: ProxyTimeoutConfig,
     non_stream_response_limits: NonStreamResponseConfig,
@@ -534,12 +475,6 @@ async fn run_guarded_non_stream_worker(
     let body_result = tokio::select! {
         biased;
         _ = cancellation.cancelled() => {
-            release_source_probe(
-                &app_state,
-                source_id,
-                source_circuit_permit.as_ref(),
-            )
-            .await;
             return;
         },
         result = &mut read_future => result.map_err(|error| {
@@ -563,15 +498,6 @@ async fn run_guarded_non_stream_worker(
         Ok(body) => body,
         Err(proxy_error) => {
             coordinator.try_terminate_error(&proxy_error);
-            record_source_failure_or_release_probe(
-                &app_state,
-                &cancellation,
-                source_id,
-                &model_str,
-                &proxy_error,
-                source_circuit_permit.as_ref(),
-            )
-            .await;
             finalize_guarded_non_stream_failure(
                 &app_state,
                 &cancellation,
@@ -589,7 +515,6 @@ async fn run_guarded_non_stream_worker(
             return;
         }
     };
-    let upstream_completed_at = Utc::now().timestamp_millis();
     crate::debug_event!(
         "proxy.response_body_read",
         request_id = &request_id,
@@ -620,15 +545,6 @@ async fn run_guarded_non_stream_worker(
             )
         }
     };
-    if cancellation.try_provider_success() {
-        record_source_success(
-            &app_state,
-            source_id,
-            &model_str,
-            source_circuit_permit.as_ref(),
-        )
-        .await;
-    }
     let delivery = send_body_frame(&sender, Ok(final_body), &cancellation, &coordinator).await;
     match delivery {
         Ok(()) => {
@@ -709,14 +625,12 @@ async fn run_guarded_non_stream_worker(
 pub(super) async fn handle_non_streaming_response_guarded(
     app_state: &Arc<AppState>,
     cancellation: &ProxyCancellationContext,
-    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     upstream_error_body_limit_bytes: usize,
     non_stream_response_limits: &NonStreamResponseConfig,
@@ -725,16 +639,13 @@ pub(super) async fn handle_non_streaming_response_guarded(
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     if !response.status().is_success() {
         return handle_non_streaming_response(
-            app_state,
             cancellation,
-            source_id,
             log_context,
             model_str,
             response,
             url,
             cost_catalog_version,
             api_key_request_lease,
-            source_circuit_permit,
             response_mode,
             upstream_error_body_limit_bytes,
             non_stream_response_limits,
@@ -761,7 +672,6 @@ pub(super) async fn handle_non_streaming_response_guarded(
             Arc::clone(app_state),
             cancellation.clone(),
             coordinator.clone(),
-            source_id,
             log_context.clone(),
             model_str,
             response,
@@ -769,7 +679,6 @@ pub(super) async fn handle_non_streaming_response_guarded(
             status_code,
             cost_catalog_version.cloned(),
             api_key_request_lease.with_coordinator(coordinator.clone()),
-            source_circuit_permit,
             response_mode,
             proxy_timeouts,
             non_stream_response_limits.clone(),

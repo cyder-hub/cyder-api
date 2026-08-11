@@ -187,6 +187,13 @@ const transformLabel = (record: RecordRequest) => {
     : $t("recordPage.detailDialog.summary.transformRequired");
 };
 
+const providerKeyIdValue = (record: RecordRequest) => {
+  const id = record.provider_api_key_id;
+  return id != null && id > 0
+    ? `#${id}`
+    : $t("recordPage.detailDialog.summary.providerKeyIdUnknown");
+};
+
 const copyRequestId = async () => {
   const requestId = props.record?.request_id;
   if (!requestId || !(await copyText(requestId))) {
@@ -202,6 +209,11 @@ const overviewItems = computed(() => {
   return [
     { label: $t("recordPage.detailDialog.summary.apiKey"), value: props.apiKeyName },
     { label: $t("recordPage.detailDialog.summary.provider"), value: props.providerName },
+    {
+      label: $t("recordPage.detailDialog.summary.providerKeyId"),
+      value: providerKeyIdValue(record),
+      mono: true,
+    },
     {
       label: $t("recordPage.detailDialog.summary.source"),
       value: formatSourceIdentity(record, $t("recordPage.source.unselected")),

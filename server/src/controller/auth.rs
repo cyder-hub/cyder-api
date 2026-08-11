@@ -1803,7 +1803,6 @@ mod tests {
         app_state.admin = Arc::new(AdminServices::new(
             Arc::clone(&app_state.catalog),
             Arc::clone(&secret_encryption),
-            Arc::clone(&app_state.source_circuit),
         ));
         let service_now = Arc::clone(&now);
         Arc::get_mut(&mut app_state.admin)
@@ -1845,7 +1844,6 @@ mod tests {
         let mut admin = AdminServices::new(
             Arc::clone(&restarted.catalog),
             Arc::clone(&restarted.secret_encryption),
-            Arc::clone(&restarted.source_circuit),
         );
         let service_now = Arc::clone(now);
         admin.auth = Arc::new(ManagerAuthService::new_for_test_with_secret_encryption(

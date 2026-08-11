@@ -29,7 +29,11 @@ export function buildCheckOptions<T>(
 export function formatCheckSourceEvidence(
   result: ProviderCheckResponse,
 ): string {
-  return `${result.profile_type} · source #${result.source_id}`;
+  const keyEvidence =
+    result.provider_api_key_id === null
+      ? "draft"
+      : `key #${result.provider_api_key_id}`;
+  return `${result.profile_type} · source #${result.source_id} · ${keyEvidence}`;
 }
 
 export function buildEnabledSourceOptions(

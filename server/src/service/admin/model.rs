@@ -597,7 +597,6 @@ mod tests {
         ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
     };
     use crate::service::catalog::CatalogService;
-    use crate::service::runtime::SourceCircuitService;
 
     fn provider_input() -> NewProvider {
         NewProvider {
@@ -638,10 +637,7 @@ mod tests {
         db.run_async(async {
             Provider::create(&provider_input(), &source_input()).expect("provider should seed");
             let catalog = Arc::new(CatalogService::new(true).await);
-            let runner = Arc::new(AdminMutationRunner::new(
-                Arc::clone(&catalog),
-                Arc::new(SourceCircuitService::new_memory()),
-            ));
+            let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
             let service = ModelAdminService::new(Arc::clone(&runner));
 
             let model = service
@@ -759,10 +755,7 @@ mod tests {
             })
             .expect("second Source should seed");
             let catalog = Arc::new(CatalogService::new(true).await);
-            let runner = Arc::new(AdminMutationRunner::new(
-                Arc::clone(&catalog),
-                Arc::new(SourceCircuitService::new_memory()),
-            ));
+            let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
             let service = ModelAdminService::new(Arc::clone(&runner));
             let model = service
                 .create_model_with_source_config(

@@ -98,8 +98,6 @@
       "enabledSources": "Enabled Sources",
       "windowDetail": "Window: {window}",
       "degradedHint": "Observed latency or error-rate degradation",
-      "halfOpenHint": "In half-open recovery probing",
-      "openHint": "Currently circuit-open",
       "noTrafficHint": "No traffic in this window",
       "activeProviders": "Active Providers Today",
       "activeModels": "Active Models"
@@ -129,7 +127,7 @@
       "lastChecked": "Checked {time}"
     },
     "operationsGroups": {
-      "unstable": "Unstable Providers",
+      "degraded": "Degraded Providers",
       "topErrors": "Top Error Providers",
       "costHotspots": "Cost Hotspots",
       "costProviders": "Costliest Providers",
@@ -143,7 +141,7 @@
       "lastError": "Last error"
     },
     "empty": {
-      "noUnstableProviders": "No providers are currently in open or half-open state.",
+      "noDegradedProviders": "No providers are currently showing observed degradation.",
       "noErrors": "No providers are currently surfacing error hotspots.",
       "noCostHotspots": "No clear cost hotspots were found.",
       "noCostProviders": "No provider cost hotspots were found.",
@@ -268,8 +266,6 @@
       "enabledSources": "Enabled Sources",
       "healthy": "Healthy",
       "degraded": "Degraded",
-      "halfOpen": "Half Open",
-      "open": "Open",
       "noTraffic": "No Traffic"
     },
     "filter": {
@@ -290,8 +286,6 @@
     "status": {
       "healthy": "Healthy",
       "degraded": "Degraded",
-      "open": "Open",
-      "half_open": "Half-open",
       "no_traffic": "No traffic"
     },
     "sort": {
@@ -311,7 +305,6 @@
       "totalLatency": "Total latency",
       "sampleCoverage": "{count} latency samples",
       "errors": "Errors",
-      "failures": "Consecutive failures",
       "models": "Models",
       "keys": "Keys",
       "cost": "Cost",
@@ -324,11 +317,10 @@
       "provider": "Provider",
       "health": "Health",
       "source": "Source",
-      "sourceCircuit": "Source Circuit"
+      "runtime": "Runtime"
     },
     "source": {
-      "title": "Source",
-      "circuitScope": "Circuit scoped to this Source"
+      "title": "Source"
     },
     "detail": {
       "statusCode": "Status code",
@@ -461,6 +453,8 @@
       "summary": {
         "apiKey": "API Key",
         "provider": "Provider",
+        "providerKeyId": "Provider Key ID",
+        "providerKeyIdUnknown": "Unknown / not selected",
         "source": "Executed Source",
         "sourceId": "Source ID",
         "sourceEndpoint": "Source Endpoint",
@@ -1338,6 +1332,7 @@
     },
     "credentials": {
       "items": "credentials",
+      "keyId": "Key #{id}",
       "enabled": "Enabled",
       "disabled": "Disabled",
       "enable": "Enable",
@@ -1392,7 +1387,7 @@
     "buttonBackToList": "Back to List",
     "sources": {
       "title": "Provider Sources",
-      "description": "Manage the endpoint and runtime state for every upstream Source owned by this Provider.",
+      "description": "Manage the endpoint and persistent enabled/default state for every upstream Source owned by this Provider.",
       "add": "Add Source",
       "addTitle": "Add Source",
       "editTitle": "Edit Source",
@@ -1407,7 +1402,6 @@
       "disabled": "Disabled",
       "default": "Default",
       "defaultHint": "Only one enabled Source can be the Provider default.",
-      "circuitUnavailable": "Circuit unavailable",
       "table": {
         "profile": "Profile",
         "endpoint": "Endpoint",

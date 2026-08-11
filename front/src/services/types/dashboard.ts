@@ -60,8 +60,6 @@ export interface DashboardRuntimeSummary {
   enabled_source_count: number;
   healthy_count: number;
   degraded_count: number;
-  half_open_count: number;
-  open_count: number;
   no_traffic_count: number;
 }
 
@@ -100,8 +98,6 @@ export interface DashboardCostModelItem {
 }
 
 export interface DashboardOperationalSignals {
-  open_providers: DashboardProviderSignalItem[];
-  half_open_providers: DashboardProviderSignalItem[];
   degraded_providers: DashboardProviderSignalItem[];
   top_error_providers: DashboardProviderSignalItem[];
   top_cost_providers: DashboardCostProviderItem[];

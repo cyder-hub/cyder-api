@@ -336,6 +336,13 @@ struct CheckProviderPayload {
     provider_api_key: Option<String>,
 }
 
+#[derive(Serialize)]
+struct SourceEvidence {
+    source_id: i64,
+    profile_type: UpstreamProfileType,
+    provider_api_key_id: Option<i64>,
+}
+
 fn validate_saved_model_source_for_check(model: &Model, source_id: i64) -> Result<(), BaseError> {
     let source_config = get_model_source_config(model.id)?;
     match source_config.source_selection_mode.as_str() {
@@ -730,7 +737,7 @@ async fn check_provider(
     State(app_state): State<Arc<AppState>>,
     Path((id, source_id)): Path<(i64, i64)>,
     Json(payload): Json<CheckProviderPayload>,
-) -> Result<HttpResult<Value>, BaseError> {
+) -> Result<HttpResult<SourceEvidence>, BaseError> {
     let mut selected_model: Option<Model> = None;
     let model_name = match (payload.model_id, payload.model_name) {
         (Some(model_id), _) => {
@@ -779,7 +786,14 @@ async fn check_provider(
         &cache_source,
     )
     .await?;
-    let credential = match (payload.provider_api_key_id, payload.provider_api_key) {
+    // Capture the durable identity before resolving the request credential. Draft
+    // credentials use an internal key_id of 0 for provider-specific materialization,
+    // but that implementation detail must never cross the manager API boundary.
+    let provider_api_key_id = payload.provider_api_key_id;
+    let provider_api_key_identity = provider_api_key_id
+        .map(|key_id| format!("saved:{key_id}"))
+        .unwrap_or_else(|| "draft".to_string());
+    let credential = match (provider_api_key_id, payload.provider_api_key) {
         (Some(key_id), _) => {
             resolve_saved_provider_credential(&provider, &cache_source, key_id, &app_state)
                 .await
@@ -819,13 +833,14 @@ async fn check_provider(
     )
     .await?;
     info!(
-        "provider check succeeded: provider_id={}, source_id={}, profile_type={:?}",
-        provider.id, source.id, source.profile_type,
+        "provider check succeeded: provider_id={}, source_id={}, profile_type={:?}, provider_api_key_identity={}",
+        provider.id, source.id, source.profile_type, provider_api_key_identity,
     );
-    Ok(HttpResult::new(json!({
-        "source_id": source.id,
-        "profile_type": source.profile_type,
-    })))
+    Ok(HttpResult::new(SourceEvidence {
+        source_id: source.id,
+        profile_type: source.profile_type,
+        provider_api_key_id,
+    }))
 }
 
 async fn bootstrap_provider(
@@ -1191,7 +1206,6 @@ mod tests {
         RequestPatchSource, RequestPatchVariantOrigin, RuntimeResolvedRequestPatch,
     };
     use crate::service::provider_credential::ProviderCredential;
-    use crate::service::runtime::SourceHealthStatus;
     use crate::service::secret_encryption::SecretDomain;
     use crate::service::vertex::{cache_vertex_token_for_test, vertex_token_is_cached_for_test};
     use crate::utils::HttpResult;
@@ -1489,6 +1503,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_check_source_evidence_distinguishes_saved_and_draft_keys() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-check-key-evidence-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let upstream = tokio::spawn(async move {
+                    for _ in 0..3 {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        let mut request = vec![0u8; 8192];
+                        let _ = socket.read(&mut request).await.unwrap();
+                        socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                    }
+                });
+
+                let provider_id = 26006;
+                let source_id = 26007;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "check-key-evidence-provider".to_string(),
+                        name: "Check Key Evidence Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Openai,
+                        endpoint: format!("http://{address}/v1"),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                    },
+                )
+                .expect("provider seed should succeed")
+                .provider;
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let created = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/provider_keys"),
+                        json!({
+                            "api_key": "saved-check-secret",
+                            "description": "saved check key"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(created.status(), StatusCode::OK);
+                let created_body = response_json(created).await;
+                let key_id = created_body["data"]["id"]
+                    .as_i64()
+                    .expect("created key should expose an id");
+                assert!(key_id > 0);
+                assert!(!created_body.to_string().contains("saved-check-secret"));
+
+                let saved = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "model_name": "saved-check-model",
+                            "provider_api_key_id": key_id
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(saved.status(), StatusCode::OK);
+                let saved_body = response_json(saved).await;
+                assert_eq!(saved_body["data"]["source_id"], source_id);
+                assert_eq!(saved_body["data"]["provider_api_key_id"], key_id);
+                assert!(!saved_body.to_string().contains("saved-check-secret"));
+
+                let disabled = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/provider/{provider_id}/provider_keys/{key_id}"),
+                        json!({ "is_enabled": false }),
+                    ),
+                )
+                .await;
+                assert_eq!(disabled.status(), StatusCode::OK);
+
+                let disabled_saved = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "model_name": "disabled-saved-check-model",
+                            "provider_api_key_id": key_id
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(disabled_saved.status(), StatusCode::OK);
+                let disabled_saved_body = response_json(disabled_saved).await;
+                assert_eq!(
+                    disabled_saved_body["data"]["provider_api_key_id"],
+                    key_id
+                );
+                assert!(!disabled_saved_body.to_string().contains("saved-check-secret"));
+                let detail = Provider::get_detail_by_id(provider.id)
+                    .expect("provider detail should remain readable");
+                assert!(!detail
+                    .api_keys
+                    .iter()
+                    .find(|summary| summary.id == key_id)
+                    .expect("checked key should remain listed")
+                    .is_enabled);
+
+                let draft = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "model_name": "draft-check-model",
+                            "provider_api_key": "draft-check-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(draft.status(), StatusCode::OK);
+                let draft_body = response_json(draft).await;
+                assert_eq!(draft_body["data"]["provider_api_key_id"], Value::Null);
+                assert!(!draft_body.to_string().contains("draft-check-secret"));
+                assert_ne!(draft_body["data"]["provider_api_key_id"], 0);
+
+                timeout(Duration::from_secs(2), upstream)
+                    .await
+                    .expect("all key evidence checks should reach upstream")
+                    .expect("upstream fixture should finish");
+                assert!(Provider::get_by_id(provider.id).is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn saved_model_check_enforces_source_scope_before_any_upstream_call() {
         let test_db_context =
             TestDbContext::new_sqlite("controller-provider-check-source-scope-http.sqlite");
@@ -1580,6 +1749,8 @@ mod tests {
                 assert_eq!(valid.status(), StatusCode::OK);
                 let valid_body = response_json(valid).await;
                 assert_eq!(valid_body["data"]["source_id"], checked_source_id);
+                assert_eq!(valid_body["data"]["provider_api_key_id"], Value::Null);
+                assert!(!valid_body.to_string().contains("draft-check-secret"));
                 assert!(
                     request_rx
                         .await
@@ -2203,23 +2374,6 @@ mod tests {
                     .as_i64()
                     .expect("source id should be returned");
 
-                for _ in 0..5 {
-                    app_state
-                        .source_circuit
-                        .record_source_failure(source_id, "stale source failure".to_string(), None)
-                        .await
-                        .expect("source failure should record");
-                }
-                assert_eq!(
-                    app_state
-                        .source_circuit
-                        .get_source_health_snapshot(source_id)
-                        .await
-                        .expect("source snapshot should load")
-                        .status,
-                    SourceHealthStatus::Open
-                );
-
                 let default_only_response = send(
                     &app_state,
                     json_request(
@@ -2235,16 +2389,6 @@ mod tests {
                 )
                 .await;
                 assert_eq!(default_only_response.status(), StatusCode::OK);
-                assert_eq!(
-                    app_state
-                        .source_circuit
-                        .get_source_health_snapshot(source_id)
-                        .await
-                        .expect("source snapshot should load")
-                        .status,
-                    SourceHealthStatus::Open,
-                    "default-only changes must not clear source circuit state"
-                );
 
                 let update_response = send(
                     &app_state,
@@ -2267,28 +2411,7 @@ mod tests {
                     "https://api.example.com/v1/updated"
                 );
                 assert_eq!(update_body["data"]["is_default"], true);
-                assert_eq!(
-                    app_state
-                        .source_circuit
-                        .get_source_health_snapshot(source_id)
-                        .await
-                        .expect("source snapshot should load")
-                        .status,
-                    SourceHealthStatus::Healthy,
-                    "endpoint/proxy changes must clear source circuit state"
-                );
 
-                for _ in 0..5 {
-                    app_state
-                        .source_circuit
-                        .record_source_failure(
-                            source_id,
-                            "disabled source failure".to_string(),
-                            None,
-                        )
-                        .await
-                        .expect("source failure should record");
-                }
                 let disable_response = send(
                     &app_state,
                     json_request(
@@ -2303,28 +2426,7 @@ mod tests {
                 )
                 .await;
                 assert_eq!(disable_response.status(), StatusCode::OK);
-                assert_eq!(
-                    app_state
-                        .source_circuit
-                        .get_source_health_snapshot(source_id)
-                        .await
-                        .expect("source snapshot should load")
-                        .status,
-                    SourceHealthStatus::Healthy,
-                    "enabled-to-disabled changes must clear source circuit state"
-                );
 
-                for _ in 0..5 {
-                    app_state
-                        .source_circuit
-                        .record_source_failure(
-                            source_id,
-                            "re-enabled source failure".to_string(),
-                            None,
-                        )
-                        .await
-                        .expect("source failure should record");
-                }
                 let enable_response = send(
                     &app_state,
                     json_request(
@@ -2339,16 +2441,6 @@ mod tests {
                 )
                 .await;
                 assert_eq!(enable_response.status(), StatusCode::OK);
-                assert_eq!(
-                    app_state
-                        .source_circuit
-                        .get_source_health_snapshot(source_id)
-                        .await
-                        .expect("source snapshot should load")
-                        .status,
-                    SourceHealthStatus::Healthy,
-                    "disabled-to-enabled changes must clear source circuit state"
-                );
 
                 let second_provider_response = send(
                     &app_state,
@@ -2420,16 +2512,6 @@ mod tests {
                 .await;
                 assert_eq!(delete_response.status(), StatusCode::OK);
                 assert!(response_json(delete_response).await["data"].is_null());
-                assert_eq!(
-                    app_state
-                        .source_circuit
-                        .get_source_health_snapshot(source_id)
-                        .await
-                        .expect("deleted source snapshot should load")
-                        .status,
-                    SourceHealthStatus::Healthy,
-                    "deleting a source must clear source circuit state"
-                );
                 let provider_after_delete = Provider::get_by_id(provider_id)
                     .expect("provider should remain after deleting its final source");
                 assert!(provider_after_delete.upstream_sources.is_empty());
@@ -2691,9 +2773,17 @@ mod tests {
             let properties = document["components"]["schemas"][schema]["properties"]
                 .as_mapping()
                 .expect("Source evidence properties should exist");
-            for field in ["source_id", "profile_type"] {
+            for field in ["source_id", "profile_type", "provider_api_key_id"] {
                 assert!(properties.contains_key(serde_yaml::Value::from(field)));
             }
+            let key_id = &properties["provider_api_key_id"];
+            assert_eq!(
+                key_id["type"].as_sequence(),
+                Some(&vec![
+                    serde_yaml::Value::from("integer"),
+                    serde_yaml::Value::from("null"),
+                ])
+            );
             assert!(!properties.contains_key(serde_yaml::Value::from("source_key")));
         }
 

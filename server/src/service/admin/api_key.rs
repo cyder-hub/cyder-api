@@ -334,10 +334,7 @@ mod tests {
     ) {
         let catalog = Arc::new(CatalogService::new(true).await);
         let encryption = Arc::new(SecretEncryptionService::from_config(&config(mode)));
-        let mutation_runner = Arc::new(AdminMutationRunner::new(
-            Arc::clone(&catalog),
-            Arc::new(crate::service::runtime::SourceCircuitService::new_memory()),
-        ));
+        let mutation_runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
         (
             ApiKeyAdminService::new(mutation_runner, Arc::clone(&encryption)),
             catalog,

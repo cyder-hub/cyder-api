@@ -5,8 +5,6 @@ import type {
 import type { ProviderRuntimeLevelMap } from "../types";
 
 const runtimeLevelPriority: Record<ProviderRuntimeLevel, number> = {
-  open: 5,
-  half_open: 4,
   degraded: 3,
   healthy: 2,
   no_traffic: 1,

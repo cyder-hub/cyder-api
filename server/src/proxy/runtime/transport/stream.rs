@@ -35,15 +35,11 @@ use crate::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{finalize_streaming_log_context, record_streaming_completion},
         },
-        source_governance::{
-            record_source_failure_or_release_probe, record_source_success, release_source_probe,
-        },
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        runtime::SourceCircuitProbePermit,
         transform::StreamTransformer,
         upstream_response::{UpstreamContentEncoding, parse_content_encoding},
     },
@@ -241,25 +237,6 @@ fn watchdog_timeout_phase(
     }
 }
 
-async fn record_guarded_source_failure(
-    app_state: &Arc<AppState>,
-    cancellation: &ProxyCancellationContext,
-    source_id: i64,
-    model_str: &str,
-    source_circuit_permit: Option<&SourceCircuitProbePermit>,
-    proxy_error: &ProxyError,
-) {
-    record_source_failure_or_release_probe(
-        app_state,
-        cancellation,
-        source_id,
-        model_str,
-        proxy_error,
-        source_circuit_permit,
-    )
-    .await;
-}
-
 async fn finalize_guarded_stream_failure(
     app_state: &Arc<AppState>,
     cancellation: &ProxyCancellationContext,
@@ -404,7 +381,6 @@ async fn run_guarded_stream_worker(
     app_state: Arc<AppState>,
     cancellation: ProxyCancellationContext,
     coordinator: ProxyTerminationCoordinator,
-    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
@@ -412,7 +388,6 @@ async fn run_guarded_stream_worker(
     status_code: StatusCode,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    source_circuit_permit: Option<SourceCircuitProbePermit>,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     proxy_timeouts: ProxyTimeoutConfig,
@@ -444,15 +419,7 @@ async fn run_guarded_stream_worker(
         );
         let read_result = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => {
-                release_source_probe(
-                    &app_state,
-                    source_id,
-                    source_circuit_permit.as_ref(),
-                )
-                .await;
-                return;
-            },
+            _ = cancellation.cancelled() => return,
             result = timeout_at(read_deadline, stream.next()) => match result {
                 Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
                 Ok(Some(Err(error))) => {
@@ -493,12 +460,6 @@ async fn run_guarded_stream_worker(
                     format!("LLM stream exceeded the {phase:?} timeout"),
                 )),
                 None => {
-                    release_source_probe(
-                        &app_state,
-                        source_id,
-                        source_circuit_permit.as_ref(),
-                    )
-                    .await;
                     return;
                 }
             },
@@ -522,15 +483,6 @@ async fn run_guarded_stream_worker(
                             failure.operator_message,
                         );
                         coordinator.try_terminate_error(&proxy_error);
-                        record_guarded_source_failure(
-                            &app_state,
-                            &cancellation,
-                            source_id,
-                            &model_str,
-                            source_circuit_permit.as_ref(),
-                            &proxy_error,
-                        )
-                        .await;
                         finalize_guarded_stream_failure(
                             &app_state,
                             &cancellation,
@@ -564,15 +516,6 @@ async fn run_guarded_stream_worker(
             Ok(None) => parser.finish(),
             Err(proxy_error) => {
                 coordinator.try_terminate_error(&proxy_error);
-                record_guarded_source_failure(
-                    &app_state,
-                    &cancellation,
-                    source_id,
-                    &model_str,
-                    source_circuit_permit.as_ref(),
-                    &proxy_error,
-                )
-                .await;
                 finalize_guarded_stream_failure(
                     &app_state,
                     &cancellation,
@@ -602,15 +545,6 @@ async fn run_guarded_stream_worker(
                         format!("SSE response parsing failed: {parse_error}"),
                     );
                     coordinator.try_terminate_error(&proxy_error);
-                    record_guarded_source_failure(
-                        &app_state,
-                        &cancellation,
-                        source_id,
-                        &model_str,
-                        source_circuit_permit.as_ref(),
-                        &proxy_error,
-                    )
-                    .await;
                     finalize_guarded_stream_failure(
                         &app_state,
                         &cancellation,
@@ -651,8 +585,6 @@ async fn run_guarded_stream_worker(
                     )
                     .await;
                     if let Err(delivery_error) = delivery {
-                        release_source_probe(&app_state, source_id, source_circuit_permit.as_ref())
-                            .await;
                         let proxy_error = match delivery_error {
                             FrameDeliveryError::ClientCancelled
                             | FrameDeliveryError::DownstreamDropped => {
@@ -684,15 +616,6 @@ async fn run_guarded_stream_worker(
                         return;
                     }
                     if downstream_openai_done {
-                        if cancellation.try_provider_success() {
-                            record_source_success(
-                                &app_state,
-                                source_id,
-                                &model_str,
-                                source_circuit_permit.as_ref(),
-                            )
-                            .await;
-                        }
                         finalize_guarded_stream_success(
                             &app_state,
                             &cancellation,
@@ -723,17 +646,7 @@ async fn run_guarded_stream_worker(
     }
 
     if cancellation.is_cancelled() {
-        release_source_probe(&app_state, source_id, source_circuit_permit.as_ref()).await;
         return;
-    }
-    if cancellation.try_provider_success() {
-        record_source_success(
-            &app_state,
-            source_id,
-            &model_str,
-            source_circuit_permit.as_ref(),
-        )
-        .await;
     }
     if downstream_protocol == DownstreamProtocol::Openai
         && upstream_protocol == UpstreamProtocol::Gemini
@@ -753,7 +666,6 @@ async fn run_guarded_stream_worker(
         )
         .await;
         if let Err(delivery_error) = delivery {
-            release_source_probe(&app_state, source_id, source_circuit_permit.as_ref()).await;
             match delivery_error {
                 FrameDeliveryError::ClientCancelled | FrameDeliveryError::DownstreamDropped => {
                     cancellation.cancel_now("downstream stopped consuming the guarded stream body");
@@ -802,14 +714,12 @@ async fn run_guarded_stream_worker(
 pub(super) async fn handle_streaming_response_guarded(
     app_state: &Arc<AppState>,
     cancellation: ProxyCancellationContext,
-    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    source_circuit_permit: Option<SourceCircuitProbePermit>,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     proxy_timeouts: ProxyTimeoutConfig,
@@ -831,15 +741,6 @@ pub(super) async fn handle_streaming_response_guarded(
             Some(log_id),
             &proxy_error,
         );
-        record_source_failure_or_release_probe(
-            app_state,
-            &cancellation,
-            source_id,
-            &model_str,
-            &proxy_error,
-            source_circuit_permit.as_ref(),
-        )
-        .await;
         let mut context = log_context.lock().await;
         finalize_streaming_log_context(
             &mut context,
@@ -864,7 +765,6 @@ pub(super) async fn handle_streaming_response_guarded(
             Arc::clone(app_state),
             cancellation.clone(),
             coordinator.clone(),
-            source_id,
             log_context.clone(),
             model_str,
             response,
@@ -872,7 +772,6 @@ pub(super) async fn handle_streaming_response_guarded(
             status_code,
             cost_catalog_version.clone(),
             api_key_request_lease.with_coordinator(coordinator.clone()),
-            source_circuit_permit,
             downstream_protocol,
             upstream_protocol,
             proxy_timeouts,

@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
+use bb8_redis::redis as redis_client;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::{CacheBackendType, FinalConfig, RuntimeStateBackendType};
-use crate::service::redis::{self, RedisPool};
+use crate::service::redis::{RedisPool, get_pool};
 
 use super::api_key_governance::{
     ApiKeyGovernanceService, MemoryApiKeyRuntimeStore, RedisApiKeyRuntimeStore,
@@ -13,10 +14,6 @@ use super::api_key_governance::{
 use super::provider_key_selection::{
     MemoryProviderKeyCursorStore, ProviderKeyCursorStore, RedisProviderKeyCursorStore,
 };
-use super::source_circuit::{
-    MemorySourceCircuitStore, RedisSourceCircuitStore, SourceCircuitService,
-};
-
 #[derive(Debug, Error)]
 pub enum RuntimeStateBackendError {
     #[error("runtime state configuration error: {0}")]
@@ -49,6 +46,45 @@ pub struct RuntimeStateBackendOperatorStatus {
     pub last_checked_at: i64,
 }
 
+#[derive(Clone)]
+pub struct RuntimeStateBackendHealth {
+    effective_backend: RuntimeStateBackendType,
+    redis_pool: Option<RedisPool>,
+}
+
+impl RuntimeStateBackendHealth {
+    #[cfg(test)]
+    pub(crate) fn redis_without_pool() -> Self {
+        Self {
+            effective_backend: RuntimeStateBackendType::Redis,
+            redis_pool: None,
+        }
+    }
+
+    pub(crate) async fn check(&self) -> Option<String> {
+        if self.effective_backend != RuntimeStateBackendType::Redis {
+            return None;
+        }
+
+        let Some(pool) = self.redis_pool.as_ref() else {
+            return Some("redis runtime backend pool is unavailable".to_string());
+        };
+        let mut connection = match pool.get().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                return Some(format!(
+                    "failed to get redis health-check connection: {error}"
+                ));
+            }
+        };
+        redis_client::cmd("PING")
+            .query_async::<()>(&mut *connection)
+            .await
+            .err()
+            .map(|error| format!("redis runtime backend PING failed: {error}"))
+    }
+}
+
 impl RuntimeStateBackendStatus {
     pub fn to_operator_status(
         &self,
@@ -77,8 +113,8 @@ impl RuntimeStateBackendStatus {
 
 pub struct RuntimeStateBackendBundle {
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
-    pub source_circuit: Arc<SourceCircuitService>,
     pub provider_key_cursor_store: Arc<dyn ProviderKeyCursorStore>,
+    pub health: RuntimeStateBackendHealth,
     pub status: RuntimeStateBackendStatus,
 }
 
@@ -105,7 +141,7 @@ impl RuntimeStateBackendBundle {
         {
             None
         } else {
-            redis::get_pool().await
+            get_pool().await
         };
 
         Self::from_config_with_pool(config, force_memory_backend, redis_pool)
@@ -190,11 +226,11 @@ impl RuntimeStateBackendBundle {
             api_key_governance: Arc::new(ApiKeyGovernanceService::new(Arc::new(
                 MemoryApiKeyRuntimeStore::default(),
             ))),
-            source_circuit: Arc::new(SourceCircuitService::new_with_config(
-                Arc::new(MemorySourceCircuitStore::default()),
-                config.provider_governance.clone(),
-            )),
             provider_key_cursor_store: Arc::new(MemoryProviderKeyCursorStore::default()),
+            health: RuntimeStateBackendHealth {
+                effective_backend: RuntimeStateBackendType::Memory,
+                redis_pool: None,
+            },
             status,
         }
     }
@@ -228,20 +264,15 @@ impl RuntimeStateBackendBundle {
                     state_ttl,
                 ),
             ))),
-            source_circuit: Arc::new(SourceCircuitService::new_with_config(
-                Arc::new(RedisSourceCircuitStore::new(
-                    pool.clone(),
-                    key_prefix.clone(),
-                    config.runtime_state.provider_circuit_probe_lease_ttl(),
-                    state_ttl,
-                )),
-                config.provider_governance.clone(),
-            )),
             provider_key_cursor_store: Arc::new(RedisProviderKeyCursorStore::new(
                 pool.clone(),
                 key_prefix.clone(),
                 state_ttl,
             )),
+            health: RuntimeStateBackendHealth {
+                effective_backend: RuntimeStateBackendType::Redis,
+                redis_pool: Some(pool),
+            },
             status,
         }
     }
@@ -260,4 +291,71 @@ fn log_backend_selected(status: &RuntimeStateBackendStatus) {
 
 fn cache_backend_name(backend: CacheBackendType) -> &'static str {
     backend.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn memory_backend_health_does_not_probe_remote_services() {
+        let health = RuntimeStateBackendHealth {
+            effective_backend: RuntimeStateBackendType::Memory,
+            redis_pool: None,
+        };
+
+        assert_eq!(health.check().await, None);
+    }
+
+    #[tokio::test]
+    async fn redis_backend_health_reports_missing_pool() {
+        let health = RuntimeStateBackendHealth {
+            effective_backend: RuntimeStateBackendType::Redis,
+            redis_pool: None,
+        };
+
+        assert_eq!(
+            health.check().await.as_deref(),
+            Some("redis runtime backend pool is unavailable")
+        );
+    }
+
+    #[test]
+    fn redis_unavailable_fallback_preserves_operator_backend_status() {
+        let mut config = crate::config::CONFIG.clone();
+        config.runtime_state.backend = RuntimeStateBackendType::Redis;
+        config.runtime_state.fallback_to_memory = true;
+        config.redis = None;
+
+        let bundle = RuntimeStateBackendBundle::from_config_with_pool(&config, false, None)
+            .expect("redis fallback should initialize memory runtime state");
+
+        assert_eq!(
+            bundle.status.configured_backend,
+            RuntimeStateBackendType::Redis
+        );
+        assert_eq!(
+            bundle.status.effective_backend,
+            RuntimeStateBackendType::Memory
+        );
+        assert_eq!(
+            bundle.status.fallback_reason.as_deref(),
+            Some("redis_unavailable")
+        );
+
+        let operator_status = bundle.status.to_operator_status(
+            config.cache.catalog_backend(),
+            config.cache.catalog_backend(),
+            None,
+            None,
+            1,
+        );
+        assert_eq!(operator_status.runtime_configured_backend, "redis");
+        assert_eq!(operator_status.runtime_effective_backend, "memory");
+        assert!(operator_status.runtime_degraded);
+        assert_eq!(
+            operator_status.last_error.as_deref(),
+            Some("redis pool is unavailable")
+        );
+    }
 }

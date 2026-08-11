@@ -107,7 +107,6 @@ pub(crate) fn log_proxy_error_event(
     let message = proxy_error_event_message(event, request_id, log_id, error);
     match error.operator_log_level() {
         ProxyLogLevel::Debug => log::debug!(target: "cyder_api::proxy", "{message}"),
-        ProxyLogLevel::Warn => log::warn!(target: "cyder_api::proxy", "{message}"),
         ProxyLogLevel::Error => log::error!(target: "cyder_api::proxy", "{message}"),
     }
 }

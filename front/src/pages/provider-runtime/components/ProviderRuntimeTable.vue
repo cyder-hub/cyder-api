@@ -41,7 +41,7 @@ const { t: $t } = useAppI18n();
         <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
           <TableHead>{{ $t("providerRuntimePage.table.provider") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.table.source") }}</TableHead>
-          <TableHead>{{ $t("providerRuntimePage.table.sourceCircuit") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.table.runtime") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.requests") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.firstResponseBody") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.ttft") }}</TableHead>
@@ -100,10 +100,6 @@ const { t: $t } = useAppI18n();
             <Badge :class="props.runtimeBadgeClass(item.runtime_level)">
               {{ props.runtimeLevelLabel(item.runtime_level) }}
             </Badge>
-            <p class="mt-2 text-xs text-gray-500">
-              {{ $t("providerRuntimePage.metrics.failures") }}:
-              {{ item.consecutive_failures }}
-            </p>
           </TableCell>
           <TableCell class="align-top">
             <p class="font-mono text-sm text-gray-900">
@@ -138,9 +134,7 @@ const { t: $t } = useAppI18n();
             </p>
             <p class="mt-1 break-words text-xs text-gray-500">
               {{
-                item.last_error_summary ||
-                item.last_error ||
-                $t("providerRuntimePage.detail.noError")
+                item.last_error_summary || $t("providerRuntimePage.detail.noError")
               }}
             </p>
             <p class="mt-1 text-xs text-gray-400">

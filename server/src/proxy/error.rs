@@ -395,24 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_governance_errors_use_stable_codes() {
-        for code in [
-            ProxyErrorCode::ProviderCircuitOpenError,
-            ProxyErrorCode::ProviderHalfOpenProbeInFlightError,
-        ] {
-            let error = ProxyError::gateway(
-                code,
-                ExecutionStage::Governance,
-                ResponseVisibility::NotVisible,
-                None,
-                "operator detail",
-            );
-            assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(error.operator_log_level(), ProxyLogLevel::Warn);
-        }
-    }
-
-    #[test]
     fn request_patch_conflict_uses_dedicated_code() {
         let error = ProxyError::gateway(
             ProxyErrorCode::RequestPatchConflictError,
@@ -430,10 +412,7 @@ mod tests {
     fn operator_log_level_is_derived_from_stable_code() {
         for code in ProxyErrorCode::ALL {
             let level = code.operator_log_level();
-            assert!(matches!(
-                level,
-                ProxyLogLevel::Debug | ProxyLogLevel::Warn | ProxyLogLevel::Error
-            ));
+            assert!(matches!(level, ProxyLogLevel::Debug | ProxyLogLevel::Error));
         }
     }
 }

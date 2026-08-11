@@ -61,5 +61,7 @@ test("record identity labels and copy feedback stay aligned in both locales", as
     assert.ok(messages.recordPage.detailDialog.copySuccess);
     assert.ok(messages.recordPage.detailDialog.copyFailed);
     assert.ok(messages.recordPage.detailDialog.summary.clientRequestId);
+    assert.ok(messages.recordPage.detailDialog.summary.providerKeyId);
+    assert.ok(messages.recordPage.detailDialog.summary.providerKeyIdUnknown);
   }
 });

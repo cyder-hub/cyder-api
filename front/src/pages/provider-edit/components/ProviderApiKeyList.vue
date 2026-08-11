@@ -41,6 +41,9 @@
             <code class="rounded bg-gray-100 px-2 py-1 text-xs text-gray-800">
               {{ keyMask(keyItem) }}
             </code>
+            <code class="rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-500">
+              {{ $t("providerEditPage.credentials.keyId", { id: keyItem.id }) }}
+            </code>
             <Badge :variant="keyItem.is_enabled ? 'secondary' : 'outline'">
               {{
                 $t(

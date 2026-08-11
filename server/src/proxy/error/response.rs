@@ -357,8 +357,6 @@ const fn openai_error_type(code: ProxyErrorCode) -> &'static str {
         | ProxyErrorCode::UpstreamConnectError
         | ProxyErrorCode::UpstreamRequestError
         | ProxyErrorCode::UpstreamResponseError
-        | ProxyErrorCode::ProviderCircuitOpenError
-        | ProxyErrorCode::ProviderHalfOpenProbeInFlightError
         | ProxyErrorCode::UpstreamServiceError
         | ProxyErrorCode::UpstreamTimeoutError => "server_error",
     }
@@ -392,8 +390,6 @@ const fn anthropic_error_type(code: ProxyErrorCode) -> &'static str {
         | ProxyErrorCode::UpstreamConnectError
         | ProxyErrorCode::UpstreamRequestError
         | ProxyErrorCode::UpstreamResponseError
-        | ProxyErrorCode::ProviderCircuitOpenError
-        | ProxyErrorCode::ProviderHalfOpenProbeInFlightError
         | ProxyErrorCode::UpstreamServiceError => "api_error",
         ProxyErrorCode::UpstreamTimeoutError => "timeout_error",
     }
@@ -426,9 +422,7 @@ const fn gemini_error_status(code: ProxyErrorCode) -> &'static str {
         | ProxyErrorCode::UpstreamConnectError
         | ProxyErrorCode::UpstreamRequestError
         | ProxyErrorCode::UpstreamResponseError => "UNKNOWN",
-        ProxyErrorCode::ProviderCircuitOpenError
-        | ProxyErrorCode::ProviderHalfOpenProbeInFlightError
-        | ProxyErrorCode::UpstreamServiceError => "UNAVAILABLE",
+        ProxyErrorCode::UpstreamServiceError => "UNAVAILABLE",
         ProxyErrorCode::UpstreamTimeoutError => "DEADLINE_EXCEEDED",
     }
 }
@@ -613,7 +607,7 @@ mod tests {
         retry_after: Option<&'static str>,
     }
 
-    const EXPECTED_PROXY_CONTRACTS: [ExpectedProxyContract; 29] = [
+    const EXPECTED_PROXY_CONTRACTS: [ExpectedProxyContract; 27] = [
         ExpectedProxyContract {
             code: ProxyErrorCode::AuthenticationError,
             stable_code: "authentication_error",
@@ -774,24 +768,6 @@ mod tests {
                 "permission_error",
                 "PERMISSION_DENIED",
             ],
-            upstream: None,
-            retry_after: None,
-        },
-        ExpectedProxyContract {
-            code: ProxyErrorCode::ProviderCircuitOpenError,
-            stable_code: "provider_circuit_open_error",
-            status: 503,
-            message: "The upstream provider is temporarily unavailable.",
-            categories: ["server_error", "server_error", "api_error", "UNAVAILABLE"],
-            upstream: None,
-            retry_after: None,
-        },
-        ExpectedProxyContract {
-            code: ProxyErrorCode::ProviderHalfOpenProbeInFlightError,
-            stable_code: "provider_half_open_probe_in_flight_error",
-            status: 503,
-            message: "The upstream provider probe is already in progress.",
-            categories: ["server_error", "server_error", "api_error", "UNAVAILABLE"],
             upstream: None,
             retry_after: None,
         },
@@ -1197,7 +1173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_error_contracts_cover_all_116_proxy_and_8_router_combinations() {
+    async fn protocol_error_contracts_cover_all_108_proxy_and_8_router_combinations() {
         assert_eq!(EXPECTED_PROXY_CONTRACTS.len(), ProxyErrorCode::ALL.len());
         assert_eq!(EXPECTED_ROUTER_CONTRACTS.len(), RouterRejection::ALL.len());
         assert_eq!(DownstreamProtocol::ALL.len(), 4);
@@ -1226,7 +1202,7 @@ mod tests {
                 proxy_combinations += 1;
             }
         }
-        assert_eq!(proxy_combinations, 116);
+        assert_eq!(proxy_combinations, 108);
 
         let mut router_combinations = 0;
         for (expected, actual_rejection) in

@@ -52,6 +52,21 @@ test("provider checks use one dialog, enabled automatic candidates, and impact p
   assert.match(sourceState, /impactUnavailable/);
 });
 
+test("Provider Key rows and Record Detail expose the same durable Provider Key ID", async () => {
+  const [keys, detail] = await Promise.all([
+    readSource("src/pages/provider-edit/components/ProviderApiKeyList.vue"),
+    readSource("src/pages/record/components/RecordDetailSheet.vue"),
+  ]);
+
+  assert.match(keys, /keyItem\.id/);
+  assert.match(keys, /providerEditPage\.credentials\.keyId/);
+  assert.match(keys, /font-mono/);
+  assert.match(detail, /record\.provider_api_key_id/);
+  assert.match(detail, /providerKeyId/);
+  assert.match(detail, /id > 0/);
+  assert.match(detail, /providerKeyIdUnknown/);
+});
+
 test("credential secrets are opaque text while dialog cleanup and reveal governance remain", async () => {
   const [form, key, secretState, security] = await Promise.all([
     readSource("src/pages/provider-edit/components/ProviderBaseInfoForm.vue"),
@@ -90,11 +105,11 @@ test("runtime provider badges aggregate the worst Source state instead of overwr
   assert.deepEqual(
     aggregateProviderRuntimeLevels([
       { provider_id: 7, runtime_level: "healthy" },
-      { provider_id: 7, runtime_level: "open" },
+      { provider_id: 7, runtime_level: "degraded" },
       { provider_id: 8, runtime_level: "degraded" },
-      { provider_id: 8, runtime_level: "half_open" },
+      { provider_id: 8, runtime_level: "healthy" },
     ]),
-    { 7: "open", 8: "half_open" },
+    { 7: "degraded", 8: "degraded" },
   );
 });
 
@@ -161,7 +176,7 @@ test("Source mutations reconcile committed state after post-commit failures", as
   assert.equal((sources.match(/await recoverAfterMutationFailure\(\)/g) || []).length, 3);
   assert.match(sourceList, /getProviderRuntimeSnapshot/);
   assert.match(sourceList, /sourceRuntime\(source\.id\)/);
-  assert.match(sourceList, /providerEditPage\.sources\.circuitUnavailable/);
+  assert.doesNotMatch(sourceList, /circuitUnavailable/);
 });
 
 test("Record Source options flatten the aggregate Source catalog", () => {

@@ -80,11 +80,9 @@ impl MetricsService {
         let overview = get_dashboard_overview_stats()?;
         let today = self.dashboard_today_stats(timezone)?;
         let window = self.default_provider_runtime_window();
-        let runtime_items = self
-            .build_provider_runtime_items(app_state, window, true)
-            .await?;
+        let mut runtime_items = self.build_provider_runtime_items(window, true).await?;
         let runtime = self
-            .provider_runtime_summary_from_items(app_state, window, &runtime_items, true)
+            .provider_runtime_summary_from_items(app_state, window, &mut runtime_items, true)
             .await?;
         Ok(MetricsDashboardResourcesReadModel {
             overview,

@@ -61,7 +61,7 @@ const {
   runtimeLevelBadgeClass,
   runtimeLevelLabel,
   showCostHotspots,
-  unstableProviders,
+  degradedProviders,
 } = dashboardOperations;
 
 const goToRuntime = () => {
@@ -124,7 +124,7 @@ onMounted(() => {
             :loading="operationsLoading"
             :error="operationsError"
             :operations-section="operationsSection"
-            :unstable-providers="unstableProviders"
+            :degraded-providers="degradedProviders"
             :show-cost-hotspots="showCostHotspots"
             :format-count="formatCount"
             :format-percentage="formatPercentage"

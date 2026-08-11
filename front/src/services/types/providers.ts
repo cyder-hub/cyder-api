@@ -109,6 +109,7 @@ export interface ProviderCheckPayload {
 export interface ProviderCheckResponse {
   source_id: number;
   profile_type: string;
+  provider_api_key_id: number | null;
 }
 
 export interface ProviderBootstrapPayload {

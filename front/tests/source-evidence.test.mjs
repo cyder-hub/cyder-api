@@ -93,8 +93,10 @@ test("Record and Runtime views render Source-first evidence without legacy Runti
   assert.match(recordDetail, /transformLabel/);
   assert.match(recordDetail, /transformRequired/);
   assert.match(runtimePage, /source_id: String\(item\.source_id\)/);
-  assert.match(runtimeCards, /providerRuntimePage\.source\.circuitScope/);
-  assert.match(runtimeTable, /providerRuntimePage\.table\.sourceCircuit/);
+  assert.match(runtimeCards, /providerRuntimePage\.source\.title/);
+  assert.match(runtimeTable, /providerRuntimePage\.table\.runtime/);
+  assert.doesNotMatch(runtimeCards, /circuitScope/);
+  assert.doesNotMatch(runtimeTable, /sourceCircuit/);
   assert.doesNotMatch(runtimeCards, /\{\{\s*item\.source_endpoint\s*\}\}/);
   assert.doesNotMatch(runtimeTable, /\{\{\s*item\.source_endpoint\s*\}\}/);
 });

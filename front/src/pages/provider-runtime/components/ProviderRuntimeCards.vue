@@ -95,7 +95,7 @@ const { t: $t } = useI18n();
             {{ formatSafeSourceEndpoint(item.source_endpoint, "-") }}
           </p>
           <p class="mt-1 font-mono text-[11px] text-gray-400">
-            source #{{ item.source_id }} · {{ $t("providerRuntimePage.source.circuitScope") }}
+            source #{{ item.source_id }}
           </p>
         </div>
 
@@ -146,17 +146,9 @@ const { t: $t } = useI18n();
                 </p>
                 <p class="mt-1 text-gray-900">{{ props.formatDateTime(item.last_error_at) }}</p>
               </div>
-              <Badge variant="outline" class="shrink-0 bg-gray-50 text-[11px] text-gray-500">
-                {{ $t("providerRuntimePage.metrics.failures") }}:
-                {{ item.consecutive_failures }}
-              </Badge>
             </div>
             <p class="mt-2 break-words text-xs text-gray-500">
-              {{
-                item.last_error_summary ||
-                item.last_error ||
-                $t("providerRuntimePage.detail.noError")
-              }}
+              {{ item.last_error_summary || $t("providerRuntimePage.detail.noError") }}
             </p>
           </div>
         </div>

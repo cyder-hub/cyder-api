@@ -294,8 +294,6 @@ pub struct DashboardRuntimeSummary {
     enabled_source_count: i64,
     healthy_count: i64,
     degraded_count: i64,
-    half_open_count: i64,
-    open_count: i64,
     no_traffic_count: i64,
 }
 
@@ -309,8 +307,6 @@ impl From<ProviderRuntimeSummary> for DashboardRuntimeSummary {
             enabled_source_count: value.enabled_source_count,
             healthy_count: value.healthy_count,
             degraded_count: value.degraded_count,
-            half_open_count: value.half_open_count,
-            open_count: value.open_count,
             no_traffic_count: value.no_traffic_count,
         }
     }
@@ -318,8 +314,6 @@ impl From<ProviderRuntimeSummary> for DashboardRuntimeSummary {
 
 #[derive(Serialize, Debug, Default)]
 pub struct DashboardOperationalSignals {
-    open_providers: Vec<DashboardProviderSignalItem>,
-    half_open_providers: Vec<DashboardProviderSignalItem>,
     degraded_providers: Vec<DashboardProviderSignalItem>,
     top_error_providers: Vec<DashboardProviderSignalItem>,
     top_cost_providers: Vec<DashboardCostProviderItem>,
@@ -437,12 +431,6 @@ impl From<DashboardTopProviderReadItem> for DashboardTopProviderItem {
 impl From<DashboardOperationalSignalsReadModel> for DashboardOperationalSignals {
     fn from(value: DashboardOperationalSignalsReadModel) -> Self {
         Self {
-            open_providers: value.open_providers.into_iter().map(Into::into).collect(),
-            half_open_providers: value
-                .half_open_providers
-                .into_iter()
-                .map(Into::into)
-                .collect(),
             degraded_providers: value
                 .degraded_providers
                 .into_iter()
@@ -723,8 +711,6 @@ fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntime
         enabled_source_count: items.iter().filter(|item| item.source_is_enabled).count() as i64,
         healthy_count: 0,
         degraded_count: 0,
-        half_open_count: 0,
-        open_count: 0,
         no_traffic_count: 0,
     };
 
@@ -732,8 +718,6 @@ fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntime
         match item.runtime_level {
             ProviderRuntimeLevel::Healthy => summary.healthy_count += 1,
             ProviderRuntimeLevel::Degraded => summary.degraded_count += 1,
-            ProviderRuntimeLevel::HalfOpen => summary.half_open_count += 1,
-            ProviderRuntimeLevel::Open => summary.open_count += 1,
             ProviderRuntimeLevel::NoTraffic => summary.no_traffic_count += 1,
         }
     }
@@ -957,9 +941,8 @@ mod tests {
     };
     use crate::schema::enum_def::UpstreamProfileType;
     use crate::service::metrics::provider_runtime::{
-        ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
-        ProviderRuntimeLevel, ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow,
-        first_runtime_backend_read_error,
+        ProviderRuntimeCostStat, ProviderRuntimeItem, ProviderRuntimeLevel,
+        ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow, first_runtime_backend_read_error,
     };
     use crate::service::metrics::runtime_overview::{
         operational_signals_from_runtime_items, top_providers_from_runtime_items,
@@ -986,14 +969,7 @@ mod tests {
             source_is_default: true,
             enabled_model_count: 1,
             enabled_provider_key_count: 1,
-            health_status: ProviderRuntimeHealthStatus::Healthy,
             runtime_level,
-            consecutive_failures: 0,
-            half_open_probe_in_flight: false,
-            opened_at: None,
-            last_failure_at: None,
-            last_recovered_at: None,
-            last_error: None,
             runtime_state_backend_degraded: false,
             runtime_state_backend_error: None,
             request_count,
@@ -1050,18 +1026,16 @@ mod tests {
         let items = vec![
             sample_runtime_item(1, ProviderRuntimeLevel::Healthy, 10, 0),
             sample_runtime_item(2, ProviderRuntimeLevel::Degraded, 10, 3),
-            sample_runtime_item(3, ProviderRuntimeLevel::HalfOpen, 1, 1),
-            sample_runtime_item(4, ProviderRuntimeLevel::Open, 1, 1),
+            sample_runtime_item(3, ProviderRuntimeLevel::Degraded, 1, 1),
+            sample_runtime_item(4, ProviderRuntimeLevel::Healthy, 1, 0),
             sample_runtime_item(5, ProviderRuntimeLevel::NoTraffic, 0, 0),
         ];
 
         let summary: DashboardRuntimeSummary = runtime_summary_from_items(&items);
 
         assert_eq!(summary.window, ProviderRuntimeWindow::OneHour);
-        assert_eq!(summary.healthy_count, 1);
-        assert_eq!(summary.degraded_count, 1);
-        assert_eq!(summary.half_open_count, 1);
-        assert_eq!(summary.open_count, 1);
+        assert_eq!(summary.healthy_count, 2);
+        assert_eq!(summary.degraded_count, 2);
         assert_eq!(summary.no_traffic_count, 1);
     }
 
@@ -1080,11 +1054,11 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_operational_signals_include_half_open_and_cost_hotspots() {
-        let mut expensive = sample_runtime_item(1, ProviderRuntimeLevel::Open, 20, 5);
+    fn dashboard_operational_signals_include_degraded_and_cost_hotspots() {
+        let mut expensive = sample_runtime_item(1, ProviderRuntimeLevel::Degraded, 20, 5);
         expensive.total_cost[0].amount_nanos = 500;
 
-        let mut recovering = sample_runtime_item(2, ProviderRuntimeLevel::HalfOpen, 8, 2);
+        let mut recovering = sample_runtime_item(2, ProviderRuntimeLevel::Degraded, 8, 2);
         recovering.total_cost[0].amount_nanos = 200;
 
         let mut steady = sample_runtime_item(3, ProviderRuntimeLevel::Healthy, 30, 1);
@@ -1094,19 +1068,11 @@ mod tests {
 
         assert_eq!(
             signals
-                .open_providers
+                .degraded_providers
                 .iter()
                 .map(|item| item.provider_id)
                 .collect::<Vec<_>>(),
-            vec![1]
-        );
-        assert_eq!(
-            signals
-                .half_open_providers
-                .iter()
-                .map(|item| item.provider_id)
-                .collect::<Vec<_>>(),
-            vec![2]
+            vec![1, 2]
         );
         assert_eq!(
             signals

@@ -70,8 +70,6 @@ const statusOptions: Array<{ value: ProviderRuntimeStatusFilter; label: string }
   { value: "all", label: $t("providerRuntimePage.filter.all") },
   { value: "healthy", label: $t("providerRuntimePage.status.healthy") },
   { value: "degraded", label: $t("providerRuntimePage.status.degraded") },
-  { value: "open", label: $t("providerRuntimePage.status.open") },
-  { value: "half_open", label: $t("providerRuntimePage.status.half_open") },
   { value: "no_traffic", label: $t("providerRuntimePage.status.no_traffic") },
 ];
 
@@ -113,16 +111,6 @@ const summaryCards = computed(() => [
     key: "degraded",
     label: $t("providerRuntimePage.summary.degraded"),
     value: summary.value?.degraded_count ?? 0,
-  },
-  {
-    key: "half_open",
-    label: $t("providerRuntimePage.summary.halfOpen"),
-    value: summary.value?.half_open_count ?? 0,
-  },
-  {
-    key: "open",
-    label: $t("providerRuntimePage.summary.open"),
-    value: summary.value?.open_count ?? 0,
   },
   {
     key: "no_traffic",
@@ -301,10 +289,6 @@ function runtimeLevelLabel(level: ProviderRuntimeLevel) {
 
 function runtimeBadgeClass(level: ProviderRuntimeLevel) {
   switch (level) {
-    case "open":
-      return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-    case "half_open":
-      return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
     case "degraded":
       return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
     case "healthy":
@@ -344,10 +328,6 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
       value: formatCount(item.error_count),
     },
     {
-      label: $t("providerRuntimePage.metrics.failures"),
-      value: formatCount(item.consecutive_failures),
-    },
-    {
       label: $t("providerRuntimePage.metrics.proxy"),
       value: item.source_use_proxy ? $t("common.yes") : $t("common.no"),
     },
@@ -360,11 +340,7 @@ function openProviderRecords(item: ProviderRuntimeItem) {
     source_id: String(item.source_id),
   };
 
-  if (
-    item.runtime_level === "open" ||
-    item.runtime_level === "half_open" ||
-    item.runtime_level === "degraded"
-  ) {
+  if (item.runtime_level === "degraded") {
     query.status = "ERROR";
   }
 

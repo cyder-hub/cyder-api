@@ -2,21 +2,12 @@ import type { RuntimeStateBackendStatus } from "./shared";
 
 export type ProviderRuntimeWindow = "15m" | "1h" | "6h" | "24h";
 
-export type ProviderRuntimeHealthStatus = "healthy" | "open" | "half_open";
-
-export type ProviderRuntimeLevel =
-  | "healthy"
-  | "degraded"
-  | "open"
-  | "half_open"
-  | "no_traffic";
+export type ProviderRuntimeLevel = "healthy" | "degraded" | "no_traffic";
 
 export type ProviderRuntimeStatusFilter =
   | "all"
   | "healthy"
   | "degraded"
-  | "open"
-  | "half_open"
   | "no_traffic";
 
 export type ProviderRuntimeSortField =
@@ -53,14 +44,7 @@ export interface ProviderRuntimeItem {
   source_is_default: boolean;
   enabled_model_count: number;
   enabled_provider_key_count: number;
-  health_status: ProviderRuntimeHealthStatus;
   runtime_level: ProviderRuntimeLevel;
-  consecutive_failures: number;
-  half_open_probe_in_flight: boolean;
-  opened_at: number | null;
-  last_failure_at: number | null;
-  last_recovered_at: number | null;
-  last_error: string | null;
   runtime_state_backend_degraded: boolean;
   runtime_state_backend_error: string | null;
   request_count: number;
@@ -88,8 +72,6 @@ export interface ProviderRuntimeSummary {
   enabled_source_count: number;
   healthy_count: number;
   degraded_count: number;
-  half_open_count: number;
-  open_count: number;
   no_traffic_count: number;
   window: ProviderRuntimeWindow;
   generated_at: number;

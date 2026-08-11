@@ -89,14 +89,7 @@
                   >
                     {{ runtimeLevelLabel(sourceRuntime(source.id)?.runtime_level ?? "no_traffic") }}
                   </Badge>
-                  <Badge v-else variant="outline" class="font-mono text-[10px] text-gray-500">
-                    {{ $t("providerEditPage.sources.circuitUnavailable") }}
-                  </Badge>
                 </div>
-                <p v-if="sourceRuntime(source.id)" class="mt-1 text-[11px] text-gray-500">
-                  {{ $t("providerRuntimePage.metrics.failures") }}:
-                  {{ sourceRuntime(source.id)?.consecutive_failures ?? 0 }}
-                </p>
               </TableCell>
               <TableCell class="text-right">
                 <div class="flex items-center justify-end gap-1">
@@ -189,14 +182,7 @@
               >
                 {{ runtimeLevelLabel(sourceRuntime(source.id)?.runtime_level ?? "no_traffic") }}
               </Badge>
-              <Badge v-else variant="outline" class="font-mono text-[10px] text-gray-500">
-                {{ $t("providerEditPage.sources.circuitUnavailable") }}
-              </Badge>
             </div>
-            <p v-if="sourceRuntime(source.id)" class="mt-1 text-[11px] text-gray-500">
-              {{ $t("providerRuntimePage.metrics.failures") }}:
-              {{ sourceRuntime(source.id)?.consecutive_failures ?? 0 }}
-            </p>
           </template>
           <div class="space-y-2 text-xs text-gray-500">
             <div class="rounded-lg border border-gray-100 px-3 py-2.5">
@@ -396,10 +382,6 @@ const runtimeLevelLabel = (level: ProviderRuntimeLevel) =>
 
 const runtimeBadgeClass = (level: ProviderRuntimeLevel) => {
   switch (level) {
-    case "open":
-      return "border-red-200 bg-red-50 text-red-700";
-    case "half_open":
-      return "border-amber-200 bg-amber-50 text-amber-700";
     case "degraded":
       return "border-orange-200 bg-orange-50 text-orange-700";
     case "healthy":

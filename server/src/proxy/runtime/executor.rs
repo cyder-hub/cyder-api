@@ -20,10 +20,9 @@ use crate::{
                 materialize_utility_request,
             },
             request_patch::resolve_runtime_request_patch_trace,
-            route_resolver::{ExecutionPlan, ExecutionTarget},
+            route_resolver::ExecutionPlan,
             transport::send_materialized_request,
         },
-        source_governance::{SourceGovernanceCheckError, ensure_source_request_allowed},
         util::get_cost_catalog_version,
         utility::{UtilityOperation, validate_utility_target},
     },
@@ -33,7 +32,6 @@ use crate::{
         cache::types::CacheApiKey,
         provider_credential::{ProviderCredentialError, resolve_selected_provider_credential},
         provider_http::normalize_provider_endpoint,
-        runtime::SourceCircuitProbePermit,
     },
 };
 
@@ -88,24 +86,6 @@ fn provider_credential_proxy_error(error: ProviderCredentialError) -> ProxyError
         None,
         error.to_string(),
     )
-}
-
-async fn allow_source(
-    app_state: &AppState,
-    target: &ExecutionTarget,
-    target_label: &str,
-) -> Result<Option<SourceCircuitProbePermit>, ProxyError> {
-    let source_label = format!(
-        "{} via source {} ({:?})",
-        target_label, target.upstream_source.id, target.upstream_source.profile_type
-    );
-    match ensure_source_request_allowed(app_state, target.upstream_source.id, &source_label).await {
-        Ok(permit) => Ok(permit),
-        Err(SourceGovernanceCheckError::Rejected(rejection)) => {
-            Err(rejection.to_proxy_error(&source_label))
-        }
-        Err(SourceGovernanceCheckError::Backend(error)) => Err(error),
-    }
 }
 
 pub(in crate::proxy) async fn execute_request(
@@ -330,13 +310,6 @@ pub(in crate::proxy) async fn execute_request(
 
     log_context.request_url = Some(materialized.final_url.clone());
 
-    let source_permit = match allow_source(&app_state, &target, &materialized.model_str).await {
-        Ok(permit) => permit,
-        Err(error) => {
-            request_lease.release().await;
-            return fail_before_send(&app_state, log_context, error).await;
-        }
-    };
     match send_materialized_request(
         Arc::clone(&app_state),
         cancellation,
@@ -348,7 +321,6 @@ pub(in crate::proxy) async fn execute_request(
         target.upstream_source.use_proxy,
         cost_catalog_version,
         request_lease,
-        source_permit,
         materialized.response_mode,
         request_context.response_visibility.clone(),
     )

@@ -1,7 +1,6 @@
 pub mod api_key_governance;
 pub mod backend;
 pub mod provider_key_selection;
-pub mod source_circuit;
 
 #[cfg(test)]
 pub(crate) use api_key_governance::FixedApiKeyGovernanceClock;
@@ -10,15 +9,10 @@ pub use api_key_governance::{
     ApiKeyGovernanceService, ApiKeyGovernanceSnapshot, ApiKeyRequestLease,
 };
 pub use backend::{
-    RuntimeStateBackendBundle, RuntimeStateBackendError, RuntimeStateBackendOperatorStatus,
-    RuntimeStateBackendStatus,
+    RuntimeStateBackendBundle, RuntimeStateBackendError, RuntimeStateBackendHealth,
+    RuntimeStateBackendOperatorStatus, RuntimeStateBackendStatus,
 };
 pub use provider_key_selection::{
     GroupItemSelectionStrategy, MemoryProviderKeyCursorStore, ProviderKeyCursorStore,
     ProviderKeySelector, RedisProviderKeyCursorStore,
-};
-pub use source_circuit::{
-    RedisSourceCircuitStore, SourceCircuitDecision, SourceCircuitError, SourceCircuitProbePermit,
-    SourceCircuitRejection, SourceCircuitService, SourceCircuitStore, SourceHealthSnapshot,
-    SourceHealthStatus,
 };

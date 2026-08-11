@@ -5,7 +5,7 @@ import {
   buildEmptyDashboard,
 } from "../src/pages/dashboard/composables/useDashboardData.ts";
 import {
-  getUnstableProviders,
+  getDegradedProviders,
   hasCostHotspots,
 } from "../src/pages/dashboard/composables/useDashboardOperations.ts";
 import { buildRuntimeStateBackendRows } from "../src/utils/runtimeBackend.ts";
@@ -17,7 +17,7 @@ test("buildEmptyDashboard returns stable zero-state dashboard data", () => {
   assert.equal(dashboard.today.success_rate, null);
   assert.equal(dashboard.runtime.window, "1h");
   assert.equal(dashboard.runtime_state_backend.runtime_effective_backend, "memory");
-  assert.deepEqual(dashboard.operational_signals.open_providers, []);
+  assert.deepEqual(dashboard.operational_signals.degraded_providers, []);
   assert.deepEqual(dashboard.operational_signals.top_cost_models, []);
 });
 
@@ -53,27 +53,26 @@ test("buildRuntimeStateBackendRows preserves catalog configured and effective ba
   ]);
 });
 
-test("getUnstableProviders merges open and half-open providers in error order", () => {
+test("getDegradedProviders sorts observed degradation by error count", () => {
   const signals = {
-    open_providers: [
-      { provider_id: 3, error_count: 8, runtime_level: "open" },
-      { provider_id: 1, error_count: 8, runtime_level: "open" },
+    degraded_providers: [
+      { provider_id: 3, error_count: 8, runtime_level: "degraded" },
+      { provider_id: 1, error_count: 8, runtime_level: "degraded" },
+      { provider_id: 2, error_count: 3, runtime_level: "degraded" },
     ],
-    half_open_providers: [{ provider_id: 2, error_count: 3, runtime_level: "half_open" }],
-    degraded_providers: [],
     top_error_providers: [],
     top_cost_providers: [],
     top_cost_models: [],
   };
 
-  const items = getUnstableProviders(signals);
+  const items = getDegradedProviders(signals);
 
   assert.deepEqual(
     items.map((item) => [item.provider_id, item.runtime_level]),
     [
-      [1, "open"],
-      [3, "open"],
-      [2, "half_open"],
+      [1, "degraded"],
+      [3, "degraded"],
+      [2, "degraded"],
     ],
   );
 });

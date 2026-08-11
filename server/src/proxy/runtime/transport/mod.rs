@@ -31,10 +31,8 @@ use crate::{
         cancellation::{CancellationDropGuard, ProxyCancellationContext},
         logging::RequestLogContext,
         runtime::api_key_lease::ApiKeyRequestLeaseFinalizer,
-        source_governance::record_source_failure_or_release_probe,
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
-    service::runtime::SourceCircuitProbePermit,
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
         upstream_response::normalize_content_type,
@@ -113,13 +111,11 @@ pub(in crate::proxy) async fn send_materialized_request(
     use_proxy: bool,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     response_visibility: ResponseVisibilityTracker,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let coordinator = cancellation.coordinator();
     let mut api_key_request_lease = api_key_request_lease.with_coordinator(coordinator.clone());
-    let source_id = log_context.source_id;
     let log_context = Arc::new(TokioMutex::new(log_context));
     log_context
         .lock()
@@ -198,15 +194,6 @@ pub(in crate::proxy) async fn send_materialized_request(
         Err(proxy_error) => {
             drop_cancellation_guard.disarm();
             cancellation.try_terminate_error(&proxy_error);
-            record_source_failure_or_release_probe(
-                &app_state,
-                &cancellation,
-                source_id,
-                &model_str,
-                &proxy_error,
-                source_circuit_permit.as_ref(),
-            )
-            .await;
             let completed_at = Utc::now().timestamp_millis();
 
             let mut context = log_context.lock().await;
@@ -242,14 +229,12 @@ pub(in crate::proxy) async fn send_materialized_request(
         match handle_streaming_response_guarded(
             &app_state,
             cancellation.clone(),
-            source_id,
             log_context.clone(),
             model_str,
             response,
             &url,
             cost_catalog_version,
             api_key_request_lease,
-            source_circuit_permit,
             downstream_protocol,
             upstream_protocol,
             proxy_timeouts.clone(),
@@ -274,14 +259,12 @@ pub(in crate::proxy) async fn send_materialized_request(
         handle_non_streaming_response_guarded(
             &app_state,
             &cancellation,
-            source_id,
             log_context,
             model_str,
             response,
             &url,
             cost_catalog_version.as_ref(),
             api_key_request_lease,
-            source_circuit_permit,
             response_mode,
             upstream_error_body_limit_bytes,
             &client_bundle.proxy_request.non_stream_response,

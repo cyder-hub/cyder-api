@@ -33,7 +33,6 @@ impl RetryAfterSeconds {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProxyLogLevel {
     Debug,
-    Warn,
     Error,
 }
 
@@ -52,8 +51,6 @@ pub(crate) enum ProxyErrorCode {
     ConcurrencyLimitError,
     QuotaExhaustedError,
     BudgetExhaustedError,
-    ProviderCircuitOpenError,
-    ProviderHalfOpenProbeInFlightError,
     ClientCancelledError,
     ServerError,
     ProtocolTransformError,
@@ -73,7 +70,7 @@ pub(crate) enum ProxyErrorCode {
 
 impl ProxyErrorCode {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 29] = [
+    pub(crate) const ALL: [Self; 27] = [
         Self::AuthenticationError,
         Self::ApiKeyDisabledError,
         Self::ApiKeyExpiredError,
@@ -86,8 +83,6 @@ impl ProxyErrorCode {
         Self::ConcurrencyLimitError,
         Self::QuotaExhaustedError,
         Self::BudgetExhaustedError,
-        Self::ProviderCircuitOpenError,
-        Self::ProviderHalfOpenProbeInFlightError,
         Self::ClientCancelledError,
         Self::ServerError,
         Self::ProtocolTransformError,
@@ -119,8 +114,6 @@ impl ProxyErrorCode {
             Self::ConcurrencyLimitError => "concurrency_limit_error",
             Self::QuotaExhaustedError => "quota_exhausted_error",
             Self::BudgetExhaustedError => "budget_exhausted_error",
-            Self::ProviderCircuitOpenError => "provider_circuit_open_error",
-            Self::ProviderHalfOpenProbeInFlightError => "provider_half_open_probe_in_flight_error",
             Self::ClientCancelledError => "client_cancelled_error",
             Self::ServerError => "server_error",
             Self::ProtocolTransformError => "protocol_transform_error",
@@ -169,9 +162,7 @@ impl ProxyErrorCode {
             | Self::UpstreamConnectError
             | Self::UpstreamRequestError
             | Self::UpstreamResponseError => StatusCode::BAD_GATEWAY,
-            Self::ProviderCircuitOpenError
-            | Self::ProviderHalfOpenProbeInFlightError
-            | Self::UpstreamServiceError => StatusCode::SERVICE_UNAVAILABLE,
+            Self::UpstreamServiceError => StatusCode::SERVICE_UNAVAILABLE,
             Self::UpstreamTimeoutError => StatusCode::GATEWAY_TIMEOUT,
         }
     }
@@ -194,10 +185,6 @@ impl ProxyErrorCode {
             Self::ConcurrencyLimitError => "The API key concurrency limit was exceeded.",
             Self::QuotaExhaustedError => "The API key quota was exhausted.",
             Self::BudgetExhaustedError => "The API key budget was exhausted.",
-            Self::ProviderCircuitOpenError => "The upstream provider is temporarily unavailable.",
-            Self::ProviderHalfOpenProbeInFlightError => {
-                "The upstream provider probe is already in progress."
-            }
             Self::ClientCancelledError => "The client cancelled the request.",
             Self::ServerError => "The gateway encountered an internal error.",
             Self::ProtocolTransformError => {
@@ -240,9 +227,6 @@ impl ProxyErrorCode {
             | Self::QuotaExhaustedError
             | Self::BudgetExhaustedError
             | Self::ClientCancelledError => ProxyLogLevel::Debug,
-            Self::ProviderCircuitOpenError | Self::ProviderHalfOpenProbeInFlightError => {
-                ProxyLogLevel::Warn
-            }
             Self::RequestPatchConflictError
             | Self::ServerError
             | Self::ProtocolTransformError
@@ -611,7 +595,7 @@ mod tests {
 
     #[test]
     fn stable_error_metadata_is_exhaustive_and_unique() {
-        assert_eq!(ProxyErrorCode::ALL.len(), 29);
+        assert_eq!(ProxyErrorCode::ALL.len(), 27);
         let codes = ProxyErrorCode::ALL
             .iter()
             .map(|code| code.as_str())
@@ -624,7 +608,7 @@ mod tests {
             assert!(code.status_code().is_client_error() || code.status_code().is_server_error());
             assert!(matches!(
                 code.operator_log_level(),
-                ProxyLogLevel::Debug | ProxyLogLevel::Warn | ProxyLogLevel::Error
+                ProxyLogLevel::Debug | ProxyLogLevel::Error
             ));
             assert_eq!(
                 serde_json::to_value(code).expect("error code should serialize"),
@@ -736,14 +720,6 @@ mod tests {
                 StatusCode::TOO_MANY_REQUESTS,
             ),
             (ProxyErrorCode::BudgetExhaustedError, StatusCode::FORBIDDEN),
-            (
-                ProxyErrorCode::ProviderCircuitOpenError,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (
-                ProxyErrorCode::ProviderHalfOpenProbeInFlightError,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
             (
                 ProxyErrorCode::ClientCancelledError,
                 StatusCode::from_u16(499).expect("valid 499"),

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::service::catalog::CatalogService;
-use crate::service::runtime::SourceCircuitService;
 use crate::service::secret_encryption::SecretEncryptionService;
 
 use self::api_key::ApiKeyAdminService;
@@ -38,9 +37,8 @@ impl AdminServices {
     pub fn new(
         catalog: Arc<CatalogService>,
         secret_encryption: Arc<SecretEncryptionService>,
-        source_circuit: Arc<SourceCircuitService>,
     ) -> Self {
-        let mutation_runner = Arc::new(AdminMutationRunner::new(catalog, source_circuit));
+        let mutation_runner = Arc::new(AdminMutationRunner::new(catalog));
 
         Self {
             auth: Arc::new(ManagerAuthService::new(Arc::clone(&secret_encryption))),
@@ -66,7 +64,6 @@ mod tests {
 
     use crate::config::SecretEncryptionConfig;
     use crate::service::catalog::CatalogService;
-    use crate::service::runtime::SourceCircuitService;
     use crate::service::secret_encryption::SecretEncryptionService;
 
     use super::AdminServices;
@@ -77,11 +74,7 @@ mod tests {
         let secret_encryption = Arc::new(SecretEncryptionService::from_config(
             &SecretEncryptionConfig::default(),
         ));
-        let services = AdminServices::new(
-            Arc::clone(&catalog),
-            Arc::clone(&secret_encryption),
-            Arc::new(SourceCircuitService::new_memory()),
-        );
+        let services = AdminServices::new(Arc::clone(&catalog), Arc::clone(&secret_encryption));
 
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),

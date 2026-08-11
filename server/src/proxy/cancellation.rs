@@ -3,7 +3,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::proxy::runtime::transport::{
-    lifecycle::{ProviderOutcome, ProxyTerminationCause, ProxyTerminationCoordinator},
+    lifecycle::{ProxyTerminationCause, ProxyTerminationCoordinator},
     timing::TransportTimingState,
 };
 
@@ -76,16 +76,6 @@ impl ProxyCancellationContext {
 
     pub(crate) fn try_terminate_error(&self, error: &ProxyError) -> bool {
         self.coordinator.try_terminate_error(error)
-    }
-
-    pub(crate) fn try_provider_success(&self) -> bool {
-        self.coordinator
-            .try_record_provider_outcome(ProviderOutcome::Success)
-    }
-
-    pub(crate) fn try_source_failure(&self) -> bool {
-        self.coordinator
-            .try_record_provider_outcome(ProviderOutcome::Failure)
     }
 
     pub(super) async fn cancellation_error(

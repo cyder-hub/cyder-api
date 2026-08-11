@@ -352,7 +352,6 @@ mod tests {
     };
     use crate::service::admin::mutation::AdminMutationRunner;
     use crate::service::catalog::CatalogService;
-    use crate::service::runtime::SourceCircuitService;
 
     fn variant_input(source_id: i64, target: &str) -> RequestPatchVariantInput {
         RequestPatchVariantInput {
@@ -401,10 +400,7 @@ mod tests {
                 )
                 .expect("provider should be seeded");
                 let catalog = Arc::new(CatalogService::new(true).await);
-                let runner = Arc::new(AdminMutationRunner::new(
-                    Arc::clone(&catalog),
-                    Arc::new(SourceCircuitService::new_memory()),
-                ));
+                let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
                 let service = RequestPatchAdminService::new(Arc::clone(&runner));
 
                 let preview = service

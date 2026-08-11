@@ -600,8 +600,6 @@ pub struct RuntimeStateRedisConfig {
     pub key_prefix: String,
     #[serde(default = "default_api_key_concurrency_lease_ttl_seconds")]
     pub api_key_concurrency_lease_ttl_seconds: u64,
-    #[serde(default = "default_provider_circuit_probe_lease_ttl_seconds")]
-    pub provider_circuit_probe_lease_ttl_seconds: u64,
     #[serde(default = "default_runtime_state_ttl_seconds")]
     pub state_ttl_seconds: u64,
 }
@@ -611,8 +609,6 @@ impl Default for RuntimeStateRedisConfig {
         Self {
             key_prefix: default_runtime_state_redis_key_prefix(),
             api_key_concurrency_lease_ttl_seconds: default_api_key_concurrency_lease_ttl_seconds(),
-            provider_circuit_probe_lease_ttl_seconds:
-                default_provider_circuit_probe_lease_ttl_seconds(),
             state_ttl_seconds: default_runtime_state_ttl_seconds(),
         }
     }
@@ -641,10 +637,6 @@ impl Default for RuntimeStateConfig {
 impl RuntimeStateConfig {
     pub fn api_key_concurrency_lease_ttl(&self) -> Duration {
         Duration::from_secs(self.redis.api_key_concurrency_lease_ttl_seconds)
-    }
-
-    pub fn provider_circuit_probe_lease_ttl(&self) -> Duration {
-        Duration::from_secs(self.redis.provider_circuit_probe_lease_ttl_seconds)
     }
 
     pub fn state_ttl(&self) -> Duration {
@@ -936,37 +928,6 @@ impl ProxyRequestConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProviderGovernanceConfig {
-    #[serde(default = "default_provider_governance_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_provider_governance_consecutive_failure_threshold")]
-    pub consecutive_failure_threshold: u32,
-    #[serde(default = "default_provider_governance_open_cooldown_seconds")]
-    pub open_cooldown_seconds: u64,
-}
-
-impl Default for ProviderGovernanceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_provider_governance_enabled(),
-            consecutive_failure_threshold:
-                default_provider_governance_consecutive_failure_threshold(),
-            open_cooldown_seconds: default_provider_governance_open_cooldown_seconds(),
-        }
-    }
-}
-
-impl ProviderGovernanceConfig {
-    pub fn open_cooldown(&self) -> Duration {
-        Duration::from_secs(self.open_cooldown_seconds)
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled && self.consecutive_failure_threshold > 0
-    }
-}
-
 // Default values for cache
 fn default_ttl_seconds() -> u64 {
     3600 // 1 hour
@@ -1028,18 +989,6 @@ fn default_sse_frame_count_limit() -> u64 {
     1_000_000
 }
 
-fn default_provider_governance_enabled() -> bool {
-    true
-}
-
-fn default_provider_governance_consecutive_failure_threshold() -> u32 {
-    5
-}
-
-fn default_provider_governance_open_cooldown_seconds() -> u64 {
-    30
-}
-
 fn default_pool_size() -> usize {
     10
 }
@@ -1058,10 +1007,6 @@ fn default_runtime_state_redis_key_prefix() -> String {
 
 fn default_api_key_concurrency_lease_ttl_seconds() -> u64 {
     900
-}
-
-fn default_provider_circuit_probe_lease_ttl_seconds() -> u64 {
-    600
 }
 
 fn default_runtime_state_ttl_seconds() -> u64 {
@@ -1226,8 +1171,6 @@ pub struct FinalConfig {
     #[serde(default)]
     pub proxy_request: ProxyRequestConfig,
     #[serde(default)]
-    pub provider_governance: ProviderGovernanceConfig,
-    #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
     pub runtime_state: RuntimeStateConfig,
@@ -1318,7 +1261,6 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         id: IdConfig::default(),
         outbound_http: OutboundHttpConfig::default(),
         proxy_request: ProxyRequestConfig::default(),
-        provider_governance: ProviderGovernanceConfig::default(),
         cache: CacheConfig::default(),
         runtime_state: RuntimeStateConfig::default(),
         secret_encryption: SecretEncryptionConfig::default(),

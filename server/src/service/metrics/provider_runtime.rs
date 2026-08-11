@@ -17,9 +17,7 @@ use crate::database::provider_runtime::{
 };
 use crate::schema::enum_def::UpstreamProfileType;
 use crate::service::app_state::AppState;
-use crate::service::runtime::{
-    RuntimeStateBackendOperatorStatus, SourceHealthSnapshot, SourceHealthStatus,
-};
+use crate::service::runtime::RuntimeStateBackendOperatorStatus;
 
 use super::service::MetricsService;
 
@@ -68,19 +66,9 @@ impl ProviderRuntimeWindow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProviderRuntimeHealthStatus {
-    Healthy,
-    Open,
-    HalfOpen,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ProviderRuntimeLevel {
     Healthy,
     Degraded,
-    Open,
-    HalfOpen,
     NoTraffic,
 }
 
@@ -90,8 +78,6 @@ pub enum ProviderRuntimeStatusFilter {
     All,
     Healthy,
     Degraded,
-    Open,
-    HalfOpen,
     NoTraffic,
 }
 
@@ -176,14 +162,7 @@ pub struct ProviderRuntimeItem {
     pub source_is_default: bool,
     pub enabled_model_count: i64,
     pub enabled_provider_key_count: i64,
-    pub health_status: ProviderRuntimeHealthStatus,
     pub runtime_level: ProviderRuntimeLevel,
-    pub consecutive_failures: u32,
-    pub half_open_probe_in_flight: bool,
-    pub opened_at: Option<i64>,
-    pub last_failure_at: Option<i64>,
-    pub last_recovered_at: Option<i64>,
-    pub last_error: Option<String>,
     pub runtime_state_backend_degraded: bool,
     pub runtime_state_backend_error: Option<String>,
     pub request_count: i64,
@@ -212,8 +191,6 @@ pub struct ProviderRuntimeSummary {
     pub enabled_source_count: i64,
     pub healthy_count: i64,
     pub degraded_count: i64,
-    pub half_open_count: i64,
-    pub open_count: i64,
     pub no_traffic_count: i64,
     pub window: ProviderRuntimeWindow,
     pub generated_at: i64,
@@ -446,7 +423,6 @@ impl MetricsService {
 
     pub async fn build_provider_runtime_items(
         &self,
-        app_state: &Arc<AppState>,
         window: ProviderRuntimeWindow,
         only_enabled: bool,
     ) -> Result<Vec<ProviderRuntimeItem>, BaseError> {
@@ -497,24 +473,6 @@ impl MetricsService {
                 if only_enabled && !source.is_enabled {
                     continue;
                 }
-                let (health_snapshot, runtime_state_backend_degraded, runtime_state_backend_error) =
-                    app_state
-                        .source_circuit
-                        .get_source_health_snapshot(source.id)
-                        .await
-                        .map(|snapshot| (snapshot, false, None))
-                        .unwrap_or_else(|err| {
-                            let error = err.to_string();
-                            crate::warn_event!(
-                                "runtime_state.read_failed",
-                                read_model = "provider_runtime",
-                                component = "source_circuit",
-                                provider_id = provider_id,
-                                source_id = source.id,
-                                error = &error,
-                            );
-                            (SourceHealthSnapshot::default(), true, Some(error))
-                        });
                 let runtime_aggregate =
                     aggregate_map
                         .get(&source.id)
@@ -539,7 +497,6 @@ impl MetricsService {
                         });
 
                 let runtime_level = compute_runtime_level(
-                    health_snapshot.status,
                     runtime_aggregate.request_count,
                     runtime_aggregate.error_count,
                     runtime_aggregate.avg_total_latency_ms,
@@ -564,16 +521,9 @@ impl MetricsService {
                         .get(&provider_id)
                         .copied()
                         .unwrap_or(0),
-                    health_status: map_health_status(health_snapshot.status),
                     runtime_level,
-                    consecutive_failures: health_snapshot.consecutive_failures,
-                    half_open_probe_in_flight: health_snapshot.half_open_probe_in_flight,
-                    opened_at: health_snapshot.opened_at,
-                    last_failure_at: health_snapshot.last_failure_at,
-                    last_recovered_at: health_snapshot.last_recovered_at,
-                    last_error: health_snapshot.last_error.clone(),
-                    runtime_state_backend_degraded,
-                    runtime_state_backend_error,
+                    runtime_state_backend_degraded: false,
+                    runtime_state_backend_error: None,
                     request_count: runtime_aggregate.request_count,
                     success_count: runtime_aggregate.success_count,
                     error_count: runtime_aggregate.error_count,
@@ -592,10 +542,7 @@ impl MetricsService {
                     last_request_at: runtime_aggregate.last_request_at,
                     last_success_at: runtime_aggregate.last_success_at,
                     last_error_at: runtime_aggregate.last_error_at,
-                    last_error_summary: build_last_error_summary(
-                        &health_snapshot,
-                        &runtime_aggregate,
-                    ),
+                    last_error_summary: build_last_error_summary(&runtime_aggregate),
                     status_code_breakdown: runtime_aggregate
                         .status_code_breakdown
                         .into_iter()
@@ -624,11 +571,12 @@ impl MetricsService {
         &self,
         app_state: &Arc<AppState>,
         window: ProviderRuntimeWindow,
-        items: &[ProviderRuntimeItem],
+        items: &mut [ProviderRuntimeItem],
         only_enabled: bool,
     ) -> Result<ProviderRuntimeSummary, BaseError> {
         let runtime_state_backend =
             runtime_backend_status_for_provider_items(app_state, items).await;
+        apply_runtime_backend_status_to_items(items, &runtime_state_backend);
         let providers = if only_enabled {
             Provider::list_all_active()?
         } else {
@@ -644,8 +592,6 @@ impl MetricsService {
             enabled_source_count: items.iter().filter(|item| item.source_is_enabled).count() as i64,
             healthy_count: 0,
             degraded_count: 0,
-            half_open_count: 0,
-            open_count: 0,
             no_traffic_count: 0,
             window,
             generated_at: Utc::now().timestamp_millis(),
@@ -656,8 +602,6 @@ impl MetricsService {
             match item.runtime_level {
                 ProviderRuntimeLevel::Healthy => summary.healthy_count += 1,
                 ProviderRuntimeLevel::Degraded => summary.degraded_count += 1,
-                ProviderRuntimeLevel::HalfOpen => summary.half_open_count += 1,
-                ProviderRuntimeLevel::Open => summary.open_count += 1,
                 ProviderRuntimeLevel::NoTraffic => summary.no_traffic_count += 1,
             }
         }
@@ -693,14 +637,6 @@ fn provider_runtime_total_latency(request: Option<&MetricRequestWindowAggregate>
     request.and_then(|item| average_or_none(item.total_latency_sum_ms, item.total_latency_count))
 }
 
-fn map_health_status(status: SourceHealthStatus) -> ProviderRuntimeHealthStatus {
-    match status {
-        SourceHealthStatus::Healthy => ProviderRuntimeHealthStatus::Healthy,
-        SourceHealthStatus::Open => ProviderRuntimeHealthStatus::Open,
-        SourceHealthStatus::HalfOpen => ProviderRuntimeHealthStatus::HalfOpen,
-    }
-}
-
 fn calculate_success_rate(request_count: i64, success_count: i64) -> Option<f64> {
     if request_count > 0 {
         Some(success_count as f64 / request_count as f64)
@@ -718,40 +654,28 @@ fn calculate_error_rate(request_count: i64, error_count: i64) -> Option<f64> {
 }
 
 pub(crate) fn compute_runtime_level(
-    health_status: SourceHealthStatus,
     request_count: i64,
     error_count: i64,
     avg_total_latency_ms: Option<f64>,
 ) -> ProviderRuntimeLevel {
-    match health_status {
-        SourceHealthStatus::Open => ProviderRuntimeLevel::Open,
-        SourceHealthStatus::HalfOpen => ProviderRuntimeLevel::HalfOpen,
-        SourceHealthStatus::Healthy => {
-            if request_count == 0 {
-                return ProviderRuntimeLevel::NoTraffic;
-            }
+    if request_count == 0 {
+        return ProviderRuntimeLevel::NoTraffic;
+    }
 
-            let error_rate = calculate_error_rate(request_count, error_count).unwrap_or(0.0);
-            let degraded_by_error_rate = request_count >= 5 && error_rate >= 0.2;
-            let degraded_by_latency = avg_total_latency_ms.is_some_and(|value| value >= 10_000.0);
+    let error_rate = calculate_error_rate(request_count, error_count).unwrap_or(0.0);
+    let degraded_by_error_rate = request_count >= 5 && error_rate >= 0.2;
+    let degraded_by_latency = avg_total_latency_ms.is_some_and(|value| value >= 10_000.0);
 
-            if degraded_by_error_rate || degraded_by_latency {
-                ProviderRuntimeLevel::Degraded
-            } else {
-                ProviderRuntimeLevel::Healthy
-            }
-        }
+    if degraded_by_error_rate || degraded_by_latency {
+        ProviderRuntimeLevel::Degraded
+    } else {
+        ProviderRuntimeLevel::Healthy
     }
 }
 
 pub(crate) fn build_last_error_summary(
-    health_snapshot: &SourceHealthSnapshot,
     runtime_aggregate: &ProviderRuntimeAggregate,
 ) -> Option<String> {
-    if let Some(last_error) = health_snapshot.last_error.as_ref() {
-        return Some(last_error.clone());
-    }
-
     let status_code = runtime_aggregate
         .status_code_breakdown
         .iter()
@@ -762,8 +686,6 @@ pub(crate) fn build_last_error_summary(
 
 fn health_rank(level: ProviderRuntimeLevel) -> i32 {
     match level {
-        ProviderRuntimeLevel::Open => 5,
-        ProviderRuntimeLevel::HalfOpen => 4,
         ProviderRuntimeLevel::Degraded => 3,
         ProviderRuntimeLevel::Healthy => 2,
         ProviderRuntimeLevel::NoTraffic => 1,
@@ -791,8 +713,6 @@ pub(crate) fn matches_status_filter(
         ProviderRuntimeStatusFilter::All => true,
         ProviderRuntimeStatusFilter::Healthy => runtime_level == ProviderRuntimeLevel::Healthy,
         ProviderRuntimeStatusFilter::Degraded => runtime_level == ProviderRuntimeLevel::Degraded,
-        ProviderRuntimeStatusFilter::Open => runtime_level == ProviderRuntimeLevel::Open,
-        ProviderRuntimeStatusFilter::HalfOpen => runtime_level == ProviderRuntimeLevel::HalfOpen,
         ProviderRuntimeStatusFilter::NoTraffic => runtime_level == ProviderRuntimeLevel::NoTraffic,
     }
 }
@@ -891,6 +811,16 @@ pub(crate) fn merge_runtime_backend_item_read_errors(
             status.last_error = Some(error);
             status.last_checked_at = checked_at;
         }
+    }
+}
+
+fn apply_runtime_backend_status_to_items(
+    runtime_items: &mut [ProviderRuntimeItem],
+    status: &RuntimeStateBackendOperatorStatus,
+) {
+    for item in runtime_items {
+        item.runtime_state_backend_degraded = status.runtime_degraded;
+        item.runtime_state_backend_error = status.last_error.clone();
     }
 }
 

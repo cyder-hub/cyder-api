@@ -4,7 +4,7 @@ use axum::Router;
 use chrono::Utc;
 use thiserror::Error;
 
-use crate::config::{CONFIG, RuntimeStateBackendType};
+use crate::config::CONFIG;
 use crate::proxy::logging::RequestLogPersistedSink;
 use crate::service::cache::CacheError;
 use crate::service::metrics::MetricsService;
@@ -18,11 +18,9 @@ use super::catalog::CatalogService;
 use super::infra::AppInfra;
 use super::runtime::{
     ApiKeyGovernanceService, ProviderKeySelector, RuntimeStateBackendBundle,
-    RuntimeStateBackendError, RuntimeStateBackendOperatorStatus, RuntimeStateBackendStatus,
-    SourceCircuitService,
+    RuntimeStateBackendError, RuntimeStateBackendHealth, RuntimeStateBackendOperatorStatus,
+    RuntimeStateBackendStatus,
 };
-
-const RUNTIME_STATE_BACKEND_HEALTHCHECK_SOURCE_ID: i64 = 0;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,9 +29,9 @@ pub struct AppState {
     pub admin: Arc<AdminServices>,
     pub provider_key_selector: Arc<ProviderKeySelector>,
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
-    pub source_circuit: Arc<SourceCircuitService>,
     pub metrics: Arc<MetricsService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
+    pub runtime_backend_health: Arc<RuntimeStateBackendHealth>,
     pub secret_encryption: Arc<SecretEncryptionService>,
     pub manager_auth_browser_origin: Option<String>,
     pub base_path: String,
@@ -116,7 +114,6 @@ impl AppState {
         let admin = Arc::new(AdminServices::new(
             Arc::clone(&catalog),
             Arc::clone(&secret_encryption),
-            Arc::clone(&runtime_backend.source_circuit),
         ));
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
@@ -130,9 +127,9 @@ impl AppState {
             admin,
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
-            source_circuit: Arc::clone(&runtime_backend.source_circuit),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
+            runtime_backend_health: Arc::new(runtime_backend.health),
             secret_encryption,
             manager_auth_browser_origin: config.manager_auth.browser_origin.clone(),
             base_path: config.base_path.clone(),
@@ -147,28 +144,15 @@ impl AppState {
 
     pub async fn runtime_state_backend_operator_status(&self) -> RuntimeStateBackendOperatorStatus {
         let checked_at = Utc::now().timestamp_millis();
-        let runtime_read_error =
-            if self.runtime_backend_status.effective_backend == RuntimeStateBackendType::Redis {
-                match self
-                    .source_circuit
-                    .get_source_health_snapshot(RUNTIME_STATE_BACKEND_HEALTHCHECK_SOURCE_ID)
-                    .await
-                {
-                    Ok(_) => None,
-                    Err(err) => {
-                        let error = err.to_string();
-                        crate::warn_event!(
-                            "runtime_state.read_failed",
-                            component = "source_circuit_healthcheck",
-                            backend = self.runtime_backend_status.effective_backend.as_str(),
-                            error = &error,
-                        );
-                        Some(error)
-                    }
-                }
-            } else {
-                None
-            };
+        let runtime_read_error = self.runtime_backend_health.check().await;
+        if let Some(error) = runtime_read_error.as_deref() {
+            crate::warn_event!(
+                "runtime_state.health_check_failed",
+                component = "runtime_state_backend",
+                backend = self.runtime_backend_status.effective_backend.as_str(),
+                error = error,
+            );
+        }
         let catalog_status = self.catalog.backend_status();
 
         self.runtime_backend_status.to_operator_status(
@@ -344,7 +328,6 @@ mod tests {
         let admin = Arc::new(AdminServices::new(
             Arc::clone(&catalog),
             Arc::clone(&secret_encryption),
-            Arc::clone(&runtime_backend.source_circuit),
         ));
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
@@ -358,9 +341,9 @@ mod tests {
             admin,
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
-            source_circuit: Arc::clone(&runtime_backend.source_circuit),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
+            runtime_backend_health: Arc::new(runtime_backend.health),
             secret_encryption,
             manager_auth_browser_origin: config.manager_auth.browser_origin.clone(),
             base_path: config.base_path.clone(),
@@ -378,8 +361,8 @@ mod tests {
         assert_eq!(Arc::strong_count(&app_state.admin), 1);
         assert_eq!(Arc::strong_count(&app_state.provider_key_selector), 1);
         assert_eq!(Arc::strong_count(&app_state.api_key_governance), 1);
-        assert_eq!(Arc::strong_count(&app_state.source_circuit), 2);
         assert_eq!(Arc::strong_count(&app_state.runtime_backend_status), 1);
+        assert_eq!(Arc::strong_count(&app_state.runtime_backend_health), 1);
         assert!(Arc::ptr_eq(
             &app_state.secret_encryption,
             &app_state.admin.secret_encryption,

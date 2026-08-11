@@ -632,10 +632,11 @@ components:
     SourceEvidence:
       type: object
       additionalProperties: false
-      required: [source_id, profile_type]
+      required: [source_id, profile_type, provider_api_key_id]
       properties:
         source_id: { type: integer, format: int64 }
         profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
+        provider_api_key_id: { type: [integer, "null"], format: int64 }
     DownstreamProtocol:
       type: string
       enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI]

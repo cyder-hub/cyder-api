@@ -22,11 +22,11 @@ async fn provider_runtime_snapshot(
         .unwrap_or_else(|| app_state.metrics.default_provider_runtime_window());
     let mut items = app_state
         .metrics
-        .build_provider_runtime_items(&app_state, window, params.only_enabled)
+        .build_provider_runtime_items(window, params.only_enabled)
         .await?;
     let summary = app_state
         .metrics
-        .provider_runtime_summary_from_items(&app_state, window, &items, params.only_enabled)
+        .provider_runtime_summary_from_items(&app_state, window, &mut items, params.only_enabled)
         .await?;
 
     if let Some(search) = params.search.as_ref().map(|value| value.trim()) {
@@ -60,13 +60,14 @@ mod tests {
     use tower::ServiceExt;
 
     use super::create_provider_runtime_router;
-    use crate::config::MetricsConfig;
+    use crate::config::{CacheBackendType, MetricsConfig, RuntimeStateBackendType};
     use crate::database::TestDbContext;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::upstream_source::NewUpstreamSource;
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::metrics::MetricsService;
+    use crate::service::runtime::{RuntimeStateBackendHealth, RuntimeStateBackendStatus};
 
     fn with_metrics_config(
         app_state: Arc<AppState>,
@@ -74,6 +75,21 @@ mod tests {
     ) -> Arc<AppState> {
         Arc::new(AppState {
             metrics: Arc::new(MetricsService::new(metrics_config)),
+            ..(*app_state).clone()
+        })
+    }
+
+    fn with_unavailable_redis_runtime_backend(app_state: Arc<AppState>) -> Arc<AppState> {
+        Arc::new(AppState {
+            runtime_backend_status: Arc::new(RuntimeStateBackendStatus {
+                catalog_cache_backend: CacheBackendType::Memory,
+                configured_backend: RuntimeStateBackendType::Redis,
+                effective_backend: RuntimeStateBackendType::Redis,
+                fallback_reason: None,
+                last_error: None,
+                last_checked_at: 1,
+            }),
+            runtime_backend_health: Arc::new(RuntimeStateBackendHealth::redis_without_pool()),
             ..(*app_state).clone()
         })
     }
@@ -220,11 +236,6 @@ mod tests {
                 insert_provider(2, false);
                 insert_provider_without_source(3, true);
                 let app_state = create_test_app_state(context.clone()).await;
-                app_state
-                    .source_circuit
-                    .record_source_failure(11, "source timeout".to_string(), None)
-                    .await
-                    .expect("source health should update");
 
                 let response = send(&app_state, "/provider/runtime/snapshot").await;
                 assert_eq!(response.status(), StatusCode::OK);
@@ -272,9 +283,9 @@ mod tests {
                     Some("https://example.com/v1")
                 );
                 assert_eq!(
-                    body.pointer("/data/items/0/consecutive_failures")
-                        .and_then(Value::as_u64),
-                    Some(1)
+                    body.pointer("/data/items/0/runtime_level")
+                        .and_then(Value::as_str),
+                    Some("no_traffic")
                 );
 
                 let response = send(
@@ -310,6 +321,50 @@ mod tests {
                         .map(Vec::len),
                     Some(0)
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_propagates_runtime_backend_health_failure_to_every_item() {
+        let context = TestDbContext::new_sqlite("provider-runtime-backend-degraded.sqlite");
+        context
+            .run_async(async {
+                insert_provider(1, true);
+                insert_provider(2, true);
+                let app_state = create_test_app_state(context.clone()).await;
+                let app_state = with_unavailable_redis_runtime_backend(app_state);
+
+                let response = send(&app_state, "/provider/runtime/snapshot").await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+                let summary_error = body
+                    .pointer("/data/summary/runtime_state_backend/last_error")
+                    .and_then(Value::as_str)
+                    .expect("summary should expose the Redis health failure");
+                assert_eq!(
+                    body.pointer("/data/summary/runtime_state_backend/runtime_degraded")
+                        .and_then(Value::as_bool),
+                    Some(true)
+                );
+
+                let items = body
+                    .pointer("/data/items")
+                    .and_then(Value::as_array)
+                    .expect("snapshot should contain runtime items");
+                assert_eq!(items.len(), 2);
+                for item in items {
+                    assert_eq!(
+                        item.get("runtime_state_backend_degraded")
+                            .and_then(Value::as_bool),
+                        Some(true)
+                    );
+                    assert_eq!(
+                        item.get("runtime_state_backend_error")
+                            .and_then(Value::as_str),
+                        Some(summary_error)
+                    );
+                }
             })
             .await;
     }

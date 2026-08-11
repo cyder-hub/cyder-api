@@ -273,7 +273,6 @@ mod tests {
                 let admin = Arc::new(AdminServices::new(
                     Arc::clone(&base.catalog),
                     Arc::clone(&encryption),
-                    Arc::clone(&base.source_circuit),
                 ));
                 let mut configured = (*base).clone();
                 configured.admin = admin;

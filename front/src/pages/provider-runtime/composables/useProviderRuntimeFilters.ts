@@ -29,8 +29,6 @@ const VALID_STATUS_FILTERS: ProviderRuntimeStatusFilter[] = [
   "all",
   "healthy",
   "degraded",
-  "open",
-  "half_open",
   "no_traffic",
 ];
 const VALID_SORT_FIELDS: ProviderRuntimeSortField[] = [

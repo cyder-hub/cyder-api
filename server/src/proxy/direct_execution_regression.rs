@@ -2724,14 +2724,6 @@ fn four_public_protocols_reject_sse_encoding_before_headers() {
             .await;
             router.wait_for_api_key_lease_release().await;
             assert_eq!(router.request_logs().await.len(), 1, "{name}");
-            let health = router
-                .app_state
-                .source_circuit
-                .get_source_health_snapshot(router.source_id)
-                .await
-                .unwrap();
-            assert_eq!(health.consecutive_failures, 1, "{name}");
-            assert!(!health.half_open_probe_in_flight, "{name}");
             upstream.shutdown().await;
         });
     }
@@ -2811,14 +2803,6 @@ fn four_public_protocols_terminate_body_on_sse_parser_failure() {
             .await;
             router.wait_for_api_key_lease_release().await;
             assert_eq!(router.request_logs().await.len(), 1, "{name}");
-            let health = router
-                .app_state
-                .source_circuit
-                .get_source_health_snapshot(router.source_id)
-                .await
-                .unwrap();
-            assert_eq!(health.consecutive_failures, 1, "{name}");
-            assert!(!health.half_open_probe_in_flight, "{name}");
             assert_eq!(upstream.requests().await.len(), 1, "{name}: no retry");
             upstream.shutdown().await;
         });
@@ -2943,17 +2927,6 @@ fn direct_execution_sse_resource_limits_finalize_once() {
             .await;
             router.wait_for_api_key_lease_release().await;
             assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
-            assert_eq!(
-                router
-                    .app_state
-                    .source_circuit
-                    .get_source_health_snapshot(router.source_id)
-                    .await
-                    .unwrap()
-                    .consecutive_failures,
-                1,
-                "{case_name}"
-            );
             assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
             upstream.shutdown().await;
         });
@@ -3032,14 +3005,6 @@ fn direct_execution_openai_done_closes_upstream_and_finalizes_once() {
         let contexts = persisted_sink.contexts.lock().await;
         assert_eq!(contexts.len(), 1);
         drop(contexts);
-        let health = router
-            .app_state
-            .source_circuit
-            .get_source_health_snapshot(router.source_id)
-            .await
-            .unwrap();
-        assert_eq!(health.consecutive_failures, 0);
-        assert!(!health.half_open_probe_in_flight);
         assert_eq!(upstream.requests().await.len(), 1);
         upstream.shutdown().await;
     });
@@ -3143,6 +3108,69 @@ fn direct_execution_regression_upstream_429_is_authentic_logged_and_never_retrie
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn direct_execution_repeated_upstream_failures_never_create_cross_request_gating() {
+    const RETIRED_FAILURE_THRESHOLD: usize = 5;
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::from_u16(fixture.error.upstream_status).unwrap(),
+            body: fixture.error.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        for attempt in 0..=RETIRED_FAILURE_THRESHOLD {
+            let response = router
+                .send(&fixture, false, &fixture.error.downstream_request)
+                .await;
+            assert_eq!(
+                response.status().as_u16(),
+                fixture.error.downstream_status,
+                "attempt {attempt} should preserve the upstream error status"
+            );
+            assert!(
+                response.headers().get("retry-after").is_none(),
+                "attempt {attempt} must not expose a cross-request Retry-After"
+            );
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("repeated error response should be readable");
+            let body: Value =
+                serde_json::from_slice(&body).expect("repeated error response should be JSON");
+            assert_eq!(
+                body,
+                render_request_id(&fixture.error.downstream_response, &request_id),
+                "attempt {attempt} should preserve the authentic error envelope"
+            );
+            router.wait_for_api_key_lease_release().await;
+
+            let logs = router.request_logs().await;
+            assert_eq!(
+                logs.len(),
+                attempt + 1,
+                "attempt {attempt} should persist exactly one request-level log"
+            );
+            assert!(logs.iter().all(|log| {
+                log.overall_status == RequestStatus::Error
+                    && log.final_error_code.as_deref() == Some("upstream_rate_limit_error")
+                    && log.upstream_http_status == Some(429)
+            }));
+        }
+
+        assert_eq!(
+            upstream.requests().await.len(),
+            RETIRED_FAILURE_THRESHOLD + 1,
+            "the request after the retired threshold must still reach upstream"
+        );
+        upstream.shutdown().await;
+    });
 }
 
 #[test]
@@ -3511,17 +3539,6 @@ fn direct_execution_non_stream_identity_and_gzip_enforce_exact_and_plus_one_limi
                 "{case_name}"
             );
             router.wait_for_api_key_lease_release().await;
-            let source_health = router
-                .app_state
-                .source_circuit
-                .get_source_health_snapshot(router.source_id)
-                .await
-                .unwrap();
-            assert_eq!(
-                source_health.consecutive_failures,
-                if succeeds { 0 } else { 1 },
-                "{case_name}"
-            );
             upstream.shutdown().await;
         });
     }
@@ -3563,17 +3580,6 @@ fn four_public_protocols_use_existing_envelopes_for_non_stream_response_limit() 
             assert_eq!(log.upstream_http_status, Some(200), "{name}");
             router.wait_for_api_key_lease_release().await;
             assert_eq!(router.request_logs().await.len(), 1, "{name}");
-            assert_eq!(
-                router
-                    .app_state
-                    .source_circuit
-                    .get_source_health_snapshot(router.source_id)
-                    .await
-                    .unwrap()
-                    .consecutive_failures,
-                1,
-                "{name}"
-            );
             upstream.shutdown().await;
         });
     }
@@ -3624,17 +3630,6 @@ fn four_public_protocols_use_existing_envelopes_for_decoded_response_limit() {
             assert_eq!(log.upstream_http_status, Some(200), "{name}");
             router.wait_for_api_key_lease_release().await;
             assert_eq!(router.request_logs().await.len(), 1, "{name}");
-            assert_eq!(
-                router
-                    .app_state
-                    .source_circuit
-                    .get_source_health_snapshot(router.source_id)
-                    .await
-                    .unwrap()
-                    .consecutive_failures,
-                1,
-                "{name}"
-            );
             upstream.shutdown().await;
         });
     }
@@ -3711,17 +3706,6 @@ fn four_public_protocols_preserve_bounded_provider_error_when_body_reaches_hard_
             );
             router.wait_for_api_key_lease_release().await;
             assert_eq!(router.request_logs().await.len(), 1, "{name}");
-            assert_eq!(
-                router
-                    .app_state
-                    .source_circuit
-                    .get_source_health_snapshot(router.source_id)
-                    .await
-                    .unwrap()
-                    .consecutive_failures,
-                1,
-                "{name}"
-            );
             upstream.shutdown().await;
         });
     }
@@ -3843,17 +3827,6 @@ fn direct_execution_provider_error_hard_limit_preserves_status_and_disclosure_pr
                 "{case_name}"
             );
             router.wait_for_api_key_lease_release().await;
-            assert_eq!(
-                router
-                    .app_state
-                    .source_circuit
-                    .get_source_health_snapshot(router.source_id)
-                    .await
-                    .unwrap()
-                    .consecutive_failures,
-                1,
-                "{case_name}"
-            );
             upstream.shutdown().await;
         });
     }
@@ -4361,14 +4334,6 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
                 1,
                 "{name}: cancelled stream must persist exactly one terminal request log"
             );
-            let source_health = router
-                .app_state
-                .source_circuit
-                .get_source_health_snapshot(router.source_id)
-                .await
-                .expect("source circuit snapshot should load");
-            assert_eq!(source_health.consecutive_failures, 0);
-            assert!(!source_health.half_open_probe_in_flight);
             assert_single_persisted_terminal_fact(
                 &persisted_sink,
                 ExecutionStage::DownstreamSend,

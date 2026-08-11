@@ -21,12 +21,6 @@ pub(crate) enum ProxyTerminationCause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderOutcome {
-    Success,
-    Failure,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadyTerminationSignal {
     ClientCancelled,
     PhaseTimeout(TimeoutPhase),
@@ -42,7 +36,6 @@ pub(crate) enum TotalWatchdogResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminationSnapshot {
     pub terminal: Option<ProxyTerminationCause>,
-    pub provider_outcome: Option<ProviderOutcome>,
     pub request_log_claimed: bool,
     pub lease_release_claimed: bool,
 }
@@ -81,7 +74,6 @@ impl TotalWatchdog {
 #[derive(Debug, Default)]
 struct CoordinatorState {
     terminal: Option<ProxyTerminationCause>,
-    provider_outcome: Option<ProviderOutcome>,
     request_log_claimed: bool,
     lease_release_claimed: bool,
     total_watchdog: Option<TotalWatchdog>,
@@ -122,15 +114,6 @@ impl ProxyTerminationCoordinator {
             _ => ProxyTerminationCause::UpstreamError,
         };
         self.try_terminate(cause)
-    }
-
-    pub(crate) fn try_record_provider_outcome(&self, outcome: ProviderOutcome) -> bool {
-        let mut state = self.lock();
-        if state.provider_outcome.is_some() {
-            return false;
-        }
-        state.provider_outcome = Some(outcome);
-        true
     }
 
     pub(crate) fn claim_request_log(&self) -> bool {
@@ -178,7 +161,6 @@ impl ProxyTerminationCoordinator {
         let state = self.lock();
         TerminationSnapshot {
             terminal: state.terminal,
-            provider_outcome: state.provider_outcome,
             request_log_claimed: state.request_log_claimed,
             lease_release_claimed: state.lease_release_claimed,
         }
@@ -252,8 +234,8 @@ mod tests {
     use tokio::time::{Instant, sleep};
 
     use super::{
-        ProviderOutcome, ProxyTerminationCause, ProxyTerminationCoordinator,
-        ReadyTerminationSignal, TotalWatchdogResult, choose_ready_termination,
+        ProxyTerminationCause, ProxyTerminationCoordinator, ReadyTerminationSignal,
+        TotalWatchdogResult, choose_ready_termination,
     };
     use crate::proxy::TimeoutPhase;
 
@@ -295,12 +277,6 @@ mod tests {
         }));
         assert_eq!(coordinator.terminal(), Some(ProxyTerminationCause::Success));
 
-        assert!(coordinator.try_record_provider_outcome(ProviderOutcome::Success));
-        assert!(!coordinator.try_record_provider_outcome(ProviderOutcome::Failure));
-        assert_eq!(
-            coordinator.snapshot().provider_outcome,
-            Some(ProviderOutcome::Success)
-        );
         assert!(coordinator.claim_request_log());
         assert!(!coordinator.claim_request_log());
         assert!(coordinator.claim_lease_release());

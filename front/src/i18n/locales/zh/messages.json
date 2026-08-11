@@ -98,8 +98,6 @@
       "enabledSources": "已启用 Source",
       "windowDetail": "窗口：{window}",
       "degradedHint": "存在错误率或延迟劣化",
-      "halfOpenHint": "处于半开探测恢复阶段",
-      "openHint": "已进入熔断打开状态",
       "noTrafficHint": "当前窗口内无请求流量",
       "activeProviders": "今日活跃渠道",
       "activeModels": "活跃模型"
@@ -129,7 +127,7 @@
       "lastChecked": "检查时间 {time}"
     },
     "operationsGroups": {
-      "unstable": "当前异常渠道",
+      "degraded": "观测到劣化的渠道",
       "topErrors": "最近错误最多",
       "costHotspots": "成本热点",
       "costProviders": "高成本渠道",
@@ -143,7 +141,7 @@
       "lastError": "最近错误"
     },
     "empty": {
-      "noUnstableProviders": "当前没有处于 open 或 half-open 的渠道。",
+      "noDegradedProviders": "当前没有观测到劣化的渠道。",
       "noErrors": "当前没有错误热点渠道。",
       "noCostHotspots": "当前没有明显的成本热点。",
       "noCostProviders": "当前没有高成本渠道。",
@@ -268,8 +266,6 @@
       "enabledSources": "已启用 Source",
       "healthy": "健康",
       "degraded": "降级",
-      "halfOpen": "半开",
-      "open": "熔断打开",
       "noTraffic": "无流量"
     },
     "filter": {
@@ -290,8 +286,6 @@
     "status": {
       "healthy": "健康",
       "degraded": "降级",
-      "open": "熔断打开",
-      "half_open": "半开探测",
       "no_traffic": "无流量"
     },
     "sort": {
@@ -311,7 +305,6 @@
       "totalLatency": "总耗时",
       "sampleCoverage": "{count} 个延迟样本",
       "errors": "错误",
-      "failures": "连续失败",
       "models": "模型",
       "keys": "Key",
       "cost": "成本",
@@ -324,11 +317,10 @@
       "provider": "渠道",
       "health": "健康",
       "source": "Source",
-      "sourceCircuit": "Source 熔断"
+      "runtime": "Runtime"
     },
     "source": {
-      "title": "Source",
-      "circuitScope": "熔断状态归属此 Source"
+      "title": "Source"
     },
     "detail": {
       "statusCode": "状态码",
@@ -461,6 +453,8 @@
       "summary": {
         "apiKey": "API Key",
         "provider": "渠道",
+        "providerKeyId": "Provider Key ID",
+        "providerKeyIdUnknown": "未知 / 未选择",
         "source": "实际执行 Source",
         "sourceId": "Source ID",
         "sourceEndpoint": "Source Endpoint",
@@ -1338,6 +1332,7 @@
     },
     "credentials": {
       "items": "个凭据",
+      "keyId": "Key #{id}",
       "enabled": "已启用",
       "disabled": "已停用",
       "enable": "启用",
@@ -1392,7 +1387,7 @@
     "buttonBackToList": "返回列表",
     "sources": {
       "title": "Provider Sources",
-      "description": "管理这个 Provider 所有上游 Source 的地址和运行状态。",
+      "description": "管理这个 Provider 所有上游 Source 的地址和持久启用/默认状态。",
       "add": "添加 Source",
       "addTitle": "添加 Source",
       "editTitle": "编辑 Source",
@@ -1407,7 +1402,6 @@
       "disabled": "已停用",
       "default": "默认",
       "defaultHint": "每个 Provider 最多只有一个启用的默认 Source。",
-      "circuitUnavailable": "Circuit 状态不可用",
       "table": {
         "profile": "Profile",
         "endpoint": "地址",

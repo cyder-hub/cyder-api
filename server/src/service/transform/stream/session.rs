@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -94,9 +94,19 @@ pub struct ResponsesSessionState {
     pub(in crate::service::transform) active_tool_calls: HashMap<u32, responses::FunctionCall>,
     pub(in crate::service::transform) completed_output: BTreeMap<u32, responses::ItemField>,
     pub(in crate::service::transform) source_created_seen: bool,
+    pub(in crate::service::transform) source_response_id: Option<String>,
+    pub(in crate::service::transform) source_response_model: Option<String>,
+    pub(in crate::service::transform) source_queued_seen: bool,
+    pub(in crate::service::transform) source_in_progress_seen: bool,
     pub(in crate::service::transform) source_terminal_seen: bool,
+    pub(in crate::service::transform) source_last_sequence_number: Option<u64>,
     pub(in crate::service::transform) source_output_item_ids: HashMap<u32, String>,
+    pub(in crate::service::transform) source_output_items_done: HashSet<u32>,
+    pub(in crate::service::transform) source_content_parts: HashSet<(String, u32)>,
+    pub(in crate::service::transform) source_reasoning_parts: HashSet<(String, u32)>,
     pub(in crate::service::transform) source_output_text: HashMap<String, String>,
+    pub(in crate::service::transform) source_refusal_text: HashMap<String, String>,
+    pub(in crate::service::transform) source_reasoning_text: HashMap<(String, u32), String>,
     pub(in crate::service::transform) source_tool_arguments: HashMap<String, String>,
 }
 
@@ -238,6 +248,34 @@ impl SessionContext {
 
     pub(in crate::service::transform) fn diagnostics_snapshot(&self) -> TransformOutcomeSummary {
         self.diagnostics.snapshot()
+    }
+
+    pub(in crate::service::transform) fn responses_source_terminal_seen(&self) -> bool {
+        self.responses.source_terminal_seen
+    }
+
+    pub(in crate::service::transform) fn responses_source_failed(&self) -> bool {
+        self.responses.source_terminal_seen && self.last_error.is_some()
+    }
+
+    pub(in crate::service::transform) fn responses_source_identity_matches(
+        &self,
+        response_id: &str,
+        response_model: &str,
+    ) -> bool {
+        self.responses.source_created_seen
+            && self.responses.source_response_id.as_deref() == Some(response_id)
+            && self.responses.source_response_model.as_deref() == Some(response_model)
+    }
+
+    pub(in crate::service::transform) fn mark_responses_source_terminal(
+        &mut self,
+        error: Option<Value>,
+    ) {
+        self.responses.source_terminal_seen = true;
+        if let Some(error) = error {
+            self.last_error = Some(error);
+        }
     }
 
     #[cfg(test)]
@@ -551,6 +589,7 @@ impl SessionContext {
             }
             UnifiedStreamEvent::MessageStop
             | UnifiedStreamEvent::ContentBlockDelta { .. }
+            | UnifiedStreamEvent::RefusalDelta { .. }
             | UnifiedStreamEvent::BlobDelta { .. } => {}
         }
     }

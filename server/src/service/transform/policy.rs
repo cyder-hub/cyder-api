@@ -146,6 +146,15 @@ impl PolicyEngine {
         target: TransformProtocol,
         kind: TransformValueKind,
     ) -> PolicyDecision {
+        if matches!(
+            target,
+            TransformProtocol::Downstream(DownstreamProtocol::Openai)
+        ) && matches!(
+            kind,
+            TransformValueKind::ReasoningContent | TransformValueKind::ReasoningDelta
+        ) {
+            return PolicyDecision::minor_drop(TransformReasonCode::UnsupportedReasoning);
+        }
         if let Some(decision) = Self::evaluate_capability_matrix(target, kind) {
             return decision;
         }
@@ -162,13 +171,10 @@ impl PolicyEngine {
             (_, target, TransformValueKind::ImageUrl) if target.is_gemini() => {
                 PolicyDecision::deterministic_text_downgrade()
             }
-            (_, target, TransformValueKind::ImageData)
-            | (_, target, TransformValueKind::FileUrl)
-            | (_, target, TransformValueKind::FileData)
-            | (_, target, TransformValueKind::ExecutableCode)
+            (_, target, TransformValueKind::FileUrl | TransformValueKind::ExecutableCode)
                 if target.is_responses() =>
             {
-                PolicyDecision::deterministic_text_downgrade()
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
             (_, target, TransformValueKind::ToolRoleMessage)
             | (_, target, TransformValueKind::ToolCall)
@@ -337,6 +343,42 @@ mod tests {
             );
             assert_eq!(request_decision.outcome, TransformOutcomeKind::Lossless);
             assert_eq!(request_decision.action, TransformAction::Send);
+        }
+    }
+
+    #[test]
+    fn responses_request_target_sends_native_inline_media_and_rejects_external_file_io() {
+        for kind in [
+            TransformValueKind::ImageUrl,
+            TransformValueKind::ImageData,
+            TransformValueKind::AudioData,
+            TransformValueKind::FileData,
+            TransformValueKind::FileId,
+        ] {
+            let decision = PolicyEngine::evaluate(
+                TransformProtocol::Unified,
+                TransformProtocol::Upstream(UpstreamProtocol::Responses),
+                kind,
+            );
+            assert_eq!(decision.outcome, TransformOutcomeKind::Lossless, "{kind:?}");
+            assert_eq!(decision.action, TransformAction::Send, "{kind:?}");
+        }
+
+        for kind in [
+            TransformValueKind::FileUrl,
+            TransformValueKind::ExecutableCode,
+        ] {
+            let decision = PolicyEngine::evaluate(
+                TransformProtocol::Unified,
+                TransformProtocol::Upstream(UpstreamProtocol::Responses),
+                kind,
+            );
+            assert_eq!(decision.outcome, TransformOutcomeKind::ExplicitReject);
+            assert_eq!(decision.action, TransformAction::Reject);
+            assert_eq!(
+                decision.reason_code,
+                TransformReasonCode::UnsupportedContent
+            );
         }
     }
 }

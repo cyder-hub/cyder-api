@@ -122,6 +122,17 @@ fn finalize_openai_request(
     data
 }
 
+fn finalize_responses_request(
+    mut data: Value,
+    _profile_type: &UpstreamProfileType,
+    _downstream_path: &str,
+) -> Value {
+    if let Value::Object(object) = &mut data {
+        object.insert("store".to_string(), Value::Bool(false));
+    }
+    data
+}
+
 fn decode_json<T, U>(
     data: Value,
     origin: TransformFailureOrigin,
@@ -838,7 +849,7 @@ const RESPONSES_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
     name: "responses",
     request: UpstreamRequestCodec {
         encode: encode_responses_request,
-        finalize: Some(noop_finalize_request),
+        finalize: Some(finalize_responses_request),
     },
     response: UpstreamResponseCodec {
         decode: decode_responses_response,

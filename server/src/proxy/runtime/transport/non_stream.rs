@@ -27,7 +27,9 @@ use crate::{
         },
     },
     schema::enum_def::RequestStatus,
-    service::transform::{TransformPhase, diagnostics::upstream_usage_missing_summary},
+    service::transform::{
+        ResponseApplicationOutcome, TransformPhase, diagnostics::upstream_usage_missing_summary,
+    },
     service::upstream_profile::UpstreamOperation,
     service::{cache::types::CacheCostCatalogVersion, upstream_response::parse_content_encoding},
 };
@@ -143,64 +145,100 @@ pub(super) async fn handle_non_streaming_response(
                     decompressed_body.clone(),
                     None,
                     usage_normalization,
+                    ResponseApplicationOutcome::Success,
                     Default::default(),
                 ))
             }
         };
-        let (final_body, parsed_usage_info, parsed_usage_normalization, mut transform_summary) =
-            match transformed {
-                Ok(output) => output,
-                Err(failure) => {
-                    let proxy_error =
-                        classify_transform_failure(&failure, response_visibility.current());
-                    cancellation.try_terminate_error(&proxy_error);
-                    let mut context = log_context.lock().await;
-                    context.request_url = Some(url.to_string());
-                    context.llm_status = Some(status_code);
-                    context.completed_at = Some(completed_at);
-                    context.cost_catalog_version = cost_catalog_version.cloned();
-                    context.overall_status = RequestStatus::Error;
-                    apply_final_error_fact(&mut context, &proxy_error);
-                    log_transform_failure(TransformLogStage::Response, &context, &failure);
-                    api_key_request_lease.release().await;
-                    return Err(ProxyRequestFailure {
-                        error: proxy_error,
-                        log_context: context.clone(),
-                    });
-                }
-            };
+        let (
+            final_body,
+            parsed_usage_info,
+            parsed_usage_normalization,
+            application_outcome,
+            mut transform_summary,
+        ) = match transformed {
+            Ok(output) => output,
+            Err(failure) => {
+                let proxy_error =
+                    classify_transform_failure(&failure, response_visibility.current());
+                cancellation.try_terminate_error(&proxy_error);
+                let mut context = log_context.lock().await;
+                context.request_url = Some(url.to_string());
+                context.llm_status = Some(status_code);
+                context.completed_at = Some(completed_at);
+                context.cost_catalog_version = cost_catalog_version.cloned();
+                context.overall_status = RequestStatus::Error;
+                apply_final_error_fact(&mut context, &proxy_error);
+                log_transform_failure(TransformLogStage::Response, &context, &failure);
+                api_key_request_lease.release().await;
+                return Err(ProxyRequestFailure {
+                    error: proxy_error,
+                    log_context: context.clone(),
+                });
+            }
+        };
 
-        let usage_missing = response_mode.expects_usage() && parsed_usage_normalization.is_none();
+        let usage_missing = application_outcome == ResponseApplicationOutcome::Success
+            && response_mode.expects_usage()
+            && parsed_usage_normalization.is_none();
         if usage_missing && !is_generation_response {
             transform_summary = upstream_usage_missing_summary(TransformPhase::ResponseObserve);
         }
 
         let mut context = log_context.lock().await;
+        let overall_status = match application_outcome {
+            ResponseApplicationOutcome::Success => RequestStatus::Success,
+            ResponseApplicationOutcome::Failed => RequestStatus::Error,
+        };
+        let (logged_usage, logged_usage_normalization) = if overall_status == RequestStatus::Success
+        {
+            (parsed_usage_info, parsed_usage_normalization)
+        } else {
+            (None, None)
+        };
         finalize_non_streaming_log_context(
             &mut context,
             url,
             status_code,
             completed_at,
             cost_catalog_version,
-            RequestStatus::Success,
-            parsed_usage_info,
-            parsed_usage_normalization,
+            overall_status.clone(),
+            logged_usage,
+            logged_usage_normalization,
         );
+        if application_outcome == ResponseApplicationOutcome::Failed {
+            let proxy_error = ProxyError::gateway(
+                ProxyErrorCode::UpstreamResponseError,
+                ExecutionStage::UpstreamResponse,
+                response_visibility.current(),
+                None,
+                "Responses upstream returned a failed application terminal.",
+            );
+            apply_final_error_fact(&mut context, &proxy_error);
+            crate::logging::log_proxy_error_event(
+                "proxy.non_stream_application_error",
+                Some(context.request_id.as_str()),
+                Some(context.id),
+                &proxy_error,
+            );
+        }
         if is_generation_response || usage_missing {
             log_transform_summary(TransformLogStage::Response, &context, &transform_summary);
         }
         if usage_missing {
             log_upstream_usage_missing(&context, &model_str, status_code);
         }
-        crate::debug_event!(
-            "proxy.request_succeeded_debug",
-            request_id = &context.request_id,
-            log_id = context.id,
-            model = &model_str,
-            status_code = status_code.as_u16(),
-            is_stream = false,
-            latency_ms = completed_at.saturating_sub(context.request_received_at),
-        );
+        if application_outcome == ResponseApplicationOutcome::Success {
+            crate::debug_event!(
+                "proxy.request_succeeded_debug",
+                request_id = &context.request_id,
+                log_id = context.id,
+                model = &model_str,
+                status_code = status_code.as_u16(),
+                is_stream = false,
+                latency_ms = completed_at.saturating_sub(context.request_received_at),
+            );
+        }
 
         let response = match response_builder.body(Body::from(final_body)) {
             Ok(response) => response,

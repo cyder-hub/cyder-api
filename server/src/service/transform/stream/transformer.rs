@@ -14,6 +14,7 @@ use crate::service::transform::adapter::{
 use crate::service::transform::diagnostics::{
     capture_transform_diagnostics, merge_transform_summaries, transform_failure, transform_success,
 };
+use crate::service::transform::response::observe_responses_usage;
 use crate::service::transform::unified::*;
 use crate::service::transform::{
     TransformAction, TransformDiagnosticFact, TransformFailureOrigin, TransformOutcomeKind,
@@ -30,6 +31,12 @@ pub struct StreamTransformer {
     last_meaningful_output_observed: bool,
     terminal_failure: Option<crate::service::transform::TransformFailure>,
     stream_summary: crate::service::transform::TransformDiagnosticCollector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceStreamTermination {
+    Succeeded,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -261,9 +268,136 @@ impl StreamTransformer {
         }
     }
 
+    pub fn validate_source_termination(&self) -> TransformResult<()> {
+        if let Some(failure) = &self.terminal_failure {
+            return Err(failure.clone());
+        }
+        if self.upstream_protocol != UpstreamProtocol::Responses
+            || self.session.responses_source_terminal_seen()
+        {
+            return Ok(transform_success(
+                (),
+                TransformPhase::StreamDecode,
+                TransformSemanticUnit::Lifecycle,
+                TransformOutcomeKind::Lossless,
+                TransformAction::PassThrough,
+                TransformReasonCode::LosslessConversion,
+            ));
+        }
+
+        Err(transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::StreamDecode,
+            TransformSemanticUnit::Lifecycle,
+            TransformReasonCode::IllegalUpstreamTerminal,
+            None,
+        ))
+    }
+
+    pub(crate) fn source_termination(&self) -> Option<SourceStreamTermination> {
+        if self.upstream_protocol != UpstreamProtocol::Responses
+            || !self.session.responses_source_terminal_seen()
+        {
+            return None;
+        }
+        Some(if self.session.responses_source_failed() {
+            SourceStreamTermination::Failed
+        } else {
+            SourceStreamTermination::Succeeded
+        })
+    }
+
     fn record_post_transform_diagnostic(&mut self, fact: TransformDiagnosticFact) {
         self.session.record_diagnostic(fact.clone());
         self.stream_summary.record(fact);
+    }
+
+    fn observe_degraded_responses_core(&mut self, raw: &str) -> Result<(), ()> {
+        let value = serde_json::from_str::<Value>(raw).map_err(|_| ())?;
+        let Some(event_type) = value.get("type").and_then(Value::as_str) else {
+            return Ok(());
+        };
+
+        if event_type == "response.usage" {
+            if let Some(usage) = observe_responses_usage(&value) {
+                self.session.merge_usage(usage, UsageMergeStrategy::Replace);
+            }
+            return Ok(());
+        }
+
+        if event_type == "error" {
+            let code_is_valid = value
+                .get("code")
+                .and_then(Value::as_str)
+                .is_some_and(|code| !code.is_empty());
+            let message_is_valid = value
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| !message.is_empty());
+            if !code_is_valid || !message_is_valid {
+                return Err(());
+            }
+            self.session
+                .mark_responses_source_terminal(Some(value.clone()));
+            return Ok(());
+        }
+
+        if !matches!(
+            event_type,
+            "response.queued"
+                | "response.in_progress"
+                | "response.completed"
+                | "response.incomplete"
+                | "response.failed"
+        ) {
+            return Ok(());
+        }
+
+        let response = value.get("response").ok_or(())?;
+        let response_id = response
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or(())?;
+        let response_model = response
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+            .ok_or(())?;
+        if !self
+            .session
+            .responses_source_identity_matches(response_id, response_model)
+        {
+            return Err(());
+        }
+
+        let status = response.get("status").and_then(Value::as_str).ok_or(())?;
+        let error = response.get("error").filter(|error| !error.is_null());
+        match event_type {
+            "response.queued" if status == "queued" && error.is_none() => return Ok(()),
+            "response.in_progress" if status == "in_progress" && error.is_none() => {
+                return Ok(());
+            }
+            "response.completed" if status == "completed" && error.is_none() => {}
+            "response.incomplete" if status == "incomplete" && error.is_none() => {
+                if !response
+                    .get("incomplete_details")
+                    .and_then(|details| details.get("reason"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.is_empty())
+                {
+                    return Err(());
+                }
+            }
+            "response.failed" if status == "failed" && error.is_some() => {}
+            _ => return Err(()),
+        }
+
+        if let Some(usage) = observe_responses_usage(&value) {
+            self.session.merge_usage(usage, UsageMergeStrategy::Replace);
+        }
+        self.session.mark_responses_source_terminal(error.cloned());
+        Ok(())
     }
 
     pub(crate) fn get_or_generate_stream_id(&mut self) -> String {
@@ -482,6 +616,11 @@ impl StreamTransformer {
                 Err(failure) => {
                     self.session
                         .restore_semantic_snapshot(observation_session_before);
+                    if self.upstream_protocol == UpstreamProtocol::Responses
+                        && self.observe_degraded_responses_core(&event.data).is_err()
+                    {
+                        return Err(failure);
+                    }
                     let fact = TransformDiagnosticFact {
                         sequence: 0,
                         phase: TransformPhase::ResponseObserve,

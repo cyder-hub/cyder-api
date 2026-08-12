@@ -176,6 +176,9 @@ pub(super) fn semantic_snapshot_from_stream_events(
             UnifiedStreamEvent::ContentBlockDelta { text, .. } => {
                 snapshot.text.push_str(&text);
             }
+            UnifiedStreamEvent::RefusalDelta { text, .. } => {
+                snapshot.text.push_str(&text);
+            }
             UnifiedStreamEvent::ReasoningDelta { text, .. } => {
                 snapshot.reasoning.push_str(&text);
             }

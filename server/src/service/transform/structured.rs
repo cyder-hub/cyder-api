@@ -5,9 +5,45 @@ use super::unified::UnifiedStructuredOutput;
 
 const SYNTHETIC_SCHEMA_NAME_PREFIX: &str = "cyder_schema_";
 
+fn write_canonical_json(value: &Value, output: &mut Vec<u8>) {
+    match value {
+        Value::Array(items) => {
+            output.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(item, output);
+            }
+            output.push(b']');
+        }
+        Value::Object(object) => {
+            output.push(b'{');
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend(
+                    serde_json::to_vec(key)
+                        .expect("JSON object key serialization is structurally infallible"),
+                );
+                output.push(b':');
+                write_canonical_json(&object[key], output);
+            }
+            output.push(b'}');
+        }
+        scalar => output.extend(
+            serde_json::to_vec(scalar)
+                .expect("serde_json::Value serialization is structurally infallible"),
+        ),
+    }
+}
+
 pub(crate) fn stable_schema_name(schema: &Value) -> String {
-    let encoded = serde_json::to_vec(schema)
-        .expect("serde_json::Value serialization is structurally infallible");
+    let mut encoded = Vec::new();
+    write_canonical_json(schema, &mut encoded);
     let digest = format!("{:x}", Sha256::digest(encoded));
     format!("{SYNTHETIC_SCHEMA_NAME_PREFIX}{}", &digest[..16])
 }
@@ -88,6 +124,20 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.starts_with(SYNTHETIC_SCHEMA_NAME_PREFIX));
         assert!(is_valid_schema_name(&first));
+    }
+
+    #[test]
+    fn synthesized_schema_names_ignore_json_object_insertion_order() {
+        let first: Value = serde_json::from_str(
+            r#"{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}},"required":["a"]}"#,
+        )
+        .expect("schema");
+        let second: Value = serde_json::from_str(
+            r#"{"required":["a"],"properties":{"b":{"type":"integer"},"a":{"type":"string"}},"type":"object"}"#,
+        )
+        .expect("schema");
+
+        assert_eq!(stable_schema_name(&first), stable_schema_name(&second));
     }
 
     #[test]

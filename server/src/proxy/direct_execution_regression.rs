@@ -68,11 +68,12 @@ use crate::{
         admin::provider::BootstrapProviderCommand,
         app_state::{AppState, create_test_app_state},
         infra::AppInfra,
+        transform::{StreamTransformer, TransformOutcomeKind},
         upstream_profile::upstream_runtime_profile,
     },
     utils::{
         ID_GENERATOR,
-        sse::{SseFrame, SseParser},
+        sse::{SseEvent, SseFrame, SseParser},
     },
 };
 
@@ -100,6 +101,9 @@ const FIXTURE_SOURCES: [(&str, &str); 4] = [
         include_str!("../service/transform/testdata/direct_execution/gemini.json"),
     ),
 ];
+
+const RESPONSES_TARGET_SOURCE: &str =
+    include_str!("../service/transform/testdata/direct_execution/responses_target.json");
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct GoldenEvent {
@@ -189,6 +193,44 @@ pub(super) struct DirectExecutionFixture {
     cancellation: CancellationGolden,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct ResponsesTargetRequestGolden {
+    non_stream: Value,
+    stream: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResponsesHttpErrorGolden {
+    status: u16,
+    response: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResponsesTargetErrorGolden {
+    http_429: ResponsesHttpErrorGolden,
+    failed_response: Value,
+    error_event: GoldenEvent,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResponsesTargetCancellationGolden {
+    first_upstream_event: GoldenEvent,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResponsesTargetGolden {
+    profile_type: UpstreamProfileType,
+    base_url: String,
+    upstream_headers: BTreeMap<String, String>,
+    upstream_path: String,
+    requests: BTreeMap<String, ResponsesTargetRequestGolden>,
+    non_stream_response: Value,
+    stream_events: Vec<GoldenEvent>,
+    usage: UsageGolden,
+    error: ResponsesTargetErrorGolden,
+    cancellation: ResponsesTargetCancellationGolden,
+}
+
 pub(super) fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
     FIXTURE_SOURCES
         .iter()
@@ -264,6 +306,49 @@ fn openai_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
                 fixture.cancellation.first_upstream_event =
                     openai.cancellation.first_upstream_event.clone();
             }
+            (name, fixture)
+        })
+        .collect()
+}
+
+fn responses_target_golden() -> ResponsesTargetGolden {
+    serde_json::from_str(RESPONSES_TARGET_SOURCE)
+        .expect("Responses target direct execution fixture should parse")
+}
+
+fn responses_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
+    let target = responses_target_golden();
+
+    fixtures()
+        .into_iter()
+        .map(|(name, mut fixture)| {
+            let request = target
+                .requests
+                .get(name)
+                .unwrap_or_else(|| panic!("{name}: Responses target request fixture"));
+            fixture.profile_type = target.profile_type;
+            fixture.upstream_headers = target.upstream_headers.clone();
+            fixture.request.upstream = request.non_stream.clone();
+            fixture.request.upstream_path = target.upstream_path.clone();
+            fixture.request.upstream_query = None;
+            fixture.non_stream.upstream_response = target.non_stream_response.clone();
+            fixture.stream.upstream_request = request.stream.clone();
+            fixture.stream.upstream_path = target.upstream_path.clone();
+            fixture.stream.upstream_query = None;
+            fixture.stream.upstream_events = target.stream_events.clone();
+            fixture.error.upstream_status = target.error.http_429.status;
+            fixture.error.upstream_response = target.error.http_429.response.clone();
+            fixture.cancellation.upstream_request = request.stream.clone();
+            fixture.cancellation.upstream_path = target.upstream_path.clone();
+            fixture.cancellation.upstream_query = None;
+            fixture.cancellation.first_upstream_event =
+                target.cancellation.first_upstream_event.clone();
+
+            if fixture.protocol == DownstreamProtocol::Responses {
+                fixture.non_stream.downstream_response = target.non_stream_response.clone();
+                fixture.stream.downstream_events = target.stream_events.clone();
+            }
+
             (name, fixture)
         })
         .collect()
@@ -1117,6 +1202,26 @@ impl RouterFixture {
             SocketAddr::from(([127, 0, 0, 1], 3000)),
             None,
             Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig::default())),
+            None,
+        )
+        .await
+    }
+
+    async fn send_with_cancellation(
+        &self,
+        fixture: &DirectExecutionFixture,
+        stream: bool,
+        body: &Value,
+        cancellation: ProxyCancellationContext,
+    ) -> Response<Body> {
+        self.send_with_client_identity(
+            fixture,
+            stream,
+            body,
+            SocketAddr::from(([127, 0, 0, 1], 3005)),
+            None,
+            Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig::default())),
+            Some(cancellation),
         )
         .await
     }
@@ -1129,6 +1234,7 @@ impl RouterFixture {
         peer_addr: SocketAddr,
         forwarded: Option<&str>,
         resolver: Arc<ClientIdentityResolver>,
+        cancellation: Option<ProxyCancellationContext>,
     ) -> Response<Body> {
         let path_template = if stream {
             &fixture.downstream_stream_path
@@ -1170,6 +1276,9 @@ impl RouterFixture {
         request
             .extensions_mut()
             .insert(axum::extract::ConnectInfo(peer_addr));
+        if let Some(cancellation) = cancellation {
+            request.extensions_mut().insert(cancellation);
+        }
         create_proxy_router(resolver)
             .with_state(Arc::clone(&self.app_state))
             .oneshot(request)
@@ -1183,21 +1292,38 @@ impl RouterFixture {
         body: Value,
         auth: DownstreamAuth,
     ) -> Response<Body> {
+        self.send_raw_method(Method::POST, uri, Some(body), Some(auth))
+            .await
+    }
+
+    async fn send_raw_method(
+        &self,
+        method: Method,
+        uri: String,
+        body: Option<Value>,
+        auth: Option<DownstreamAuth>,
+    ) -> Response<Body> {
         let mut builder = Request::builder()
-            .method(Method::POST)
+            .method(method)
             .uri(uri)
             .header(CONTENT_TYPE, "application/json");
         match auth {
-            DownstreamAuth::Bearer => {
+            Some(DownstreamAuth::Bearer) => {
                 builder = builder.header("authorization", format!("Bearer {}", self.downstream_key))
             }
-            DownstreamAuth::XApiKey => builder = builder.header("x-api-key", &self.downstream_key),
-            DownstreamAuth::GeminiQuery => {
+            Some(DownstreamAuth::XApiKey) => {
+                builder = builder.header("x-api-key", &self.downstream_key)
+            }
+            Some(DownstreamAuth::GeminiQuery) => {
                 panic!("Gemini query authentication must be included in the supplied URI")
             }
+            None => {}
         }
         let mut request = builder
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .body(match body {
+                Some(body) => Body::from(serde_json::to_vec(&body).unwrap()),
+                None => Body::empty(),
+            })
             .expect("downstream utility request should build");
         request
             .extensions_mut()
@@ -1411,6 +1537,19 @@ impl RouterFixture {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+
+    async fn assert_no_api_key_usage_charge(&self, case_name: &str) {
+        let snapshot = self
+            .app_state
+            .api_key_governance
+            .get_api_key_governance_snapshot(self.downstream_api_key_id)
+            .await
+            .expect("API key governance snapshot should load");
+        assert_eq!(snapshot.daily_token_count, 0, "{case_name}");
+        assert_eq!(snapshot.monthly_token_count, 0, "{case_name}");
+        assert!(snapshot.daily_billed_amounts.is_empty(), "{case_name}");
+        assert!(snapshot.monthly_billed_amounts.is_empty(), "{case_name}");
+    }
 }
 
 async fn assert_single_persisted_terminal_fact(
@@ -1533,10 +1672,7 @@ fn sse_proxy_config(
     config
 }
 
-fn parse_downstream_events(
-    _downstream_protocol: DownstreamProtocol,
-    body: &[u8],
-) -> Vec<GoldenEvent> {
+fn parse_downstream_sse_events(body: &[u8]) -> Vec<SseEvent> {
     let mut parser = SseParser::new(crate::config::SseResponseConfig::default());
     let mut frames = Vec::new();
     let mut next = parser.feed(body).expect("downstream SSE should parse");
@@ -1554,6 +1690,13 @@ fn parse_downstream_events(
         }
     }
     frames
+}
+
+fn parse_downstream_events(
+    _downstream_protocol: DownstreamProtocol,
+    body: &[u8],
+) -> Vec<GoldenEvent> {
+    parse_downstream_sse_events(body)
         .into_iter()
         .map(|event| GoldenEvent {
             event: event.event,
@@ -1643,8 +1786,8 @@ fn assert_upstream(
     );
     let body: Value = serde_json::from_slice(&request.body).expect("upstream body should be JSON");
     assert_eq!(
-        body,
-        render_value(expected_body, requested_model),
+        normalized(body),
+        normalized(render_value(expected_body, requested_model)),
         "{name}: upstream body"
     );
     for (header, expected) in &fixture.upstream_headers {
@@ -1941,6 +2084,87 @@ fn direct_execution_regression_fixtures_define_four_complete_protocols() {
 }
 
 #[test]
+fn responses_target_fixtures_define_four_complete_protocols_and_native_evidence() {
+    let target = responses_target_golden();
+    let fixtures = responses_target_fixtures();
+
+    assert_eq!(target.base_url, "/v1");
+    assert_eq!(target.profile_type, UpstreamProfileType::Responses);
+    assert_eq!(target.upstream_path, "/v1/responses");
+    assert_eq!(
+        fixtures.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        vec!["openai", "responses", "anthropic", "gemini"]
+    );
+    assert_eq!(target.requests.len(), 4);
+
+    for (name, fixture) in fixtures {
+        validate_fixture(name, &fixture);
+        assert_eq!(
+            fixture.profile_type,
+            UpstreamProfileType::Responses,
+            "{name}"
+        );
+        assert_eq!(fixture.request.upstream_path, "/v1/responses", "{name}");
+        assert_eq!(fixture.stream.upstream_path, "/v1/responses", "{name}");
+        assert_eq!(
+            fixture.cancellation.upstream_path, "/v1/responses",
+            "{name}"
+        );
+        assert_eq!(
+            fixture
+                .upstream_headers
+                .get("authorization")
+                .map(String::as_str),
+            Some("Bearer provider-baseline-secret"),
+            "{name}"
+        );
+        for request in [&fixture.request.upstream, &fixture.stream.upstream_request] {
+            assert_eq!(request["model"], "$UPSTREAM_MODEL", "{name}");
+            assert_eq!(request["store"], false, "{name}");
+        }
+        assert_eq!(fixture.request.upstream["stream"], false, "{name}");
+        assert_eq!(fixture.stream.upstream_request["stream"], true, "{name}");
+        assert_eq!(
+            fixture.non_stream.upstream_response["status"], "completed",
+            "{name}"
+        );
+        assert_eq!(
+            fixture.non_stream.upstream_response["usage"]["input_tokens"], 11,
+            "{name}"
+        );
+        assert_eq!(
+            fixture.non_stream.upstream_response["usage"]["output_tokens"], 7,
+            "{name}"
+        );
+    }
+
+    assert_eq!(
+        (target.usage.input, target.usage.output, target.usage.total),
+        (11, 7, 18)
+    );
+    assert!(
+        target
+            .stream_events
+            .iter()
+            .any(|event| event.data["type"] == "response.output_text.done")
+    );
+    assert!(
+        target
+            .stream_events
+            .iter()
+            .any(|event| event.data["type"] == "response.completed")
+    );
+    assert_eq!(target.error.http_429.status, 429);
+    assert_eq!(target.error.failed_response["status"], "failed");
+    assert_eq!(target.error.error_event.event.as_deref(), Some("error"));
+    assert_eq!(target.error.error_event.data["type"], "error");
+    assert_eq!(
+        target.cancellation.first_upstream_event.data["response"]["status"],
+        "in_progress"
+    );
+}
+
+#[test]
 fn malformed_request_is_rejected_before_request_record_or_upstream_call() {
     let (name, fixture) = fixtures()
         .into_iter()
@@ -2026,6 +2250,1891 @@ fn cross_protocol_shape_failure_is_rejected_before_credential_or_upstream_use() 
             ResponseVisibility::NotVisible,
         )
         .await;
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn responses_stateful_controls_are_rejected_before_credential_or_upstream_use() {
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("responses fixture");
+    for (case, field, value) in [
+        ("store", "store", json!(true)),
+        (
+            "previous-response",
+            "previous_response_id",
+            json!("response-state-private-marker"),
+        ),
+        (
+            "conversation",
+            "conversation",
+            json!({"id": "conversation-state-private-marker"}),
+        ),
+        ("background", "background", json!(true)),
+    ] {
+        let fixture = fixture.clone();
+        run_case(case, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: json!({"upstream": "upstream-private-marker"}),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let source_id = router
+                .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Responses)
+                .await;
+            let mut request = fixture.request.downstream.clone();
+            request["input"] = json!([{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "prompt-private-marker"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,media-private-marker"}
+                ]
+            }]);
+            request["tools"] = json!([{
+                "type": "function",
+                "name": "private_tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"schema-private-marker": {"type": "string"}}
+                }
+            }]);
+            request["metadata"] = json!({"arguments": "tool-arguments-private-marker"});
+            request[field] = value;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("stateless rejection response should read");
+            let error_body: Value =
+                serde_json::from_slice(&body).expect("stateless rejection should be JSON");
+            assert_eq!(
+                downstream_error_code(&error_body, fixture.protocol),
+                Some("invalid_request_error"),
+                "{case}"
+            );
+            let public_body = String::from_utf8_lossy(&body);
+            for marker in [
+                "prompt-private-marker",
+                "response-state-private-marker",
+                "conversation-state-private-marker",
+                "tool-arguments-private-marker",
+                "schema-private-marker",
+                "media-private-marker",
+                "upstream-private-marker",
+            ] {
+                assert!(!public_body.contains(marker), "{case}: {marker}");
+            }
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{case}: stateless policy must precede credential decryption"
+            );
+            assert!(upstream.requests().await.is_empty(), "{case}");
+            let log = router
+                .wait_for_log_for_source(source_id, RequestStatus::Error)
+                .await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error")
+            );
+            let log_error = log.final_error_message.unwrap_or_default();
+            for marker in [
+                "prompt-private-marker",
+                "response-state-private-marker",
+                "conversation-state-private-marker",
+                "tool-arguments-private-marker",
+                "schema-private-marker",
+                "media-private-marker",
+                "upstream-private-marker",
+            ] {
+                assert!(!log_error.contains(marker), "{case}: logged {marker}");
+            }
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_target_materializes_native_requests_for_all_public_downstreams_and_modes() {
+    for (name, fixture) in responses_target_fixtures() {
+        for is_stream in [false, true] {
+            let fixture = fixture.clone();
+            let case_name = format!(
+                "responses-materialize-{name}-{}",
+                if is_stream { "stream" } else { "non-stream" }
+            );
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    body: fixture.error.upstream_response.clone(),
+                })
+                .await;
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                let downstream_request = if is_stream {
+                    &fixture.stream.downstream_request
+                } else {
+                    &fixture.request.downstream
+                };
+
+                let response = router.send(&fixture, is_stream, downstream_request).await;
+
+                assert_eq!(
+                    response.status(),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "{case_name}"
+                );
+                let request_id = assert_downstream_request_identity(&response);
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("upstream error response should be consumed");
+                let captured = upstream.requests().await;
+                let (expected_body, expected_path) = if is_stream {
+                    (
+                        &fixture.stream.upstream_request,
+                        &fixture.stream.upstream_path,
+                    )
+                } else {
+                    (&fixture.request.upstream, &fixture.request.upstream_path)
+                };
+                assert_upstream(
+                    name,
+                    &fixture,
+                    &captured,
+                    expected_path,
+                    None,
+                    expected_body,
+                    &router.requested_model(),
+                    &request_id,
+                );
+                assert_eq!(
+                    captured[0]
+                        .headers
+                        .get("accept-encoding")
+                        .and_then(|value| value.to_str().ok()),
+                    Some(if is_stream {
+                        "identity"
+                    } else {
+                        "gzip, identity"
+                    }),
+                    "{case_name}"
+                );
+                assert!(
+                    !captured[0].headers.contains_key("x-api-key"),
+                    "{case_name}"
+                );
+                assert!(
+                    !captured[0].headers.contains_key("x-goog-api-key"),
+                    "{case_name}"
+                );
+                assert_eq!(
+                    router.app_state.secret_encryption.decrypt_call_count(),
+                    1,
+                    "{case_name}: one request resolves one Provider Key"
+                );
+                let log = router.wait_for_log(RequestStatus::Error).await;
+                assert_log_common(&router, &fixture, &log);
+                assert_eq!(log.upstream_http_status, Some(429), "{case_name}");
+                assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+fn assert_responses_base_success_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Responses target fixture for protocol");
+
+    let non_stream_fixture = fixture.clone();
+    let non_stream_name = format!("{test_name}-non-stream");
+    run_case(&non_stream_name, move |context| async move {
+        let upstream = TestUpstream::spawn_json(
+            StatusCode::OK,
+            non_stream_fixture.non_stream.upstream_response.clone(),
+        )
+        .await;
+        let router = RouterFixture::new(context, &non_stream_fixture, &upstream.base_url).await;
+        let (catalog_id, catalog_version_id) = router.attach_cost_catalog(Some(100), Some(2)).await;
+
+        let response = router
+            .send(
+                &non_stream_fixture,
+                false,
+                &non_stream_fixture.request.downstream,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{protocol:?}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("non-stream response should complete");
+        assert!(
+            String::from_utf8_lossy(&body).contains("baseline pong"),
+            "{protocol:?}"
+        );
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &non_stream_fixture,
+            &captured,
+            &non_stream_fixture.request.upstream_path,
+            None,
+            &non_stream_fixture.request.upstream,
+            &router.requested_model(),
+            &request_id,
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.request_id, request_id);
+        assert_log_common(&router, &non_stream_fixture, &log);
+        assert_log_timing_order(&log);
+        assert!(!log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_usage(&log, &non_stream_fixture.usage);
+        assert_eq!(log.cache_read_tokens, Some(3));
+        assert_eq!(log.reasoning_tokens, Some(2));
+        assert_eq!(log.cost_catalog_id, Some(catalog_id));
+        assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+        assert_eq!(log.estimated_cost_nanos, Some(122));
+        assert!(log.cost_snapshot_json.is_some());
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        assert_eq!(upstream.requests().await.len(), 1);
+        upstream.shutdown().await;
+    });
+
+    let stream_fixture = fixture;
+    let stream_name = format!("{test_name}-stream");
+    run_case(&stream_name, move |context| async move {
+        let mut upstream_events = stream_fixture.stream.upstream_events.clone();
+        let terminal_sequence = upstream_events
+            .last()
+            .and_then(|event| event.data["sequence_number"].as_u64())
+            .expect("terminal sequence");
+        upstream_events.last_mut().expect("terminal event").data["sequence_number"] =
+            json!(terminal_sequence + 1);
+        upstream_events.insert(
+            upstream_events.len() - 1,
+            GoldenEvent {
+                event: Some("response.usage".to_string()),
+                data: json!({
+                    "type":"response.usage","sequence_number":terminal_sequence,
+                    "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+                }),
+            },
+        );
+        let dropped = Arc::new(DropSignal::default());
+        let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+            content_encoding: None,
+            chunks: vec![events_to_sse_bytes(&upstream_events)],
+            hang_after_chunks: true,
+            dropped: Some(Arc::clone(&dropped)),
+        })
+        .await;
+        let router = RouterFixture::new(context, &stream_fixture, &upstream.base_url).await;
+        let (catalog_id, catalog_version_id) = router.attach_cost_catalog(Some(100), Some(2)).await;
+
+        let response = router
+            .send(
+                &stream_fixture,
+                true,
+                &stream_fixture.stream.downstream_request,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{protocol:?}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = timeout(
+            WAIT_TIMEOUT,
+            axum::body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("completed terminal should close the downstream body")
+        .expect("stream body should be readable");
+        let events = parse_downstream_events(protocol, &body);
+        assert_eq!(
+            stream_text(protocol, &events),
+            "baseline pong",
+            "{protocol:?}"
+        );
+        let terminal_count = events
+            .iter()
+            .filter(|event| match protocol {
+                DownstreamProtocol::Openai => event.data == json!("[DONE]"),
+                DownstreamProtocol::Responses => event.data["type"] == "response.completed",
+                DownstreamProtocol::Anthropic => event.event.as_deref() == Some("message_stop"),
+                DownstreamProtocol::Gemini => event.data["candidates"][0]["finishReason"]
+                    .as_str()
+                    .is_some(),
+            })
+            .count();
+        assert_eq!(terminal_count, 1, "{protocol:?}: exactly one terminal");
+        dropped.wait().await;
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &stream_fixture,
+            &captured,
+            &stream_fixture.stream.upstream_path,
+            None,
+            &stream_fixture.stream.upstream_request,
+            &router.requested_model(),
+            &request_id,
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.request_id, request_id);
+        assert_log_common(&router, &stream_fixture, &log);
+        assert_log_timing_order(&log);
+        assert!(log.is_stream);
+        assert!(log.first_token_at.is_some());
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_usage(&log, &stream_fixture.usage);
+        assert_eq!(log.cache_read_tokens, Some(3));
+        assert_eq!(log.reasoning_tokens, Some(2));
+        assert_eq!(log.cost_catalog_id, Some(catalog_id));
+        assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+        assert_eq!(log.estimated_cost_nanos, Some(122));
+        assert!(log.cost_snapshot_json.is_some());
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        assert_eq!(upstream.requests().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! responses_base_success_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_responses_base_success_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+responses_base_success_cell_test!(
+    openai_to_responses_base_cell_success_is_verified,
+    DownstreamProtocol::Openai
+);
+responses_base_success_cell_test!(
+    responses_to_responses_base_cell_success_is_verified,
+    DownstreamProtocol::Responses
+);
+responses_base_success_cell_test!(
+    anthropic_to_responses_base_cell_success_is_verified,
+    DownstreamProtocol::Anthropic
+);
+responses_base_success_cell_test!(
+    gemini_to_responses_base_cell_success_is_verified,
+    DownstreamProtocol::Gemini
+);
+
+#[test]
+fn responses_unversioned_create_alias_executes_the_same_native_contract() {
+    let (_, mut fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Responses)
+        .expect("Responses target fixture");
+    fixture.downstream_path = "/responses/responses".to_string();
+
+    run_case("responses-unversioned-create", move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, fixture.non_stream.upstream_response.clone())
+                .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("unversioned Create response should read");
+        assert!(String::from_utf8_lossy(&body).contains("baseline pong"));
+        let captured = upstream.requests().await;
+        assert_upstream(
+            "responses-unversioned-create",
+            &fixture,
+            &captured,
+            &fixture.request.upstream_path,
+            None,
+            &fixture.request.upstream,
+            &router.requested_model(),
+            &request_id,
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_log_common(&router, &fixture, &log);
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn responses_public_routes_enforce_methods_before_authentication_without_side_effects() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Responses)
+        .expect("Responses target fixture");
+
+    run_case(
+        "responses-route-method-boundary",
+        move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            for (method, path, expected_allow) in [
+                (Method::GET, "/responses/responses", "POST"),
+                (Method::GET, "/responses/v1/responses", "POST"),
+                (Method::POST, "/responses/models", "GET,HEAD"),
+                (Method::POST, "/responses/v1/models", "GET,HEAD"),
+            ] {
+                let response = router
+                    .send_raw_method(
+                        method,
+                        path.to_string(),
+                        Some(json!({"private": "route-method-private-marker"})),
+                        None,
+                    )
+                    .await;
+                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("allow")
+                        .and_then(|value| value.to_str().ok()),
+                    Some(expected_allow),
+                    "{path}"
+                );
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("method rejection should read");
+                assert_payload_free_transform_bytes(&body, "route-method-private-marker");
+                let body: Value = serde_json::from_slice(&body).expect("error should be JSON");
+                assert_eq!(
+                    downstream_error_code(&body, DownstreamProtocol::Responses),
+                    Some("method_not_allowed_error"),
+                    "{path}"
+                );
+            }
+
+            router.app_state.flush_proxy_logs().await;
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            assert!(router.request_logs().await.is_empty());
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn responses_stateful_resource_paths_are_unregistered_and_have_zero_side_effects() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Responses)
+        .expect("Responses target fixture");
+
+    run_case(
+        "responses-stateful-route-boundary",
+        move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            for prefix in ["/responses", "/responses/v1"] {
+                for (method, suffix) in [
+                    (Method::GET, "/responses/resp_route_private_marker"),
+                    (Method::DELETE, "/responses/resp_route_private_marker"),
+                    (
+                        Method::GET,
+                        "/responses/resp_route_private_marker/input_items",
+                    ),
+                    (Method::POST, "/responses/resp_route_private_marker/cancel"),
+                    (Method::POST, "/conversations"),
+                    (Method::GET, "/conversations/conv_route_private_marker"),
+                    (Method::DELETE, "/conversations/conv_route_private_marker"),
+                    (
+                        Method::GET,
+                        "/conversations/conv_route_private_marker/items",
+                    ),
+                    (
+                        Method::POST,
+                        "/conversations/conv_route_private_marker/items",
+                    ),
+                    (Method::GET, "/models/model_route_private_marker"),
+                ] {
+                    let path = format!("{prefix}{suffix}");
+                    let body = (method != Method::GET).then(|| {
+                        json!({
+                            "input": "stateful-route-body-private-marker",
+                            "metadata": {"private": true}
+                        })
+                    });
+                    let response = router
+                        .send_raw_method(method, path.clone(), body, Some(DownstreamAuth::Bearer))
+                        .await;
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .expect("route-not-found response should read");
+                    assert_payload_free_transform_bytes(&body, "route_private_marker");
+                    assert_payload_free_transform_bytes(
+                        &body,
+                        "stateful-route-body-private-marker",
+                    );
+                    let body: Value = serde_json::from_slice(&body).expect("error should be JSON");
+                    assert_eq!(
+                        downstream_error_code(&body, DownstreamProtocol::Responses),
+                        Some("route_not_found_error"),
+                        "{path}"
+                    );
+                }
+            }
+
+            router.app_state.flush_proxy_logs().await;
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            assert!(router.request_logs().await.is_empty());
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn responses_non_stream_completed_usage_and_missing_usage_drive_success_costs() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+
+    for missing_usage in [false, true] {
+        let fixture = fixture.clone();
+        let case_name = if missing_usage {
+            "responses-non-stream-missing-usage"
+        } else {
+            "responses-non-stream-completed-usage"
+        };
+        run_case(case_name, move |context| async move {
+            let mut upstream_body = fixture.non_stream.upstream_response.clone();
+            if missing_usage {
+                upstream_body
+                    .as_object_mut()
+                    .expect("response fixture object")
+                    .remove("usage");
+            } else {
+                upstream_body["usage"]["total_tokens"] = json!(999);
+            }
+            upstream_body["vendor_extension"] = json!({"preserved": true});
+            let raw_body = serde_json::to_vec_pretty(&upstream_body).expect("response serializes");
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json; charset=utf-8".to_string()),
+                content_encoding: None,
+                body: raw_body.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let (catalog_id, catalog_version_id) =
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let downstream_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Responses body should read");
+            assert_eq!(downstream_body.as_ref(), raw_body.as_slice(), "{case_name}");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.cost_catalog_id, Some(catalog_id));
+            assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+            let snapshot: CostSnapshot = serde_json::from_str(
+                log.cost_snapshot_json
+                    .as_deref()
+                    .expect("successful response should persist cost"),
+            )
+            .expect("cost snapshot should parse");
+            if missing_usage {
+                assert_eq!(log.total_input_tokens, None);
+                assert_eq!(log.total_output_tokens, None);
+                assert_eq!(log.total_tokens, None);
+                assert_eq!(log.estimated_cost_nanos, Some(100));
+                assert_eq!(snapshot.total_cost_nanos, 100);
+                assert_eq!(snapshot.detail_lines.len(), 1);
+                assert_eq!(
+                    snapshot.detail_lines[0].meter_key,
+                    MeterKey::InvokeRequestCalls
+                );
+            } else {
+                assert_eq!(log.total_input_tokens, Some(11));
+                assert_eq!(log.total_output_tokens, Some(7));
+                assert_eq!(log.total_tokens, Some(18));
+                assert_eq!(log.cache_read_tokens, Some(3));
+                assert_eq!(log.reasoning_tokens, Some(2));
+                assert_eq!(log.estimated_cost_nanos, Some(122));
+                assert_eq!(snapshot.total_cost_nanos, 122);
+                assert!(
+                    snapshot
+                        .warnings
+                        .iter()
+                        .any(|warning| { warning.contains("999") && warning.contains("18") })
+                );
+            }
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_non_stream_incomplete_is_billed_but_failed_and_illegal_finals_are_not() {
+    let target = responses_target_golden();
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+
+    for (case_name, mut upstream_body, expected_http, expected_log_status, expected_cost) in [
+        (
+            "responses-non-stream-incomplete",
+            {
+                let mut body = fixture.non_stream.upstream_response.clone();
+                body["status"] = json!("incomplete");
+                body["completed_at"] = Value::Null;
+                body["incomplete_details"] = json!({"reason": "max_tokens"});
+                body["output"][0]["status"] = json!("incomplete");
+                body
+            },
+            StatusCode::OK,
+            RequestStatus::Success,
+            Some(122),
+        ),
+        (
+            "responses-non-stream-failed",
+            target.error.failed_response,
+            StatusCode::OK,
+            RequestStatus::Error,
+            None,
+        ),
+        (
+            "responses-non-stream-illegal-in-progress",
+            {
+                let mut body = fixture.non_stream.upstream_response.clone();
+                body["status"] = json!("in_progress");
+                body
+            },
+            StatusCode::BAD_GATEWAY,
+            RequestStatus::Error,
+            None,
+        ),
+    ] {
+        let fixture = fixture.clone();
+        upstream_body["vendor_extension"] = json!({"private": "terminal-marker"});
+        let raw_body = serde_json::to_vec_pretty(&upstream_body).expect("response serializes");
+        run_case(case_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+                body: raw_body.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), expected_http, "{case_name}");
+            let downstream_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("terminal response should read");
+            if expected_http == StatusCode::OK {
+                assert_eq!(downstream_body.as_ref(), raw_body.as_slice(), "{case_name}");
+            } else {
+                assert!(!String::from_utf8_lossy(&downstream_body).contains("terminal-marker"));
+            }
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(expected_log_status.clone()).await;
+            assert_eq!(log.estimated_cost_nanos, expected_cost, "{case_name}");
+            if expected_log_status == RequestStatus::Success {
+                assert_eq!(log.total_tokens, Some(18));
+                assert!(log.cost_snapshot_json.is_some());
+            } else {
+                assert_eq!(log.total_input_tokens, None);
+                assert_eq!(log.total_output_tokens, None);
+                assert_eq!(log.total_tokens, None);
+                assert!(log.cost_snapshot_json.is_none());
+                assert_eq!(
+                    log.final_error_code.as_deref(),
+                    Some("upstream_response_error")
+                );
+            }
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_stream_completed_and_incomplete_close_upstream_and_bill_once_for_all_downstreams() {
+    let target = responses_target_golden();
+    for (name, fixture) in responses_target_fixtures() {
+        for incomplete in [false, true] {
+            let fixture = fixture.clone();
+            let mut upstream_events = target.stream_events.clone();
+            if incomplete {
+                let terminal = upstream_events
+                    .last_mut()
+                    .expect("Responses stream terminal fixture");
+                terminal.event = Some("response.incomplete".to_string());
+                terminal.data["type"] = json!("response.incomplete");
+                terminal.data["response"]["status"] = json!("incomplete");
+                terminal.data["response"]["incomplete_details"] =
+                    json!({"reason": "max_output_tokens"});
+                terminal.data["response"]["output"][0]["status"] = json!("incomplete");
+            }
+            let terminal_sequence = upstream_events
+                .last()
+                .and_then(|event| event.data["sequence_number"].as_u64())
+                .expect("terminal sequence number");
+            upstream_events
+                .last_mut()
+                .expect("Responses stream terminal fixture")
+                .data["sequence_number"] = json!(terminal_sequence + 1);
+            upstream_events.insert(
+                upstream_events.len() - 1,
+                GoldenEvent {
+                    event: Some("response.usage".to_string()),
+                    data: json!({
+                        "type": "response.usage",
+                        "sequence_number": terminal_sequence,
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    }),
+                },
+            );
+            let mut preflight =
+                StreamTransformer::new(UpstreamProtocol::Responses, fixture.protocol);
+            for event in &upstream_events {
+                preflight
+                    .transform_event_with_observation(SseEvent {
+                        event: event.event.clone(),
+                        data: event_data_text(&event.data),
+                        ..Default::default()
+                    })
+                    .unwrap_or_else(|failure| {
+                        panic!(
+                            "{name}: fixture event {:?} failed: {failure:?}",
+                            event.event
+                        )
+                    });
+            }
+            let case_name = format!(
+                "responses-stream-{name}-{}",
+                if incomplete {
+                    "incomplete"
+                } else {
+                    "completed"
+                }
+            );
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let dropped = Arc::new(DropSignal::default());
+                let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+                    content_encoding: None,
+                    chunks: vec![events_to_sse_bytes(&upstream_events)],
+                    hang_after_chunks: true,
+                    dropped: Some(Arc::clone(&dropped)),
+                })
+                .await;
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                let (catalog_id, catalog_version_id) =
+                    router.attach_cost_catalog(Some(100), Some(2)).await;
+
+                let response = router
+                    .send(&fixture, true, &fixture.stream.downstream_request)
+                    .await;
+
+                assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+                let body = timeout(
+                    WAIT_TIMEOUT,
+                    axum::body::to_bytes(response.into_body(), usize::MAX),
+                )
+                .await
+                .expect("typed terminal should close the downstream body")
+                .expect("successful Responses stream should remain readable");
+                let downstream_events = parse_downstream_events(fixture.protocol, &body);
+                let terminal_count = downstream_events
+                    .iter()
+                    .filter(|event| match fixture.protocol {
+                        DownstreamProtocol::Openai => event.data == json!("[DONE]"),
+                        DownstreamProtocol::Responses => {
+                            event.data["type"]
+                                == json!(if incomplete {
+                                    "response.incomplete"
+                                } else {
+                                    "response.completed"
+                                })
+                        }
+                        DownstreamProtocol::Anthropic => {
+                            event.event.as_deref() == Some("message_stop")
+                        }
+                        DownstreamProtocol::Gemini => event.data["candidates"][0]["finishReason"]
+                            .as_str()
+                            .is_some(),
+                    })
+                    .count();
+                assert_eq!(
+                    terminal_count,
+                    1,
+                    "{case_name}: one body terminal; events={downstream_events:?}; body={}",
+                    String::from_utf8_lossy(&body)
+                );
+                dropped.wait().await;
+
+                let log = router.wait_for_log(RequestStatus::Success).await;
+                assert_eq!(log.total_input_tokens, Some(11), "{case_name}");
+                assert_eq!(log.total_output_tokens, Some(7), "{case_name}");
+                assert_eq!(log.total_tokens, Some(18), "{case_name}");
+                assert_eq!(log.cache_read_tokens, Some(3), "{case_name}");
+                assert_eq!(log.reasoning_tokens, Some(2), "{case_name}");
+                assert_eq!(log.cost_catalog_id, Some(catalog_id), "{case_name}");
+                assert_eq!(
+                    log.cost_catalog_version_id,
+                    Some(catalog_version_id),
+                    "{case_name}"
+                );
+                assert_eq!(log.estimated_cost_nanos, Some(122), "{case_name}");
+                assert!(log.cost_snapshot_json.is_some(), "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn responses_stream_failed_and_error_events_emit_one_terminal_without_cost_for_all_downstreams() {
+    let target = responses_target_golden();
+    for (name, fixture) in responses_target_fixtures() {
+        for independent_error in [false, true] {
+            let fixture = fixture.clone();
+            let usage_event = GoldenEvent {
+                event: Some("response.usage".to_string()),
+                data: json!({
+                    "type": "response.usage",
+                    "sequence_number": 1,
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 7,
+                        "total_tokens": 18,
+                        "input_tokens_details": {"cached_tokens": 3},
+                        "output_tokens_details": {"reasoning_tokens": 2}
+                    }
+                }),
+            };
+            let upstream_events = if independent_error {
+                let mut error_event = target.error.error_event.clone();
+                error_event.data["sequence_number"] = json!(2);
+                vec![target.stream_events[0].clone(), usage_event, error_event]
+            } else {
+                let mut failed_response = target.error.failed_response.clone();
+                failed_response["id"] = json!("resp_baseline");
+                vec![
+                    target.stream_events[0].clone(),
+                    usage_event,
+                    GoldenEvent {
+                        event: Some("response.failed".to_string()),
+                        data: json!({
+                            "type": "response.failed",
+                            "sequence_number": 2,
+                            "response": failed_response,
+                        }),
+                    },
+                ]
+            };
+            let case_name = format!(
+                "responses-stream-{name}-{}",
+                if independent_error { "error" } else { "failed" }
+            );
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let dropped = Arc::new(DropSignal::default());
+                let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+                    content_encoding: None,
+                    chunks: vec![events_to_sse_bytes(&upstream_events)],
+                    hang_after_chunks: true,
+                    dropped: Some(Arc::clone(&dropped)),
+                })
+                .await;
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+
+                let response = router
+                    .send(&fixture, true, &fixture.stream.downstream_request)
+                    .await;
+
+                assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+                let request_id = assert_downstream_request_identity(&response);
+                let body = timeout(
+                    WAIT_TIMEOUT,
+                    axum::body::to_bytes(response.into_body(), usize::MAX),
+                )
+                .await
+                .expect("failed Responses terminal should close the downstream body")
+                .expect("native failure terminal should close normally");
+                let downstream_events = parse_downstream_events(fixture.protocol, &body);
+                if fixture.protocol == DownstreamProtocol::Responses {
+                    let expected_type = if independent_error {
+                        "error"
+                    } else {
+                        "response.failed"
+                    };
+                    assert_eq!(
+                        downstream_events
+                            .iter()
+                            .filter(|event| event.data["type"] == expected_type)
+                            .count(),
+                        1,
+                        "{case_name}: same-wire source terminal must be preserved once"
+                    );
+                    assert!(
+                        downstream_events
+                            .iter()
+                            .all(|event| event.data["type"] != "response.error"),
+                        "{case_name}: no second gateway terminal"
+                    );
+                } else {
+                    let terminal = downstream_events
+                        .last()
+                        .expect("cross-wire application failure terminal");
+                    assert_native_fatal_stream_event(fixture.protocol, terminal, &request_id);
+                    let terminal_count = downstream_events
+                        .iter()
+                        .filter(|event| match fixture.protocol {
+                            DownstreamProtocol::Openai => event.data.get("error").is_some(),
+                            DownstreamProtocol::Anthropic => {
+                                event.event.as_deref() == Some("error")
+                            }
+                            DownstreamProtocol::Gemini => event.data.get("error").is_some(),
+                            DownstreamProtocol::Responses => unreachable!(),
+                        })
+                        .count();
+                    assert_eq!(terminal_count, 1, "{case_name}: one body terminal");
+                }
+                dropped.wait().await;
+
+                let log = router.wait_for_log(RequestStatus::Error).await;
+                assert_eq!(
+                    log.final_error_code.as_deref(),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
+                assert_eq!(log.total_input_tokens, None, "{case_name}");
+                assert_eq!(log.total_output_tokens, None, "{case_name}");
+                assert_eq!(log.total_tokens, None, "{case_name}");
+                assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+                assert!(log.cost_snapshot_json.is_none(), "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                router.assert_no_api_key_usage_charge(&case_name).await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn responses_stream_eof_without_terminal_fails_closed_for_all_downstreams() {
+    let target = responses_target_golden();
+    for (name, fixture) in responses_target_fixtures() {
+        let upstream_events = vec![
+            target.stream_events[0].clone(),
+            GoldenEvent {
+                event: Some("response.usage".to_string()),
+                data: json!({
+                    "type": "response.usage",
+                    "sequence_number": 1,
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 7,
+                        "total_tokens": 18
+                    }
+                }),
+            },
+        ];
+        let case_name = format!("responses-stream-{name}-missing-terminal");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: upstream_events,
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = timeout(
+                WAIT_TIMEOUT,
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("missing terminal EOF should fail before deadline")
+            .expect("typed EOF failure should use one native terminal event");
+            let downstream_events = parse_downstream_events(fixture.protocol, &body);
+            let terminal = downstream_events
+                .last()
+                .expect("EOF failure terminal event");
+            assert_native_fatal_stream_event(fixture.protocol, terminal, &request_id);
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert_eq!(log.total_input_tokens, None, "{case_name}");
+            assert_eq!(log.total_output_tokens, None, "{case_name}");
+            assert_eq!(log.total_tokens, None, "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+            assert!(log.cost_snapshot_json.is_none(), "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_stream_client_cancellation_closes_upstream_once_for_all_downstreams() {
+    let target = responses_target_golden();
+    for (name, fixture) in responses_target_fixtures() {
+        let mut first_events = target.stream_events[..3].to_vec();
+        first_events[1].data["sequence_number"] = json!(2);
+        first_events[2].data["sequence_number"] = json!(3);
+        first_events.insert(
+            1,
+            GoldenEvent {
+                event: Some("response.usage".to_string()),
+                data: json!({
+                    "type": "response.usage",
+                    "sequence_number": 1,
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 7,
+                        "total_tokens": 18
+                    }
+                }),
+            },
+        );
+        let case_name = format!("responses-stream-{name}-cancelled");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let dropped = Arc::new(DropSignal::default());
+            let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+                content_encoding: None,
+                chunks: vec![events_to_sse_bytes(&first_events)],
+                hang_after_chunks: true,
+                dropped: Some(Arc::clone(&dropped)),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let mut body = response.into_body().into_data_stream();
+            loop {
+                let frame = timeout(WAIT_TIMEOUT, body.next())
+                    .await
+                    .expect("transformed frame deadline")
+                    .expect("transformed frame")
+                    .expect("transformed frame should be readable");
+                if String::from_utf8_lossy(&frame).contains("baseline ") {
+                    break;
+                }
+            }
+            drop(body);
+            dropped.wait().await;
+            let log = router.wait_for_log(RequestStatus::Cancelled).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("client_cancelled_error"),
+                "{case_name}"
+            );
+            assert_eq!(log.total_input_tokens, None, "{case_name}");
+            assert_eq!(log.total_output_tokens, None, "{case_name}");
+            assert_eq!(log.total_tokens, None, "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+            assert!(log.cost_snapshot_json.is_none(), "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_target_http_429_is_authentic_bounded_and_never_retried_for_all_downstreams() {
+    const DISCLOSURE_LIMIT: usize = 1_024;
+    const RAW_LIMIT: usize = 1_048_576;
+
+    for (name, fixture) in responses_target_fixtures() {
+        let case_name = format!("responses-target-{name}-http-429");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let marker = format!("responses-provider-private-marker-{name}");
+            let mut upstream_body = marker.as_bytes().to_vec();
+            upstream_body.resize(RAW_LIMIT + 1, b'x');
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                content_type: Some("text/plain; private=discarded".to_string()),
+                content_encoding: None,
+                body: upstream_body,
+            })
+            .await;
+            let mut router =
+                RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
+            router
+                .replace_proxy_request_config(
+                    context,
+                    one_mib_non_stream_proxy_config(DISCLOSURE_LIMIT),
+                )
+                .await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "{case_name}"
+            );
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("bounded Responses target error should read");
+            let body: Value = serde_json::from_slice(&body).expect("error should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("upstream_rate_limit_error"),
+                "{case_name}"
+            );
+            assert_eq!(body["upstream_error"]["status"], 429, "{case_name}");
+            assert_eq!(body["upstream_error"]["truncated"], true, "{case_name}");
+            assert_eq!(
+                body["upstream_error"]["captured_bytes"], DISCLOSURE_LIMIT,
+                "{case_name}"
+            );
+            assert_eq!(
+                body["upstream_error"]["limit_bytes"], DISCLOSURE_LIMIT,
+                "{case_name}"
+            );
+            assert!(
+                body["upstream_error"]["body_text"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with(&marker)),
+                "{case_name}: bounded public extension should retain only the allowed prefix"
+            );
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &fixture,
+                &captured,
+                &fixture.request.upstream_path,
+                fixture.request.upstream_query.as_deref(),
+                &fixture.request.upstream,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.upstream_http_status, Some(429), "{case_name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_rate_limit_error"),
+                "{case_name}"
+            );
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(&marker),
+                "{case_name}: provider body must not enter persisted diagnostics"
+            );
+            assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+            assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_target_success_body_limits_fail_without_cost_for_all_downstreams() {
+    const LIMIT: usize = 1_048_576;
+
+    for (name, fixture) in responses_target_fixtures() {
+        for compressed in [false, true] {
+            let fixture = fixture.clone();
+            let case_name = format!(
+                "responses-target-{name}-{}-body-limit",
+                if compressed { "decoded" } else { "raw" }
+            );
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let (content_encoding, body) = if compressed {
+                    let decoded =
+                        serde_json::to_vec(&json_body_with_exact_serialized_size(LIMIT + 1))
+                            .expect("decoded body-limit fixture should serialize");
+                    let encoded = gzip_bytes(&decoded);
+                    assert!(encoded.len() < LIMIT, "{case_name}: isolate decoded limit");
+                    (Some("gzip".to_string()), encoded)
+                } else {
+                    (None, vec![b'x'; LIMIT + 1])
+                };
+                let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                    status: StatusCode::OK,
+                    content_type: Some("application/json".to_string()),
+                    content_encoding,
+                    body,
+                })
+                .await;
+                let mut router =
+                    RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
+                router
+                    .replace_proxy_request_config(context, one_mib_non_stream_proxy_config(65_536))
+                    .await;
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+
+                let response = router
+                    .send(&fixture, false, &fixture.request.downstream)
+                    .await;
+
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
+                let request_id = assert_downstream_request_identity(&response);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("Responses target body-limit envelope should read");
+                let body: Value = serde_json::from_slice(&body).expect("error should be JSON");
+                assert_eq!(
+                    downstream_error_code(&body, fixture.protocol),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
+                let captured = upstream.requests().await;
+                assert_upstream(
+                    name,
+                    &fixture,
+                    &captured,
+                    &fixture.request.upstream_path,
+                    fixture.request.upstream_query.as_deref(),
+                    &fixture.request.upstream,
+                    &router.requested_model(),
+                    &request_id,
+                );
+                let log = router.wait_for_log(RequestStatus::Error).await;
+                assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+                assert_eq!(
+                    log.final_error_code.as_deref(),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
+                assert_eq!(log.total_input_tokens, None, "{case_name}");
+                assert_eq!(log.total_output_tokens, None, "{case_name}");
+                assert_eq!(log.total_tokens, None, "{case_name}");
+                assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+                assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn responses_unknown_incomplete_reason_fails_closed_cross_wire_without_cost() {
+    const PRIVATE_REASON: &str = "future_private_incomplete_reason";
+
+    for (name, fixture) in responses_target_fixtures()
+        .into_iter()
+        .filter(|(_, fixture)| fixture.protocol != DownstreamProtocol::Responses)
+    {
+        let mut upstream_body = fixture.non_stream.upstream_response.clone();
+        upstream_body["status"] = json!("incomplete");
+        upstream_body["completed_at"] = Value::Null;
+        upstream_body["incomplete_details"] = json!({"reason": PRIVATE_REASON});
+        upstream_body["output"][0]["status"] = json!("incomplete");
+        upstream_body["vendor_extension"] = json!({"private": PRIVATE_REASON});
+        let case_name = format!("responses-target-{name}-unknown-incomplete-reason");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: upstream_body,
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("unknown incomplete reason error should read");
+            assert_payload_free_transform_bytes(&body, PRIVATE_REASON);
+            let body: Value = serde_json::from_slice(&body).expect("error should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &fixture,
+                &captured,
+                &fixture.request.upstream_path,
+                fixture.request.upstream_query.as_deref(),
+                &fixture.request.upstream,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_REASON),
+                "{case_name}: private incomplete reason must not enter logs"
+            );
+            assert_eq!(log.total_tokens, None, "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+            assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_target_precommit_client_cancellation_returns_499_and_releases_once() {
+    for (name, fixture) in responses_target_fixtures() {
+        let case_name = format!("responses-target-{name}-precommit-cancel");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let dropped = Arc::new(DropSignal::default());
+            let upstream = TestUpstream::spawn(ScriptedReply::HangingBody {
+                content_type: "application/json".to_string(),
+                first_chunk: br#"{"#.to_vec(),
+                dropped: Arc::clone(&dropped),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+            let cancellation = ProxyCancellationContext::new();
+            let cancellation_trigger = cancellation.clone();
+            let captured_requests = Arc::clone(&upstream.captured);
+            let cancel_task = tokio::spawn(async move {
+                let deadline = Instant::now() + WAIT_TIMEOUT;
+                loop {
+                    if !captured_requests.lock().await.is_empty() {
+                        cancellation_trigger.cancel_now("Responses client disconnected");
+                        return;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "Responses request should reach upstream before cancellation"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+
+            let response = timeout(
+                WAIT_TIMEOUT,
+                router.send_with_cancellation(
+                    &fixture,
+                    false,
+                    &fixture.request.downstream,
+                    cancellation,
+                ),
+            )
+            .await
+            .expect("cancelled Responses target request should finish");
+            cancel_task
+                .await
+                .expect("Responses cancellation trigger should join");
+
+            assert_eq!(response.status().as_u16(), 499, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("cancellation envelope should read");
+            dropped.wait().await;
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &fixture,
+                &captured,
+                &fixture.request.upstream_path,
+                fixture.request.upstream_query.as_deref(),
+                &fixture.request.upstream,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Cancelled).await;
+            assert_eq!(log.overall_status, RequestStatus::Cancelled, "{case_name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("client_cancelled_error"),
+                "{case_name}"
+            );
+            assert!(
+                matches!(log.upstream_http_status, None | Some(200)),
+                "{case_name}: cancellation may win before or after authentic upstream headers"
+            );
+            assert_eq!(log.total_input_tokens, None, "{case_name}");
+            assert_eq!(log.total_output_tokens, None, "{case_name}");
+            assert_eq!(log.total_tokens, None, "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+            assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_same_wire_non_stream_preserves_unknown_output_bytes_and_observes_usage() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+    run_case(
+        "responses-same-wire-non-stream-extension",
+        move |context| async move {
+            let original = br#"{
+  "id": "resp_extension",
+  "object": "response",
+  "status": "completed",
+  "model": "baseline-upstream-model",
+  "output": [{"type":"vendor_future_item","private":{"opaque":true}}],
+  "usage": {"input_tokens":11,"output_tokens":7,"total_tokens":18},
+  "vendor_extension": {"spacing":"must remain exact"}
+}
+"#
+            .to_vec();
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+                body: original.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("same-wire extension response should read");
+            assert_eq!(body.as_ref(), original.as_slice());
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_input_tokens, Some(11));
+            assert_eq!(log.total_output_tokens, Some(7));
+            assert_eq!(log.total_tokens, Some(18));
+            assert_eq!(log.estimated_cost_nanos, Some(122));
+            assert!(log.cost_snapshot_json.is_some());
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            assert_eq!(upstream.requests().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn responses_same_wire_sse_preserves_event_name_data_and_order_while_replacing_usage() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+    run_case(
+        "responses-same-wire-sse-extension",
+        move |context| async move {
+            let expected = vec![
+            SseEvent {
+                event: Some("response.created".to_string()),
+                data: "{ \"type\" : \"response.created\", \"sequence_number\" : 0, \"response\" : {\"id\":\"resp_extension\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"baseline-upstream-model\",\"output\":[],\"vendor\":true}, \"vendor_top\" : true }".to_string(),
+                ..Default::default()
+            },
+            SseEvent {
+                event: Some("response.vendor.extension".to_string()),
+                data: "{ \"type\" : \"response.vendor.extension\", \"sequence_number\" : 1, \"private\" : {\"opaque\":true} }".to_string(),
+                ..Default::default()
+            },
+            SseEvent {
+                event: Some("response.usage".to_string()),
+                data: "{ \"type\" : \"response.usage\", \"sequence_number\" : 2, \"usage\" : {\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2} }".to_string(),
+                ..Default::default()
+            },
+            SseEvent {
+                event: Some("response.completed".to_string()),
+                data: "{ \"type\" : \"response.completed\", \"sequence_number\" : 3, \"response\" : {\"id\":\"resp_extension\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"baseline-upstream-model\",\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18,\"input_tokens_details\":{\"cached_tokens\":3},\"output_tokens_details\":{\"reasoning_tokens\":2}},\"metadata\":{\"future_vendor_field\":true},\"vendor\":true}, \"vendor_top\" : true }".to_string(),
+                ..Default::default()
+            },
+        ];
+            let upstream_events = expected
+                .iter()
+                .map(|event| GoldenEvent {
+                    event: event.event.clone(),
+                    data: Value::String(event.data.clone()),
+                })
+                .collect::<Vec<_>>();
+            let dropped = Arc::new(DropSignal::default());
+            let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+                content_encoding: None,
+                chunks: vec![events_to_sse_bytes(&upstream_events)],
+                hang_after_chunks: true,
+                dropped: Some(Arc::clone(&dropped)),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = timeout(
+                WAIT_TIMEOUT,
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("typed same-wire terminal should close Body")
+            .expect("same-wire SSE body should remain readable");
+            assert_eq!(parse_downstream_sse_events(&body), expected);
+            dropped.wait().await;
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_input_tokens, Some(11));
+            assert_eq!(log.total_output_tokens, Some(7));
+            assert_eq!(log.total_tokens, Some(18));
+            assert_eq!(log.cache_read_tokens, Some(3));
+            assert_eq!(log.reasoning_tokens, Some(2));
+            assert_eq!(log.estimated_cost_nanos, Some(122));
+            assert!(log.cost_snapshot_json.is_some());
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            assert_eq!(upstream.requests().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn responses_target_revalidates_patched_body_before_credentials() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+    run_case("responses-invalid-final-body", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_source_variant(
+                router.source_id,
+                RequestPatchVariantInput {
+                    source_id: router.source_id,
+                    model_id: None,
+                    suffix: None,
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/input".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!(42))),
+                        description: Some("Responses final target validation".to_string()),
+                    }],
+                },
+            )
+            .await
+            .expect("invalid final-body Patch should be saved for runtime validation");
+        router
+            .app_state
+            .catalog
+            .invalidate_models_catalog()
+            .await
+            .expect("Patch catalog should invalidate");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("final target rejection should read");
+        let body: Value = serde_json::from_slice(&body).expect("rejection should be JSON");
+        assert_eq!(
+            downstream_error_code(&body, fixture.protocol),
+            Some("provider_configuration_error")
+        );
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("provider_configuration_error")
+        );
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn responses_target_credential_request_never_follows_redirects() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+    run_case("responses-no-redirect", move |context| async move {
+        let redirect_target = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: json!({"captured": true}),
+        })
+        .await;
+        let upstream = TestUpstream::spawn(ScriptedReply::Redirect {
+            status: StatusCode::TEMPORARY_REDIRECT,
+            location: format!("{}/credential-capture", redirect_target.base_url),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("redirect error response should read");
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].path, "/v1/responses");
+        assert_eq!(
+            captured[0]
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-baseline-secret")
+        );
+        assert!(redirect_target.requests().await.is_empty());
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.upstream_http_status, Some(307));
+        assert_eq!(upstream.requests().await.len(), 1);
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+        redirect_target.shutdown().await;
+    });
+}
+
+#[test]
+fn responses_target_invalid_base_url_fails_before_credentials_and_network() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+    run_case("responses-invalid-base-url", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        UpstreamSource::update(
+            router.source_id,
+            router.provider_id,
+            &UpdateUpstreamSourceData {
+                base_url: Some("http://user:base-url-private-marker@127.0.0.1:1/v1".to_string()),
+                use_proxy: None,
+                is_enabled: None,
+                is_default: None,
+                updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
+            },
+        )
+        .expect("legacy invalid Responses base URL should be seeded directly");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("provider cache should invalidate");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("invalid URL response should read");
+        let body: Value = serde_json::from_slice(&body).expect("response should be JSON");
+        assert_eq!(
+            downstream_error_code(&body, fixture.protocol),
+            Some("provider_configuration_error")
+        );
+        assert!(!body.to_string().contains("base-url-private-marker"));
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("provider_configuration_error")
+        );
+        assert!(
+            !log.final_error_message
+                .unwrap_or_default()
+                .contains("base-url-private-marker")
+        );
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn responses_target_falls_back_to_model_name_when_real_model_name_is_absent() {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("Responses target fixture");
+    run_case("responses-model-fallback", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: fixture.error.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        Model::update(
+            router.model_id,
+            &UpdateModelData {
+                model_name: None,
+                real_model_name: Some(None),
+                is_enabled: None,
+                cost_catalog_id: None,
+            },
+        )
+        .expect("real model name should clear");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("model cache should invalidate");
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("upstream error response should read");
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1);
+        let body: Value =
+            serde_json::from_slice(&captured[0].body).expect("request should be JSON");
+        assert_eq!(body["model"], router.model_name);
+        assert_eq!(body["store"], false);
+        assert_eq!(captured[0].path, "/v1/responses");
+        router.wait_for_log(RequestStatus::Error).await;
         router.wait_for_api_key_lease_release().await;
         upstream.shutdown().await;
     });
@@ -4681,6 +6790,7 @@ fn direct_execution_client_identity_http_persists_normalized_forwarded_ip() {
                 SocketAddr::from(([10, 0, 0, 9], 3000)),
                 Some("for=\"[::ffff:198.51.100.42]:8443\""),
                 resolver,
+                None,
             )
             .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -4820,6 +6930,154 @@ fn all_public_downstream_reasoning_controls_reach_the_openai_target() {
             assert!(!serialized.contains("summary"), "{name}");
             assert!(!serialized.contains("display"), "{name}");
             assert!(!serialized.contains("includeThoughts"), "{name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn all_public_downstream_reasoning_controls_reach_the_responses_target() {
+    let mut upstream_response = responses_target_golden().non_stream_response;
+    upstream_response["output"] = json!([
+        {"type":"reasoning","id":"rs_visible","content":[],
+         "summary":[{"type":"summary_text","text":"visible summary"}],
+         "encrypted_content":null},
+        {"type":"message","id":"msg_answer","status":"completed","role":"assistant",
+         "content":[{"type":"output_text","text":"reasoned answer","annotations":[],"logprobs":[]}]}
+    ]);
+
+    for (name, fixture) in responses_target_fixtures() {
+        let upstream_response = upstream_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let mut request = fixture.request.downstream.clone();
+            let expected_effort = match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["reasoning_effort"] = json!("medium");
+                    "medium"
+                }
+                DownstreamProtocol::Responses => {
+                    request["reasoning"] = json!({"effort":"xhigh","summary":"detailed"});
+                    "xhigh"
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["thinking"] = json!({"type":"adaptive","display":"summarized"});
+                    request["output_config"] = json!({"effort":"max"});
+                    "xhigh"
+                }
+                DownstreamProtocol::Gemini => {
+                    request["generationConfig"]["thinkingConfig"] = json!({
+                        "thinkingLevel":"low","includeThoughts":true
+                    });
+                    "low"
+                }
+            };
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_no_public_transform_diagnostics(&response);
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("reasoning response should complete");
+            let public = String::from_utf8_lossy(&response_body);
+            assert!(public.contains("reasoned answer"), "{name}: {public}");
+            if fixture.protocol == DownstreamProtocol::Openai {
+                assert!(
+                    !public.contains("visible summary"),
+                    "{name}: reasoning must not be relabeled as answer text"
+                );
+            } else {
+                assert!(
+                    public.contains("visible summary"),
+                    "{name}: caller-visible reasoning"
+                );
+            }
+
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}: exactly one Responses call");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("Responses target request should be JSON");
+            assert_eq!(body["reasoning"]["effort"], expected_effort, "{name}");
+            assert_eq!(body["store"], false, "{name}");
+            if fixture.protocol == DownstreamProtocol::Responses {
+                assert_eq!(body["reasoning"]["summary"], "detailed", "{name}");
+            } else {
+                assert!(
+                    body["reasoning"].get("summary").is_none_or(Value::is_null),
+                    "{name}"
+                );
+            }
+            let serialized = serde_json::to_string(&body).expect("JSON");
+            assert!(!serialized.contains("display"), "{name}");
+            assert!(!serialized.contains("includeThoughts"), "{name}");
+
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.reasoning_tokens, Some(2), "{name}");
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_target_rejects_reasoning_conflicts_before_credentials() {
+    const PRIVATE_MARKER: &str = "responses-reasoning-private-marker";
+    for (name, fixture) in responses_target_fixtures() {
+        run_case(name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"})).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["reasoning_effort"] = json!(PRIVATE_MARKER);
+                }
+                DownstreamProtocol::Responses => {
+                    request["reasoning"] = json!({"effort":PRIVATE_MARKER});
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["thinking"] = json!({"type":"disabled","display":PRIVATE_MARKER});
+                    request["output_config"] = json!({"effort":"high"});
+                }
+                DownstreamProtocol::Gemini => {
+                    request["generationConfig"]["thinkingConfig"] = json!({
+                        "thinkingLevel":"low","thinkingBudget":128,
+                        "private":PRIVATE_MARKER
+                    });
+                }
+            }
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("reasoning rejection should be readable");
+            assert!(
+                !String::from_utf8_lossy(&body).contains(PRIVATE_MARKER),
+                "{name}"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}"
+            );
+            assert!(upstream.requests().await.is_empty(), "{name}");
+            let log = router
+                .wait_for_log_for_source(router.source_id, RequestStatus::Error)
+                .await;
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_MARKER),
+                "{name}: private reasoning control must not enter Request Log"
+            );
+            router.wait_for_api_key_lease_release().await;
             upstream.shutdown().await;
         });
     }
@@ -5001,6 +7259,111 @@ fn all_public_downstream_multimodal_inputs_reach_the_openai_target() {
 }
 
 #[test]
+fn all_public_downstream_multimodal_inputs_reach_the_responses_target() {
+    let upstream_response = responses_target_golden().non_stream_response;
+
+    for (name, fixture) in responses_target_fixtures() {
+        let upstream_response = upstream_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["messages"] = json!([{
+                        "role":"user","content":[
+                            {"type":"image_url","image_url":{"url":"https://example.com/image.png","detail":"high"}},
+                            {"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ=="}},
+                            {"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}},
+                            {"type":"file","file":{"filename":"report.pdf","file_data":"JVBERi0="}},
+                            {"type":"file","file":{"file_id":"file_same_target"}}
+                        ]
+                    }]);
+                }
+                DownstreamProtocol::Responses => {
+                    request["input"] = json!([{
+                        "type":"message","role":"user","content":[
+                            {"type":"input_image","image_url":"data:image/webp;base64,ZmFrZQ==","detail":"low"},
+                            {"type":"input_audio","input_audio":{"data":"SUQz","format":"mp3"}},
+                            {"type":"input_file","filename":"notes.md","file_data":"IyBub3Rlcw=="},
+                            {"type":"input_file","file_id":"file_same_target"}
+                        ]
+                    }]);
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["messages"] = json!([{
+                        "role":"user","content":[
+                            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"ZmFrZQ=="}},
+                            {"type":"image","source":{"type":"url","url":"https://example.com/image.webp"}},
+                            {"type":"document","source":{"type":"base64","media_type":"text/csv","data":"YSxi"},"title":"table.csv"}
+                        ]
+                    }]);
+                }
+                DownstreamProtocol::Gemini => {
+                    request["contents"] = json!([{
+                        "role":"user","parts":[
+                            {"inlineData":{"mimeType":"image/png","data":"ZmFrZQ==","displayName":"preview.png"}},
+                            {"inlineData":{"mimeType":"audio/mpeg","data":"SUQz","displayName":"voice.mp3"}},
+                            {"inlineData":{"mimeType":"application/json","data":"e30=","displayName":"data.json"}},
+                            {"fileData":{"mimeType":"image/jpeg","fileUri":"https://example.com/image.jpg","displayName":"preview.jpg"}}
+                        ]
+                    }]);
+                }
+            }
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_no_public_transform_diagnostics(&response);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("multimodal response should complete");
+
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}: no upload, probe, or retry call");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("Responses target request should be JSON");
+            assert_eq!(body["store"], false, "{name}");
+            let parts = body["input"]
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find_map(|item| item.get("content").and_then(Value::as_array))
+                })
+                .expect("Responses target should receive typed message content");
+            assert!(
+                parts.iter().any(|part| part["type"] == "input_image"),
+                "{name}"
+            );
+            assert!(
+                parts.iter().any(|part| part["type"] == "input_file"),
+                "{name}"
+            );
+            if fixture.protocol != DownstreamProtocol::Anthropic {
+                assert!(
+                    parts.iter().any(|part| part["type"] == "input_audio"),
+                    "{name}"
+                );
+            }
+            if fixture.protocol == DownstreamProtocol::Openai {
+                assert!(
+                    parts
+                        .iter()
+                        .any(|part| { part["type"] == "input_image" && part["detail"] == "high" })
+                );
+            }
+            let serialized = serde_json::to_string(&body).expect("JSON");
+            assert!(!serialized.contains("file_data: "), "{name}");
+            assert!(!serialized.contains("displayName"), "{name}");
+
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
 fn all_public_downstreams_reject_unportable_media_before_credentials() {
     const PRIVATE_MARKER: &str = "multimodal-private-marker";
     for (name, fixture) in fixtures() {
@@ -5067,6 +7430,186 @@ fn all_public_downstreams_reject_unportable_media_before_credentials() {
             );
             upstream.shutdown().await;
         });
+    }
+}
+
+#[test]
+fn responses_target_rejects_all_unportable_media_before_credentials() {
+    const PRIVATE_MARKER: &str = "responses-media-private-marker";
+
+    for (wire_name, fixture) in responses_target_fixtures() {
+        let cases: Vec<(&str, Value)> = match fixture.protocol {
+            DownstreamProtocol::Openai => vec![
+                (
+                    "invalid-base64",
+                    json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PRIVATE_MARKER}")}}
+                    ]}]}),
+                ),
+                (
+                    "empty-filename",
+                    json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                        {"type":"file","file":{"filename":"","file_data":"JVBERi0="}}
+                    ]}]}),
+                ),
+                (
+                    "executable-mime",
+                    json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                        {"type":"file","file":{"filename":"payload.exe","file_data":"AA=="}}
+                    ]}]}),
+                ),
+                (
+                    "illegal-role",
+                    json!({"model":"gpt-5","messages":[{"role":"assistant","content":[
+                        {"type":"image_url","image_url":{"url":"https://example.com/a.png"}}
+                    ]}]}),
+                ),
+            ],
+            DownstreamProtocol::Responses => vec![
+                (
+                    "conflicting-source",
+                    json!({"model":"gpt-5","input":[{"role":"user","content":[
+                        {"type":"input_image","image_url":"https://example.com/a.png","file_id":"file_same_target"}
+                    ]}]}),
+                ),
+                (
+                    "external-file-url",
+                    json!({"model":"gpt-5","input":[{"role":"user","content":[
+                        {"type":"input_file","filename":"remote.pdf","file_url":format!("https://example.com/{PRIVATE_MARKER}.pdf")}
+                    ]}]}),
+                ),
+                (
+                    "empty-filename",
+                    json!({"model":"gpt-5","input":[{"role":"user","content":[
+                        {"type":"input_file","filename":"","file_data":"JVBERi0="}
+                    ]}]}),
+                ),
+                (
+                    "unknown-mime",
+                    json!({"model":"gpt-5","input":[{"role":"user","content":[
+                        {"type":"input_file","filename":"payload.bin","file_data":"data:application/octet-stream;base64,AA=="}
+                    ]}]}),
+                ),
+                (
+                    "illegal-role",
+                    json!({"model":"gpt-5","input":[{"role":"assistant","content":[
+                        {"type":"input_audio","input_audio":{"data":"AA==","format":"wav"}}
+                    ]}]}),
+                ),
+            ],
+            DownstreamProtocol::Anthropic => vec![
+                (
+                    "external-file-id",
+                    json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":[
+                        {"type":"document","source":{"type":"file","file_id":PRIVATE_MARKER},"title":"remote.pdf"}
+                    ]}]}),
+                ),
+                (
+                    "missing-filename",
+                    json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":[
+                        {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}
+                    ]}]}),
+                ),
+                (
+                    "invalid-base64",
+                    json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":[
+                        {"type":"image","source":{"type":"base64","media_type":"image/png","data":PRIVATE_MARKER}}
+                    ]}]}),
+                ),
+                (
+                    "illegal-role",
+                    json!({"model":"claude","max_tokens":64,"messages":[{"role":"assistant","content":[
+                        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}
+                    ]}]}),
+                ),
+            ],
+            DownstreamProtocol::Gemini => vec![
+                (
+                    "hosted-uri",
+                    json!({"contents":[{"role":"user","parts":[
+                        {"fileData":{"mimeType":"application/pdf","fileUri":format!("https://generativelanguage.googleapis.com/v1beta/files/{PRIVATE_MARKER}")}}
+                    ]}]}),
+                ),
+                (
+                    "video",
+                    json!({"contents":[{"role":"user","parts":[
+                        {"inlineData":{"mimeType":"video/mp4","data":"AA==","displayName":"clip.mp4"}}
+                    ]}]}),
+                ),
+                (
+                    "unknown-mime",
+                    json!({"contents":[{"role":"user","parts":[
+                        {"inlineData":{"mimeType":"application/octet-stream","data":"AA==","displayName":"blob.bin"}}
+                    ]}]}),
+                ),
+                (
+                    "missing-filename",
+                    json!({"contents":[{"role":"user","parts":[
+                        {"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}
+                    ]}]}),
+                ),
+                (
+                    "illegal-role",
+                    json!({"contents":[{"role":"model","parts":[
+                        {"inlineData":{"mimeType":"image/png","data":"AA=="}}
+                    ]}]}),
+                ),
+                (
+                    "executable",
+                    json!({"contents":[{"role":"user","parts":[
+                        {"executableCode":{"language":"python","code":PRIVATE_MARKER}}
+                    ]}]}),
+                ),
+            ],
+        };
+
+        for (case_name, request) in cases {
+            let fixture = fixture.clone();
+            let name = format!("{wire_name}-{case_name}");
+            run_case(&name, move |context| async move {
+                let upstream =
+                    TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"}))
+                        .await;
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                let mut request = request;
+                if fixture.protocol != DownstreamProtocol::Gemini {
+                    request["model"] = json!(router.requested_model());
+                }
+                router
+                    .app_state
+                    .secret_encryption
+                    .reset_decrypt_call_count();
+
+                let response = router.send(&fixture, false, &request).await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("media rejection should be readable");
+                assert!(
+                    !String::from_utf8_lossy(&body).contains(PRIVATE_MARKER),
+                    "{case_name}"
+                );
+                assert_eq!(
+                    router.app_state.secret_encryption.decrypt_call_count(),
+                    0,
+                    "{case_name}"
+                );
+                assert!(upstream.requests().await.is_empty(), "{case_name}");
+                let log = router
+                    .wait_for_log_for_source(router.source_id, RequestStatus::Error)
+                    .await;
+                assert!(
+                    !log.final_error_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(PRIVATE_MARKER),
+                    "{case_name}: private media must not enter Request Log"
+                );
+                router.wait_for_api_key_lease_release().await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
     }
 }
 
@@ -5167,6 +7710,428 @@ fn all_public_downstream_structured_outputs_reach_the_openai_target() {
         });
     }
 }
+
+#[test]
+fn all_public_downstream_structured_outputs_reach_the_responses_target() {
+    let upstream_response = responses_target_golden().non_stream_response;
+
+    for (name, fixture) in responses_target_fixtures() {
+        let upstream_response = upstream_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let schema = json!({
+                "type":"object",
+                "properties":{"answer":{"type":"string","minLength":2}},
+                "required":["answer"],
+                "additionalProperties":false
+            });
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["response_format"] = json!({
+                        "type":"json_schema","json_schema":{
+                            "name":"answer_contract","description":"An answer",
+                            "schema":schema,"strict":true
+                        }
+                    });
+                }
+                DownstreamProtocol::Responses => {
+                    request["text"] = json!({"format":{
+                        "type":"json_schema","name":"answer_contract",
+                        "description":"An answer","schema":schema,"strict":true
+                    }});
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["output_config"] = json!({"format":{
+                        "type":"json_schema","schema":schema
+                    }});
+                }
+                DownstreamProtocol::Gemini => {
+                    request["generationConfig"] = json!({"responseFormat":{"text":{
+                        "mimeType":"application/json","schema":{
+                            "type":"object","propertyOrdering":["answer"],
+                            "properties":{"answer":{
+                                "type":"string","minLength":2,"propertyOrdering":[]
+                            }},
+                            "required":["answer"],"additionalProperties":false
+                        }
+                    }}});
+                }
+            }
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_no_public_transform_diagnostics(&response);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("structured response should complete without gateway schema validation");
+
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}: exactly one Responses call");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("Responses target request should be JSON");
+            assert_eq!(body["store"], false, "{name}");
+            let format = &body["text"]["format"];
+            assert_eq!(format["type"], "json_schema", "{name}");
+            assert_eq!(format["strict"], true, "{name}");
+            assert_eq!(
+                format["schema"]["properties"]["answer"]["minLength"], 2,
+                "{name}"
+            );
+            assert!(
+                format["name"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                "{name}: explicit or stable synthesized name"
+            );
+            if matches!(
+                fixture.protocol,
+                DownstreamProtocol::Openai | DownstreamProtocol::Responses
+            ) {
+                assert_eq!(format["name"], "answer_contract", "{name}");
+                assert_eq!(format["description"], "An answer", "{name}");
+            }
+            if fixture.protocol == DownstreamProtocol::Gemini {
+                assert!(!format["schema"].to_string().contains("propertyOrdering"));
+            }
+
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResponsesAdvancedCellCapability {
+    Tools,
+    Reasoning,
+    Multimodal,
+    StructuredOutput,
+}
+
+fn advanced_responses_cell_request(
+    fixture: &DirectExecutionFixture,
+    capability: ResponsesAdvancedCellCapability,
+) -> Value {
+    let mut request = fixture.request.downstream.clone();
+    match (fixture.protocol, capability) {
+        (DownstreamProtocol::Openai, ResponsesAdvancedCellCapability::Tools) => {
+            request["messages"] = json!([
+                {"role":"assistant","content":null,"tool_calls":[{
+                    "id":"call_lookup","type":"function",
+                    "function":{"name":"lookup","arguments":"{\"city\":\"Paris\"}"}
+                }]},
+                {"role":"tool","tool_call_id":"call_lookup","content":"{\"ok\":true}"}
+            ]);
+            request["tools"] = json!([{"type":"function","function":{
+                "name":"lookup","parameters":{"type":"object"},"strict":true
+            }}]);
+            request["tool_choice"] = json!({"type":"function","function":{"name":"lookup"}});
+            request["parallel_tool_calls"] = json!(false);
+        }
+        (DownstreamProtocol::Responses, ResponsesAdvancedCellCapability::Tools) => {
+            request["input"] = json!([
+                {"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"city\":\"Paris\"}"},
+                {"type":"function_call_output","call_id":"call_lookup","output":{"ok":true}}
+            ]);
+            request["tools"] = json!([{
+                "type":"function","name":"lookup","parameters":{"type":"object"},"strict":true
+            }]);
+            request["tool_choice"] = json!({"type":"function","name":"lookup"});
+            request["parallel_tool_calls"] = json!(false);
+        }
+        (DownstreamProtocol::Anthropic, ResponsesAdvancedCellCapability::Tools) => {
+            request["messages"] = json!([
+                {"role":"assistant","content":[{"type":"tool_use","id":"call_lookup","name":"lookup","input":{"city":"Paris"}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_lookup","content":{"ok":true}}]}
+            ]);
+            request["tools"] = json!([{
+                "name":"lookup","input_schema":{"type":"object"}
+            }]);
+            request["tool_choice"] =
+                json!({"type":"tool","name":"lookup","disable_parallel_tool_use":true});
+        }
+        (DownstreamProtocol::Gemini, ResponsesAdvancedCellCapability::Tools) => {
+            request["contents"] = json!([
+                {"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"city":"Paris"}}}]},
+                {"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"ok":true}}}]}
+            ]);
+            request["tools"] = json!([{"functionDeclarations":[{
+                "name":"lookup","parameters":{"type":"object"}
+            }]}]);
+            request["toolConfig"] = json!({"functionCallingConfig":{
+                "mode":"ANY","allowedFunctionNames":["lookup"]
+            }});
+        }
+        (DownstreamProtocol::Openai, ResponsesAdvancedCellCapability::Reasoning) => {
+            request["reasoning_effort"] = json!("medium");
+        }
+        (DownstreamProtocol::Responses, ResponsesAdvancedCellCapability::Reasoning) => {
+            request["reasoning"] = json!({"effort":"xhigh","summary":"detailed"});
+        }
+        (DownstreamProtocol::Anthropic, ResponsesAdvancedCellCapability::Reasoning) => {
+            request["thinking"] = json!({"type":"adaptive"});
+            request["output_config"] = json!({"effort":"max"});
+        }
+        (DownstreamProtocol::Gemini, ResponsesAdvancedCellCapability::Reasoning) => {
+            request["generationConfig"]["thinkingConfig"] =
+                json!({"thinkingLevel":"low","includeThoughts":true});
+        }
+        (DownstreamProtocol::Openai, ResponsesAdvancedCellCapability::Multimodal) => {
+            request["messages"] = json!([{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":"https://example.com/image.png","detail":"high"}},
+                {"type":"file","file":{"filename":"report.pdf","file_data":"JVBERi0="}}
+            ]}]);
+        }
+        (DownstreamProtocol::Responses, ResponsesAdvancedCellCapability::Multimodal) => {
+            request["input"] = json!([{"role":"user","content":[
+                {"type":"input_image","image_url":"data:image/png;base64,ZmFrZQ==","detail":"high"},
+                {"type":"input_file","filename":"report.pdf","file_data":"JVBERi0="}
+            ]}]);
+        }
+        (DownstreamProtocol::Anthropic, ResponsesAdvancedCellCapability::Multimodal) => {
+            request["messages"] = json!([{"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"ZmFrZQ=="}},
+                {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="},"title":"report.pdf"}
+            ]}]);
+        }
+        (DownstreamProtocol::Gemini, ResponsesAdvancedCellCapability::Multimodal) => {
+            request["contents"] = json!([{"role":"user","parts":[
+                {"inlineData":{"mimeType":"image/png","data":"ZmFrZQ==","displayName":"preview.png"}},
+                {"inlineData":{"mimeType":"application/pdf","data":"JVBERi0=","displayName":"report.pdf"}}
+            ]}]);
+        }
+        (DownstreamProtocol::Openai, ResponsesAdvancedCellCapability::StructuredOutput) => {
+            request["response_format"] = json!({"type":"json_schema","json_schema":{
+                "name":"answer_contract","description":"An answer","strict":true,
+                "schema":{"type":"object","properties":{"answer":{"type":"string","minLength":2}}}
+            }});
+        }
+        (DownstreamProtocol::Responses, ResponsesAdvancedCellCapability::StructuredOutput) => {
+            request["text"] = json!({"format":{
+                "type":"json_schema","name":"answer_contract","description":"An answer","strict":true,
+                "schema":{"type":"object","properties":{"answer":{"type":"string","minLength":2}}}
+            }});
+        }
+        (DownstreamProtocol::Anthropic, ResponsesAdvancedCellCapability::StructuredOutput) => {
+            request["output_config"] = json!({"format":{
+                "type":"json_schema","schema":{"type":"object","properties":{"answer":{"type":"string","minLength":2}}}
+            }});
+        }
+        (DownstreamProtocol::Gemini, ResponsesAdvancedCellCapability::StructuredOutput) => {
+            request["generationConfig"] = json!({"responseFormat":{"text":{
+                "mimeType":"application/json","schema":{"type":"object","propertyOrdering":["answer"],
+                    "properties":{"answer":{"type":"string","minLength":2}}}
+            }}});
+        }
+    }
+    request
+}
+
+fn assert_responses_advanced_cell(
+    test_name: &'static str,
+    protocol: DownstreamProtocol,
+    capability: ResponsesAdvancedCellCapability,
+    expects_controlled_loss: bool,
+) {
+    let (_, fixture) = responses_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Responses target fixture for protocol");
+
+    run_case(test_name, move |context| async move {
+        let upstream = TestUpstream::spawn_json(
+            StatusCode::OK,
+            responses_target_golden().non_stream_response,
+        )
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let request = advanced_responses_cell_request(&fixture, capability);
+
+        let transformed = crate::service::transform::transform_request_data(
+            request.clone(),
+            protocol,
+            UpstreamProtocol::Responses,
+            false,
+        )
+        .expect("advanced cell transform must be sendable");
+        let controlled_facts = transformed
+            .summary
+            .facts
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact.outcome,
+                    TransformOutcomeKind::ControlledLossMinor
+                        | TransformOutcomeKind::ControlledLossMajor
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            !controlled_facts.is_empty(),
+            expects_controlled_loss,
+            "{protocol:?}/{capability:?}"
+        );
+        assert!(
+            controlled_facts
+                .iter()
+                .all(|fact| fact.safe_summary.is_none()),
+            "{protocol:?}/{capability:?}: diagnostics must be payload-free"
+        );
+
+        let response = router.send(&fixture, false, &request).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{protocol:?}/{capability:?}"
+        );
+        assert_no_public_transform_diagnostics(&response);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("advanced response should complete");
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "one direct Responses call");
+        assert_eq!(captured[0].path, "/v1/responses");
+        let body: Value = serde_json::from_slice(&captured[0].body).expect("Responses JSON");
+        assert_eq!(body["store"], false);
+        match capability {
+            ResponsesAdvancedCellCapability::Tools => {
+                assert_eq!(body["tools"][0]["type"], "function");
+                assert!(
+                    body["input"]
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|item| {
+                            item["type"] == "function_call"
+                                || item["type"] == "function_call_output"
+                        }))
+                );
+            }
+            ResponsesAdvancedCellCapability::Reasoning => {
+                assert!(body["reasoning"]["effort"].is_string());
+            }
+            ResponsesAdvancedCellCapability::Multimodal => {
+                let serialized = body["input"].to_string();
+                assert!(serialized.contains("input_image"));
+                assert!(serialized.contains("input_file"));
+            }
+            ResponsesAdvancedCellCapability::StructuredOutput => {
+                assert_eq!(body["text"]["format"]["type"], "json_schema");
+                assert!(body["text"]["format"]["name"].is_string());
+            }
+        }
+        router.wait_for_log(RequestStatus::Success).await;
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! responses_advanced_cell_test {
+    ($name:ident, $protocol:expr, $capability:expr, $loss:expr) => {
+        #[test]
+        fn $name() {
+            assert_responses_advanced_cell(stringify!($name), $protocol, $capability, $loss);
+        }
+    };
+}
+
+responses_advanced_cell_test!(
+    openai_to_responses_tools_cell_is_full,
+    DownstreamProtocol::Openai,
+    ResponsesAdvancedCellCapability::Tools,
+    false
+);
+responses_advanced_cell_test!(
+    responses_to_responses_tools_cell_is_full,
+    DownstreamProtocol::Responses,
+    ResponsesAdvancedCellCapability::Tools,
+    false
+);
+responses_advanced_cell_test!(
+    anthropic_to_responses_tools_cell_is_full,
+    DownstreamProtocol::Anthropic,
+    ResponsesAdvancedCellCapability::Tools,
+    false
+);
+responses_advanced_cell_test!(
+    gemini_to_responses_tools_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini,
+    ResponsesAdvancedCellCapability::Tools,
+    true
+);
+responses_advanced_cell_test!(
+    openai_to_responses_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai,
+    ResponsesAdvancedCellCapability::Reasoning,
+    true
+);
+responses_advanced_cell_test!(
+    responses_to_responses_reasoning_cell_is_full,
+    DownstreamProtocol::Responses,
+    ResponsesAdvancedCellCapability::Reasoning,
+    false
+);
+responses_advanced_cell_test!(
+    anthropic_to_responses_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Anthropic,
+    ResponsesAdvancedCellCapability::Reasoning,
+    true
+);
+responses_advanced_cell_test!(
+    gemini_to_responses_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini,
+    ResponsesAdvancedCellCapability::Reasoning,
+    true
+);
+responses_advanced_cell_test!(
+    openai_to_responses_multimodal_cell_is_full,
+    DownstreamProtocol::Openai,
+    ResponsesAdvancedCellCapability::Multimodal,
+    false
+);
+responses_advanced_cell_test!(
+    responses_to_responses_multimodal_cell_is_full,
+    DownstreamProtocol::Responses,
+    ResponsesAdvancedCellCapability::Multimodal,
+    false
+);
+responses_advanced_cell_test!(
+    anthropic_to_responses_multimodal_cell_is_full,
+    DownstreamProtocol::Anthropic,
+    ResponsesAdvancedCellCapability::Multimodal,
+    false
+);
+responses_advanced_cell_test!(
+    gemini_to_responses_multimodal_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini,
+    ResponsesAdvancedCellCapability::Multimodal,
+    true
+);
+responses_advanced_cell_test!(
+    openai_to_responses_structured_output_cell_is_full,
+    DownstreamProtocol::Openai,
+    ResponsesAdvancedCellCapability::StructuredOutput,
+    false
+);
+responses_advanced_cell_test!(
+    responses_to_responses_structured_output_cell_is_full,
+    DownstreamProtocol::Responses,
+    ResponsesAdvancedCellCapability::StructuredOutput,
+    false
+);
+responses_advanced_cell_test!(
+    anthropic_to_responses_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Anthropic,
+    ResponsesAdvancedCellCapability::StructuredOutput,
+    true
+);
+responses_advanced_cell_test!(
+    gemini_to_responses_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini,
+    ResponsesAdvancedCellCapability::StructuredOutput,
+    true
+);
 
 #[test]
 fn all_public_downstream_portable_tool_lifecycles_reach_the_openai_target() {
@@ -5274,6 +8239,306 @@ fn all_public_downstream_portable_tool_lifecycles_reach_the_openai_target() {
             if fixture.protocol != DownstreamProtocol::Gemini {
                 assert_eq!(body["parallel_tool_calls"], false, "{name}");
             }
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn all_public_downstream_portable_tool_lifecycles_reach_the_responses_target() {
+    let mut upstream_response = responses_target_golden().non_stream_response;
+    upstream_response["output"] = json!([{
+        "type":"function_call",
+        "id":"fc_model_lookup",
+        "call_id":"model-call-lookup",
+        "name":"lookup",
+        "arguments":"{\"city\":\"London\"}",
+        "status":"completed"
+    }]);
+
+    for (name, fixture) in responses_target_fixtures() {
+        let upstream_response = upstream_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["messages"] = json!([
+                        {"role":"assistant","content":null,"tool_calls":[
+                            {"id":"openai-weather","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}},
+                            {"id":"openai-time","type":"function","function":{"name":"time","arguments":"{\"zone\":\"UTC\"}"}}
+                        ]},
+                        {"role":"tool","tool_call_id":"openai-weather","content":"{\"temp\":21}"},
+                        {"role":"tool","tool_call_id":"openai-time","content":"12:00"}
+                    ]);
+                    request["tools"] = json!([
+                        {"type":"function","function":{"name":"weather","description":"lookup weather","parameters":{"type":"object"},"strict":true}},
+                        {"type":"function","function":{"name":"time","parameters":{"type":"object"},"strict":false}}
+                    ]);
+                    request["tool_choice"] = json!({"type":"allowed_tools","allowed_tools":{
+                        "mode":"required","tools":[
+                            {"type":"function","function":{"name":"weather"}},
+                            {"type":"function","function":{"name":"time"}}
+                        ]
+                    }});
+                    request["parallel_tool_calls"] = json!(false);
+                }
+                DownstreamProtocol::Responses => {
+                    request["input"] = json!([
+                        {"type":"function_call","id":"fc-weather","call_id":"responses-weather","name":"weather","arguments":"{\"city\":\"Paris\"}"},
+                        {"type":"function_call","id":"fc-time","call_id":"responses-time","name":"time","arguments":"{\"zone\":\"UTC\"}"},
+                        {"type":"function_call_output","id":"fco-weather","call_id":"responses-weather","output":{"temp":21}},
+                        {"type":"function_call_output","id":"fco-time","call_id":"responses-time","output":"12:00"}
+                    ]);
+                    request["tools"] = json!([
+                        {"type":"function","name":"weather","description":"lookup weather","parameters":{"type":"object"},"strict":true},
+                        {"type":"function","name":"time","parameters":{"type":"object"},"strict":false}
+                    ]);
+                    request["tool_choice"] = json!({"type":"allowed_tools","mode":"required","tools":[
+                        {"type":"function","name":"weather"},
+                        {"type":"function","name":"time"}
+                    ]});
+                    request["parallel_tool_calls"] = json!(false);
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["messages"] = json!([
+                        {"role":"assistant","content":[
+                            {"type":"tool_use","id":"anthropic-weather","name":"weather","input":{"city":"Paris"}},
+                            {"type":"tool_use","id":"anthropic-time","name":"time","input":{"zone":"UTC"}}
+                        ]},
+                        {"role":"user","content":[
+                            {"type":"tool_result","tool_use_id":"anthropic-weather","content":{"temp":21}},
+                            {"type":"tool_result","tool_use_id":"anthropic-time","content":"12:00"}
+                        ]}
+                    ]);
+                    request["tools"] = json!([
+                        {"name":"weather","description":"lookup weather","input_schema":{"type":"object"},"strict":true},
+                        {"name":"time","input_schema":{"type":"object"},"strict":false}
+                    ]);
+                    request["tool_choice"] = json!({
+                        "type":"tool","name":"weather","disable_parallel_tool_use":true
+                    });
+                }
+                DownstreamProtocol::Gemini => {
+                    request["contents"] = json!([
+                        {"role":"model","parts":[
+                            {"functionCall":{"name":"weather","args":{"city":"Paris"}}},
+                            {"functionCall":{"name":"time","args":{"zone":"UTC"}}}
+                        ]},
+                        {"role":"user","parts":[
+                            {"functionResponse":{"name":"weather","response":{"temp":21}}},
+                            {"functionResponse":{"name":"time","response":{"result":"12:00"}}}
+                        ]}
+                    ]);
+                    request["tools"] = json!([{"functionDeclarations":[
+                        {"name":"weather","description":"lookup weather","parameters":{"type":"object"}},
+                        {"name":"time","parameters":{"type":"object"}}
+                    ]}]);
+                    request["toolConfig"] = json!({"functionCallingConfig":{
+                        "mode":"ANY","allowedFunctionNames":["weather","time"]
+                    }});
+                }
+            }
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let response_body: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("tool response should complete"),
+            )
+            .expect("downstream tool response should be JSON");
+
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}: exactly one Responses call");
+            assert_eq!(captured[0].path, "/v1/responses", "{name}");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("Responses target request should be JSON");
+            assert_eq!(body["store"], false, "{name}");
+            assert_eq!(body["tools"][0]["name"], "weather", "{name}");
+            assert_eq!(body["tools"][0]["description"], "lookup weather", "{name}");
+            assert_eq!(
+                body["tools"][0]["parameters"],
+                json!({"type":"object"}),
+                "{name}"
+            );
+            assert_eq!(body["tools"][0]["strict"], true, "{name}");
+            if fixture.protocol != DownstreamProtocol::Gemini {
+                assert_eq!(body["parallel_tool_calls"], false, "{name}");
+            }
+            assert_eq!(
+                body["input"][0]["call_id"], body["input"][2]["call_id"],
+                "{name}"
+            );
+            assert_eq!(
+                body["input"][1]["call_id"], body["input"][3]["call_id"],
+                "{name}"
+            );
+            assert_ne!(
+                body["input"][0]["call_id"], body["input"][1]["call_id"],
+                "{name}"
+            );
+
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    assert_eq!(response_body["choices"][0]["finish_reason"], "tool_calls");
+                    assert_eq!(
+                        response_body["choices"][0]["message"]["tool_calls"][0]["id"],
+                        "model-call-lookup"
+                    );
+                    assert_eq!(
+                        response_body["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                        "lookup"
+                    );
+                }
+                DownstreamProtocol::Responses => {
+                    assert_eq!(response_body["status"], "completed");
+                    assert_eq!(response_body["output"][0]["call_id"], "model-call-lookup");
+                }
+                DownstreamProtocol::Anthropic => {
+                    assert_eq!(response_body["stop_reason"], "tool_use");
+                    assert_eq!(response_body["content"][0]["id"], "model-call-lookup");
+                    assert_eq!(response_body["content"][0]["name"], "lookup");
+                }
+                DownstreamProtocol::Gemini => {
+                    assert_eq!(
+                        response_body["candidates"][0]["content"]["parts"][0]["functionCall"]["name"],
+                        "lookup"
+                    );
+                    assert_eq!(
+                        response_body["candidates"][0]["content"]["parts"][0]["functionCall"]["args"],
+                        json!({"city":"London"})
+                    );
+                }
+            }
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn responses_target_rejects_invalid_or_forced_nonportable_tools_before_credentials() {
+    const PRIVATE_MARKER: &str = "responses-tool-private-marker";
+    for (name, fixture) in responses_target_fixtures() {
+        run_case(name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"})).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["tools"] = json!([{"type":"function","function":{
+                        "name":"lookup","parameters":[PRIVATE_MARKER]
+                    }}])
+                }
+                DownstreamProtocol::Responses => {
+                    request["tools"] = json!([{
+                        "type":"function","name":"lookup","parameters":[PRIVATE_MARKER]
+                    }])
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["tools"] = json!([{
+                        "name":"lookup","input_schema":[PRIVATE_MARKER]
+                    }])
+                }
+                DownstreamProtocol::Gemini => {
+                    request["tools"] = json!([{"functionDeclarations":[{
+                        "name":"lookup","parameters":[PRIVATE_MARKER]
+                    }]}])
+                }
+            }
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("invalid function rejection should be readable");
+            assert!(
+                !String::from_utf8_lossy(&body).contains(PRIVATE_MARKER),
+                "{name}"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}"
+            );
+            assert!(upstream.requests().await.is_empty(), "{name}");
+            let log = router
+                .wait_for_log_for_source(router.source_id, RequestStatus::Error)
+                .await;
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_MARKER),
+                "{name}: private tool payload must not enter Request Log"
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+
+    for (name, fixture) in responses_target_fixtures()
+        .into_iter()
+        .filter(|(_, fixture)| fixture.protocol != DownstreamProtocol::Responses)
+    {
+        run_case(name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"})).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["tools"] = json!([{"type":"custom","marker":PRIVATE_MARKER}]);
+                    request["tool_choice"] = json!("required");
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["tools"] =
+                        json!([{"type":"web_search_20250305","marker":PRIVATE_MARKER}]);
+                    request["tool_choice"] = json!({"type":"any"});
+                }
+                DownstreamProtocol::Gemini => {
+                    request["tools"] = json!([{"googleSearch":{"marker":PRIVATE_MARKER}}]);
+                    request["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
+                }
+                DownstreamProtocol::Responses => unreachable!(),
+            }
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("forced nonportable rejection should be readable");
+            assert!(
+                !String::from_utf8_lossy(&body).contains(PRIVATE_MARKER),
+                "{name}"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}"
+            );
+            assert!(upstream.requests().await.is_empty(), "{name}");
+            let log = router
+                .wait_for_log_for_source(router.source_id, RequestStatus::Error)
+                .await;
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_MARKER),
+                "{name}: private nonportable payload must not enter Request Log"
+            );
+            router.wait_for_api_key_lease_release().await;
             upstream.shutdown().await;
         });
     }
@@ -5402,6 +8667,151 @@ fn all_public_downstreams_reject_unrepresentable_structured_outputs_before_crede
             );
             upstream.shutdown().await;
         });
+    }
+}
+
+#[test]
+fn responses_target_rejects_invalid_structured_outputs_before_credentials() {
+    const PRIVATE_MARKER: &str = "responses-structured-private-marker";
+
+    for (wire_name, fixture) in responses_target_fixtures() {
+        let mut cases = Vec::new();
+        match fixture.protocol {
+            DownstreamProtocol::Openai => {
+                let mut grammar = fixture.request.downstream.clone();
+                grammar["response_format"] = json!({"type":"grammar","grammar":PRIVATE_MARKER});
+                cases.push(("grammar", grammar));
+
+                let mut invalid_name = fixture.request.downstream.clone();
+                invalid_name["response_format"] = json!({"type":"json_schema","json_schema":{
+                    "name":"","schema":{"private":PRIVATE_MARKER},"strict":true
+                }});
+                cases.push(("invalid-name", invalid_name));
+
+                let mut invalid_schema = fixture.request.downstream.clone();
+                invalid_schema["response_format"] = json!({"type":"json_schema","json_schema":{
+                    "name":"valid_name","schema":[PRIVATE_MARKER],"strict":true
+                }});
+                cases.push(("invalid-schema", invalid_schema));
+            }
+            DownstreamProtocol::Responses => {
+                let formats = [
+                    (
+                        "grammar",
+                        json!({"type":"grammar","grammar":PRIVATE_MARKER}),
+                    ),
+                    (
+                        "invalid-name",
+                        json!({"type":"json_schema","name":"","schema":{"private":PRIVATE_MARKER}}),
+                    ),
+                    (
+                        "invalid-schema",
+                        json!({"type":"json_schema","name":"valid_name","schema":[PRIVATE_MARKER]}),
+                    ),
+                    (
+                        "conflicting-json-object",
+                        json!({"type":"json_object","schema":{"private":PRIVATE_MARKER}}),
+                    ),
+                ];
+                for (name, format) in formats {
+                    let mut request = fixture.request.downstream.clone();
+                    request["text"] = json!({"format":format});
+                    cases.push((name, request));
+                }
+                let mut wrong_envelope = fixture.request.downstream.clone();
+                wrong_envelope["response_format"] =
+                    json!({"type":"json_schema","private":PRIVATE_MARKER});
+                cases.push(("wrong-envelope", wrong_envelope));
+            }
+            DownstreamProtocol::Anthropic => {
+                let mut grammar = fixture.request.downstream.clone();
+                grammar["output_config"] = json!({"format":{
+                    "type":"grammar","grammar":PRIVATE_MARKER
+                }});
+                cases.push(("grammar", grammar));
+
+                let mut invalid_schema = fixture.request.downstream.clone();
+                invalid_schema["output_config"] = json!({"format":{
+                    "type":"json_schema","schema":[PRIVATE_MARKER]
+                }});
+                cases.push(("invalid-schema", invalid_schema));
+            }
+            DownstreamProtocol::Gemini => {
+                let mut non_json = fixture.request.downstream.clone();
+                non_json["generationConfig"] = json!({
+                    "responseMimeType":"text/x.enum",
+                    "responseSchema":{"private":PRIVATE_MARKER}
+                });
+                cases.push(("non-json", non_json));
+
+                let mut double_schema = fixture.request.downstream.clone();
+                double_schema["generationConfig"] = json!({
+                    "responseMimeType":"application/json",
+                    "responseSchema":{"private":PRIVATE_MARKER},
+                    "responseJsonSchema":{"private":PRIVATE_MARKER}
+                });
+                cases.push(("double-schema", double_schema));
+
+                let mut conflicting_envelopes = fixture.request.downstream.clone();
+                conflicting_envelopes["generationConfig"] = json!({
+                    "responseFormat":{"text":{"mimeType":"application/json",
+                        "schema":{"private":PRIVATE_MARKER}}},
+                    "responseMimeType":"application/json"
+                });
+                cases.push(("conflicting-envelopes", conflicting_envelopes));
+
+                let mut invalid_schema = fixture.request.downstream.clone();
+                invalid_schema["generationConfig"] = json!({
+                    "responseFormat":{"text":{"mimeType":"application/json",
+                        "schema":[PRIVATE_MARKER]}}
+                });
+                cases.push(("invalid-schema", invalid_schema));
+            }
+        }
+
+        for (case_name, request) in cases {
+            let fixture = fixture.clone();
+            let name = format!("{wire_name}-{case_name}");
+            run_case(&name, move |context| async move {
+                let upstream =
+                    TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"}))
+                        .await;
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                router
+                    .app_state
+                    .secret_encryption
+                    .reset_decrypt_call_count();
+
+                let response = router.send(&fixture, false, &request).await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("structured rejection should be readable");
+                assert!(
+                    !String::from_utf8_lossy(&body).contains(PRIVATE_MARKER),
+                    "{case_name}"
+                );
+                assert_eq!(
+                    router.app_state.secret_encryption.decrypt_call_count(),
+                    0,
+                    "{case_name}"
+                );
+                assert!(upstream.requests().await.is_empty(), "{case_name}");
+                let log = router
+                    .wait_for_log_for_source(router.source_id, RequestStatus::Error)
+                    .await;
+                assert!(
+                    !log.final_error_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(PRIVATE_MARKER),
+                    "{case_name}: schema must not enter Request Log"
+                );
+                router.wait_for_api_key_lease_release().await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
     }
 }
 
@@ -7452,6 +10862,7 @@ fn models_routes_apply_static_kind_and_source_operation_filters_without_exposing
 
         for (path, auth, allowed_embedding) in [
             ("/openai/v1/models", DownstreamAuth::Bearer, true),
+            ("/responses/models", DownstreamAuth::Bearer, false),
             ("/responses/v1/models", DownstreamAuth::Bearer, false),
             ("/anthropic/v1/models", DownstreamAuth::XApiKey, false),
             ("/gemini/v1/models", DownstreamAuth::GeminiQuery, false),

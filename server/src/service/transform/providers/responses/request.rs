@@ -145,7 +145,7 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
                             .into_iter()
                             .filter_map(|part| {
                                 if matches!(
-                                    part,
+                                    &part,
                                     UnifiedContentPart::Text { .. }
                                         | UnifiedContentPart::Refusal { .. }
                                         | UnifiedContentPart::Reasoning { .. }
@@ -159,6 +159,17 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
                                     TransformValueKind::from(&part),
                                     "Downgrading rich system content to recoverable instruction text during Responses request conversion.",
                                 );
+                                if matches!(
+                                    part,
+                                    UnifiedContentPart::ImageUrl { .. }
+                                        | UnifiedContentPart::ImageData { .. }
+                                        | UnifiedContentPart::AudioData { .. }
+                                        | UnifiedContentPart::FileUrl { .. }
+                                        | UnifiedContentPart::FileData { .. }
+                                        | UnifiedContentPart::FileId { .. }
+                                ) {
+                                    return None;
+                                }
                                 keep.then(|| render_responses_instruction_part(part)).flatten()
                             })
                             .collect::<Vec<_>>()
@@ -227,7 +238,7 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
                         .into_iter()
                         .filter_map(|part| {
                             if matches!(
-                                part,
+                                &part,
                                 UnifiedContentPart::Text { .. }
                                     | UnifiedContentPart::Refusal { .. }
                                     | UnifiedContentPart::Reasoning { .. }
@@ -241,6 +252,17 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
                                 TransformValueKind::from(&part),
                                 "Downgrading rich system content to recoverable instruction text during Responses request conversion.",
                             );
+                            if matches!(
+                                part,
+                                UnifiedContentPart::ImageUrl { .. }
+                                    | UnifiedContentPart::ImageData { .. }
+                                    | UnifiedContentPart::AudioData { .. }
+                                    | UnifiedContentPart::FileUrl { .. }
+                                    | UnifiedContentPart::FileData { .. }
+                                    | UnifiedContentPart::FileId { .. }
+                            ) {
+                                return None;
+                            }
                             keep.then(|| render_responses_instruction_part(part)).flatten()
                         })
                         .collect::<Vec<_>>()

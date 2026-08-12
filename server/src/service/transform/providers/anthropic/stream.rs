@@ -156,7 +156,8 @@ pub(crate) fn try_transform_unified_stream_events_to_anthropic_events(
                     )?);
                 }
             },
-            UnifiedStreamEvent::ContentBlockDelta { index, text, .. } => {
+            UnifiedStreamEvent::ContentBlockDelta { index, text, .. }
+            | UnifiedStreamEvent::RefusalDelta { index, text, .. } => {
                 let block_exists = context.anthropic_active_blocks().contains_key(&index);
                 context
                     .anthropic_active_blocks_mut()

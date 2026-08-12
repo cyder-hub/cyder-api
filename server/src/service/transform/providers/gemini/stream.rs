@@ -131,7 +131,8 @@ pub(crate) fn try_transform_unified_stream_events_to_gemini_events(
 
     for event in stream_events {
         let maybe_event = match event {
-            UnifiedStreamEvent::ContentBlockDelta { text, .. } => Some(GeminiChunkResponse {
+            UnifiedStreamEvent::ContentBlockDelta { text, .. }
+            | UnifiedStreamEvent::RefusalDelta { text, .. } => Some(GeminiChunkResponse {
                 candidates: vec![GeminiCandidate {
                     index: Some(0),
                     content: Some(GeminiResponseContent {

@@ -419,6 +419,35 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
                 })
             })
         }
+        UnifiedStreamEvent::RefusalDelta { text, .. } => {
+            serde_json::to_string(&OpenAiChunkResponse {
+                id,
+                object: "chat.completion.chunk".to_string(),
+                created,
+                model,
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: None,
+                        content: None,
+                        reasoning_content: None,
+                        tool_calls: None,
+                        refusal: Some(text),
+                        name: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+            })
+            .map(|data| {
+                Some(SseEvent {
+                    data,
+                    ..Default::default()
+                })
+            })
+        }
         UnifiedStreamEvent::ToolCallStart {
             index,
             id: tool_id,
@@ -573,9 +602,12 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
                 ..Default::default()
             })
         }),
+        UnifiedStreamEvent::MessageStop => Ok(Some(SseEvent {
+            data: "[DONE]".to_string(),
+            ..Default::default()
+        })),
         UnifiedStreamEvent::ItemAdded { .. }
         | UnifiedStreamEvent::ItemDone { .. }
-        | UnifiedStreamEvent::MessageStop
         | UnifiedStreamEvent::ContentPartAdded { .. }
         | UnifiedStreamEvent::ContentPartDone { .. }
         | UnifiedStreamEvent::ContentBlockStart { .. }

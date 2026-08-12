@@ -2,13 +2,14 @@ use serde_json::Value;
 
 use super::adapter::{downstream_adapter_for, upstream_adapter_for};
 use super::diagnostics::{
-    capture_transform_diagnostics, merge_transform_summaries, transform_success,
+    capture_transform_diagnostics, merge_transform_summaries, transform_failure, transform_success,
     upstream_usage_missing_summary,
 };
 use super::{
     TransformAction, TransformDiagnosticCollector, TransformDiagnosticFact, TransformFailure,
     TransformFailureOrigin, TransformOutcomeKind, TransformOutcomeSummary, TransformPhase,
-    TransformReasonCode, TransformResult, TransformSemanticUnit, TransformSuccess,
+    TransformReasonCode, TransformResult, TransformSafeSummary, TransformSemanticUnit,
+    TransformSuccess,
 };
 use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
@@ -19,6 +20,14 @@ pub struct ResponseTransformValue {
     pub value: Value,
     pub usage_info: Option<UsageInfo>,
     pub usage_normalization: Option<UsageNormalization>,
+    pub application_outcome: ResponseApplicationOutcome,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResponseApplicationOutcome {
+    #[default]
+    Success,
+    Failed,
 }
 
 fn protocols_share_wire_format(
@@ -52,14 +61,22 @@ pub(in crate::service::transform) fn transform_result_with_cost(
     upstream_protocol: UpstreamProtocol,
     downstream_protocol: DownstreamProtocol,
 ) -> TransformResult<ResponseTransformValue> {
+    let application_outcome =
+        observe_application_outcome(&data, upstream_protocol, downstream_protocol)?;
+
     if protocols_share_wire_format(upstream_protocol, downstream_protocol) {
         let source_adapter = upstream_adapter_for(upstream_protocol);
         let observation = (source_adapter.response.decode)(data.clone());
         let (usage_info, usage_normalization, observation_summary) = match observation {
             Ok(decoded) => {
-                let usage_info = decoded.value.usage.clone().map(Into::into);
-                let usage_normalization = decoded.value.usage.as_ref().map(Into::into);
-                let observation_summary = if decoded.value.usage.is_some() {
+                let observed_usage = if upstream_protocol == UpstreamProtocol::Responses {
+                    observe_responses_usage(&data)
+                } else {
+                    decoded.value.usage
+                };
+                let usage_info = observed_usage.clone().map(Into::into);
+                let usage_normalization = observed_usage.as_ref().map(Into::into);
+                let observation_summary = if observed_usage.is_some() {
                     transform_success(
                         (),
                         TransformPhase::ResponseObserve,
@@ -89,7 +106,28 @@ pub(in crate::service::transform) fn transform_result_with_cost(
                         .first()
                         .and_then(|fact| fact.safe_summary.clone()),
                 });
-                (None, None, collector.into_summary())
+                let observed_usage = (upstream_protocol == UpstreamProtocol::Responses)
+                    .then(|| observe_responses_usage(&data))
+                    .flatten();
+                let usage_info = observed_usage.clone().map(Into::into);
+                let usage_normalization = observed_usage.as_ref().map(Into::into);
+                let summary = merge_transform_summaries([
+                    collector.into_summary(),
+                    if observed_usage.is_some() {
+                        transform_success(
+                            (),
+                            TransformPhase::ResponseObserve,
+                            TransformSemanticUnit::Usage,
+                            TransformOutcomeKind::Lossless,
+                            TransformAction::PassThrough,
+                            TransformReasonCode::LosslessConversion,
+                        )
+                        .summary
+                    } else {
+                        upstream_usage_missing_summary(TransformPhase::ResponseObserve)
+                    },
+                ]);
+                (usage_info, usage_normalization, summary)
             }
         };
         let passthrough = transform_success(
@@ -97,6 +135,7 @@ pub(in crate::service::transform) fn transform_result_with_cost(
                 value: data,
                 usage_info,
                 usage_normalization,
+                application_outcome,
             },
             TransformPhase::ResponseObserve,
             TransformSemanticUnit::ResponseEnvelope,
@@ -111,7 +150,12 @@ pub(in crate::service::transform) fn transform_result_with_cost(
     }
 
     let (result, policy_summary) = capture_transform_diagnostics(|| {
-        transform_result_with_cost_inner(data, upstream_protocol, downstream_protocol)
+        transform_result_with_cost_inner(
+            data,
+            upstream_protocol,
+            downstream_protocol,
+            application_outcome,
+        )
     });
 
     if let Some(rejection) = explicit_rejection(&policy_summary) {
@@ -151,6 +195,7 @@ fn transform_result_with_cost_inner(
     data: Value,
     upstream_protocol: UpstreamProtocol,
     downstream_protocol: DownstreamProtocol,
+    application_outcome: ResponseApplicationOutcome,
 ) -> TransformResult<ResponseTransformValue> {
     let source_adapter = upstream_adapter_for(upstream_protocol);
     let target_adapter = downstream_adapter_for(downstream_protocol);
@@ -177,6 +222,7 @@ fn transform_result_with_cost_inner(
                 value: encoded.value,
                 usage_info,
                 usage_normalization,
+                application_outcome,
             },
             summary: merge_transform_summaries([decoded.summary, usage_summary, encoded.summary]),
         }),
@@ -186,4 +232,92 @@ fn transform_result_with_cost_inner(
             Err(failure)
         }
     }
+}
+
+fn observe_application_outcome(
+    data: &Value,
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: DownstreamProtocol,
+) -> Result<ResponseApplicationOutcome, TransformFailure> {
+    if upstream_protocol != UpstreamProtocol::Responses {
+        return Ok(ResponseApplicationOutcome::Success);
+    }
+
+    let fail = |reason_code| {
+        transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::ResponseObserve,
+            TransformSemanticUnit::Lifecycle,
+            reason_code,
+            Some(TransformSafeSummary::from_json(data)),
+        )
+    };
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| fail(TransformReasonCode::IllegalUpstreamTerminal))?;
+    let has_error = data.get("error").is_some_and(|error| !error.is_null());
+
+    match status {
+        "completed" if !has_error => Ok(ResponseApplicationOutcome::Success),
+        "incomplete" if !has_error => {
+            let reason = data
+                .get("incomplete_details")
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| fail(TransformReasonCode::IllegalUpstreamTerminal))?;
+            if matches!(
+                reason,
+                "max_tokens" | "max_output_tokens" | "content_filter"
+            ) || downstream_protocol == DownstreamProtocol::Responses
+            {
+                Ok(ResponseApplicationOutcome::Success)
+            } else {
+                Err(fail(TransformReasonCode::UnknownIncompleteReason))
+            }
+        }
+        "failed" if downstream_protocol == DownstreamProtocol::Responses => {
+            Ok(ResponseApplicationOutcome::Failed)
+        }
+        "failed" => Err(fail(TransformReasonCode::UpstreamApplicationFailed)),
+        "queued" | "in_progress" | "cancelled" => {
+            Err(fail(TransformReasonCode::IllegalUpstreamTerminal))
+        }
+        _ => Err(fail(TransformReasonCode::IllegalUpstreamTerminal)),
+    }
+}
+
+pub(in crate::service::transform) fn observe_responses_usage(
+    data: &Value,
+) -> Option<super::unified::UnifiedUsage> {
+    let usage = data.get("usage").or_else(|| {
+        data.get("response")
+            .and_then(|response| response.get("usage"))
+    })?;
+    if usage.is_null() {
+        return None;
+    }
+    let token_count = |field: &str| {
+        usage
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+
+    Some(super::unified::UnifiedUsage {
+        input_tokens: token_count("input_tokens")?,
+        output_tokens: token_count("output_tokens")?,
+        total_tokens: token_count("total_tokens")?,
+        cached_tokens: usage
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        reasoning_tokens: usage
+            .get("output_tokens_details")
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        ..Default::default()
+    })
 }

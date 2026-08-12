@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::controller::BaseError;
 use crate::database::request_patch::{
-    RequestPatchVariantInput, normalize_suffix, normalize_target,
+    RequestPatchVariantInput, normalize_suffix, normalize_target, validate_reserved_target,
 };
 use crate::schema::enum_def::RequestPatchOperation;
 use crate::schema::enum_def::RequestPatchPlacement;
@@ -14,9 +14,10 @@ use crate::service::cache::types::{
 
 /// Turn a validated Manager Preview payload into an ephemeral catalog Variant.
 ///
-/// The database preview path remains responsible for owner, value, dangerous-target,
-/// and persistence-shape validation. This helper only gives the shared evaluator a
-/// candidate snapshot to merge; it never allocates or persists IDs.
+/// The database preview path remains responsible for owner, value, and
+/// persistence-shape validation. This helper repeats reserved-target validation
+/// so every Manager Preview caller shares the same fail-closed policy before the
+/// candidate reaches the evaluator; it never allocates or persists IDs.
 pub fn cache_variant_from_preview_input(
     input: &RequestPatchVariantInput,
     variant_id: Option<i64>,
@@ -43,11 +44,13 @@ pub fn cache_variant_from_preview_input(
                     })?)
                 }
             };
+            let target = normalize_target(rule.placement, &rule.target)?;
+            validate_reserved_target(rule.placement, &target)?;
             Ok(CacheRequestPatchRule {
                 id: -(index as i64 + 1),
                 variant_id: id,
                 placement: rule.placement,
-                target: normalize_target(rule.placement, &rule.target)?,
+                target,
                 operation: rule.operation,
                 value_json,
                 description: rule.description.clone(),
@@ -600,6 +603,35 @@ mod tests {
             description: None,
             created_at: id,
             updated_at: id,
+        }
+    }
+
+    #[test]
+    fn preview_cache_conversion_rejects_responses_stateless_targets() {
+        for target in [
+            "/store",
+            "/previous_response_id/value",
+            "/conversation/id",
+            "/background",
+        ] {
+            let input = RequestPatchVariantInput {
+                source_id: 10,
+                model_id: None,
+                suffix: Some("stateless".to_string()),
+                enabled: true,
+                expose_in_models: true,
+                rules: vec![crate::database::request_patch::RequestPatchRuleInput {
+                    placement: RequestPatchPlacement::Body,
+                    target: target.to_string(),
+                    operation: RequestPatchOperation::Remove,
+                    value_json: None,
+                    description: None,
+                }],
+            };
+            assert!(
+                cache_variant_from_preview_input(&input, None).is_err(),
+                "{target}"
+            );
         }
     }
 

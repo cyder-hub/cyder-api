@@ -74,7 +74,12 @@ fn responses_message_blob_events(
 pub(crate) fn responses_chunk_to_unified_stream_events(
     chunk: ResponsesChunkResponse,
 ) -> Vec<UnifiedStreamEvent> {
-    let ResponsesChunkResponse { id, model, event } = chunk;
+    let ResponsesChunkResponse {
+        id,
+        model,
+        sequence_number: _,
+        event,
+    } = chunk;
 
     let mut events = Vec::new();
 
@@ -86,9 +91,17 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 role: UnifiedRole::Assistant,
             }];
         }
+        ResponsesStreamEvent::ResponseQueued { .. }
+        | ResponsesStreamEvent::ResponseInProgress { .. } => return Vec::new(),
         ResponsesStreamEvent::ResponseCompleted { response }
         | ResponsesStreamEvent::ResponseIncomplete { response } => {
             return response_terminal_stream_events(response);
+        }
+        ResponsesStreamEvent::ResponseFailed { response } => {
+            return vec![UnifiedStreamEvent::Error {
+                error: serde_json::to_value(response.error)
+                    .expect("Responses application error serialization is structurally infallible"),
+            }];
         }
         ResponsesStreamEvent::OutputItemAdded { output_index, item } => match item {
             ItemField::Message(message) => {
@@ -248,6 +261,24 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 item_index: None,
                 item_id: Some(item_id),
                 part_index: content_index,
+            }];
+        }
+        ResponsesStreamEvent::OutputTextDone { .. }
+        | ResponsesStreamEvent::RefusalDone { .. }
+        | ResponsesStreamEvent::ReasoningDone { .. }
+        | ResponsesStreamEvent::AnnotationAdded { .. } => return Vec::new(),
+        ResponsesStreamEvent::RefusalDelta {
+            item_id,
+            output_index,
+            content_index,
+            delta,
+        } => {
+            return vec![UnifiedStreamEvent::RefusalDelta {
+                index: content_index,
+                item_index: Some(output_index),
+                item_id: Some(item_id),
+                part_index: Some(content_index),
+                text: delta,
             }];
         }
         ResponsesStreamEvent::ReasoningSummaryPartAdded {

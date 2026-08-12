@@ -214,23 +214,27 @@ fn build_contract_cases() -> Vec<TransformContractCaseReport> {
                 success: false,
                 origin: Some(TransformFailureOrigin::TargetCapability),
                 phase: TransformPhase::ResponseEncode,
-                semantic_unit: TransformSemanticUnit::ReasoningContent,
+                semantic_unit: TransformSemanticUnit::ToolResult,
                 outcome: TransformOutcomeKind::ExplicitReject,
                 action: TransformAction::Reject,
-                reason_code: TransformReasonCode::UnsupportedReasoning,
+                reason_code: TransformReasonCode::UnsupportedContent,
             },
             ContractExecution::from_result(transform_result(
                 json!({
-                    "id":"msg_quality",
-                    "type":"message",
-                    "role":"assistant",
-                    "content":[{"type":"thinking","thinking":"private","signature":"sig"}],
-                    "model":"claude-sonnet",
-                    "stop_reason":"end_turn",
-                    "stop_sequence":null,
-                    "usage":{"input_tokens":1,"output_tokens":1}
+                    "id":"resp_quality","object":"response","created_at":1,
+                    "status":"completed","model":"gpt-5",
+                    "output":[{
+                        "type":"function_call_output","id":"fco_quality",
+                        "call_id":"call_quality","output":"QUALITY_PRIVATE_SENTINEL",
+                        "status":"completed"
+                    }],
+                    "usage":{
+                        "input_tokens":1,"output_tokens":1,"total_tokens":2,
+                        "input_tokens_details":{"cached_tokens":0},
+                        "output_tokens_details":{"reasoning_tokens":0}
+                    }
                 }),
-                UpstreamProtocol::Anthropic,
+                UpstreamProtocol::Responses,
                 DownstreamProtocol::Openai,
             )),
         ),
@@ -254,14 +258,14 @@ fn build_contract_cases() -> Vec<TransformContractCaseReport> {
         build_case_report(
             ContractExpectation {
                 name: "stream_encode_failure",
-                input_count: 2,
+                input_count: 1,
                 success: false,
                 origin: Some(TransformFailureOrigin::TargetCapability),
                 phase: TransformPhase::StreamEncode,
-                semantic_unit: TransformSemanticUnit::ReasoningDelta,
+                semantic_unit: TransformSemanticUnit::BlobDelta,
                 outcome: TransformOutcomeKind::ExplicitReject,
                 action: TransformAction::Reject,
-                reason_code: TransformReasonCode::UnsupportedReasoning,
+                reason_code: TransformReasonCode::UnsupportedBlobDelta,
             },
             execute_stream_encode_failure(),
         ),
@@ -373,26 +377,12 @@ fn build_contract_cases() -> Vec<TransformContractCaseReport> {
 
 fn execute_stream_encode_failure() -> ContractExecution {
     let mut transformer =
-        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
-    let frames = [
-        sse(json!({
-            "type":"message_start",
-            "message":{
-                "id":"msg_quality",
-                "type":"message",
-                "role":"assistant",
-                "content":[],
-                "model":"claude-sonnet"
-            }
-        })
-        .to_string()),
-        sse(json!({
-            "type":"content_block_start",
-            "index":0,
-            "content_block":{"type":"thinking","thinking":"","signature":null}
-        })
-        .to_string()),
-    ];
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+    let frames = [sse(json!({
+        "type":"response.blob","index":0,
+        "data":{"private":"QUALITY_PRIVATE_SENTINEL"}
+    })
+    .to_string())];
 
     let mut summaries = Vec::new();
     let mut successful_input_count = 0;

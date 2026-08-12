@@ -51,10 +51,11 @@ use crate::service::provider_credential::{
     upstream_protocol_for_profile,
 };
 use crate::service::provider_http::{
-    base_url_is_default, normalize_provider_base_url, normalize_source_base_url,
+    base_url_is_default, join_base_url_and_operation_path, normalize_provider_base_url,
+    normalize_source_base_url,
 };
 use crate::service::secret_encryption::SensitiveSecret;
-use crate::service::transform::validate_final_generation_request;
+use crate::service::transform::{finalize_request_data, validate_final_generation_request};
 use crate::service::upstream_profile::{UpstreamOperation, resolve_source_operation_url};
 use crate::service::upstream_response::apply_upstream_accept_encoding;
 
@@ -960,20 +961,31 @@ async fn build_provider_check_request(
             }),
         },
         UpstreamProfileType::Responses => ProviderCheckRequest {
-            url: format_openai_check_url(source),
+            url: join_base_url_and_operation_path(&source.base_url, "responses").map_err(
+                |error| {
+                    BaseError::ParamInvalid(Some(format!(
+                        "Source does not support Responses check: {error}"
+                    )))
+                },
+            )?,
             headers,
             body: json!({
                 "model": model_name,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "hi"
-                    }
-                ]
+                "input": "hi",
+                "store": false,
+                "stream": false,
+                "max_output_tokens": 1
             }),
         },
     };
 
+    let upstream_protocol = upstream_protocol_for_profile(&cache_source.profile_type);
+    request.body = finalize_request_data(
+        request.body,
+        upstream_protocol,
+        &cache_source.profile_type,
+        "source-check",
+    );
     let mut url = Url::parse(&request.url).map_err(|e| {
         BaseError::ParamInvalid(Some(format!("Failed to parse request URL: {}", e)))
     })?;
@@ -984,8 +996,10 @@ async fn build_provider_check_request(
         request_patches,
     )
     .map_err(provider_check_patch_error)?;
-    let upstream_protocol = upstream_protocol_for_profile(&cache_source.profile_type);
-    if upstream_protocol == UpstreamProtocol::Openai {
+    if matches!(
+        upstream_protocol,
+        UpstreamProtocol::Openai | UpstreamProtocol::Responses
+    ) {
         validate_final_generation_request(
             &request.body,
             upstream_protocol,
@@ -1007,15 +1021,6 @@ async fn build_provider_check_request(
     request.url = url.to_string();
 
     Ok(request)
-}
-
-fn format_openai_check_url(source: &UpstreamSource) -> String {
-    let path = source
-        .chat_completions_path_override
-        .as_deref()
-        .unwrap_or("chat/completions");
-    crate::service::provider_http::join_base_url_and_operation_path(&source.base_url, path)
-        .expect("persisted Source URL and operation path must be valid")
 }
 
 fn format_gemini_generate_content_url(source: &UpstreamSource, model_name: &str) -> String {
@@ -1654,6 +1659,7 @@ mod tests {
     use crate::database::provider::{
         Provider, ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
     };
+    use crate::database::request_log::{RequestLog, RequestLogQueryPayload};
     use crate::database::request_patch::{
         RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
     };
@@ -1824,6 +1830,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_check_request_uses_native_stateless_contract() {
+        let provider = sample_provider(
+            UpstreamProfileType::Responses,
+            "https://relay.example/proxy/openai/v1/",
+        );
+        let request = super::build_provider_check_request(
+            &provider,
+            &provider.upstream_sources[0],
+            &credential("responses-test-secret"),
+            "gpt-5-responses",
+            &[],
+        )
+        .await
+        .expect("Responses check request should build");
+
+        assert_eq!(
+            request.url,
+            "https://relay.example/proxy/openai/v1/responses"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("Responses auth header"),
+            "Bearer responses-test-secret"
+        );
+        assert_eq!(
+            request.body,
+            json!({
+                "model": "gpt-5-responses",
+                "input": "hi",
+                "store": false,
+                "stream": false,
+                "max_output_tokens": 1
+            })
+        );
+        assert!(request.body.get("messages").is_none());
+    }
+
+    #[tokio::test]
+    async fn responses_check_rejects_stateless_patch_target() {
+        let provider =
+            sample_provider(UpstreamProfileType::Responses, "https://api.example.com/v1");
+        let error = match super::build_provider_check_request(
+            &provider,
+            &provider.upstream_sources[0],
+            &credential("responses-private-secret"),
+            "gpt-5-responses",
+            &[request_patch(
+                4,
+                RequestPatchPlacement::Body,
+                "/store",
+                RequestPatchOperation::Set,
+                Some(json!(true)),
+            )],
+        )
+        .await
+        {
+            Ok(_) => panic!("Source Check must not bypass the stateless reserved target"),
+            Err(error) => error,
+        };
+        let message = super::base_error_message(&error);
+        assert!(message.contains("reserved"));
+        assert!(!message.contains("responses-private-secret"));
+    }
+
+    #[tokio::test]
+    async fn responses_source_check_non_success_calls_native_endpoint_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8192];
+            let read = socket.read(&mut request).await.unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+            socket
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let provider = sample_provider(
+            UpstreamProfileType::Responses,
+            &format!("http://{address}/proxy/v1/"),
+        );
+
+        let error = super::perform_provider_check(
+            &reqwest::Client::new(),
+            &provider,
+            &provider.upstream_sources[0],
+            &credential("responses-non-success-secret"),
+            "responses-non-success-model",
+            &[],
+            &crate::config::ProxyTimeoutConfig::default(),
+        )
+        .await
+        .expect_err("non-success Responses check should fail");
+
+        assert!(super::base_error_message(&error).contains("429"));
+        let request = request_rx.await.expect("one Source Check request");
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.starts_with("post /proxy/v1/responses http/1.1"));
+        assert!(request_lower.contains("authorization: bearer responses-non-success-secret"));
+        assert!(!request_lower.contains("chat/completions"));
+        assert!(!request_lower.contains("\"messages\""));
+        timeout(Duration::from_secs(2), upstream)
+            .await
+            .expect("single upstream call should complete")
+            .expect("upstream fixture should join");
+    }
+
+    #[tokio::test]
     async fn gemini_check_request_uses_generate_content() {
         let provider = sample_provider(
             UpstreamProfileType::Gemini,
@@ -1920,7 +2040,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_check_rejects_patched_bodies_outside_the_final_openai_profile() {
+    async fn provider_check_rejects_patched_bodies_outside_the_final_target_profile() {
         let cases = [
             (
                 UpstreamProfileType::Openai,
@@ -1943,6 +2063,17 @@ mod tests {
                     Some(json!("gemini-private-marker")),
                 ),
                 "$",
+            ),
+            (
+                UpstreamProfileType::Responses,
+                request_patch(
+                    3,
+                    RequestPatchPlacement::Body,
+                    "/input",
+                    RequestPatchOperation::Set,
+                    Some(json!({"responses-private-marker": true})),
+                ),
+                "/input",
             ),
         ];
 
@@ -2188,6 +2319,176 @@ mod tests {
                     .expect("all key evidence checks should reach upstream")
                     .expect("upstream fixture should finish");
                 assert!(Provider::get_by_id(provider.id).is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn responses_source_check_saved_and_draft_keys_share_native_contract_without_proxy_logs()
+    {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-responses-source-check-native-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (requests_tx, requests_rx) = oneshot::channel();
+                let upstream = tokio::spawn(async move {
+                    let mut requests = Vec::new();
+                    for _ in 0..2 {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        let mut request = vec![0u8; 8192];
+                        let read = socket.read(&mut request).await.unwrap();
+                        requests.push(String::from_utf8_lossy(&request[..read]).to_string());
+                        socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    let _ = requests_tx.send(requests);
+                });
+
+                let provider_id = 26040;
+                let source_id = 26041;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "responses-check-provider".to_string(),
+                        name: "Responses Check Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Responses,
+                        base_url: format!("http://{address}/proxy/v1/"),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Responses,
+                        )
+                    },
+                )
+                .expect("Responses provider seed should succeed")
+                .provider;
+                let saved_model = Model::create(
+                    provider.id,
+                    "saved-responses-model",
+                    Some("saved-responses-real-model"),
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("saved Responses model should seed");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let created = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/provider_keys"),
+                        json!({
+                            "api_key": "saved-responses-secret",
+                            "description": "saved Responses check key"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(created.status(), StatusCode::OK);
+                let key_id = response_json(created).await["data"]["id"]
+                    .as_i64()
+                    .expect("saved key id");
+
+                let saved = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "model_id": saved_model.id,
+                            "provider_api_key_id": key_id
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(saved.status(), StatusCode::OK);
+                let saved_evidence = response_json(saved).await;
+                assert_eq!(saved_evidence["data"]["profile_type"], "RESPONSES");
+                assert_eq!(saved_evidence["data"]["provider_api_key_id"], key_id);
+
+                let draft = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "draft_model": {
+                                "model_kind": "CHAT",
+                                "upstream_model_name": "draft-responses-model"
+                            },
+                            "provider_api_key": "draft-responses-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(draft.status(), StatusCode::OK);
+                let draft_evidence = response_json(draft).await;
+                assert_eq!(draft_evidence["data"]["profile_type"], "RESPONSES");
+                assert_eq!(draft_evidence["data"]["provider_api_key_id"], Value::Null);
+
+                let requests = timeout(Duration::from_secs(2), requests_rx)
+                    .await
+                    .expect("both Responses checks should reach upstream")
+                    .expect("request evidence should be returned");
+                assert_eq!(requests.len(), 2);
+                for (request, expected_model, expected_secret) in [
+                    (
+                        &requests[0],
+                        "saved-responses-real-model",
+                        "saved-responses-secret",
+                    ),
+                    (
+                        &requests[1],
+                        "draft-responses-model",
+                        "draft-responses-secret",
+                    ),
+                ] {
+                    let (head, body) = request
+                        .split_once("\r\n\r\n")
+                        .expect("HTTP request should contain a body");
+                    let head = head.to_ascii_lowercase();
+                    assert!(head.starts_with("post /proxy/v1/responses http/1.1"));
+                    assert!(head.contains(&format!("authorization: bearer {expected_secret}")));
+                    assert!(head.contains("accept-encoding: gzip, identity"));
+                    let body: Value =
+                        serde_json::from_str(body.trim()).expect("check body should be JSON");
+                    assert_eq!(body["model"], expected_model);
+                    assert_eq!(body["input"], "hi");
+                    assert_eq!(body["store"], false);
+                    assert_eq!(body["stream"], false);
+                    assert_eq!(body["max_output_tokens"], 1);
+                    assert!(body.get("messages").is_none());
+                }
+
+                app_state.flush_proxy_logs().await;
+                let logs = RequestLog::list_full(RequestLogQueryPayload {
+                    page: Some(1),
+                    page_size: Some(10),
+                    ..Default::default()
+                });
+                assert!(logs.expect("Request Logs should query").list.is_empty());
+                timeout(Duration::from_secs(2), upstream)
+                    .await
+                    .expect("upstream fixture should finish")
+                    .expect("upstream fixture should join");
             })
             .await;
     }

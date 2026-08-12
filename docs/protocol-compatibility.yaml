@@ -124,7 +124,7 @@ evidence:
   - id: native-materializer-unavailable
     kind: code
     reference: "server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind"
-    summary: "Responses and Anthropic upstream generation protocols are rejected before HTTP materialization."
+    summary: "Anthropic upstream generation is rejected before HTTP materialization; completed native columns use executable test evidence instead."
   - id: ollama-upstream-incomplete
     kind: code
     reference: "server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind"
@@ -137,6 +137,150 @@ evidence:
     kind: test
     reference: "cargo run -p cyder-api --bin transform_quality_gate -- --quick"
     summary: "Transform quality evidence exists, but it does not satisfy the router-to-upstream direct-execution bar for advanced dimensions."
+  - id: r3-17-fixture-scope
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_fixtures_define_four_complete_protocols_and_native_evidence"
+    summary: "Freezes exactly four public-downstream-to-Responses fixtures with complete native request, response, stream, error, usage, and cancellation evidence."
+  - id: r3-17-stateless-policy
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_stateful_controls_are_rejected_before_credential_or_upstream_use"
+    summary: "Pins store, previous-response, conversation, and background state controls to payload-safe rejection before Provider credentials and network access."
+  - id: r3-17-materializer
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_materializes_native_requests_for_all_public_downstreams_and_modes"
+    summary: "Exercises all four downstream requests in non-stream and stream modes through the native Responses materializer, exact POST /responses body, Bearer auth, and one call."
+  - id: r3-17-source-check
+    kind: test
+    reference: "controller::provider::tests::responses_source_check_saved_and_draft_keys_share_native_contract_without_proxy_logs"
+    summary: "Pins saved and draft Responses Source Check to one native stateless POST /responses without downstream quota or Request Log side effects."
+  - id: r3-17-openai-base
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_responses_base_cell_success_is_verified"
+    summary: "Executes OpenAI downstream non-stream and stream text through one frozen Responses Source with terminal usage, cost, connection closure, and one request log."
+  - id: r3-17-responses-base
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_responses_base_cell_success_is_verified"
+    summary: "Executes Responses downstream non-stream and stream text through one frozen Responses Source with same-wire lifecycle, terminal usage, cost, and one request log."
+  - id: r3-17-anthropic-base
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_responses_base_cell_success_is_verified"
+    summary: "Executes Anthropic downstream non-stream and stream text through one frozen Responses Source with native target materialization, terminal usage, cost, and one request log."
+  - id: r3-17-gemini-base
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_responses_base_cell_success_is_verified"
+    summary: "Executes Gemini downstream non-stream and stream text through one frozen Responses Source with native target materialization, terminal usage, cost, and one request log."
+  - id: r3-17-http-error
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_http_429_is_authentic_bounded_and_never_retried_for_all_downstreams"
+    summary: "Exercises authentic bounded Responses Provider 429 errors through all four downstream envelopes with one call, one Error log, lease release, and no cost."
+  - id: r3-17-cancellation
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_precommit_client_cancellation_returns_499_and_releases_once"
+    summary: "Exercises pre-commit client cancellation for all four downstreams, proving HTTP 499, upstream closure, one Cancelled log, one lease release, and no cost."
+  - id: r3-17-terminal-cost
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_non_stream_incomplete_is_billed_but_failed_and_illegal_finals_are_not"
+    summary: "Pins incomplete as billable success while failed and illegal 2xx final states remain Error without token or cost settlement."
+  - id: r3-17-stream-terminal-error
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_stream_failed_and_error_events_emit_one_terminal_without_cost_for_all_downstreams"
+    summary: "Pins response.failed and error to one downstream-native stream terminal, one Error log, upstream closure, and no cost for every downstream."
+  - id: r3-17-stream-eof
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_stream_eof_without_terminal_fails_closed_for_all_downstreams"
+    summary: "Pins Responses SSE EOF without a legal terminal to one downstream-native failure, one Error log, lease release, and no cost."
+  - id: r3-17-body-limit
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_success_body_limits_fail_without_cost_for_all_downstreams"
+    summary: "Exercises raw and gzip-decoded Responses success body limits for all downstreams, proving one 502 failure and no usage or cost settlement."
+  - id: r3-17-route-boundary
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_stateful_resource_paths_are_unregistered_and_have_zero_side_effects"
+    summary: "Enumerates unversioned and v1 stateful Responses resources and single-item routes as protocol-native 404s before credentials, upstream access, or generation logging."
+  - id: r3-17-models-boundary
+    kind: test
+    reference: "proxy::direct_execution_regression::models_routes_apply_static_kind_and_source_operation_filters_without_exposing_kind"
+    summary: "Pins both Responses Models aliases to the local statically executable CHAT catalog without upstream discovery or internal model-kind exposure."
+  - id: r3-17-openai-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_responses_tools_cell_is_full"
+    summary: "Executes the portable OpenAI function definition, selection, call, and result lifecycle through one Responses request with zero controlled loss."
+  - id: r3-17-responses-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_responses_tools_cell_is_full"
+    summary: "Executes the portable Responses function lifecycle through one same-wire Responses request with zero controlled loss."
+  - id: r3-17-anthropic-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_responses_tools_cell_is_full"
+    summary: "Executes the portable Anthropic function lifecycle through one Responses request with zero controlled loss."
+  - id: r3-17-gemini-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_responses_tools_cell_has_typed_controlled_loss"
+    summary: "Executes the portable Gemini function lifecycle through one Responses request and asserts its payload-free typed controlled-loss fact."
+  - id: r3-17-openai-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_responses_reasoning_cell_has_typed_controlled_loss"
+    summary: "Executes OpenAI qualitative reasoning through one Responses request and asserts its payload-free typed controlled-loss fact."
+  - id: r3-17-responses-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_responses_reasoning_cell_is_full"
+    summary: "Executes Responses effort and summary controls through one same-wire Responses request with zero controlled loss."
+  - id: r3-17-anthropic-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_responses_reasoning_cell_has_typed_controlled_loss"
+    summary: "Executes Anthropic qualitative reasoning through one Responses request and asserts its payload-free typed controlled-loss fact."
+  - id: r3-17-gemini-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_responses_reasoning_cell_has_typed_controlled_loss"
+    summary: "Executes Gemini qualitative reasoning through one Responses request and asserts its payload-free typed controlled-loss fact."
+  - id: r3-17-openai-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_responses_multimodal_cell_is_full"
+    summary: "Executes portable OpenAI image and inline file inputs through one Responses request with zero controlled loss."
+  - id: r3-17-responses-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_responses_multimodal_cell_is_full"
+    summary: "Executes portable Responses image and inline file inputs through one same-wire Responses request with zero controlled loss."
+  - id: r3-17-anthropic-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_responses_multimodal_cell_is_full"
+    summary: "Executes portable Anthropic image and inline document inputs through one Responses request with zero controlled loss."
+  - id: r3-17-gemini-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_responses_multimodal_cell_has_typed_controlled_loss"
+    summary: "Executes portable Gemini inline media through one Responses request and asserts its payload-free typed controlled-loss fact."
+  - id: r3-17-openai-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_responses_structured_output_cell_is_full"
+    summary: "Executes OpenAI JSON schema output controls through one Responses request with zero controlled loss."
+  - id: r3-17-responses-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_responses_structured_output_cell_is_full"
+    summary: "Executes Responses JSON schema output controls through one same-wire Responses request with zero controlled loss."
+  - id: r3-17-anthropic-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_responses_structured_output_cell_has_typed_controlled_loss"
+    summary: "Executes Anthropic JSON schema output controls through one Responses request and asserts stable synthetic-envelope controlled loss."
+  - id: r3-17-gemini-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_responses_structured_output_cell_has_typed_controlled_loss"
+    summary: "Executes Gemini JSON schema output controls through one Responses request and asserts property-ordering controlled loss."
+  - id: r3-17-tools-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_rejects_invalid_or_forced_nonportable_tools_before_credentials"
+    summary: "Pins invalid and forced nonportable tools to payload-safe zero-call rejection before Provider credential decryption."
+  - id: r3-17-reasoning-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_rejects_reasoning_conflicts_before_credentials"
+    summary: "Pins conflicting or unrepresentable reasoning controls to payload-safe zero-call rejection before Provider credential decryption."
+  - id: r3-17-multimodal-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_rejects_all_unportable_media_before_credentials"
+    summary: "Pins unportable media, foreign IDs, hosted URIs, and invalid inline payloads to payload-safe zero-call rejection."
+  - id: r3-17-structured-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_target_rejects_invalid_structured_outputs_before_credentials"
+    summary: "Pins conflicting and unrepresentable structured-output controls to payload-safe zero-call rejection before credentials."
   - id: r3-16-reasoning-direct
     kind: test
     reference: "proxy::direct_execution_regression::all_public_downstream_reasoning_controls_reach_the_openai_target"
@@ -376,7 +520,6 @@ transform_runtime_contract:
     enabled: false
     owner: R4.6
   advanced_cell_owners:
-    - { upstream_protocol: RESPONSES, owner: R3.17 }
     - { upstream_protocol: ANTHROPIC, owner: R3.18 }
     - { upstream_protocol: GEMINI, owner: R3.19 }
     - { upstream_protocol: OLLAMA, owner: R3.20 }
@@ -528,17 +671,17 @@ generation_cells:
   - downstream: OPENAI
     upstream: RESPONSES
     base:
-      non_stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      usage: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      normal_termination: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
+      non_stream_text: { status: verified, evidence: [r3-17-openai-base, r3-17-materializer] }
+      stream_text: { status: verified, evidence: [r3-17-openai-base, r3-17-materializer] }
+      usage: { status: verified, evidence: [r3-17-openai-base, r3-17-terminal-cost] }
+      normal_termination: { status: verified, evidence: [r3-17-openai-base, r3-17-terminal-cost] }
+      upstream_error: { status: verified, evidence: [r3-17-http-error, r3-17-stream-terminal-error, r3-17-stream-eof, r3-17-body-limit] }
+      cancellation: { status: verified, evidence: [r3-17-cancellation] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      tools: { status: full, evidence: [r3-17-openai-tools-cell] }
+      reasoning: { status: controlled_loss, evidence: [r3-17-openai-reasoning-cell, r3-17-reasoning-reject] }
+      multimodal: { status: full, evidence: [r3-17-openai-multimodal-cell] }
+      structured_output: { status: full, evidence: [r3-17-openai-structured-cell] }
   - downstream: OPENAI
     upstream: ANTHROPIC
     base:
@@ -599,17 +742,17 @@ generation_cells:
   - downstream: RESPONSES
     upstream: RESPONSES
     base:
-      non_stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      usage: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      normal_termination: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
+      non_stream_text: { status: verified, evidence: [r3-17-responses-base, r3-17-materializer] }
+      stream_text: { status: verified, evidence: [r3-17-responses-base, r3-17-materializer] }
+      usage: { status: verified, evidence: [r3-17-responses-base, r3-17-terminal-cost] }
+      normal_termination: { status: verified, evidence: [r3-17-responses-base, r3-17-terminal-cost] }
+      upstream_error: { status: verified, evidence: [r3-17-http-error, r3-17-stream-terminal-error, r3-17-stream-eof, r3-17-body-limit] }
+      cancellation: { status: verified, evidence: [r3-17-cancellation] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      tools: { status: full, evidence: [r3-17-responses-tools-cell] }
+      reasoning: { status: full, evidence: [r3-17-responses-reasoning-cell] }
+      multimodal: { status: full, evidence: [r3-17-responses-multimodal-cell] }
+      structured_output: { status: full, evidence: [r3-17-responses-structured-cell] }
   - downstream: RESPONSES
     upstream: ANTHROPIC
     base:
@@ -670,17 +813,17 @@ generation_cells:
   - downstream: ANTHROPIC
     upstream: RESPONSES
     base:
-      non_stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      usage: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      normal_termination: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
+      non_stream_text: { status: verified, evidence: [r3-17-anthropic-base, r3-17-materializer] }
+      stream_text: { status: verified, evidence: [r3-17-anthropic-base, r3-17-materializer] }
+      usage: { status: verified, evidence: [r3-17-anthropic-base, r3-17-terminal-cost] }
+      normal_termination: { status: verified, evidence: [r3-17-anthropic-base, r3-17-terminal-cost] }
+      upstream_error: { status: verified, evidence: [r3-17-http-error, r3-17-stream-terminal-error, r3-17-stream-eof, r3-17-body-limit] }
+      cancellation: { status: verified, evidence: [r3-17-cancellation] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      tools: { status: full, evidence: [r3-17-anthropic-tools-cell] }
+      reasoning: { status: controlled_loss, evidence: [r3-17-anthropic-reasoning-cell, r3-17-reasoning-reject] }
+      multimodal: { status: full, evidence: [r3-17-anthropic-multimodal-cell] }
+      structured_output: { status: controlled_loss, evidence: [r3-17-anthropic-structured-cell, r3-17-structured-reject] }
   - downstream: ANTHROPIC
     upstream: ANTHROPIC
     base:
@@ -741,17 +884,17 @@ generation_cells:
   - downstream: GEMINI
     upstream: RESPONSES
     base:
-      non_stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      stream_text: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      usage: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      normal_termination: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      upstream_error: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
-      cancellation: { status: unavailable, evidence: [native-materializer-unavailable], owner: R3.17 }
+      non_stream_text: { status: verified, evidence: [r3-17-gemini-base, r3-17-materializer] }
+      stream_text: { status: verified, evidence: [r3-17-gemini-base, r3-17-materializer] }
+      usage: { status: verified, evidence: [r3-17-gemini-base, r3-17-terminal-cost] }
+      normal_termination: { status: verified, evidence: [r3-17-gemini-base, r3-17-terminal-cost] }
+      upstream_error: { status: verified, evidence: [r3-17-http-error, r3-17-stream-terminal-error, r3-17-stream-eof, r3-17-body-limit] }
+      cancellation: { status: verified, evidence: [r3-17-cancellation] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.17 }
+      tools: { status: controlled_loss, evidence: [r3-17-gemini-tools-cell, r3-17-tools-reject] }
+      reasoning: { status: controlled_loss, evidence: [r3-17-gemini-reasoning-cell, r3-17-reasoning-reject] }
+      multimodal: { status: controlled_loss, evidence: [r3-17-gemini-multimodal-cell, r3-17-multimodal-reject] }
+      structured_output: { status: controlled_loss, evidence: [r3-17-gemini-structured-cell, r3-17-structured-reject] }
   - downstream: GEMINI
     upstream: ANTHROPIC
     base:
@@ -806,7 +949,7 @@ utilities:
     incompatible_upstream_behavior: not_applicable
     verification:
       status: verified
-      evidence: [router-contract, router-method-contract, r3-11-model-catalog-selector, r3-11-ollama-discovery-boundary]
+      evidence: [router-contract, router-method-contract, r3-11-model-catalog-selector, r3-11-ollama-discovery-boundary, r3-17-models-boundary]
   - name: embeddings
     route_suffix: /embeddings
     method: POST

@@ -45,6 +45,7 @@ pub(crate) fn process_success_response_body(
         Bytes,
         Option<UsageInfo>,
         Option<UsageNormalization>,
+        crate::service::transform::ResponseApplicationOutcome,
         TransformOutcomeSummary,
     ),
     TransformFailure,
@@ -72,6 +73,7 @@ pub(crate) fn process_success_response_body(
                 body_bytes,
                 output.value.usage_info,
                 output.value.usage_normalization,
+                output.value.application_outcome,
                 output.summary,
             ))
         }
@@ -90,6 +92,7 @@ pub(crate) fn process_success_response_body(
                 decompressed_body.clone(),
                 None,
                 None,
+                crate::service::transform::ResponseApplicationOutcome::Success,
                 collector.into_summary(),
             ))
         }
@@ -130,6 +133,46 @@ mod tests {
     };
 
     use super::*;
+
+    fn responses_body(
+        status: &str,
+        incomplete_reason: Option<&str>,
+        usage: Option<Value>,
+    ) -> Bytes {
+        let mut body = serde_json::json!({
+            "id": "resp_terminal",
+            "object": "response",
+            "created_at": 1,
+            "status": status,
+            "model": "responses-model",
+            "output": [{
+                "type": "message",
+                "id": "msg_terminal",
+                "status": if status == "completed" { "completed" } else { "incomplete" },
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "partial or complete",
+                    "annotations": [],
+                    "logprobs": []
+                }]
+            }],
+            "error": if status == "failed" {
+                serde_json::json!({"code": "application_failed", "message": "private upstream detail"})
+            } else {
+                Value::Null
+            },
+            "store": false,
+            "background": false
+        });
+        if let Some(reason) = incomplete_reason {
+            body["incomplete_details"] = serde_json::json!({"reason": reason});
+        }
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        Bytes::from(serde_json::to_vec_pretty(&body).expect("fixture serializes"))
+    }
 
     #[test]
     fn downstream_success_builder_inherits_only_normalized_content_type() {
@@ -202,7 +245,7 @@ mod tests {
 }"#,
         );
 
-        let (output, usage, normalization, summary) = process_success_response_body(
+        let (output, usage, normalization, outcome, summary) = process_success_response_body(
             &body,
             DownstreamProtocol::Openai,
             UpstreamProtocol::Openai,
@@ -210,6 +253,10 @@ mod tests {
         .expect("same-wire observation must not affect success");
 
         assert_eq!(output, body);
+        assert_eq!(
+            outcome,
+            crate::service::transform::ResponseApplicationOutcome::Success
+        );
         assert_eq!(usage.expect("usage").total_tokens, 8);
         let normalization = normalization.expect("normalization");
         assert_eq!(normalization.total_input_tokens, 3);
@@ -227,7 +274,7 @@ mod tests {
             Bytes::from_static(br#"{"choices":"not-an-array"}"#),
             Bytes::from_static(b"{not-json}"),
         ] {
-            let (output, usage, normalization, summary) = process_success_response_body(
+            let (output, usage, normalization, outcome, summary) = process_success_response_body(
                 &body,
                 DownstreamProtocol::Openai,
                 UpstreamProtocol::Openai,
@@ -235,6 +282,10 @@ mod tests {
             .expect("same-wire observation failure must be non-fatal");
 
             assert_eq!(output, body);
+            assert_eq!(
+                outcome,
+                crate::service::transform::ResponseApplicationOutcome::Success
+            );
             assert!(usage.is_none());
             assert!(normalization.is_none());
             assert!(summary.facts.iter().any(|fact| {
@@ -262,6 +313,197 @@ mod tests {
             assert_eq!(failure.phase, TransformPhase::ResponseDecode);
             assert_eq!(failure.reason_code, TransformReasonCode::SourceDecodeFailed);
             assert!(failure.summary.facts[0].safe_summary.is_some());
+        }
+    }
+
+    #[test]
+    fn responses_same_wire_observes_terminal_and_usage_without_rewriting_bytes() {
+        let usage = serde_json::json!({
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "total_tokens": 999,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens_details": {"reasoning_tokens": 2}
+        });
+
+        for (status, reason, expected_outcome) in [
+            (
+                "completed",
+                None,
+                crate::service::transform::ResponseApplicationOutcome::Success,
+            ),
+            (
+                "incomplete",
+                Some("private_same_wire_reason"),
+                crate::service::transform::ResponseApplicationOutcome::Success,
+            ),
+            (
+                "failed",
+                None,
+                crate::service::transform::ResponseApplicationOutcome::Failed,
+            ),
+        ] {
+            let body = responses_body(status, reason, Some(usage.clone()));
+            let (output, usage_info, normalization, outcome, _) = process_success_response_body(
+                &body,
+                DownstreamProtocol::Responses,
+                UpstreamProtocol::Responses,
+            )
+            .expect("known same-wire terminal should be observed");
+
+            assert_eq!(output, body, "{status}");
+            assert_eq!(outcome, expected_outcome, "{status}");
+            let usage_info = usage_info.expect("targeted usage observation");
+            assert_eq!(usage_info.total_tokens, 999);
+            assert_eq!(usage_info.cached_tokens, 3);
+            assert_eq!(usage_info.reasoning_tokens, 2);
+            let normalization = normalization.expect("usage normalization");
+            assert_eq!(normalization.normalized_total_tokens(), 18);
+            assert_eq!(normalization.cache_read_tokens, 3);
+            assert_eq!(normalization.reasoning_tokens, 2);
+            assert_eq!(normalization.warnings.len(), 1);
+            assert!(normalization.warnings[0].contains("999"));
+            assert!(normalization.warnings[0].contains("18"));
+        }
+    }
+
+    #[test]
+    fn responses_same_wire_unknown_output_degrades_observation_without_masking_core_facts() {
+        for (status, expected_outcome) in [
+            (
+                "completed",
+                crate::service::transform::ResponseApplicationOutcome::Success,
+            ),
+            (
+                "failed",
+                crate::service::transform::ResponseApplicationOutcome::Failed,
+            ),
+        ] {
+            let body = Bytes::from(format!(
+                r#"{{
+  "id":"resp_extension","object":"response","status":"{status}","model":"responses-model",
+  "output":[{{"type":"vendor_future_item","private":{{"opaque":true}}}}],
+  "error":{},
+  "usage":{{"input_tokens":11,"output_tokens":7,"total_tokens":18}},
+  "vendor_extension":{{"spacing":"must remain exact"}}
+}}"#,
+                if status == "failed" {
+                    r#"{"code":"application_failed","message":"private upstream detail"}"#
+                } else {
+                    "null"
+                }
+            ));
+
+            let (output, usage, normalization, outcome, summary) = process_success_response_body(
+                &body,
+                DownstreamProtocol::Responses,
+                UpstreamProtocol::Responses,
+            )
+            .expect("unknown same-wire output item must only degrade observation");
+
+            assert_eq!(output, body, "{status}");
+            assert_eq!(outcome, expected_outcome, "{status}");
+            assert_eq!(usage.expect("targeted usage").total_tokens, 18);
+            assert_eq!(
+                normalization
+                    .expect("targeted normalization")
+                    .normalized_total_tokens(),
+                18
+            );
+            assert!(summary.facts.iter().any(|fact| {
+                fact.outcome == TransformOutcomeKind::ObservationDegraded
+                    && fact.action == TransformAction::PassThrough
+                    && fact.reason_code == TransformReasonCode::ObservationParseFailed
+            }));
+            assert!(summary.facts.iter().all(|fact| {
+                fact.safe_summary
+                    .as_ref()
+                    .is_none_or(|summary| summary.bytes > 0 && summary.event_count == 0)
+            }));
+        }
+    }
+
+    #[test]
+    fn responses_cross_wire_maps_closed_incomplete_reasons_for_each_target() {
+        for (source_reason, openai_reason, anthropic_reason, gemini_reason) in [
+            ("max_tokens", "length", "max_tokens", "MAX_TOKENS"),
+            ("max_output_tokens", "length", "max_tokens", "MAX_TOKENS"),
+            ("content_filter", "content_filter", "refusal", "SAFETY"),
+        ] {
+            let body = responses_body("incomplete", Some(source_reason), None);
+            for (protocol, pointer, expected) in [
+                (
+                    DownstreamProtocol::Openai,
+                    "/choices/0/finish_reason",
+                    openai_reason,
+                ),
+                (
+                    DownstreamProtocol::Anthropic,
+                    "/stop_reason",
+                    anthropic_reason,
+                ),
+                (
+                    DownstreamProtocol::Gemini,
+                    "/candidates/0/finishReason",
+                    gemini_reason,
+                ),
+            ] {
+                let (output, _, _, outcome, _) =
+                    process_success_response_body(&body, protocol, UpstreamProtocol::Responses)
+                        .expect("known incomplete reason should transform");
+                assert_eq!(
+                    outcome,
+                    crate::service::transform::ResponseApplicationOutcome::Success
+                );
+                let output: Value = serde_json::from_slice(&output).expect("target JSON");
+                assert_eq!(
+                    output.pointer(pointer).and_then(Value::as_str),
+                    Some(expected),
+                    "{source_reason} -> {protocol:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn responses_cross_wire_unknown_or_failed_and_illegal_finals_fail_closed() {
+        let unknown = responses_body("incomplete", Some("vendor_private_reason"), None);
+        let failure = process_success_response_body(
+            &unknown,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Responses,
+        )
+        .expect_err("unknown cross-wire reason must fail closed");
+        assert_eq!(
+            failure.reason_code,
+            TransformReasonCode::UnknownIncompleteReason
+        );
+
+        let failed = responses_body("failed", None, None);
+        let failure = process_success_response_body(
+            &failed,
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Responses,
+        )
+        .expect_err("failed cross-wire terminal must become a pre-commit failure");
+        assert_eq!(
+            failure.reason_code,
+            TransformReasonCode::UpstreamApplicationFailed
+        );
+
+        for status in ["queued", "in_progress", "cancelled"] {
+            let body = responses_body(status, None, None);
+            let failure = process_success_response_body(
+                &body,
+                DownstreamProtocol::Responses,
+                UpstreamProtocol::Responses,
+            )
+            .expect_err("non-terminal final body must fail closed");
+            assert_eq!(
+                failure.reason_code,
+                TransformReasonCode::IllegalUpstreamTerminal,
+                "{status}"
+            );
         }
     }
 }

@@ -198,6 +198,7 @@ mod tests {
             .cancellation_error(ExecutionStage::Connect, ResponseVisibility::NotVisible)
             .await;
         assert_eq!(error.code(), ProxyErrorCode::ClientCancelledError);
+        assert_eq!(error.status_code().as_u16(), 499);
         assert_eq!(error.stage(), ExecutionStage::Connect);
         assert_eq!(error.operator_message(), "client closed socket");
     }

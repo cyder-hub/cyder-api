@@ -552,5 +552,29 @@ mod tests {
         assert!(error.operator_message().contains("authorization"));
         assert!(!headers.contains_key("authorization"));
         assert_eq!(url.query(), Some("existing=safe"));
+
+        for (operation, target, value) in [
+            (RequestPatchOperation::Set, "/store", Some("true")),
+            (RequestPatchOperation::Remove, "/store/enabled", None),
+            (
+                RequestPatchOperation::Set,
+                "/previous_response_id",
+                Some("\"private-response-id\""),
+            ),
+            (RequestPatchOperation::Remove, "/conversation/id", None),
+            (RequestPatchOperation::Set, "/background", Some("true")),
+        ] {
+            let original = body.clone();
+            let forbidden = runtime_rule(operation, target, value);
+            let error = apply_request_patches(
+                &mut body,
+                &mut url,
+                &mut headers,
+                std::slice::from_ref(&forbidden),
+            )
+            .expect_err("runtime must reject persisted stateful Responses target");
+            assert!(error.operator_message().contains("reserved"), "{target}");
+            assert_eq!(body, original, "{target}");
+        }
     }
 }

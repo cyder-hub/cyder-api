@@ -98,6 +98,15 @@ fn record_source_no_output(semantic_unit: TransformSemanticUnit) {
     );
 }
 
+fn record_source_drop(semantic_unit: TransformSemanticUnit) {
+    record_source_fact(
+        semantic_unit,
+        TransformOutcomeKind::ControlledLossMinor,
+        TransformAction::Drop,
+        TransformReasonCode::UnsupportedContent,
+    );
+}
+
 fn record_synthesis(semantic_unit: TransformSemanticUnit, reason_code: TransformReasonCode) {
     record_fact(
         semantic_unit,
@@ -484,14 +493,18 @@ fn validate_responses_stream_frame(
             let response = value.get("response").ok_or_else(|| {
                 SourceStreamSemanticError::invalid(TransformSemanticUnit::ResponseEnvelope)
             })?;
-            require_non_empty_string(response, "id", TransformSemanticUnit::Lifecycle)?;
-            require_non_empty_string(response, "model", TransformSemanticUnit::Model)?;
+            let response_id =
+                require_non_empty_string(response, "id", TransformSemanticUnit::Lifecycle)?;
+            let response_model =
+                require_non_empty_string(response, "model", TransformSemanticUnit::Model)?;
             if response.get("status").and_then(Value::as_str) != Some("in_progress") {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
             state.source_created_seen = true;
+            state.source_response_id = Some(response_id.to_string());
+            state.source_response_model = Some(response_model.to_string());
         }
         "response.output_item.added" => {
             if !state.source_created_seen {
@@ -669,8 +682,17 @@ fn validate_responses_stream_frame(
             let response = value.get("response").ok_or_else(|| {
                 SourceStreamSemanticError::invalid(TransformSemanticUnit::ResponseEnvelope)
             })?;
-            require_non_empty_string(response, "id", TransformSemanticUnit::Lifecycle)?;
-            require_non_empty_string(response, "model", TransformSemanticUnit::Model)?;
+            let response_id =
+                require_non_empty_string(response, "id", TransformSemanticUnit::Lifecycle)?;
+            let response_model =
+                require_non_empty_string(response, "model", TransformSemanticUnit::Model)?;
+            if state.source_response_id.as_deref() != Some(response_id)
+                || state.source_response_model.as_deref() != Some(response_model)
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
             let expected_status = if event_type == "response.completed" {
                 "completed"
             } else {
@@ -1567,10 +1589,11 @@ fn typed_responses_item_id(item: &responses::ItemField) -> Result<&str, SourceSt
     Ok(id)
 }
 
-fn typed_responses_message_text(
+fn typed_responses_message_content(
     item: &responses::Message,
-) -> Result<String, SourceStreamSemanticError> {
+) -> Result<(String, String), SourceStreamSemanticError> {
     let mut text = String::new();
+    let mut refusal = String::new();
     for part in &item.content {
         match part {
             responses::ItemContentPart::OutputText {
@@ -1579,10 +1602,12 @@ fn typed_responses_message_text(
                 logprobs,
             } => {
                 text.push_str(part_text);
-                if !annotations.is_empty()
-                    || logprobs
-                        .as_ref()
-                        .is_some_and(|logprobs| !logprobs.is_empty())
+                if !annotations.is_empty() {
+                    record_source_drop(TransformSemanticUnit::Metadata);
+                }
+                if logprobs
+                    .as_ref()
+                    .is_some_and(|logprobs| !logprobs.is_empty())
                 {
                     return Err(SourceStreamSemanticError::unknown(
                         TransformSemanticUnit::Metadata,
@@ -1594,10 +1619,10 @@ fn typed_responses_message_text(
             | responses::ItemContentPart::ReasoningText { text: part_text } => {
                 text.push_str(part_text);
             }
-            responses::ItemContentPart::Refusal { .. } => {
-                return Err(SourceStreamSemanticError::unknown(
-                    TransformSemanticUnit::Refusal,
-                ));
+            responses::ItemContentPart::Refusal {
+                refusal: part_refusal,
+            } => {
+                refusal.push_str(part_refusal);
             }
             responses::ItemContentPart::InputText { .. }
             | responses::ItemContentPart::InputImage { .. }
@@ -1609,7 +1634,7 @@ fn typed_responses_message_text(
             }
         }
     }
-    Ok(text)
+    Ok((text, refusal))
 }
 
 pub(in crate::service::transform) fn validate_responses_stream_chunk(
@@ -1623,6 +1648,17 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
         return Err(SourceStreamSemanticError::invalid(
             TransformSemanticUnit::Lifecycle,
         ));
+    }
+    if let Some(sequence_number) = chunk.sequence_number {
+        if state
+            .source_last_sequence_number
+            .is_some_and(|previous| sequence_number <= previous)
+        {
+            return Err(SourceStreamSemanticError::invalid(
+                TransformSemanticUnit::Lifecycle,
+            ));
+        }
+        state.source_last_sequence_number = Some(sequence_number);
     }
     match &chunk.event {
         ResponsesStreamEvent::Item(item) => {
@@ -1665,6 +1701,37 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
                 ));
             }
             state.source_created_seen = true;
+            state.source_response_id = Some(response.id.clone());
+            state.source_response_model = Some(response.model.clone());
+        }
+        ResponsesStreamEvent::ResponseQueued { response }
+        | ResponsesStreamEvent::ResponseInProgress { response } => {
+            if !state.source_created_seen
+                || response.id.is_empty()
+                || response.model.is_empty()
+                || state.source_response_id.as_deref() != Some(response.id.as_str())
+                || state.source_response_model.as_deref() != Some(response.model.as_str())
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            let (expected_status, already_seen) =
+                if matches!(&chunk.event, ResponsesStreamEvent::ResponseQueued { .. }) {
+                    (ResponseStatus::Queued, &mut state.source_queued_seen)
+                } else {
+                    (
+                        ResponseStatus::InProgress,
+                        &mut state.source_in_progress_seen,
+                    )
+                };
+            if *already_seen || response.status != expected_status || response.error.is_some() {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            *already_seen = true;
+            record_source_no_output(TransformSemanticUnit::Lifecycle);
         }
         ResponsesStreamEvent::OutputItemAdded { output_index, item } => {
             if !state.source_created_seen {
@@ -1684,13 +1751,17 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
             }
             match item {
                 ItemField::Message(message) => {
-                    if !typed_responses_message_text(message)?.is_empty() {
+                    let (text, refusal) = typed_responses_message_content(message)?;
+                    if !text.is_empty() || !refusal.is_empty() {
                         return Err(SourceStreamSemanticError::invalid(
                             TransformSemanticUnit::Lifecycle,
                         ));
                     }
                     state
                         .source_output_text
+                        .insert(id.to_string(), String::new());
+                    state
+                        .source_refusal_text
                         .insert(id.to_string(), String::new());
                 }
                 ItemField::FunctionCall(call) => {
@@ -1715,14 +1786,27 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
             text,
             ..
         } if item_id.is_some() => {
-            if item_index.is_none() || part_index.is_none() {
+            let Some(output_index) = item_index else {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            };
+            let item_id = item_id.as_deref().expect("guarded item id");
+            if part_index.is_none()
+                || state.source_output_items_done.contains(output_index)
+                || state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+            {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
             state
                 .source_output_text
-                .get_mut(item_id.as_deref().expect("guarded item id"))
+                .get_mut(item_id)
                 .ok_or_else(|| {
                     SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
                 })?
@@ -1734,17 +1818,30 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
             arguments,
             ..
         } if item_id.is_some() => {
-            if item_index.is_none() {
+            let Some(output_index) = item_index else {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            };
+            let item_id = item_id.as_deref().expect("guarded item id");
+            if state.source_output_items_done.contains(output_index)
+                || state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+            {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
-            let arguments_buffer = state
-                .source_tool_arguments
-                .get_mut(item_id.as_deref().expect("guarded item id"))
-                .ok_or_else(|| {
-                    SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
-                })?;
+            let arguments_buffer =
+                state
+                    .source_tool_arguments
+                    .get_mut(item_id)
+                    .ok_or_else(|| {
+                        SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
+                    })?;
             if !try_append_tool_arguments(arguments_buffer, arguments) {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::ToolCallDelta,
@@ -1757,11 +1854,27 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
             arguments,
             ..
         } => {
-            let Some(item_id) = item_id.as_deref().filter(|_| item_index.is_some()) else {
+            let Some(output_index) = item_index else {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             };
+            let Some(item_id) = item_id.as_deref() else {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            };
+            if state.source_output_items_done.contains(output_index)
+                || state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
             if state.source_tool_arguments.get(item_id).map(String::as_str) != Some(arguments)
                 || !validate_json_object_text(arguments)
             {
@@ -1773,11 +1886,12 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
         }
         ResponsesStreamEvent::OutputItemDone { output_index, item } => {
             let id = typed_responses_item_id(item)?;
-            if state
-                .source_output_item_ids
-                .get(output_index)
-                .map(String::as_str)
-                != Some(id)
+            if state.source_output_items_done.contains(output_index)
+                || state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(id)
             {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
@@ -1785,8 +1899,9 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
             }
             match item {
                 ItemField::Message(message) => {
-                    if state.source_output_text.get(id)
-                        != Some(&typed_responses_message_text(message)?)
+                    let (text, refusal) = typed_responses_message_content(message)?;
+                    if state.source_output_text.get(id) != Some(&text)
+                        || state.source_refusal_text.get(id) != Some(&refusal)
                     {
                         return Err(SourceStreamSemanticError::invalid(
                             TransformSemanticUnit::Lifecycle,
@@ -1806,27 +1921,229 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
                 ItemField::FunctionCallOutput(_) | ItemField::Reasoning(_) => {}
                 ItemField::Unknown(_) => unreachable!("item identity rejected unknown item"),
             }
+            state.source_output_items_done.insert(*output_index);
         }
-        ResponsesStreamEvent::ContentPartAdded { item_id, .. }
-        | ResponsesStreamEvent::ContentPartDone { item_id, .. } => {
-            if item_id.is_empty() {
+        ResponsesStreamEvent::ContentPartAdded {
+            item_id,
+            content_index,
+        } => {
+            if item_id.is_empty()
+                || !state
+                    .source_output_item_ids
+                    .values()
+                    .any(|known_id| known_id == item_id)
+                || !state
+                    .source_content_parts
+                    .insert((item_id.clone(), *content_index))
+            {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
             record_source_no_output(TransformSemanticUnit::Lifecycle);
         }
-        ResponsesStreamEvent::ReasoningSummaryPartAdded { item_id, .. }
-        | ResponsesStreamEvent::ReasoningSummaryPartDone { item_id, .. } => {
-            if item_id.is_empty() {
+        ResponsesStreamEvent::ContentPartDone {
+            item_id,
+            content_index,
+        } => {
+            if !state
+                .source_content_parts
+                .remove(&(item_id.clone(), *content_index))
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            record_source_no_output(TransformSemanticUnit::Lifecycle);
+        }
+        ResponsesStreamEvent::OutputTextDone {
+            item_id,
+            output_index,
+            content_index: _,
+            text,
+        } => {
+            if state.source_output_items_done.contains(output_index)
+                || state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+                || state.source_output_text.get(item_id) != Some(text)
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            record_source_no_output(TransformSemanticUnit::Lifecycle);
+        }
+        ResponsesStreamEvent::RefusalDelta {
+            item_id,
+            output_index,
+            delta,
+            ..
+        } => {
+            if state.source_output_items_done.contains(output_index)
+                || state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            state
+                .source_refusal_text
+                .get_mut(item_id)
+                .ok_or_else(|| {
+                    SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
+                })?
+                .push_str(delta);
+        }
+        ResponsesStreamEvent::RefusalDone {
+            item_id,
+            output_index,
+            refusal,
+            ..
+        } => {
+            if state.source_output_items_done.contains(output_index)
+                || state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+                || state.source_refusal_text.get(item_id) != Some(refusal)
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            record_source_no_output(TransformSemanticUnit::Lifecycle);
+        }
+        ResponsesStreamEvent::AnnotationAdded {
+            item_id,
+            output_index,
+            annotation,
+            ..
+        } => {
+            if state
+                .source_output_item_ids
+                .get(output_index)
+                .map(String::as_str)
+                != Some(item_id)
+                || !annotation.is_object()
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Metadata,
+                ));
+            }
+            record_source_drop(TransformSemanticUnit::Metadata);
+        }
+        ResponsesStreamEvent::ReasoningSummaryPartAdded {
+            item_id,
+            summary_index,
+        } => {
+            if item_id.is_empty()
+                || !state
+                    .source_output_item_ids
+                    .values()
+                    .any(|known_id| known_id == item_id)
+                || !state
+                    .source_reasoning_parts
+                    .insert((item_id.clone(), *summary_index))
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            state
+                .source_reasoning_text
+                .insert((item_id.clone(), *summary_index), String::new());
+        }
+        ResponsesStreamEvent::ReasoningSummaryPartDone {
+            item_id,
+            summary_index,
+        } => {
+            if !state
+                .source_reasoning_parts
+                .remove(&(item_id.clone(), *summary_index))
+            {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
         }
+        ResponsesStreamEvent::ReasoningDelta {
+            item_index,
+            item_id: Some(item_id),
+            part_index: Some(part_index),
+            text,
+            ..
+        } => {
+            if let Some(output_index) = item_index {
+                if state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+                {
+                    return Err(SourceStreamSemanticError::invalid(
+                        TransformSemanticUnit::Lifecycle,
+                    ));
+                }
+                state
+                    .source_reasoning_text
+                    .entry((item_id.clone(), *part_index))
+                    .or_default()
+                    .push_str(text);
+            } else {
+                state
+                    .source_reasoning_text
+                    .get_mut(&(item_id.clone(), *part_index))
+                    .ok_or_else(|| {
+                        SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
+                    })?
+                    .push_str(text);
+            }
+        }
+        ResponsesStreamEvent::ReasoningDone {
+            item_id,
+            item_index,
+            part_index,
+            text,
+            ..
+        } => {
+            if let Some(output_index) = item_index
+                && state
+                    .source_output_item_ids
+                    .get(output_index)
+                    .map(String::as_str)
+                    != Some(item_id)
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            if state
+                .source_reasoning_text
+                .get(&(item_id.clone(), *part_index))
+                != Some(text)
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            record_source_no_output(TransformSemanticUnit::Lifecycle);
+        }
         ResponsesStreamEvent::ResponseCompleted { response }
         | ResponsesStreamEvent::ResponseIncomplete { response } => {
-            if !state.source_created_seen || response.id.is_empty() || response.model.is_empty() {
+            if !state.source_created_seen
+                || response.id.is_empty()
+                || response.model.is_empty()
+                || state.source_response_id.as_deref() != Some(response.id.as_str())
+                || state.source_response_model.as_deref() != Some(response.model.as_str())
+            {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
@@ -1843,6 +2160,44 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
                     .metadata
                     .as_object()
                     .is_some_and(|metadata| !metadata.is_empty())
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            if response.status == ResponseStatus::Incomplete {
+                let reason = response
+                    .incomplete_details
+                    .as_ref()
+                    .map(|details| details.reason.as_str());
+                if !matches!(
+                    reason,
+                    Some("max_tokens" | "max_output_tokens" | "content_filter")
+                ) {
+                    return Err(SourceStreamSemanticError {
+                        semantic_unit: TransformSemanticUnit::Lifecycle,
+                        reason_code: TransformReasonCode::UnknownIncompleteReason,
+                    });
+                }
+            }
+            if !state.source_content_parts.is_empty()
+                || !state.source_reasoning_parts.is_empty()
+                || state.source_output_items_done.len() != state.source_output_item_ids.len()
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            state.source_terminal_seen = true;
+        }
+        ResponsesStreamEvent::ResponseFailed { response } => {
+            if !state.source_created_seen
+                || response.id.is_empty()
+                || response.model.is_empty()
+                || state.source_response_id.as_deref() != Some(response.id.as_str())
+                || state.source_response_model.as_deref() != Some(response.model.as_str())
+                || response.status != ResponseStatus::Failed
+                || response.error.is_none()
             {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
@@ -1895,6 +2250,7 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
                     TransformSemanticUnit::StreamError,
                 ));
             }
+            state.source_terminal_seen = true;
         }
         ResponsesStreamEvent::Unknown(_) => {
             return Err(SourceStreamSemanticError::unknown(
@@ -2187,6 +2543,32 @@ pub(in crate::service::transform) fn audit_target_stream_events(
                 item_id,
                 ..
             } => {
+                if target == DownstreamProtocol::Responses
+                    && item_index.is_none()
+                    && item_id.is_none()
+                    && context.responses().current_item_id.is_none()
+                {
+                    record_synthesis(
+                        TransformSemanticUnit::Lifecycle,
+                        TransformReasonCode::SyntheticCorrelationId,
+                    );
+                    record_synthesis(
+                        TransformSemanticUnit::Lifecycle,
+                        TransformReasonCode::SyntheticIndex,
+                    );
+                }
+            }
+            UnifiedStreamEvent::RefusalDelta {
+                item_index,
+                item_id,
+                ..
+            } => {
+                apply_transform_policy(
+                    TransformProtocol::Unified,
+                    target_protocol,
+                    TransformValueKind::Refusal,
+                    "Auditing target stream refusal capability.",
+                );
                 if target == DownstreamProtocol::Responses
                     && item_index.is_none()
                     && item_id.is_none()
@@ -2618,7 +3000,7 @@ mod tests {
     }
 
     #[test]
-    fn target_stream_audit_rejects_reasoning_for_incapable_target() {
+    fn target_stream_audit_records_controlled_loss_for_openai_reasoning() {
         let mut transformer =
             StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
         let (_, summary) = capture_transform_diagnostics(|| {
@@ -2634,6 +3016,13 @@ mod tests {
                 &mut transformer.stream_context(),
             )
         });
-        assert!(summary.action_counts.contains_key(&TransformAction::Reject));
+        assert_eq!(
+            summary
+                .outcome_counts
+                .get(&TransformOutcomeKind::ControlledLossMinor),
+            Some(&1)
+        );
+        assert_eq!(summary.action_counts.get(&TransformAction::Drop), Some(&1));
+        assert!(!summary.action_counts.contains_key(&TransformAction::Reject));
     }
 }

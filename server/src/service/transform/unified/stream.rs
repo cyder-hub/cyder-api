@@ -210,6 +210,16 @@ pub enum UnifiedStreamEvent {
         part_index: Option<u32>,
         text: String,
     },
+    RefusalDelta {
+        index: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_index: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        part_index: Option<u32>,
+        text: String,
+    },
     ContentBlockStop {
         index: u32,
     },
@@ -292,6 +302,7 @@ pub(crate) fn meaningful_output_from_stream_event(event: &UnifiedStreamEvent) ->
         | UnifiedStreamEvent::ContentPartAdded { .. }
         | UnifiedStreamEvent::ReasoningSummaryPartAdded { .. } => false,
         UnifiedStreamEvent::ContentBlockDelta { text, .. }
+        | UnifiedStreamEvent::RefusalDelta { text, .. }
         | UnifiedStreamEvent::ReasoningDelta { text, .. } => meaningful_text(text),
         UnifiedStreamEvent::ToolCallStart { name, .. } => meaningful_text(name),
         UnifiedStreamEvent::ToolCallArgumentsDelta {
@@ -578,6 +589,7 @@ pub fn map_openai_finish_reason_to_anthropic(reason: &str) -> String {
         "stop" => "end_turn".to_string(),
         "tool_calls" => "tool_use".to_string(),
         "length" => "max_tokens".to_string(),
+        "content_filter" => "refusal".to_string(),
         _ => "end_turn".to_string(),
     }
 }

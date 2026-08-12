@@ -2,7 +2,9 @@ use serde_json::{Value, json};
 
 use super::payload::*;
 
+use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::unified::*;
+use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 
 impl From<OpenAiUsage> for UnifiedUsage {
     fn from(openai_usage: OpenAiUsage) -> Self {
@@ -233,8 +235,13 @@ impl From<UnifiedResponse> for OpenAiResponse {
                                 image_url: OpenAiImageUrl { url, detail },
                             });
                         }
-                        UnifiedContentPart::Reasoning { text } => {
-                            content_parts.push(OpenAiContentPart::Text { text });
+                        UnifiedContentPart::Reasoning { .. } => {
+                            apply_transform_policy(
+                                TransformProtocol::Unified,
+                                TransformProtocol::Downstream(DownstreamProtocol::Openai),
+                                TransformValueKind::ReasoningContent,
+                                "Dropping reasoning content that Chat Completions cannot preserve without presenting it as ordinary answer text.",
+                            );
                         }
                         UnifiedContentPart::ImageData { mime_type, data } => {
                             has_multimodal = true;

@@ -110,7 +110,7 @@ fn test_unified_request_to_responses_preserves_structured_input_items() {
 }
 
 #[test]
-fn test_unified_request_to_responses_derives_rich_system_instructions() {
+fn test_unified_request_to_responses_never_textualizes_system_media() {
     let unified_req = UnifiedRequest {
         model: Some("gpt-4.1".to_string()),
         messages: vec![
@@ -154,9 +154,7 @@ fn test_unified_request_to_responses_derives_rich_system_instructions() {
 
     assert_eq!(
         responses_req.instructions.as_deref(),
-        Some(
-            "Follow policy\ndata:image/png;base64,ZmFrZQ==\nfile_url: https://files.example.com/report.pdf\nmime_type: application/pdf\n```python\nprint(1)\n```\ntool_call: lookup\narguments: {\"city\":\"Boston\"}"
-        )
+        Some("Follow policy\ntool_call: lookup\narguments: {\"city\":\"Boston\"}")
     );
 }
 

@@ -26,8 +26,15 @@ const HARD_FORBIDDEN_HEADERS: &[&str] = &[
     "x-request-id",
     "x-client-request-id",
 ];
-const HARD_FORBIDDEN_BODY_TARGETS: &[&str] =
-    &["/model", "/stream", "/stream_options/include_usage"];
+const HARD_FORBIDDEN_BODY_TARGETS: &[&str] = &[
+    "/model",
+    "/stream",
+    "/stream_options/include_usage",
+    "/store",
+    "/previous_response_id",
+    "/conversation",
+    "/background",
+];
 const HARD_FORBIDDEN_QUERY_TARGETS: &[&str] = &["key"];
 
 db_object! {
@@ -1625,6 +1632,31 @@ mod tests {
             )])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn responses_stateless_body_targets_and_descendants_are_reserved_for_all_operations() {
+        for operation in [RequestPatchOperation::Set, RequestPatchOperation::Remove] {
+            for target in [
+                "/store",
+                "/store/enabled",
+                "/previous_response_id",
+                "/previous_response_id/value",
+                "/conversation",
+                "/conversation/id",
+                "/background",
+                "/background/enabled",
+            ] {
+                let value = (operation == RequestPatchOperation::Set).then(|| json!(true));
+                assert!(
+                    normalize_rules(&[
+                        rule(RequestPatchPlacement::Body, target, operation, value,)
+                    ])
+                    .is_err(),
+                    "{operation:?} {target}"
+                );
+            }
+        }
     }
 
     #[test]

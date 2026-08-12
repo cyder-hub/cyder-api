@@ -74,6 +74,7 @@ fn select_generation_prepare_kind(
         UpstreamProtocol::Openai => Ok(GenerationPrepareKind::Llm {
             path: "chat/completions",
         }),
+        UpstreamProtocol::Responses => Ok(GenerationPrepareKind::Llm { path: "responses" }),
         UpstreamProtocol::Ollama => Ok(GenerationPrepareKind::Llm { path: "api/chat" }),
         UpstreamProtocol::Gemini => Ok(GenerationPrepareKind::Gemini { is_stream }),
         _ => {
@@ -436,12 +437,18 @@ pub(in crate::proxy) fn preflight_generation_request(
         transform_failure,
     })?;
 
-    if target.upstream_protocol == UpstreamProtocol::Openai {
+    if matches!(
+        target.upstream_protocol,
+        UpstreamProtocol::Openai | UpstreamProtocol::Responses
+    ) {
         if let Value::Object(object) = &mut transformed.value {
             object.insert(
                 "model".to_string(),
                 json!(resolve_real_model_name(&target.model)),
             );
+            if target.upstream_protocol == UpstreamProtocol::Responses {
+                object.insert("stream".to_string(), json!(is_stream));
+            }
         }
     }
 
@@ -470,6 +477,23 @@ pub(in crate::proxy) fn preflight_generation_request(
     }
 
     Ok(transformed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses_generation_prepare_kind_uses_one_native_path_for_both_modes() {
+        for is_stream in [false, true] {
+            let kind = select_generation_prepare_kind(UpstreamProtocol::Responses, is_stream)
+                .expect("Responses generation should be materializable");
+            assert!(
+                matches!(kind, GenerationPrepareKind::Llm { path: "responses" }),
+                "is_stream={is_stream}"
+            );
+        }
+    }
 }
 
 pub(in crate::proxy) async fn materialize_utility_request(

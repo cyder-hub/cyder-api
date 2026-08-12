@@ -467,6 +467,33 @@ pub(super) fn encode_formal_responses_stream_event(
                 }));
             }
         }
+        UnifiedStreamEvent::RefusalDelta {
+            index,
+            item_index,
+            item_id,
+            part_index,
+            text,
+        } => {
+            let output_index = item_index.unwrap_or(state.responses_mut().current_output_index);
+            let item_id = item_id
+                .or_else(|| {
+                    state
+                        .responses_mut()
+                        .output_item_ids
+                        .get(&output_index)
+                        .cloned()
+                })
+                .or_else(|| state.responses_mut().current_item_id.clone());
+            if let Some(item_id) = item_id {
+                frames.push(json!({
+                    "type": "response.refusal.delta",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "content_index": part_index.unwrap_or(index),
+                    "delta": text
+                }));
+            }
+        }
         UnifiedStreamEvent::ContentPartAdded {
             item_index,
             item_id,

@@ -9,6 +9,7 @@ pub(super) use super::response_mapping::*;
 
 impl From<ResponsesResponse> for UnifiedResponse {
     fn from(responses_res: ResponsesResponse) -> Self {
+        let finish_reason = responses_finish_reason(&responses_res);
         let provider_response_metadata = build_responses_response_metadata(
             &responses_res.output,
             responses_res.metadata.clone(),
@@ -82,7 +83,8 @@ impl From<ResponsesResponse> for UnifiedResponse {
             }
         }
 
-        let choices = if content.is_empty() && response_items.is_empty() {
+        let choices = if content.is_empty() && response_items.is_empty() && finish_reason.is_none()
+        {
             Vec::new()
         } else {
             vec![UnifiedChoice {
@@ -92,7 +94,7 @@ impl From<ResponsesResponse> for UnifiedResponse {
                     content,
                 },
                 items: response_items,
-                finish_reason: Some("stop".to_string()),
+                finish_reason,
                 logprobs: None,
             }]
         };

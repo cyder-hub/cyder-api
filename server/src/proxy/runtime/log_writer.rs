@@ -139,7 +139,12 @@ pub(in crate::proxy) fn finalize_streaming_log_context(
     context.llm_status = Some(status_code);
     context.completed_at = Some(completed_at);
     context.cost_catalog_version = cost_catalog_version.cloned();
+    let succeeded = overall_status == RequestStatus::Success;
     context.overall_status = overall_status;
+    if !succeeded {
+        context.usage = None;
+        context.usage_normalization = None;
+    }
     if let Some(error) = final_error {
         apply_final_error_fact(context, error);
     }
@@ -164,6 +169,8 @@ pub(in crate::proxy) async fn finalize_cancelled_log_context(
     context.completed_at = Some(Utc::now().timestamp_millis());
     context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = RequestStatus::Cancelled;
+    context.usage = None;
+    context.usage_normalization = None;
     apply_final_error_fact(&mut context, proxy_error);
     crate::logging::log_proxy_error_event(
         "proxy.stream_terminal_error",

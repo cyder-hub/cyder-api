@@ -721,6 +721,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_stateless_targets_are_rejected_by_preview_and_save_routes() {
+        let database = TestDbContext::new_sqlite("controller-request-patch-stateless.sqlite");
+        database
+            .run_async(async {
+                let (provider, _) = seed_provider(8451, 8461);
+                let app_state = create_test_app_state(database.clone()).await;
+                let source_id = 8461;
+                let base = format!(
+                    "/provider/{}/sources/{source_id}/request_patch",
+                    provider.id
+                );
+
+                for (index, (operation, target)) in [
+                    (RequestPatchOperation::Set, "/store"),
+                    (RequestPatchOperation::Remove, "/store/enabled"),
+                    (RequestPatchOperation::Set, "/previous_response_id"),
+                    (RequestPatchOperation::Remove, "/conversation/id"),
+                    (RequestPatchOperation::Set, "/background"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let payload = json!({
+                        "source_id": source_id,
+                        "model_id": null,
+                        "suffix": format!("stateless-{index}"),
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": [{
+                            "placement": RequestPatchPlacement::Body,
+                            "target": target,
+                            "operation": operation,
+                            "value_json": (operation == RequestPatchOperation::Set)
+                                .then_some("patch-private-marker"),
+                            "description": null
+                        }]
+                    });
+                    for uri in [format!("{base}/preview"), format!("{base}/variants")] {
+                        let response = send(
+                            &app_state,
+                            json_request(Method::POST, &uri, payload.clone()),
+                        )
+                        .await;
+                        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri} {target}");
+                        let body = response_json(response).await.to_string();
+                        assert!(body.contains("reserved"), "{uri} {target}");
+                        assert!(!body.contains("patch-private-marker"), "{uri} {target}");
+                    }
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn aggregate_source_routes_support_crud_preview_explain_and_negative_legacy_route() {
         let database = TestDbContext::new_sqlite("controller-request-patch-aggregate.sqlite");
         database

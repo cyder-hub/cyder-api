@@ -19,6 +19,35 @@ fn sse(data: impl Into<String>) -> SseEvent {
     }
 }
 
+fn responses_response_value(
+    status: &str,
+    output: Value,
+    error: Value,
+    incomplete_reason: Option<&str>,
+) -> Value {
+    json!({
+        "id": "resp_portable",
+        "object": "response",
+        "created_at": 1,
+        "completed_at": if status == "completed" { json!(1) } else { Value::Null },
+        "status": status,
+        "incomplete_details": incomplete_reason.map(|reason| json!({"reason": reason})),
+        "model": "responses-model",
+        "output": output,
+        "error": error,
+        "store": false,
+        "background": false
+    })
+}
+
+fn responses_event(event_type: &str, sequence_number: Option<u64>, mut fields: Value) -> SseEvent {
+    fields["type"] = json!(event_type);
+    if let Some(sequence_number) = sequence_number {
+        fields["sequence_number"] = json!(sequence_number);
+    }
+    sse(fields.to_string())
+}
+
 #[test]
 fn meaningful_output_observation_is_shared_by_four_source_protocols_and_targets() {
     let openai_text = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}";
@@ -483,6 +512,1125 @@ fn test_responses_source_stream_fast_path_matches_unified_openai_path() {
         .collect::<Vec<_>>();
 
     assert_eq!(optimized_values, legacy_values);
+}
+
+#[test]
+fn responses_official_portable_event_families_deserialize_without_catch_all() {
+    let in_progress = responses_response_value("in_progress", json!([]), Value::Null, None);
+    let completed = responses_response_value("completed", json!([]), Value::Null, None);
+    let incomplete = responses_response_value(
+        "incomplete",
+        json!([]),
+        Value::Null,
+        Some("max_output_tokens"),
+    );
+    let failed = responses_response_value(
+        "failed",
+        json!([]),
+        json!({"code": "server_error", "message": "safe fixture"}),
+        None,
+    );
+    let message = json!({
+        "type": "message",
+        "id": "msg_portable",
+        "status": "completed",
+        "role": "assistant",
+        "content": []
+    });
+    let events = vec![
+        json!({"type":"response.created","response":in_progress}),
+        json!({"type":"response.queued","response":responses_response_value("queued", json!([]), Value::Null, None)}),
+        json!({"type":"response.in_progress","response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+        json!({"type":"response.completed","response":completed}),
+        json!({"type":"response.incomplete","response":incomplete}),
+        json!({"type":"response.failed","response":failed}),
+        json!({"type":"response.output_item.added","output_index":0,"item":message.clone()}),
+        json!({"type":"response.output_item.done","output_index":0,"item":message}),
+        json!({"type":"response.content_part.added","item_id":"msg_portable","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}),
+        json!({"type":"response.content_part.done","item_id":"msg_portable","content_index":0,"part":{"type":"output_text","text":"ok","annotations":[],"logprobs":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_portable","output_index":0,"content_index":0,"delta":"ok"}),
+        json!({"type":"response.output_text.done","item_id":"msg_portable","output_index":0,"content_index":0,"text":"ok"}),
+        json!({"type":"response.refusal.delta","item_id":"msg_portable","output_index":0,"content_index":1,"delta":"no"}),
+        json!({"type":"response.refusal.done","item_id":"msg_portable","output_index":0,"content_index":1,"refusal":"no"}),
+        json!({"type":"response.output_text.annotation.added","item_id":"msg_portable","output_index":0,"content_index":0,"annotation":{"type":"url_citation","url":"https://example.test"}}),
+        json!({"type":"response.function_call_arguments.delta","item_id":"fc_portable","output_index":1,"delta":"{}"}),
+        json!({"type":"response.function_call_arguments.done","item_id":"fc_portable","output_index":1,"call_id":"call_portable","arguments":"{}"}),
+        json!({"type":"response.reasoning_summary_part.added","item_id":"rs_portable","summary_index":0,"part":{"type":"summary_text","text":""}}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_portable","summary_index":0,"delta":"why"}),
+        json!({"type":"response.reasoning_summary_text.done","item_id":"rs_portable","summary_index":0,"text":"why"}),
+        json!({"type":"response.reasoning_summary_part.done","item_id":"rs_portable","summary_index":0,"part":{"type":"summary_text","text":"why"}}),
+        json!({"type":"response.reasoning_text.delta","item_id":"rs_portable","output_index":2,"content_index":0,"delta":"visible"}),
+        json!({"type":"response.reasoning_text.done","item_id":"rs_portable","output_index":2,"content_index":0,"text":"visible"}),
+        json!({"type":"error","code":"server_error","message":"safe fixture","param":null}),
+    ];
+
+    for (sequence, mut event) in events.into_iter().enumerate() {
+        event["sequence_number"] = json!(sequence);
+        let chunk: responses::ResponsesChunkResponse =
+            serde_json::from_value(event).expect("official portable event must deserialize");
+        assert_eq!(chunk.sequence_number, Some(sequence as u64));
+        assert!(
+            !matches!(chunk.event, responses::ResponsesStreamEvent::Unknown(_)),
+            "official event must not enter catch-all"
+        );
+    }
+}
+
+#[test]
+fn responses_portable_text_refusal_function_reasoning_lifecycle_transforms_once() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+    let message_added = json!({
+        "type":"message","id":"msg_portable","status":"in_progress",
+        "role":"assistant","content":[]
+    });
+    let message_done = json!({
+        "type":"message","id":"msg_portable","status":"completed",
+        "role":"assistant","content":[
+            {"type":"output_text","text":"hello","annotations":[],"logprobs":[]},
+            {"type":"refusal","refusal":"no"}
+        ]
+    });
+    let function_added = json!({
+        "type":"function_call","id":"fc_portable","call_id":"call_portable",
+        "name":"lookup","arguments":"","status":"in_progress"
+    });
+    let function_done = json!({
+        "type":"function_call","id":"fc_portable","call_id":"call_portable",
+        "name":"lookup","arguments":"{\"x\":1}","status":"completed"
+    });
+    let reasoning_added = json!({
+        "type":"reasoning","id":"rs_portable","content":[],"summary":[],
+        "encrypted_content":null
+    });
+    let reasoning_done = json!({
+        "type":"reasoning","id":"rs_portable","content":[],
+        "summary":[{"type":"summary_text","text":"why"}],"encrypted_content":null
+    });
+    let terminal_output = json!([message_done.clone(), function_done.clone()]);
+    let mut terminal_response =
+        responses_response_value("completed", terminal_output, Value::Null, None);
+    terminal_response["usage"] = json!({
+        "input_tokens":4,"output_tokens":6,"total_tokens":10,
+        "input_tokens_details":{"cached_tokens":1},
+        "output_tokens_details":{"reasoning_tokens":2}
+    });
+    let frames = vec![
+        responses_event(
+            "response.created",
+            Some(1),
+            json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+        ),
+        responses_event(
+            "response.queued",
+            Some(2),
+            json!({"response":responses_response_value("queued", json!([]), Value::Null, None)}),
+        ),
+        responses_event(
+            "response.in_progress",
+            Some(3),
+            json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+        ),
+        responses_event(
+            "response.output_item.added",
+            Some(4),
+            json!({"output_index":0,"item":message_added}),
+        ),
+        responses_event(
+            "response.content_part.added",
+            Some(5),
+            json!({"item_id":"msg_portable","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}),
+        ),
+        responses_event(
+            "response.output_text.delta",
+            Some(6),
+            json!({"item_id":"msg_portable","output_index":0,"content_index":0,"delta":"hello"}),
+        ),
+        responses_event(
+            "response.output_text.done",
+            Some(7),
+            json!({"item_id":"msg_portable","output_index":0,"content_index":0,"text":"hello"}),
+        ),
+        responses_event(
+            "response.output_text.annotation.added",
+            Some(8),
+            json!({"item_id":"msg_portable","output_index":0,"content_index":0,"annotation":{"type":"url_citation","url":"https://example.test"}}),
+        ),
+        responses_event(
+            "response.content_part.done",
+            Some(9),
+            json!({"item_id":"msg_portable","content_index":0,"part":{"type":"output_text","text":"hello","annotations":[],"logprobs":[]}}),
+        ),
+        responses_event(
+            "response.content_part.added",
+            Some(10),
+            json!({"item_id":"msg_portable","content_index":1,"part":{"type":"refusal","refusal":""}}),
+        ),
+        responses_event(
+            "response.refusal.delta",
+            Some(11),
+            json!({"item_id":"msg_portable","output_index":0,"content_index":1,"delta":"no"}),
+        ),
+        responses_event(
+            "response.refusal.done",
+            Some(12),
+            json!({"item_id":"msg_portable","output_index":0,"content_index":1,"refusal":"no"}),
+        ),
+        responses_event(
+            "response.content_part.done",
+            Some(13),
+            json!({"item_id":"msg_portable","content_index":1,"part":{"type":"refusal","refusal":"no"}}),
+        ),
+        responses_event(
+            "response.output_item.done",
+            Some(14),
+            json!({"output_index":0,"item":message_done}),
+        ),
+        responses_event(
+            "response.output_item.added",
+            Some(15),
+            json!({"output_index":1,"item":function_added}),
+        ),
+        responses_event(
+            "response.function_call_arguments.delta",
+            Some(16),
+            json!({"item_id":"fc_portable","output_index":1,"delta":"{\"x\":"}),
+        ),
+        responses_event(
+            "response.function_call_arguments.delta",
+            Some(17),
+            json!({"item_id":"fc_portable","output_index":1,"delta":"1}"}),
+        ),
+        responses_event(
+            "response.function_call_arguments.done",
+            Some(18),
+            json!({"item_id":"fc_portable","output_index":1,"call_id":"call_portable","arguments":"{\"x\":1}"}),
+        ),
+        responses_event(
+            "response.output_item.done",
+            Some(19),
+            json!({"output_index":1,"item":function_done}),
+        ),
+        responses_event(
+            "response.completed",
+            Some(20),
+            json!({"response":terminal_response}),
+        ),
+    ];
+
+    let mut downstream = Vec::new();
+    let mut controlled_loss_seen = false;
+    for frame in frames {
+        let output = transformer
+            .transform_event(frame)
+            .expect("portable Responses lifecycle should transform");
+        controlled_loss_seen |= output.value.disposition == StreamFrameDisposition::ControlledLoss;
+        downstream.extend(output.value.events);
+    }
+
+    transformer
+        .validate_source_termination()
+        .expect("completed terminal must close the source stream");
+    assert!(
+        controlled_loss_seen,
+        "annotation must be a typed controlled loss"
+    );
+    assert_eq!(
+        transformer.cached_usage_info().expect("usage").total_tokens,
+        10
+    );
+    let downstream_values = downstream
+        .iter()
+        .filter(|event| event.data != "[DONE]")
+        .map(|event| serde_json::from_str::<Value>(&event.data).expect("OpenAI JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        downstream
+            .iter()
+            .filter(|event| event.data == "[DONE]")
+            .count(),
+        1
+    );
+    assert!(downstream_values.iter().any(|value| {
+        value
+            .pointer("/choices/0/delta/content")
+            .and_then(Value::as_str)
+            == Some("hello")
+    }));
+    assert!(downstream_values.iter().any(|value| {
+        value
+            .pointer("/choices/0/delta/refusal")
+            .and_then(Value::as_str)
+            == Some("no")
+    }));
+    assert!(downstream_values.iter().any(|value| {
+        value
+            .pointer("/choices/0/delta/tool_calls/0/function/arguments")
+            .and_then(Value::as_str)
+            == Some("{\"x\":")
+    }));
+    assert_eq!(
+        downstream_values
+            .iter()
+            .filter(|value| value
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str)
+                == Some("tool_calls"))
+            .count(),
+        1
+    );
+
+    let mut reasoning =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Gemini);
+    let mut reasoning_terminal = responses_response_value(
+        "completed",
+        json!([reasoning_done.clone()]),
+        Value::Null,
+        None,
+    );
+    reasoning_terminal["usage"] = json!({
+        "input_tokens":1,"output_tokens":2,"total_tokens":3,
+        "input_tokens_details":{"cached_tokens":0},
+        "output_tokens_details":{"reasoning_tokens":2}
+    });
+    let reasoning_frames = vec![
+        responses_event(
+            "response.created",
+            Some(1),
+            json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+        ),
+        responses_event(
+            "response.output_item.added",
+            Some(2),
+            json!({"output_index":0,"item":reasoning_added}),
+        ),
+        responses_event(
+            "response.reasoning_summary_part.added",
+            Some(3),
+            json!({"item_id":"rs_portable","summary_index":0,"part":{"type":"summary_text","text":""}}),
+        ),
+        responses_event(
+            "response.reasoning_summary_text.delta",
+            Some(4),
+            json!({"item_id":"rs_portable","summary_index":0,"delta":"why"}),
+        ),
+        responses_event(
+            "response.reasoning_summary_text.done",
+            Some(5),
+            json!({"item_id":"rs_portable","summary_index":0,"text":"why"}),
+        ),
+        responses_event(
+            "response.reasoning_summary_part.done",
+            Some(6),
+            json!({"item_id":"rs_portable","summary_index":0,"part":{"type":"summary_text","text":"why"}}),
+        ),
+        responses_event(
+            "response.output_item.done",
+            Some(7),
+            json!({"output_index":0,"item":reasoning_done}),
+        ),
+        responses_event(
+            "response.completed",
+            Some(8),
+            json!({"response":reasoning_terminal}),
+        ),
+    ];
+    let mut reasoning_values = Vec::new();
+    for frame in reasoning_frames {
+        let output = reasoning
+            .transform_event(frame)
+            .expect("portable reasoning lifecycle should transform");
+        reasoning_values.extend(
+            output
+                .value
+                .events
+                .into_iter()
+                .map(|event| serde_json::from_str::<Value>(&event.data).expect("Gemini JSON")),
+        );
+    }
+    reasoning
+        .validate_source_termination()
+        .expect("reasoning stream terminal");
+    assert!(reasoning_values.iter().any(|value| {
+        value
+            .pointer("/candidates/0/content/parts/0/text")
+            .and_then(Value::as_str)
+            == Some("why")
+            && value
+                .pointer("/candidates/0/content/parts/0/thought")
+                .and_then(Value::as_bool)
+                == Some(true)
+    }));
+}
+
+#[test]
+fn responses_function_arguments_delta_done_and_tool_finish_reach_every_downstream_once() {
+    let function_added = json!({
+        "type":"function_call","id":"fc_multi","call_id":"call_multi",
+        "name":"lookup","arguments":"","status":"in_progress"
+    });
+    let function_done = json!({
+        "type":"function_call","id":"fc_multi","call_id":"call_multi",
+        "name":"lookup","arguments":"{\"city\":\"Paris\"}","status":"completed"
+    });
+    let mut terminal_response = responses_response_value(
+        "completed",
+        json!([function_done.clone()]),
+        Value::Null,
+        None,
+    );
+    terminal_response["usage"] = json!({
+        "input_tokens":2,"output_tokens":3,"total_tokens":5,
+        "input_tokens_details":{"cached_tokens":0},
+        "output_tokens_details":{"reasoning_tokens":0}
+    });
+    let frames = vec![
+        responses_event(
+            "response.created",
+            Some(1),
+            json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+        ),
+        responses_event(
+            "response.output_item.added",
+            Some(2),
+            json!({"output_index":0,"item":function_added}),
+        ),
+        responses_event(
+            "response.function_call_arguments.delta",
+            Some(3),
+            json!({"item_id":"fc_multi","output_index":0,"delta":"{\"city\":"}),
+        ),
+        responses_event(
+            "response.function_call_arguments.delta",
+            Some(4),
+            json!({"item_id":"fc_multi","output_index":0,"delta":"\"Paris\"}"}),
+        ),
+        responses_event(
+            "response.function_call_arguments.done",
+            Some(5),
+            json!({"item_id":"fc_multi","output_index":0,"call_id":"call_multi","arguments":"{\"city\":\"Paris\"}"}),
+        ),
+        responses_event(
+            "response.output_item.done",
+            Some(6),
+            json!({"output_index":0,"item":function_done}),
+        ),
+        responses_event(
+            "response.completed",
+            Some(7),
+            json!({"response":terminal_response}),
+        ),
+    ];
+
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Responses, downstream);
+        let mut emitted = Vec::new();
+        for (frame_index, frame) in frames.clone().into_iter().enumerate() {
+            emitted.extend(
+                transformer
+                    .transform_event(frame)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{downstream:?} portable function frame {frame_index} must transform: {error:?}"
+                        )
+                    })
+                    .value
+                    .events,
+            );
+        }
+        transformer
+            .validate_source_termination()
+            .expect("completed function stream must terminate");
+
+        match downstream {
+            DownstreamProtocol::Responses => {
+                let names = emitted
+                    .iter()
+                    .map(|event| {
+                        serde_json::from_str::<Value>(&event.data)
+                            .expect("Responses JSON")
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|name| name.as_str() == "response.function_call_arguments.delta")
+                        .count(),
+                    2
+                );
+                assert_eq!(
+                    names
+                        .iter()
+                        .filter(|name| name.as_str() == "response.function_call_arguments.done")
+                        .count(),
+                    1
+                );
+                assert_eq!(names.last().map(String::as_str), Some("response.completed"));
+            }
+            DownstreamProtocol::Openai => {
+                let values = emitted
+                    .iter()
+                    .filter(|event| event.data != "[DONE]")
+                    .map(|event| serde_json::from_str::<Value>(&event.data).expect("OpenAI JSON"))
+                    .collect::<Vec<_>>();
+                let arguments = values
+                    .iter()
+                    .filter_map(|value| {
+                        value
+                            .pointer("/choices/0/delta/tool_calls/0/function/arguments")
+                            .and_then(Value::as_str)
+                    })
+                    .collect::<String>();
+                assert_eq!(arguments, "{\"city\":\"Paris\"}");
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(|value| value.pointer("/choices/0/finish_reason")
+                            == Some(&json!("tool_calls")))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| event.data == "[DONE]")
+                        .count(),
+                    1
+                );
+            }
+            DownstreamProtocol::Anthropic => {
+                let values = emitted
+                    .iter()
+                    .map(|event| {
+                        serde_json::from_str::<Value>(&event.data).expect("Anthropic JSON")
+                    })
+                    .collect::<Vec<_>>();
+                let arguments = values
+                    .iter()
+                    .filter_map(|value| {
+                        value.pointer("/delta/partial_json").and_then(Value::as_str)
+                    })
+                    .collect::<String>();
+                assert_eq!(arguments, "{\"city\":\"Paris\"}");
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(
+                            |value| value.pointer("/delta/stop_reason") == Some(&json!("tool_use"))
+                        )
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| event.event.as_deref() == Some("message_stop"))
+                        .count(),
+                    1
+                );
+            }
+            DownstreamProtocol::Gemini => {
+                let values = emitted
+                    .iter()
+                    .map(|event| serde_json::from_str::<Value>(&event.data).expect("Gemini JSON"))
+                    .collect::<Vec<_>>();
+                assert!(values.iter().any(|value| {
+                    value.pointer("/candidates/0/content/parts/0/functionCall/name")
+                        == Some(&json!("lookup"))
+                        && value.pointer("/candidates/0/content/parts/0/functionCall/args")
+                            == Some(&json!({"city":"Paris"}))
+                }));
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(|value| value.pointer("/candidates/0/finishReason")
+                            == Some(&json!("TOOL_USE")))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn responses_visible_reasoning_stream_is_native_or_typed_and_never_relabelled_as_openai_text() {
+    let reasoning_added = json!({
+        "type":"reasoning","id":"rs_visible","content":[],"summary":[],
+        "encrypted_content":null
+    });
+    let reasoning_done = json!({
+        "type":"reasoning","id":"rs_visible","content":[],
+        "summary":[{"type":"summary_text","text":"visible summary"}],
+        "encrypted_content":null
+    });
+    let mut terminal_response = responses_response_value(
+        "completed",
+        json!([reasoning_done.clone()]),
+        Value::Null,
+        None,
+    );
+    terminal_response["usage"] = json!({
+        "input_tokens":1,"output_tokens":2,"total_tokens":3,
+        "input_tokens_details":{"cached_tokens":0},
+        "output_tokens_details":{"reasoning_tokens":2}
+    });
+    let frames = vec![
+        responses_event(
+            "response.created",
+            Some(1),
+            json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+        ),
+        responses_event(
+            "response.output_item.added",
+            Some(2),
+            json!({"output_index":0,"item":reasoning_added}),
+        ),
+        responses_event(
+            "response.reasoning_summary_part.added",
+            Some(3),
+            json!({"item_id":"rs_visible","summary_index":0,"part":{"type":"summary_text","text":""}}),
+        ),
+        responses_event(
+            "response.reasoning_summary_text.delta",
+            Some(4),
+            json!({"item_id":"rs_visible","summary_index":0,"delta":"visible summary"}),
+        ),
+        responses_event(
+            "response.reasoning_summary_text.done",
+            Some(5),
+            json!({"item_id":"rs_visible","summary_index":0,"text":"visible summary"}),
+        ),
+        responses_event(
+            "response.reasoning_summary_part.done",
+            Some(6),
+            json!({"item_id":"rs_visible","summary_index":0,"part":{"type":"summary_text","text":"visible summary"}}),
+        ),
+        responses_event(
+            "response.output_item.done",
+            Some(7),
+            json!({"output_index":0,"item":reasoning_done}),
+        ),
+        responses_event(
+            "response.completed",
+            Some(8),
+            json!({"response":terminal_response}),
+        ),
+    ];
+
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Responses, downstream);
+        let mut emitted = Vec::new();
+        for frame in frames.clone() {
+            emitted.extend(
+                transformer
+                    .transform_event(frame)
+                    .unwrap_or_else(|error| panic!("{downstream:?}: {error:?}"))
+                    .value
+                    .events,
+            );
+        }
+        transformer
+            .validate_source_termination()
+            .expect("reasoning stream must terminate");
+        let serialized = emitted
+            .iter()
+            .map(|event| event.data.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        match downstream {
+            DownstreamProtocol::Openai => {
+                assert!(!serialized.contains("visible summary"));
+                assert!(transformer.diagnostics_snapshot().facts.iter().any(|fact| {
+                    fact.semantic_unit == TransformSemanticUnit::ReasoningDelta
+                        && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                        && fact.action == TransformAction::Drop
+                        && fact.safe_summary.is_none()
+                }));
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| event.data == "[DONE]")
+                        .count(),
+                    1
+                );
+            }
+            DownstreamProtocol::Responses => {
+                assert!(serialized.contains("response.reasoning_summary_text.delta"));
+                assert!(serialized.contains("visible summary"));
+                assert!(
+                    !transformer
+                        .diagnostics_snapshot()
+                        .facts
+                        .iter()
+                        .any(|fact| matches!(
+                            fact.outcome,
+                            TransformOutcomeKind::ControlledLossMinor
+                                | TransformOutcomeKind::ControlledLossMajor
+                        ))
+                );
+            }
+            DownstreamProtocol::Anthropic => {
+                assert!(serialized.contains("thinking_delta"));
+                assert!(serialized.contains("visible summary"));
+            }
+            DownstreamProtocol::Gemini => {
+                assert!(serialized.contains("visible summary"));
+                assert!(serialized.contains("\"thought\":true"));
+            }
+        }
+    }
+}
+
+#[test]
+fn responses_unknown_hidden_reasoning_event_fails_closed_without_payload_diagnostics() {
+    const PRIVATE_MARKER: &str = "encrypted-reasoning-event-private-marker";
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+    transformer
+        .transform_event(responses_event(
+            "response.created",
+            Some(1),
+            json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+        ))
+        .expect("created event");
+
+    let failure = transformer
+        .transform_event(responses_event(
+            "response.reasoning.encrypted_content.delta",
+            Some(2),
+            json!({"item_id":"rs_hidden","delta":PRIVATE_MARKER}),
+        ))
+        .expect_err("unknown hidden reasoning event must fail closed cross-wire");
+    assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+    assert_eq!(
+        failure.semantic_unit,
+        TransformSemanticUnit::ResponsesUnknownItem
+    );
+    assert_eq!(
+        failure.reason_code,
+        TransformReasonCode::UnknownSemanticUnit
+    );
+    assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+    assert!(failure.summary.facts.iter().all(|fact| {
+        fact.safe_summary
+            .as_ref()
+            .is_none_or(|summary| !summary.sha256.contains(PRIVATE_MARKER))
+    }));
+}
+
+#[test]
+fn responses_native_media_output_event_fails_closed_cross_wire_without_payload_diagnostics() {
+    const PRIVATE_MARKER: &str = "image-output-private-marker";
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Responses, downstream);
+        transformer
+            .transform_event(responses_event(
+                "response.created",
+                Some(1),
+                json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+            ))
+            .expect("created event");
+
+        let failure = transformer
+            .transform_event(responses_event(
+                "response.image_generation_call.partial_image",
+                Some(2),
+                json!({
+                    "item_id":"ig_1","output_index":0,"partial_image_index":0,
+                    "partial_image_b64":PRIVATE_MARKER
+                }),
+            ))
+            .expect_err("native media output event must fail closed cross-wire");
+        assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+        assert_eq!(
+            failure.semantic_unit,
+            TransformSemanticUnit::ResponsesUnknownItem
+        );
+        assert_eq!(
+            failure.reason_code,
+            TransformReasonCode::UnknownSemanticUnit
+        );
+        assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+        assert!(failure.summary.facts.iter().all(|fact| {
+            fact.safe_summary
+                .as_ref()
+                .is_none_or(|summary| !summary.sha256.contains(PRIVATE_MARKER))
+        }));
+    }
+}
+
+#[test]
+fn responses_stream_sequence_unknown_terminal_and_eof_contracts_fail_closed() {
+    let invalid_sequence = json!({
+        "type":"response.created",
+        "sequence_number":1.5,
+        "response":responses_response_value("in_progress", json!([]), Value::Null, None)
+    });
+    assert!(serde_json::from_value::<responses::ResponsesChunkResponse>(invalid_sequence).is_err());
+
+    let mut ordering =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+    ordering
+        .transform_event(responses_event("response.created", Some(5), json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)})))
+        .expect("first sequence");
+    ordering
+        .transform_event(responses_event(
+            "response.queued",
+            None,
+            json!({"response":responses_response_value("queued", json!([]), Value::Null, None)}),
+        ))
+        .expect("sequence may be omitted");
+    let failure = ordering
+        .transform_event(responses_event("response.in_progress", Some(5), json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)})))
+        .expect_err("duplicate or descending sequence must fail");
+    assert_eq!(failure.semantic_unit, TransformSemanticUnit::Lifecycle);
+
+    let mut unknown =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+    let failure = unknown
+        .transform_event(responses_event(
+            "response.private_tool.delta",
+            Some(1),
+            json!({"private":"payload-marker"}),
+        ))
+        .expect_err("unknown tagged event must fail closed");
+    assert_eq!(
+        failure.reason_code,
+        TransformReasonCode::UnknownSemanticUnit
+    );
+
+    let mut eof = StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+    eof.transform_event(responses_event(
+        "response.created",
+        None,
+        json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)}),
+    ))
+    .expect("created event");
+    let failure = eof
+        .validate_source_termination()
+        .expect_err("EOF without terminal must fail closed");
+    assert_eq!(
+        failure.reason_code,
+        TransformReasonCode::IllegalUpstreamTerminal
+    );
+
+    let mut terminal =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+    terminal
+        .transform_event(responses_event("response.created", Some(1), json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)})))
+        .expect("created event");
+    terminal
+        .transform_event(responses_event(
+            "response.completed",
+            Some(2),
+            json!({"response":responses_response_value("completed", json!([]), Value::Null, None)}),
+        ))
+        .expect("completed event");
+    terminal
+        .validate_source_termination()
+        .expect("one terminal");
+    terminal
+        .transform_event(responses_event("response.in_progress", Some(3), json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)})))
+        .expect_err("semantic event after terminal must fail closed");
+
+    for terminal_event in [
+        responses_event(
+            "response.failed",
+            Some(2),
+            json!({"response":responses_response_value("failed", json!([]), json!({"code":"server_error","message":"private"}), None)}),
+        ),
+        responses_event(
+            "error",
+            Some(2),
+            json!({"code":"server_error","message":"private","param":null}),
+        ),
+    ] {
+        let mut failed =
+            StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
+        failed
+            .transform_event(responses_event("response.created", Some(1), json!({"response":responses_response_value("in_progress", json!([]), Value::Null, None)})))
+            .expect("created event");
+        let failure = failed
+            .transform_event(terminal_event)
+            .expect_err("failed/error terminal must stop cross-wire output");
+        assert_eq!(failure.semantic_unit, TransformSemanticUnit::StreamError);
+    }
+}
+
+#[test]
+fn responses_same_wire_preserves_extensions_while_core_usage_and_failures_remain_observable() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Responses);
+    let created = responses_event(
+        "response.created",
+        Some(0),
+        json!({
+            "response": responses_response_value(
+                "in_progress",
+                json!([]),
+                Value::Null,
+                None,
+            ),
+            "vendor_extension": {"opaque": true},
+        }),
+    );
+    assert_eq!(
+        transformer
+            .transform_event(created.clone())
+            .expect("known created frame")
+            .value
+            .events,
+        vec![created]
+    );
+
+    let extension = SseEvent {
+        event: Some("response.vendor.extension".to_string()),
+        data: "{ \"type\" : \"response.vendor.extension\", \"sequence_number\" : 1, \"private\" : {\"opaque\":true} }".to_string(),
+        ..Default::default()
+    };
+    let extension_output = transformer
+        .transform_event(extension.clone())
+        .expect("unknown same-wire extension must pass through");
+    assert_eq!(extension_output.value.events, vec![extension]);
+    assert_eq!(
+        extension_output.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    assert!(extension_output.summary.facts.iter().any(|fact| {
+        fact.outcome == TransformOutcomeKind::ObservationDegraded
+            && fact.action == TransformAction::PassThrough
+            && fact.reason_code == TransformReasonCode::ObservationParseFailed
+    }));
+
+    let usage = responses_event(
+        "response.usage",
+        Some(2),
+        json!({"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}),
+    );
+    assert_eq!(
+        transformer
+            .transform_event(usage.clone())
+            .expect("known usage frame")
+            .value
+            .events,
+        vec![usage]
+    );
+    assert_eq!(
+        transformer.cached_usage_info().expect("observed usage"),
+        UsageInfo {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+            ..Default::default()
+        }
+    );
+
+    let failed = responses_event(
+        "response.failed",
+        Some(3),
+        json!({
+            "response": responses_response_value(
+                "failed",
+                json!([{"type":"vendor_future_item","private":true}]),
+                json!({"code":"server_error","message":"private"}),
+                None,
+            ),
+            "vendor_extension": {"opaque": true},
+        }),
+    );
+    assert_eq!(
+        transformer
+            .transform_event(failed.clone())
+            .expect("known failed core must not be masked by extensions")
+            .value
+            .events,
+        vec![failed]
+    );
+    assert_eq!(
+        transformer.source_termination(),
+        Some(SourceStreamTermination::Failed)
+    );
+    transformer
+        .validate_source_termination()
+        .expect("failed is a present source terminal");
+
+    let independent_error = SseEvent {
+        event: Some("error".to_string()),
+        data: "{ \"type\" : \"error\", \"sequence_number\" : 9, \"code\" : \"server_error\", \"message\" : \"private\", \"param\" : null, \"vendor\" : true }".to_string(),
+        ..Default::default()
+    };
+    let mut error_transformer =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Responses);
+    assert_eq!(
+        error_transformer
+            .transform_event(independent_error.clone())
+            .expect("independent error core must remain observable")
+            .value
+            .events,
+        vec![independent_error]
+    );
+    assert_eq!(
+        error_transformer.source_termination(),
+        Some(SourceStreamTermination::Failed)
+    );
+}
+
+#[test]
+fn responses_same_wire_degraded_terminal_observation_preserves_core_terminal_and_usage() {
+    for (event_type, status, incomplete_reason, add_metadata) in [
+        ("response.completed", "completed", None, true),
+        (
+            "response.incomplete",
+            "incomplete",
+            Some("future_vendor_limit"),
+            false,
+        ),
+    ] {
+        let mut transformer =
+            StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Responses);
+        transformer
+            .transform_event(responses_event(
+                "response.created",
+                Some(1),
+                json!({
+                    "response": responses_response_value(
+                        "in_progress",
+                        json!([]),
+                        Value::Null,
+                        None,
+                    )
+                }),
+            ))
+            .expect("created event");
+
+        let mut response =
+            responses_response_value(status, json!([]), Value::Null, incomplete_reason);
+        response["usage"] = json!({
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "total_tokens": 18,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens_details": {"reasoning_tokens": 2}
+        });
+        if add_metadata {
+            response["metadata"] = json!({"future_vendor_field": true});
+        }
+        let terminal = responses_event(
+            event_type,
+            Some(2),
+            json!({"response": response, "vendor_extension": true}),
+        );
+
+        let output = transformer
+            .transform_event(terminal.clone())
+            .expect("same-wire terminal observer degradation must preserve the native terminal");
+        assert_eq!(output.value.events, vec![terminal]);
+        assert_eq!(
+            output.value.disposition,
+            StreamFrameDisposition::ObservationDegraded
+        );
+        assert_eq!(
+            transformer.source_termination(),
+            Some(SourceStreamTermination::Succeeded)
+        );
+        assert_eq!(
+            transformer.cached_usage_info(),
+            Some(UsageInfo {
+                input_tokens: 11,
+                output_tokens: 7,
+                total_tokens: 18,
+                cached_tokens: 3,
+                reasoning_tokens: 2,
+                ..Default::default()
+            })
+        );
+        transformer
+            .validate_source_termination()
+            .expect("degraded observation still has a source terminal");
+    }
+}
+
+#[test]
+fn responses_lifecycle_snapshots_are_pinned_to_created_identity() {
+    let lifecycle_cases = [
+        ("response.queued", "queued", Value::Null, None),
+        ("response.in_progress", "in_progress", Value::Null, None),
+        ("response.completed", "completed", Value::Null, None),
+        (
+            "response.incomplete",
+            "incomplete",
+            Value::Null,
+            Some("max_output_tokens"),
+        ),
+        (
+            "response.failed",
+            "failed",
+            json!({"code":"server_error","message":"private"}),
+            None,
+        ),
+    ];
+
+    for downstream in [DownstreamProtocol::Responses, DownstreamProtocol::Openai] {
+        for (event_type, status, error, incomplete_reason) in &lifecycle_cases {
+            for mismatched_field in ["id", "model"] {
+                let mut transformer =
+                    StreamTransformer::new(UpstreamProtocol::Responses, downstream);
+                transformer
+                    .transform_event(responses_event(
+                        "response.created",
+                        Some(1),
+                        json!({
+                            "response": responses_response_value(
+                                "in_progress",
+                                json!([]),
+                                Value::Null,
+                                None,
+                            )
+                        }),
+                    ))
+                    .expect("created event");
+
+                let mut response =
+                    responses_response_value(status, json!([]), error.clone(), *incomplete_reason);
+                response[mismatched_field] = json!(if mismatched_field == "id" {
+                    "resp_other"
+                } else {
+                    "responses-model-other"
+                });
+                let failure = transformer
+                    .transform_event(responses_event(
+                        event_type,
+                        Some(2),
+                        json!({"response": response}),
+                    ))
+                    .expect_err("later lifecycle identity must match response.created");
+                assert_eq!(
+                    failure.semantic_unit,
+                    TransformSemanticUnit::Lifecycle,
+                    "{downstream:?} {event_type} mismatched {mismatched_field}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

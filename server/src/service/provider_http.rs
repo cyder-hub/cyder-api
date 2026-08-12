@@ -272,6 +272,13 @@ mod tests {
             join_base_url_and_operation_path("https://relay.example/prefix/", "chat/completions/"),
             Ok("https://relay.example/prefix/chat/completions".to_string())
         );
+        assert_eq!(
+            join_base_url_and_operation_path(
+                "https://relay.example/proxy/openai/v1///",
+                "responses/",
+            ),
+            Ok("https://relay.example/proxy/openai/v1/responses".to_string())
+        );
         for value in [
             "",
             "/chat/completions",

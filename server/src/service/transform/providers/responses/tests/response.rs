@@ -180,6 +180,10 @@ fn test_responses_response_to_unified_preserves_structured_items() {
         &unified_res.choices[0].message.content[2],
         UnifiedContentPart::Text { text } if text == "final answer"
     ));
+    assert_eq!(
+        unified_res.choices[0].finish_reason.as_deref(),
+        Some("tool_calls")
+    );
 }
 
 #[test]

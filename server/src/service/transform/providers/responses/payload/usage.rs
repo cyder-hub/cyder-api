@@ -41,6 +41,12 @@ pub enum ToolChoiceValue {
     Required,
 }
 
+impl Default for ToolChoice {
+    fn default() -> Self {
+        Self::Value(ToolChoiceValue::Auto)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SpecificToolChoice {
     #[serde(rename = "type")]
@@ -63,11 +69,26 @@ pub enum Truncation {
     Disabled,
 }
 
+impl Default for Truncation {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TextField {
     pub format: TextResponseFormat,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbosity: Option<Verbosity>,
+}
+
+impl Default for TextField {
+    fn default() -> Self {
+        Self {
+            format: TextResponseFormat::Text,
+            verbosity: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -116,12 +137,12 @@ pub enum ReasoningSummary {
     Auto,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct InputTokensDetails {
     pub cached_tokens: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct OutputTokensDetails {
     pub reasoning_tokens: u32,
 }
@@ -131,7 +152,9 @@ pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default)]
     pub input_tokens_details: InputTokensDetails,
+    #[serde(default)]
     pub output_tokens_details: OutputTokensDetails,
 }
 

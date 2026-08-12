@@ -221,6 +221,9 @@ pub enum TransformReasonCode {
     SyntheticIndex,
     NoSemanticOutput,
     UpstreamUsageMissing,
+    UpstreamApplicationFailed,
+    IllegalUpstreamTerminal,
+    UnknownIncompleteReason,
 }
 
 impl TransformReasonCode {
@@ -252,6 +255,9 @@ impl TransformReasonCode {
             Self::SyntheticIndex => "synthetic_index",
             Self::NoSemanticOutput => "no_semantic_output",
             Self::UpstreamUsageMissing => "upstream_usage_missing",
+            Self::UpstreamApplicationFailed => "upstream_application_failed",
+            Self::IllegalUpstreamTerminal => "illegal_upstream_terminal",
+            Self::UnknownIncompleteReason => "unknown_incomplete_reason",
         }
     }
 }

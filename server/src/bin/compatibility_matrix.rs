@@ -544,6 +544,7 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
 
     let evidence = validate_evidence(&matrix.evidence)?;
     validate_r316_executable_evidence(&evidence)?;
+    validate_r317_executable_evidence(&evidence)?;
     validate_downstream_error_contracts(&matrix.downstream_error_contracts, &evidence)?;
     validate_transform_runtime_contract(&matrix.transform_runtime_contract, &evidence)?;
     validate_upstream_source_contract(&matrix.upstream_source_contract, &evidence)?;
@@ -707,6 +708,167 @@ fn validate_r316_executable_evidence(evidence: &HashMap<&str, &Evidence>) -> Res
     Ok(())
 }
 
+const REQUIRED_R317_EXECUTABLE_EVIDENCE: [(&str, &str); 36] = [
+    (
+        "r3-17-fixture-scope",
+        "proxy::direct_execution_regression::responses_target_fixtures_define_four_complete_protocols_and_native_evidence",
+    ),
+    (
+        "r3-17-stateless-policy",
+        "proxy::direct_execution_regression::responses_stateful_controls_are_rejected_before_credential_or_upstream_use",
+    ),
+    (
+        "r3-17-materializer",
+        "proxy::direct_execution_regression::responses_target_materializes_native_requests_for_all_public_downstreams_and_modes",
+    ),
+    (
+        "r3-17-source-check",
+        "controller::provider::tests::responses_source_check_saved_and_draft_keys_share_native_contract_without_proxy_logs",
+    ),
+    (
+        "r3-17-openai-base",
+        "proxy::direct_execution_regression::openai_to_responses_base_cell_success_is_verified",
+    ),
+    (
+        "r3-17-responses-base",
+        "proxy::direct_execution_regression::responses_to_responses_base_cell_success_is_verified",
+    ),
+    (
+        "r3-17-anthropic-base",
+        "proxy::direct_execution_regression::anthropic_to_responses_base_cell_success_is_verified",
+    ),
+    (
+        "r3-17-gemini-base",
+        "proxy::direct_execution_regression::gemini_to_responses_base_cell_success_is_verified",
+    ),
+    (
+        "r3-17-http-error",
+        "proxy::direct_execution_regression::responses_target_http_429_is_authentic_bounded_and_never_retried_for_all_downstreams",
+    ),
+    (
+        "r3-17-cancellation",
+        "proxy::direct_execution_regression::responses_target_precommit_client_cancellation_returns_499_and_releases_once",
+    ),
+    (
+        "r3-17-terminal-cost",
+        "proxy::direct_execution_regression::responses_non_stream_incomplete_is_billed_but_failed_and_illegal_finals_are_not",
+    ),
+    (
+        "r3-17-stream-terminal-error",
+        "proxy::direct_execution_regression::responses_stream_failed_and_error_events_emit_one_terminal_without_cost_for_all_downstreams",
+    ),
+    (
+        "r3-17-stream-eof",
+        "proxy::direct_execution_regression::responses_stream_eof_without_terminal_fails_closed_for_all_downstreams",
+    ),
+    (
+        "r3-17-body-limit",
+        "proxy::direct_execution_regression::responses_target_success_body_limits_fail_without_cost_for_all_downstreams",
+    ),
+    (
+        "r3-17-route-boundary",
+        "proxy::direct_execution_regression::responses_stateful_resource_paths_are_unregistered_and_have_zero_side_effects",
+    ),
+    (
+        "r3-17-models-boundary",
+        "proxy::direct_execution_regression::models_routes_apply_static_kind_and_source_operation_filters_without_exposing_kind",
+    ),
+    (
+        "r3-17-openai-tools-cell",
+        "proxy::direct_execution_regression::openai_to_responses_tools_cell_is_full",
+    ),
+    (
+        "r3-17-responses-tools-cell",
+        "proxy::direct_execution_regression::responses_to_responses_tools_cell_is_full",
+    ),
+    (
+        "r3-17-anthropic-tools-cell",
+        "proxy::direct_execution_regression::anthropic_to_responses_tools_cell_is_full",
+    ),
+    (
+        "r3-17-gemini-tools-cell",
+        "proxy::direct_execution_regression::gemini_to_responses_tools_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-17-openai-reasoning-cell",
+        "proxy::direct_execution_regression::openai_to_responses_reasoning_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-17-responses-reasoning-cell",
+        "proxy::direct_execution_regression::responses_to_responses_reasoning_cell_is_full",
+    ),
+    (
+        "r3-17-anthropic-reasoning-cell",
+        "proxy::direct_execution_regression::anthropic_to_responses_reasoning_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-17-gemini-reasoning-cell",
+        "proxy::direct_execution_regression::gemini_to_responses_reasoning_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-17-openai-multimodal-cell",
+        "proxy::direct_execution_regression::openai_to_responses_multimodal_cell_is_full",
+    ),
+    (
+        "r3-17-responses-multimodal-cell",
+        "proxy::direct_execution_regression::responses_to_responses_multimodal_cell_is_full",
+    ),
+    (
+        "r3-17-anthropic-multimodal-cell",
+        "proxy::direct_execution_regression::anthropic_to_responses_multimodal_cell_is_full",
+    ),
+    (
+        "r3-17-gemini-multimodal-cell",
+        "proxy::direct_execution_regression::gemini_to_responses_multimodal_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-17-openai-structured-cell",
+        "proxy::direct_execution_regression::openai_to_responses_structured_output_cell_is_full",
+    ),
+    (
+        "r3-17-responses-structured-cell",
+        "proxy::direct_execution_regression::responses_to_responses_structured_output_cell_is_full",
+    ),
+    (
+        "r3-17-anthropic-structured-cell",
+        "proxy::direct_execution_regression::anthropic_to_responses_structured_output_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-17-gemini-structured-cell",
+        "proxy::direct_execution_regression::gemini_to_responses_structured_output_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-17-tools-reject",
+        "proxy::direct_execution_regression::responses_target_rejects_invalid_or_forced_nonportable_tools_before_credentials",
+    ),
+    (
+        "r3-17-reasoning-reject",
+        "proxy::direct_execution_regression::responses_target_rejects_reasoning_conflicts_before_credentials",
+    ),
+    (
+        "r3-17-multimodal-reject",
+        "proxy::direct_execution_regression::responses_target_rejects_all_unportable_media_before_credentials",
+    ),
+    (
+        "r3-17-structured-reject",
+        "proxy::direct_execution_regression::responses_target_rejects_invalid_structured_outputs_before_credentials",
+    ),
+];
+
+fn validate_r317_executable_evidence(evidence: &HashMap<&str, &Evidence>) -> Result<(), String> {
+    for (id, reference) in REQUIRED_R317_EXECUTABLE_EVIDENCE {
+        let item = evidence
+            .get(id)
+            .ok_or_else(|| format!("R3.17 requires executable evidence '{id}'"))?;
+        if item.kind != EvidenceKind::Test || item.reference != reference {
+            return Err(format!(
+                "R3.17 evidence '{id}' must reference stable automated test '{reference}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_transform_runtime_contract(
     contract: &TransformRuntimeContract,
     evidence: &HashMap<&str, &Evidence>,
@@ -771,7 +933,12 @@ fn expected_transform_runtime_contract() -> TransformRuntimeContract {
         },
         advanced_cell_owners: UpstreamProtocol::ALL
             .into_iter()
-            .filter(|upstream_protocol| *upstream_protocol != UpstreamProtocol::Openai)
+            .filter(|upstream_protocol| {
+                !matches!(
+                    upstream_protocol,
+                    UpstreamProtocol::Openai | UpstreamProtocol::Responses
+                )
+            })
             .map(|upstream_protocol| TransformAdvancedCellOwner {
                 upstream_protocol,
                 owner: generation_owner(upstream_protocol).to_string(),
@@ -1345,14 +1512,15 @@ fn validate_generation_cells(
 }
 
 fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String> {
-    let verified_cell = matches!(
-        (cell.downstream, cell.upstream),
-        (DownstreamProtocol::Openai, UpstreamProtocol::Openai)
-            | (DownstreamProtocol::Responses, UpstreamProtocol::Openai)
-            | (DownstreamProtocol::Anthropic, UpstreamProtocol::Openai)
-            | (DownstreamProtocol::Gemini, UpstreamProtocol::Openai)
-            | (DownstreamProtocol::Gemini, UpstreamProtocol::Gemini)
-    );
+    let verified_cell = cell.upstream == UpstreamProtocol::Responses
+        || matches!(
+            (cell.downstream, cell.upstream),
+            (DownstreamProtocol::Openai, UpstreamProtocol::Openai)
+                | (DownstreamProtocol::Responses, UpstreamProtocol::Openai)
+                | (DownstreamProtocol::Anthropic, UpstreamProtocol::Openai)
+                | (DownstreamProtocol::Gemini, UpstreamProtocol::Openai)
+                | (DownstreamProtocol::Gemini, UpstreamProtocol::Gemini)
+        );
     let base_statuses = cell.base.entries().map(|(_, assessment)| assessment.status);
     if verified_cell {
         if !base_statuses
@@ -1374,14 +1542,12 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
         ));
     }
 
-    if matches!(
-        cell.upstream,
-        UpstreamProtocol::Responses | UpstreamProtocol::Anthropic
-    ) && !cell
-        .base
-        .entries()
-        .into_iter()
-        .all(|(_, assessment)| assessment.status == BaseStatus::Unavailable)
+    if cell.upstream == UpstreamProtocol::Anthropic
+        && !cell
+            .base
+            .entries()
+            .into_iter()
+            .all(|(_, assessment)| assessment.status == BaseStatus::Unavailable)
     {
         return Err(format!(
             "native {:?} materialization is unavailable in every base dimension",
@@ -1406,6 +1572,41 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
                 ));
             }
         }
+    } else if cell.upstream == UpstreamProtocol::Responses {
+        for (dimension, assessment) in cell.base.entries() {
+            let expected_evidence = expected_responses_base_evidence(cell.downstream, dimension);
+            if assessment.status != BaseStatus::Verified
+                || assessment
+                    .evidence
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    != expected_evidence
+            {
+                return Err(format!(
+                    "R3.17 base cell {:?}->Responses {dimension} must be verified with its exact direct-execution evidence",
+                    cell.downstream
+                ));
+            }
+        }
+        for (dimension, assessment) in cell.advanced.entries() {
+            let expected_status = expected_responses_advanced_status(cell.downstream, dimension);
+            let expected_evidence =
+                expected_responses_advanced_evidence(cell.downstream, dimension);
+            if assessment.status != expected_status
+                || assessment
+                    .evidence
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    != expected_evidence
+            {
+                return Err(format!(
+                    "R3.17 advanced cell {:?}->Responses {dimension} must be {:?} with its exact executable main/diagnostic/rejection evidence",
+                    cell.downstream, expected_status
+                ));
+            }
+        }
     } else if !cell
         .advanced
         .entries()
@@ -1413,11 +1614,84 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
         .all(|(_, assessment)| assessment.status == AdvancedStatus::NotVerified)
     {
         return Err(format!(
-            "advanced dimensions outside the completed OpenAI upstream column for {:?}->{:?} must remain not_verified",
+            "advanced dimensions outside the completed OpenAI and Responses upstream columns for {:?}->{:?} must remain not_verified",
             cell.downstream, cell.upstream
         ));
     }
     Ok(())
+}
+
+fn expected_responses_base_evidence(
+    downstream: DownstreamProtocol,
+    dimension: &str,
+) -> Vec<&'static str> {
+    let success = match downstream {
+        DownstreamProtocol::Openai => "r3-17-openai-base",
+        DownstreamProtocol::Responses => "r3-17-responses-base",
+        DownstreamProtocol::Anthropic => "r3-17-anthropic-base",
+        DownstreamProtocol::Gemini => "r3-17-gemini-base",
+    };
+    match dimension {
+        "non_stream_text" | "stream_text" => vec![success, "r3-17-materializer"],
+        "usage" | "normal_termination" => vec![success, "r3-17-terminal-cost"],
+        "upstream_error" => vec![
+            "r3-17-http-error",
+            "r3-17-stream-terminal-error",
+            "r3-17-stream-eof",
+            "r3-17-body-limit",
+        ],
+        "cancellation" => vec!["r3-17-cancellation"],
+        _ => unreachable!("base dimensions are closed"),
+    }
+}
+
+fn expected_responses_advanced_status(
+    downstream: DownstreamProtocol,
+    dimension: &str,
+) -> AdvancedStatus {
+    match (downstream, dimension) {
+        (DownstreamProtocol::Openai, "tools" | "multimodal" | "structured_output")
+        | (DownstreamProtocol::Responses, _)
+        | (DownstreamProtocol::Anthropic, "tools" | "multimodal") => AdvancedStatus::Full,
+        _ => AdvancedStatus::ControlledLoss,
+    }
+}
+
+fn expected_responses_advanced_evidence(
+    downstream: DownstreamProtocol,
+    dimension: &str,
+) -> Vec<&'static str> {
+    let cell = match (downstream, dimension) {
+        (DownstreamProtocol::Openai, "tools") => "r3-17-openai-tools-cell",
+        (DownstreamProtocol::Responses, "tools") => "r3-17-responses-tools-cell",
+        (DownstreamProtocol::Anthropic, "tools") => "r3-17-anthropic-tools-cell",
+        (DownstreamProtocol::Gemini, "tools") => "r3-17-gemini-tools-cell",
+        (DownstreamProtocol::Openai, "reasoning") => "r3-17-openai-reasoning-cell",
+        (DownstreamProtocol::Responses, "reasoning") => "r3-17-responses-reasoning-cell",
+        (DownstreamProtocol::Anthropic, "reasoning") => "r3-17-anthropic-reasoning-cell",
+        (DownstreamProtocol::Gemini, "reasoning") => "r3-17-gemini-reasoning-cell",
+        (DownstreamProtocol::Openai, "multimodal") => "r3-17-openai-multimodal-cell",
+        (DownstreamProtocol::Responses, "multimodal") => "r3-17-responses-multimodal-cell",
+        (DownstreamProtocol::Anthropic, "multimodal") => "r3-17-anthropic-multimodal-cell",
+        (DownstreamProtocol::Gemini, "multimodal") => "r3-17-gemini-multimodal-cell",
+        (DownstreamProtocol::Openai, "structured_output") => "r3-17-openai-structured-cell",
+        (DownstreamProtocol::Responses, "structured_output") => "r3-17-responses-structured-cell",
+        (DownstreamProtocol::Anthropic, "structured_output") => "r3-17-anthropic-structured-cell",
+        (DownstreamProtocol::Gemini, "structured_output") => "r3-17-gemini-structured-cell",
+        _ => unreachable!("advanced dimensions are a closed four-by-four matrix"),
+    };
+    if expected_responses_advanced_status(downstream, dimension) == AdvancedStatus::ControlledLoss {
+        let rejection = match dimension {
+            "tools" => "r3-17-tools-reject",
+            "reasoning" => "r3-17-reasoning-reject",
+            "multimodal" => "r3-17-multimodal-reject",
+            "structured_output" => "r3-17-structured-reject",
+            _ => unreachable!("advanced dimensions are closed"),
+        };
+        vec![cell, rejection]
+    } else {
+        vec![cell]
+    }
 }
 
 fn expected_openai_advanced_status(
@@ -2483,11 +2757,11 @@ mod tests {
     #[test]
     fn missing_owner_is_rejected() {
         let mut matrix = canonical_matrix();
-        matrix.generation_cells[1].advanced.tools.owner = None;
+        matrix.generation_cells[2].advanced.tools.owner = None;
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.17")
+                .contains("must be owned by R3.18")
         );
     }
 
@@ -2608,6 +2882,55 @@ mod tests {
             .iter_mut()
             .find(|item| item.id == "r3-16-tools-direct")
             .expect("R3.16 tools evidence")
+            .reference = "wrong-test".to_string();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("must reference stable automated test")
+        );
+    }
+
+    #[test]
+    fn r317_base_advanced_owner_and_executable_reference_drift_are_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[1].base.non_stream_text.status = BaseStatus::Partial;
+        matrix.generation_cells[1].base.non_stream_text.owner = Some("R3.17".to_string());
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("representative cell")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[1].base.non_stream_text.owner = Some("R3.17".to_string());
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("complete and must not have an owner")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[1].advanced.reasoning.status = AdvancedStatus::Full;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("R3.17 advanced cell")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[16].advanced.tools.evidence.pop();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("R3.17 advanced cell")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix
+            .evidence
+            .iter_mut()
+            .find(|item| item.id == "r3-17-openai-base")
+            .expect("R3.17 base evidence")
             .reference = "wrong-test".to_string();
         assert!(
             validate_matrix(&matrix)

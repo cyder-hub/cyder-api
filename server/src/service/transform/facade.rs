@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::TransformResult;
-pub use super::response::ResponseTransformValue;
+pub use super::response::{ResponseApplicationOutcome, ResponseTransformValue};
 use super::{request, response};
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 use crate::utils::usage::UsageInfo;

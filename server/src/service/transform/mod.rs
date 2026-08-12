@@ -28,8 +28,8 @@ pub use diagnostics::{
 use diagnostics::{TransformDiagnosticFact as DiagnosticFact, record_captured_transform_fact};
 pub(crate) use facade::validate_final_generation_request;
 pub use facade::{
-    ResponseTransformValue, finalize_request_data, transform_request_data, transform_result,
-    transform_result_with_cost,
+    ResponseApplicationOutcome, ResponseTransformValue, finalize_request_data,
+    transform_request_data, transform_result, transform_result_with_cost,
 };
 use policy::PolicyEngine;
 pub(crate) use stream::AnthropicActiveBlockKind;
@@ -38,7 +38,10 @@ pub use stream::{
     SessionContext, StreamBatchTransformOutput, StreamFrameDisposition, StreamTransformOutput,
     StreamTransformer,
 };
-pub(crate) use stream::{FatalStreamEncodeError, FatalStreamErrorFact, encode_fatal_stream_error};
+pub(crate) use stream::{
+    FatalStreamEncodeError, FatalStreamErrorFact, SourceStreamTermination,
+    encode_fatal_stream_error,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TransformProtocol {

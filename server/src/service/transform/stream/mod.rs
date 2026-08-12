@@ -15,6 +15,7 @@ pub use session::{
     AnthropicActiveBlockState, AnthropicSessionState, GeminiSessionState, ResponsesSessionState,
     SessionContext,
 };
+pub(crate) use transformer::SourceStreamTermination;
 pub use transformer::{
     StreamBatchTransformOutput, StreamFrameDisposition, StreamTransformOutput, StreamTransformer,
 };

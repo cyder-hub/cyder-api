@@ -45,8 +45,8 @@ use crate::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
         transform::{
-            FatalStreamEncodeError, FatalStreamErrorFact, StreamTransformer, TransformFailure,
-            encode_fatal_stream_error,
+            FatalStreamEncodeError, FatalStreamErrorFact, SourceStreamTermination,
+            StreamTransformer, TransformFailure, encode_fatal_stream_error,
         },
         upstream_response::{UpstreamContentEncoding, parse_content_encoding},
     },
@@ -725,17 +725,27 @@ async fn run_guarded_stream_worker(
                 }
                 let transformed_events = transform_output.value.events;
                 sync_stream_usage_to_log_context(&log_context, &mut transformer).await;
-                for transformed_event in transformed_events {
+                let source_termination = transformer.source_termination();
+                let terminal_event_index = source_termination
+                    .is_some()
+                    .then(|| transformed_events.len().checked_sub(1))
+                    .flatten();
+                for (event_index, transformed_event) in transformed_events.into_iter().enumerate() {
                     let downstream_openai_done =
                         is_downstream_openai_done_event(downstream_protocol, &transformed_event);
                     let transformed_chunk = transformed_event.to_bytes().freeze();
-                    let delivery = send_body_frame(
-                        &sender,
-                        Ok(transformed_chunk),
-                        &cancellation,
-                        &coordinator,
-                    )
-                    .await;
+                    let delivery = if terminal_event_index == Some(event_index) {
+                        send_terminal_body_event(
+                            &sender,
+                            transformed_chunk,
+                            &cancellation,
+                            &coordinator,
+                        )
+                        .await
+                    } else {
+                        send_body_frame(&sender, Ok(transformed_chunk), &cancellation, &coordinator)
+                            .await
+                    };
                     if let Err(delivery_error) = delivery {
                         let proxy_error = match delivery_error {
                             FrameDeliveryError::ClientCancelled
@@ -786,6 +796,47 @@ async fn run_guarded_stream_worker(
                         return;
                     }
                 }
+                match source_termination {
+                    Some(SourceStreamTermination::Succeeded) => {
+                        finalize_guarded_stream_success(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &log_context,
+                            transformer,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &model_str,
+                            &mut api_key_request_lease,
+                        )
+                        .await;
+                        return;
+                    }
+                    Some(SourceStreamTermination::Failed) => {
+                        let proxy_error = upstream_stream_error(
+                            ProxyErrorCode::UpstreamResponseError,
+                            &response_visibility,
+                            "Responses stream reported an application failure",
+                        );
+                        log_stream_transform_summary_once(&log_context, &transformer).await;
+                        coordinator.try_terminate_error(&proxy_error);
+                        finalize_streaming_error_and_release(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &log_context,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &mut api_key_request_lease,
+                            &proxy_error,
+                        )
+                        .await;
+                        return;
+                    }
+                    None => {}
+                }
             }
 
             next_frame = if at_eof {
@@ -801,6 +852,27 @@ async fn run_guarded_stream_worker(
 
     if cancellation.is_cancelled() {
         log_stream_transform_summary_once(&log_context, &transformer).await;
+        return;
+    }
+    if let Err(failure) = transformer.validate_source_termination() {
+        let proxy_error = transform_failure_to_proxy_error(&failure, response_visibility.current());
+        log_stream_transform_failure_once(&log_context, &transformer, &failure).await;
+        finalize_guarded_transform_failure(
+            &app_state,
+            &cancellation,
+            &coordinator,
+            &sender,
+            &log_context,
+            &url,
+            status_code,
+            cost_catalog_version.as_ref(),
+            &response_visibility,
+            &mut api_key_request_lease,
+            downstream_protocol,
+            &request_id,
+            &proxy_error,
+        )
+        .await;
         return;
     }
     if downstream_protocol == DownstreamProtocol::Openai
@@ -969,7 +1041,7 @@ pub(super) async fn handle_streaming_response_guarded(
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
-    use axum::http::{HeaderMap, HeaderValue, header::CONTENT_ENCODING};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_ENCODING};
 
     use super::{
         downstream_response_build_error, encode_guarded_transform_terminal, upstream_stream_error,
@@ -1016,6 +1088,10 @@ mod tests {
         );
         assert_eq!(before_first_chunk.stage(), ExecutionStage::UpstreamResponse);
         assert_eq!(
+            before_first_chunk.status_code(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
             before_first_chunk.response_visibility(),
             ResponseVisibility::HeadersCommitted
         );
@@ -1027,6 +1103,7 @@ mod tests {
             "stream interrupted",
         );
         assert_eq!(after_first_chunk.stage(), ExecutionStage::UpstreamResponse);
+        assert_eq!(after_first_chunk.status_code(), StatusCode::BAD_GATEWAY);
         assert_eq!(
             after_first_chunk.response_visibility(),
             ResponseVisibility::BodyStarted

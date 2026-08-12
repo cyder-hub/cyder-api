@@ -329,7 +329,7 @@ paths:
       - $ref: "#/components/parameters/SourceId"
     put:
       operationId: updateProviderSource
-      description: Updates Source endpoint, proxy, enabled, and default target state. Profile is immutable and cannot be supplied.
+      description: Updates Source base URL, Profile-allowed operation settings, proxy, enabled, and default target state. Profile is immutable and is rejected when supplied.
       requestBody:
         required: true
         content:
@@ -337,6 +337,7 @@ paths:
             schema: { $ref: "#/components/schemas/UpstreamSourceUpdate" }
       responses:
         "200": { $ref: "#/components/responses/UpstreamSource" }
+        "400": { $ref: "#/components/responses/ManagerError" }
         "422": { $ref: "#/components/responses/ManagerError" }
     delete:
       operationId: deleteProviderSource
@@ -524,40 +525,163 @@ components:
   schemas:
     UpstreamProfileType:
       type: string
-      enum: [OPENAI, GEMINI, VERTEX, VERTEX_OPENAI, OLLAMA, ANTHROPIC, RESPONSES, GEMINI_OPENAI]
-    UpstreamSourceInput:
+      enum: [OPENAI, OPENAI_COMPATIBLE, GEMINI, VERTEX, OLLAMA, ANTHROPIC, RESPONSES, GEMINI_OPENAI]
+    SourceLifecycleInput:
       type: object
-      additionalProperties: false
-      required: [profile_type, endpoint]
       properties:
-        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
-        endpoint: { type: string, format: uri, minLength: 1 }
         use_proxy: { type: boolean, default: false }
         is_enabled: { type: boolean, default: true }
         is_default: { type: boolean, default: false }
+    OpenAiSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type]
+          properties:
+            profile_type: { type: string, const: OPENAI }
+            base_url: { type: [string, "null"], format: uri, minLength: 1, description: Null or omission persists the official OpenAI base URL. }
+            chat_completions_enabled: { type: [boolean, "null"], default: true }
+            chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+            embeddings_enabled: { type: [boolean, "null"], default: true }
+            embeddings_path_override: { type: [string, "null"], minLength: 1 }
+      unevaluatedProperties: false
+    GeminiOpenAiSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type]
+          properties:
+            profile_type: { type: string, const: GEMINI_OPENAI }
+            base_url: { type: [string, "null"], format: uri, minLength: 1, description: Null or omission persists the official Gemini OpenAI-compatible base URL. }
+            chat_completions_enabled: { type: [boolean, "null"], default: true }
+            chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+            embeddings_enabled: { type: [boolean, "null"], default: true }
+            embeddings_path_override: { type: [string, "null"], minLength: 1 }
+      unevaluatedProperties: false
+    OpenAiCompatibleSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type, base_url]
+          properties:
+            profile_type: { type: string, const: OPENAI_COMPATIBLE }
+            base_url: { type: string, format: uri, minLength: 1 }
+            chat_completions_enabled: { type: [boolean, "null"], default: true }
+            chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+            embeddings_enabled: { type: [boolean, "null"], default: false }
+            embeddings_path_override: { type: [string, "null"], minLength: 1 }
+            rerank_enabled: { type: [boolean, "null"], default: false }
+            rerank_path_override: { type: [string, "null"], minLength: 1 }
+      unevaluatedProperties: false
+    NativeSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type, base_url]
+          properties:
+            profile_type: { type: string, enum: [GEMINI, VERTEX, OLLAMA, ANTHROPIC, RESPONSES] }
+            base_url: { type: string, format: uri, minLength: 1 }
+      unevaluatedProperties: false
+    UpstreamSourceInput:
+      oneOf:
+        - $ref: "#/components/schemas/OpenAiSourceInput"
+        - $ref: "#/components/schemas/OpenAiCompatibleSourceInput"
+        - $ref: "#/components/schemas/GeminiOpenAiSourceInput"
+        - $ref: "#/components/schemas/NativeSourceInput"
+      discriminator:
+        propertyName: profile_type
+        mapping:
+          OPENAI: "#/components/schemas/OpenAiSourceInput"
+          OPENAI_COMPATIBLE: "#/components/schemas/OpenAiCompatibleSourceInput"
+          GEMINI_OPENAI: "#/components/schemas/GeminiOpenAiSourceInput"
+          GEMINI: "#/components/schemas/NativeSourceInput"
+          VERTEX: "#/components/schemas/NativeSourceInput"
+          OLLAMA: "#/components/schemas/NativeSourceInput"
+          ANTHROPIC: "#/components/schemas/NativeSourceInput"
+          RESPONSES: "#/components/schemas/NativeSourceInput"
     UpstreamSourceUpdate:
       type: object
       additionalProperties: false
       properties:
-        endpoint: { type: [string, "null"], format: uri, minLength: 1 }
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType", description: Immutable; the server rejects this field when present. }
+        base_url: { type: [string, "null"], format: uri, minLength: 1 }
         use_proxy: { type: [boolean, "null"] }
+        chat_completions_enabled: { type: [boolean, "null"] }
+        chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+        embeddings_enabled: { type: [boolean, "null"] }
+        embeddings_path_override: { type: [string, "null"], minLength: 1 }
+        rerank_enabled: { type: [boolean, "null"] }
+        rerank_path_override: { type: [string, "null"], minLength: 1 }
         is_enabled: { type: [boolean, "null"] }
         is_default: { type: [boolean, "null"] }
-    UpstreamSource:
+    SourceCommon:
       type: object
-      additionalProperties: false
-      required: [id, provider_id, profile_type, endpoint, use_proxy, is_enabled, is_default, deleted_at, created_at, updated_at]
+      required: [id, provider_id, base_url, base_url_is_default, use_proxy, is_enabled, is_default, deleted_at, created_at, updated_at]
       properties:
         id: { type: integer, format: int64 }
         provider_id: { type: integer, format: int64 }
-        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
-        endpoint: { type: string, format: uri }
+        base_url: { type: string, format: uri }
+        base_url_is_default: { type: boolean }
         use_proxy: { type: boolean }
         is_enabled: { type: boolean }
         is_default: { type: boolean }
         deleted_at: { type: [integer, "null"], format: int64 }
         created_at: { type: integer, format: int64 }
         updated_at: { type: integer, format: int64 }
+    OpenAiSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type, chat_completions_enabled, chat_completions_path_override, embeddings_enabled, embeddings_path_override]
+          properties:
+            profile_type: { type: string, const: OPENAI }
+            chat_completions_enabled: { type: boolean }
+            chat_completions_path_override: { type: [string, "null"] }
+            embeddings_enabled: { type: boolean }
+            embeddings_path_override: { type: [string, "null"] }
+      unevaluatedProperties: false
+    GeminiOpenAiSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type, chat_completions_enabled, chat_completions_path_override, embeddings_enabled, embeddings_path_override]
+          properties:
+            profile_type: { type: string, const: GEMINI_OPENAI }
+            chat_completions_enabled: { type: boolean }
+            chat_completions_path_override: { type: [string, "null"] }
+            embeddings_enabled: { type: boolean }
+            embeddings_path_override: { type: [string, "null"] }
+      unevaluatedProperties: false
+    OpenAiCompatibleSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type, chat_completions_enabled, chat_completions_path_override, embeddings_enabled, embeddings_path_override, rerank_enabled, rerank_path_override]
+          properties:
+            profile_type: { type: string, const: OPENAI_COMPATIBLE }
+            chat_completions_enabled: { type: boolean }
+            chat_completions_path_override: { type: [string, "null"] }
+            embeddings_enabled: { type: boolean }
+            embeddings_path_override: { type: [string, "null"] }
+            rerank_enabled: { type: boolean }
+            rerank_path_override: { type: [string, "null"] }
+      unevaluatedProperties: false
+    NativeSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type]
+          properties:
+            profile_type: { type: string, enum: [GEMINI, VERTEX, OLLAMA, ANTHROPIC, RESPONSES] }
+      unevaluatedProperties: false
+    UpstreamSource:
+      oneOf:
+        - $ref: "#/components/schemas/OpenAiSource"
+        - $ref: "#/components/schemas/OpenAiCompatibleSource"
+        - $ref: "#/components/schemas/GeminiOpenAiSource"
+        - $ref: "#/components/schemas/NativeSource"
+      discriminator:
+        propertyName: profile_type
     ProviderAggregate:
       type: object
       additionalProperties: false
@@ -611,24 +735,53 @@ components:
     ProviderBootstrap:
       type: object
       additionalProperties: false
-      required: [initial_source, api_key, model_name, key]
+      required: [initial_source, api_key, model_name, model_kind, key]
       properties:
         initial_source: { $ref: "#/components/schemas/UpstreamSourceInput" }
         api_key: { type: string, minLength: 1 }
         model_name: { type: string, minLength: 1 }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
         name: { type: [string, "null"] }
         key: { type: string, minLength: 1 }
         real_model_name: { type: [string, "null"] }
         save_and_test: { type: boolean, default: false }
         api_key_description: { type: [string, "null"] }
     ProviderCheck:
+      description: Exactly one saved CHAT model or ephemeral CHAT draft model. Draft models are neither persisted nor bound and do not select Model-level or suffix Patch variants.
+      oneOf:
+        - $ref: "#/components/schemas/ProviderCheckSavedModel"
+        - $ref: "#/components/schemas/ProviderCheckDraftModel"
+    ProviderCheckSavedModel:
       type: object
       additionalProperties: false
+      required: [model_id]
+      anyOf:
+        - required: [provider_api_key_id]
+        - required: [provider_api_key]
       properties:
-        model_id: { type: [integer, "null"], format: int64 }
-        model_name: { type: [string, "null"] }
+        model_id: { type: integer, format: int64 }
         provider_api_key_id: { type: [integer, "null"], format: int64 }
         provider_api_key: { type: [string, "null"] }
+    ProviderCheckDraftModel:
+      type: object
+      additionalProperties: false
+      required: [draft_model]
+      anyOf:
+        - required: [provider_api_key_id]
+        - required: [provider_api_key]
+      properties:
+        draft_model: { $ref: "#/components/schemas/ProviderCheckDraftModelValue" }
+        provider_api_key_id: { type: [integer, "null"], format: int64 }
+        provider_api_key: { type: [string, "null"] }
+    ProviderCheckDraftModelValue:
+      type: object
+      additionalProperties: false
+      required: [model_kind, upstream_model_name]
+      properties:
+        model_kind:
+          type: string
+          const: CHAT
+        upstream_model_name: { type: string, minLength: 1 }
     SourceEvidence:
       type: object
       additionalProperties: false
@@ -646,6 +799,9 @@ components:
     ModelSourceSelectionMode:
       type: string
       enum: [INHERIT_ALL, EXPLICIT]
+    ModelKind:
+      type: string
+      enum: [CHAT, EMBEDDING, RERANK]
     ModelSourceBinding:
       type: object
       additionalProperties: false
@@ -745,11 +901,12 @@ components:
     ModelCreate:
       type: object
       additionalProperties: false
-      required: [provider_id, model_name]
+      required: [provider_id, model_name, model_kind]
       properties:
         provider_id: { type: integer, format: int64 }
         model_name: { type: string, minLength: 1 }
         real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
         is_enabled: { type: boolean, default: true }
         source_config: { $ref: "#/components/schemas/ModelSourceConfig" }
     ModelUpdate:
@@ -759,17 +916,19 @@ components:
       properties:
         model_name: { type: string, minLength: 1 }
         real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind", description: Immutable; the server rejects this field when present. }
         is_enabled: { type: boolean }
         cost_catalog_id: { type: [integer, "null"], format: int64 }
     Model:
       type: object
       additionalProperties: false
-      required: [id, provider_id, model_name, real_model_name, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at]
+      required: [id, provider_id, model_name, real_model_name, model_kind, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at]
       properties:
         id: { type: integer, format: int64 }
         provider_id: { type: integer, format: int64 }
         model_name: { type: string }
         real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
         cost_catalog_id: { type: [integer, "null"], format: int64 }
         source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
         deleted_at: { type: [integer, "null"], format: int64 }
@@ -779,12 +938,13 @@ components:
     ModelResponse:
       type: object
       additionalProperties: false
-      required: [id, provider_id, model_name, real_model_name, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at, source_config]
+      required: [id, provider_id, model_name, real_model_name, model_kind, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at, source_config]
       properties:
         id: { type: integer, format: int64 }
         provider_id: { type: integer, format: int64 }
         model_name: { type: string }
         real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
         cost_catalog_id: { type: [integer, "null"], format: int64 }
         source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
         deleted_at: { type: [integer, "null"], format: int64 }
@@ -795,7 +955,7 @@ components:
     ModelSummary:
       type: object
       additionalProperties: false
-      required: [id, provider_id, provider_key, provider_name, model_name, real_model_name, source_selection_mode, is_enabled, source_config]
+      required: [id, provider_id, provider_key, provider_name, model_name, real_model_name, model_kind, source_selection_mode, is_enabled, source_config]
       properties:
         id: { type: integer, format: int64 }
         provider_id: { type: integer, format: int64 }
@@ -803,6 +963,7 @@ components:
         provider_name: { type: string }
         model_name: { type: string }
         real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
         source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
         is_enabled: { type: boolean }
         source_config: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
@@ -830,7 +991,6 @@ components:
         operation: { $ref: "#/components/schemas/RequestPatchOperation" }
         value_json: { $ref: "#/components/schemas/RequestPatchScalarValue" }
         description: { type: [string, "null"] }
-        confirm_dangerous_target: { type: boolean, default: false }
     RequestPatchVariantInput:
       type: object
       additionalProperties: false
@@ -919,15 +1079,6 @@ components:
           items: { $ref: "#/components/schemas/RequestPatchVariantAggregate" }
         variant_count: { type: integer, minimum: 0 }
         rule_count: { type: integer, minimum: 0 }
-    RequestPatchDangerousTargetConfirmation:
-      type: object
-      additionalProperties: false
-      required: [placement, target, reason, confirm_field]
-      properties:
-        placement: { $ref: "#/components/schemas/RequestPatchPlacement" }
-        target: { type: string }
-        reason: { type: string }
-        confirm_field: { type: string }
     RequestPatchPreviewConflict:
       type: object
       additionalProperties: false
@@ -943,13 +1094,10 @@ components:
     RequestPatchVariantPreview:
       type: object
       additionalProperties: false
-      required: [suffix, rule_count, dangerous_targets, conflicts, affected_model_count, valid, failure_reason]
+      required: [suffix, rule_count, conflicts, affected_model_count, valid, failure_reason]
       properties:
         suffix: { type: [string, "null"] }
         rule_count: { type: integer, minimum: 0 }
-        dangerous_targets:
-          type: array
-          items: { $ref: "#/components/schemas/RequestPatchDangerousTargetConfirmation" }
         conflicts:
           type: array
           items: { $ref: "#/components/schemas/RequestPatchPreviewConflict" }
@@ -1120,9 +1268,9 @@ components:
     BootstrapCheckResult:
       type: object
       additionalProperties: false
-      required: [success, message]
+      required: [status, message]
       properties:
-        success: { type: boolean }
+        status: { type: string, enum: [success, failed, check_skipped] }
         message: { type: string }
     ProviderBootstrapResult:
       type: object

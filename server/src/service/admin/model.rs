@@ -14,7 +14,9 @@ use crate::database::model_source_binding::{
 use crate::database::provider::Provider;
 use crate::database::request_patch::RequestPatchVariantRepository;
 use crate::database::upstream_source::UpstreamSource;
-use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
+use crate::schema::enum_def::{
+    DownstreamProtocol, ModelKind, UpstreamProfileType, UpstreamProtocol,
+};
 use crate::service::cache::types::{CacheModel, CacheModelSourceBinding, CacheProvider};
 use crate::service::source_selector::{
     SourceSelectionTraceEntry, select_source, upstream_wire_family,
@@ -30,6 +32,7 @@ pub struct CreateModelInput {
     pub provider_id: i64,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub model_kind: ModelKind,
     pub is_enabled: bool,
 }
 
@@ -92,6 +95,7 @@ pub struct ModelSourceExplain {
 pub struct ModelSourceSnapshotOwner {
     pub model_id: i64,
     pub provider_id: i64,
+    pub model_kind: ModelKind,
     pub source_selection_mode: String,
 }
 
@@ -117,6 +121,7 @@ pub fn load_cache_model_snapshots(models: &[Model]) -> Result<HashMap<i64, Cache
                     provider_id: model.provider_id,
                     model_name: model.model_name.clone(),
                     real_model_name: model.real_model_name.clone(),
+                    model_kind: model.model_kind,
                     cost_catalog_id: model.cost_catalog_id,
                     source_selection_mode: model.source_selection_mode.clone(),
                     source_bindings,
@@ -141,6 +146,7 @@ pub fn load_model_source_config_summaries(
             provider_id: owner.provider_id,
             model_name: String::new(),
             real_model_name: None,
+            model_kind: owner.model_kind,
             cost_catalog_id: None,
             source_selection_mode: owner.source_selection_mode.clone(),
             deleted_at: None,
@@ -349,6 +355,7 @@ impl ModelAdminService {
             input.provider_id,
             &input.model_name,
             input.real_model_name.as_deref(),
+            input.model_kind,
             input.is_enabled,
             source_config.as_ref(),
         )?;
@@ -393,6 +400,7 @@ impl ModelAdminService {
         let summary = load_model_source_config_summaries(&[ModelSourceSnapshotOwner {
             model_id: model.id,
             provider_id: model.provider_id,
+            model_kind: model.model_kind,
             source_selection_mode: model.source_selection_mode,
         }])?;
         summary.get(&model.id).cloned().ok_or_else(|| {
@@ -615,12 +623,13 @@ mod tests {
             id: 8102,
             provider_id: 8101,
             profile_type: UpstreamProfileType::Openai,
-            endpoint: "https://admin.example.com/v1".to_string(),
+            base_url: "https://admin.example.com/v1".to_string(),
             use_proxy: false,
             is_enabled: true,
             is_default: true,
             created_at: 1,
             updated_at: 1,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
         }
     }
 
@@ -646,6 +655,7 @@ mod tests {
                         provider_id: 8101,
                         model_name: "admin-model".to_string(),
                         real_model_name: None,
+                        model_kind: crate::schema::enum_def::ModelKind::Chat,
                         is_enabled: true,
                     },
                     Some(explicit_config()),
@@ -746,12 +756,13 @@ mod tests {
                 id: 8103,
                 provider_id: 8101,
                 profile_type: UpstreamProfileType::Anthropic,
-                endpoint: "https://secondary.example.com/v1".to_string(),
+                base_url: "https://secondary.example.com/v1".to_string(),
                 use_proxy: false,
                 is_enabled: true,
                 is_default: false,
                 created_at: 1,
                 updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Anthropic)
             })
             .expect("second Source should seed");
             let catalog = Arc::new(CatalogService::new(true).await);
@@ -763,6 +774,7 @@ mod tests {
                         provider_id: 8101,
                         model_name: "inherit-all-model".to_string(),
                         real_model_name: None,
+                        model_kind: crate::schema::enum_def::ModelKind::Chat,
                         is_enabled: true,
                     },
                     Some(ModelSourceConfig::inherit_all()),
@@ -781,7 +793,6 @@ mod tests {
                     operation: RequestPatchOperation::Set,
                     value_json: Some(Some(serde_json::json!(0.2))),
                     description: None,
-                    confirm_dangerous_target: false,
                 }],
             })
             .expect("Source suffix should be created");

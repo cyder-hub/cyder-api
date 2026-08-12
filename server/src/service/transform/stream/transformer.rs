@@ -172,8 +172,8 @@ impl StreamTransformer {
                 phase: TransformPhase::ResponseObserve,
                 semantic_unit: TransformSemanticUnit::Usage,
                 outcome: TransformOutcomeKind::ObservationDegraded,
-                action: TransformAction::Drop,
-                reason_code: TransformReasonCode::ObservationParseFailed,
+                action: TransformAction::PassThrough,
+                reason_code: TransformReasonCode::UpstreamUsageMissing,
                 safe_summary: None,
             });
             debug!(
@@ -225,8 +225,8 @@ impl StreamTransformer {
                 phase: TransformPhase::ResponseObserve,
                 semantic_unit: TransformSemanticUnit::Usage,
                 outcome: TransformOutcomeKind::ObservationDegraded,
-                action: TransformAction::Drop,
-                reason_code: TransformReasonCode::ObservationParseFailed,
+                action: TransformAction::PassThrough,
+                reason_code: TransformReasonCode::UpstreamUsageMissing,
                 safe_summary: None,
             });
             warn!(

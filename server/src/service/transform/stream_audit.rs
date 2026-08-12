@@ -6,6 +6,7 @@ use serde_json::Value;
 use super::capability::TransformValueKind;
 use super::diagnostics::record_captured_transform_fact;
 use super::providers::{anthropic, openai, responses};
+use super::stream::session::{MAX_STREAM_TOOL_ARGUMENT_BYTES, try_append_tool_arguments};
 use super::stream::{AnthropicActiveBlockKind, StreamTransformContext};
 use super::unified::{
     UnifiedChunkResponse, UnifiedContentPartDelta, UnifiedItem, UnifiedRole, UnifiedStreamEvent,
@@ -326,7 +327,11 @@ fn validate_openai_stream_frame(
                     state.name = Some(name.to_string());
                 }
                 if let Some(arguments) = arguments {
-                    state.arguments.push_str(arguments);
+                    if !try_append_tool_arguments(&mut state.arguments, arguments) {
+                        return Err(SourceStreamSemanticError::invalid(
+                            TransformSemanticUnit::ToolCallDelta,
+                        ));
+                    }
                 }
             }
         }
@@ -568,13 +573,18 @@ fn validate_responses_stream_frame(
             let delta = value.get("delta").and_then(Value::as_str).ok_or_else(|| {
                 SourceStreamSemanticError::invalid(TransformSemanticUnit::ToolCallDelta)
             })?;
-            state
-                .source_tool_arguments
-                .get_mut(item_id)
-                .ok_or_else(|| {
-                    SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
-                })?
-                .push_str(delta);
+            let arguments_buffer =
+                state
+                    .source_tool_arguments
+                    .get_mut(item_id)
+                    .ok_or_else(|| {
+                        SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
+                    })?;
+            if !try_append_tool_arguments(arguments_buffer, delta) {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::ToolCallDelta,
+                ));
+            }
         }
         "response.function_call_arguments.done" => {
             let item_id =
@@ -1316,7 +1326,11 @@ pub(in crate::service::transform) fn validate_openai_stream_chunk(
                     state.name = Some(name.to_string());
                 }
                 if let Some(arguments) = &call.function.arguments {
-                    state.arguments.push_str(arguments);
+                    if !try_append_tool_arguments(&mut state.arguments, arguments) {
+                        return Err(SourceStreamSemanticError::invalid(
+                            TransformSemanticUnit::ToolCallDelta,
+                        ));
+                    }
                 }
             }
         }
@@ -1587,6 +1601,7 @@ fn typed_responses_message_text(
             }
             responses::ItemContentPart::InputText { .. }
             | responses::ItemContentPart::InputImage { .. }
+            | responses::ItemContentPart::InputAudio { .. }
             | responses::ItemContentPart::InputFile { .. } => {
                 return Err(SourceStreamSemanticError::unknown(
                     TransformSemanticUnit::ResponsesUnknownItem,
@@ -1724,13 +1739,17 @@ pub(in crate::service::transform) fn validate_responses_stream_chunk(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
-            state
+            let arguments_buffer = state
                 .source_tool_arguments
                 .get_mut(item_id.as_deref().expect("guarded item id"))
                 .ok_or_else(|| {
                     SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
-                })?
-                .push_str(arguments);
+                })?;
+            if !try_append_tool_arguments(arguments_buffer, arguments) {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::ToolCallDelta,
+                ));
+            }
         }
         ResponsesStreamEvent::ToolCallArgumentsDone {
             item_index,
@@ -1943,6 +1962,52 @@ pub(in crate::service::transform) fn audit_target_stream_events(
     context: &mut StreamTransformContext<'_>,
 ) {
     let target_protocol = TransformProtocol::Downstream(target);
+    for (event_position, event) in events.iter().enumerate() {
+        let UnifiedStreamEvent::ToolCallArgumentsDelta {
+            index, arguments, ..
+        } = event
+        else {
+            continue;
+        };
+        let existing_len = match target {
+            DownstreamProtocol::Anthropic => context
+                .anthropic_active_blocks()
+                .get(index)
+                .map_or(0, |state| state.text.len()),
+            DownstreamProtocol::Responses => context
+                .responses()
+                .active_tool_calls
+                .get(index)
+                .map_or(0, |call| call.arguments.len()),
+            DownstreamProtocol::Gemini => context
+                .gemini_target_tool_calls()
+                .get(index)
+                .map_or(0, |state| state.arguments.len()),
+            DownstreamProtocol::Openai => 0,
+        };
+        let prior_batch_len = events[..event_position]
+            .iter()
+            .filter_map(|prior| match prior {
+                UnifiedStreamEvent::ToolCallArgumentsDelta {
+                    index: prior_index,
+                    arguments,
+                    ..
+                } if prior_index == index => Some(arguments.len()),
+                _ => None,
+            })
+            .sum::<usize>();
+        if target != DownstreamProtocol::Openai
+            && existing_len
+                .saturating_add(prior_batch_len)
+                .saturating_add(arguments.len())
+                > MAX_STREAM_TOOL_ARGUMENT_BYTES
+        {
+            record_rejection(
+                TransformSemanticUnit::ToolCallDelta,
+                TransformReasonCode::InvalidProtocolShape,
+            );
+        }
+    }
     if target == DownstreamProtocol::Gemini {
         let mut tool_calls = context.gemini_target_tool_calls().clone();
         for event in events {
@@ -1986,7 +2051,12 @@ pub(in crate::service::transform) fn audit_target_stream_events(
                         }
                         state.name = Some(name.clone());
                     }
-                    state.arguments.push_str(arguments);
+                    if !try_append_tool_arguments(&mut state.arguments, arguments) {
+                        record_rejection(
+                            TransformSemanticUnit::ToolCallDelta,
+                            TransformReasonCode::InvalidProtocolShape,
+                        );
+                    }
                 }
                 UnifiedStreamEvent::ToolCallStop { index, .. } => {
                     let Some(state) = tool_calls.remove(index) else {

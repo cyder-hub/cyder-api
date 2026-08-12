@@ -311,6 +311,7 @@ const handleModelSheetSaved = (savedModel: EditingModelData) => {
   Object.assign(model, {
     model_name: savedModel.model_name,
     real_model_name: savedModel.real_model_name,
+    model_kind: savedModel.model_kind,
     source_config: savedModel.source_config,
     is_enabled: savedModel.is_enabled,
   });
@@ -321,6 +322,7 @@ const handleCreateModelSaved = (savedModel: EditingModelData) => {
     id: savedModel.id,
     model_name: savedModel.model_name,
     real_model_name: savedModel.real_model_name || null,
+    model_kind: savedModel.model_kind,
     source_config: savedModel.source_config,
     is_enabled: savedModel.is_enabled,
     isEditing: false,

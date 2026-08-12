@@ -33,7 +33,7 @@ use crate::{
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
-        upstream_response::normalize_content_type,
+        upstream_profile::UpstreamOperation, upstream_response::normalize_content_type,
     },
 };
 
@@ -46,6 +46,7 @@ pub(in crate::proxy) enum ProxyResponseMode {
     Utility {
         downstream_protocol: DownstreamProtocol,
         upstream_protocol: UpstreamProtocol,
+        operation: Option<UpstreamOperation>,
     },
 }
 
@@ -59,7 +60,15 @@ impl ProxyResponseMode {
             | Self::Utility {
                 downstream_protocol,
                 upstream_protocol,
+                ..
             } => (downstream_protocol, upstream_protocol),
+        }
+    }
+
+    fn expects_usage(self) -> bool {
+        match self {
+            Self::Generation { .. } => true,
+            Self::Utility { operation, .. } => operation == Some(UpstreamOperation::Embeddings),
         }
     }
 }

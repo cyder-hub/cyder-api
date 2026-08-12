@@ -5,15 +5,16 @@ use serde::Deserialize;
 use super::{DbResult, get_connection};
 use crate::controller::BaseError;
 use crate::database::request_patch::{RequestPatchVariantAggregate, RequestPatchVariantRepository};
+use crate::schema::enum_def::ModelKind;
 use crate::utils::ID_GENERATOR;
-use crate::{db_execute, db_object};
+use crate::{db_execute, db_object_no_default};
 
 use serde::Serialize;
 
 // `Model` is the canonical provider-scoped candidate identity used at execution time.
 // Shared logical names and key-scoped overrides are intentionally modeled elsewhere.
 
-db_object! {
+db_object_no_default! {
     #[derive(Queryable, Selectable, Identifiable, Debug, Clone, serde::Serialize)]
     #[diesel(table_name = model)]
     pub struct Model {
@@ -21,6 +22,7 @@ db_object! {
         pub provider_id: i64,
         pub model_name: String,
         pub real_model_name: Option<String>,
+        pub model_kind: ModelKind,
         pub cost_catalog_id: Option<i64>,
         pub source_selection_mode: String,
         pub deleted_at: Option<i64>,
@@ -36,6 +38,7 @@ pub struct NewModel {
     pub provider_id: i64,
         pub model_name: String,
         pub real_model_name: Option<String>,
+        pub model_kind: ModelKind,
         pub source_selection_mode: String,
         pub is_enabled: bool,
     pub created_at: i64,
@@ -67,6 +70,7 @@ pub struct ModelSummaryItem {
     pub provider_name: String,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub model_kind: ModelKind,
     pub source_selection_mode: String,
     pub is_enabled: bool,
 }
@@ -77,12 +81,14 @@ impl Model {
         provider_id_val: i64,
         model_name_val: &str,
         real_model_name_val: Option<&str>,
+        model_kind_val: ModelKind,
         is_enabled_val: bool,
     ) -> DbResult<Model> {
         Self::create_with_source_config(
             provider_id_val,
             model_name_val,
             real_model_name_val,
+            model_kind_val,
             is_enabled_val,
             None,
         )
@@ -93,6 +99,7 @@ impl Model {
         provider_id_val: i64,
         model_name_val: &str,
         real_model_name_val: Option<&str>,
+        model_kind_val: ModelKind,
         is_enabled_val: bool,
         source_config: Option<&crate::database::model_source_binding::ModelSourceConfig>,
     ) -> DbResult<Model> {
@@ -108,6 +115,7 @@ impl Model {
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(|s| s.to_string()),
+            model_kind: model_kind_val,
             source_selection_mode,
             is_enabled: is_enabled_val,
             created_at: now,
@@ -315,6 +323,7 @@ impl Model {
                     provider::dsl::name,
                     model::dsl::model_name,
                     model::dsl::real_model_name,
+                    model::dsl::model_kind,
                     model::dsl::source_selection_mode,
                     model::dsl::is_enabled,
                 ))
@@ -325,6 +334,7 @@ impl Model {
                     String,
                     String,
                     Option<String>,
+                    ModelKind,
                     String,
                     bool,
                 )>(conn)
@@ -342,6 +352,7 @@ impl Model {
                         provider_name,
                         model_name,
                         real_model_name,
+                        model_kind,
                         source_selection_mode,
                         is_enabled,
                     )| {
@@ -352,6 +363,7 @@ impl Model {
                             provider_name,
                             model_name,
                             real_model_name,
+                            model_kind,
                             source_selection_mode,
                             is_enabled,
                         }
@@ -392,6 +404,7 @@ impl Model {
         provider_id_val: i64,
         model_name_val: &str,
         real_model_name_val: Option<&str>,
+        model_kind_val: ModelKind,
     ) -> DbResult<Model> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
@@ -416,6 +429,12 @@ impl Model {
             match existing_model_db {
                 Some(db_model) => {
                     let model_item = ModelDb::from_db(db_model);
+                    if model_item.model_kind != model_kind_val {
+                        return Err(BaseError::ParamInvalid(Some(format!(
+                            "model {} already exists with immutable kind {:?}",
+                            model_item.id, model_item.model_kind
+                        ))));
+                    }
 
                     // Update existing model
                     let update_data = UpdateModelData {
@@ -450,6 +469,7 @@ impl Model {
                         provider_id: provider_id_val,
                         model_name: model_name_val.to_string(),
                         real_model_name: real_model_name_val.map(|s| s.to_string()),
+                        model_kind: model_kind_val,
                         source_selection_mode: "INHERIT_ALL".to_string(),
                         is_enabled: true,
                         created_at: now,
@@ -531,12 +551,13 @@ mod tests {
             id,
             provider_id: id,
             profile_type: UpstreamProfileType::Openai,
-            endpoint: "https://example.com/v1".to_string(),
+            base_url: "https://example.com/v1".to_string(),
             use_proxy: false,
             is_enabled: true,
             is_default: true,
             created_at: now,
             updated_at: now,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
         };
         diesel::insert_into(upstream_source::table)
             .values(NewUpstreamSourceDb::to_db(&source))
@@ -560,6 +581,7 @@ mod tests {
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(ToString::to_string),
+            model_kind: ModelKind::Chat,
             source_selection_mode: "INHERIT_ALL".to_string(),
             is_enabled: is_enabled_val,
             created_at: now,
@@ -585,6 +607,7 @@ mod tests {
                 provider::dsl::name,
                 model::dsl::model_name,
                 model::dsl::real_model_name,
+                model::dsl::model_kind,
                 model::dsl::source_selection_mode,
                 model::dsl::is_enabled,
             ))
@@ -595,6 +618,7 @@ mod tests {
                 String,
                 String,
                 Option<String>,
+                ModelKind,
                 String,
                 bool,
             )>(conn)
@@ -609,6 +633,7 @@ mod tests {
                     provider_name,
                     model_name,
                     real_model_name,
+                    model_kind,
                     source_selection_mode,
                     is_enabled,
                 )| ModelSummaryItem {
@@ -618,6 +643,7 @@ mod tests {
                     provider_name,
                     model_name,
                     real_model_name,
+                    model_kind,
                     source_selection_mode,
                     is_enabled,
                 },
@@ -657,6 +683,7 @@ mod tests {
                 provider_id: 11,
                 model_name: "alpha-model".to_string(),
                 real_model_name: None,
+                model_kind: ModelKind::Chat,
                 cost_catalog_id: None,
                 source_selection_mode: "INHERIT_ALL".to_string(),
                 deleted_at: None,
@@ -698,17 +725,26 @@ mod tests {
                         id: 72,
                         provider_id: 71,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: "https://model-delete.example/v1".to_string(),
+                        base_url: "https://model-delete.example/v1".to_string(),
                         use_proxy: false,
                         is_enabled: true,
                         is_default: true,
                         created_at: 1,
                         updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Openai,
+                        )
                     },
                 )
                 .expect("provider should be created");
-                let model = Model::create(provider.provider.id, "recoverable-model", None, true)
-                    .expect("model should be created");
+                let model = Model::create(
+                    provider.provider.id,
+                    "recoverable-model",
+                    None,
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("model should be created");
                 let variant = RequestPatchVariantRepository::create(&RequestPatchVariantInput {
                     source_id: 72,
                     model_id: Some(model.id),
@@ -721,7 +757,6 @@ mod tests {
                         operation: RequestPatchOperation::Set,
                         value_json: Some(Some(serde_json::json!(0.2))),
                         description: None,
-                        confirm_dangerous_target: false,
                     }],
                 })
                 .expect("model Variant should be created");

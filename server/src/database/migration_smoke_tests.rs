@@ -28,6 +28,7 @@ const R39_UPSTREAM_SOURCE_VERSION: &str = "20260805090000";
 const R310_PROVIDER_MULTI_SOURCE_VERSION: &str = "20260806090000";
 const R311_MODEL_SOURCE_SELECTION_VERSION: &str = "20260807090000";
 const R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION: &str = "20260810090000";
+const R316_OPENAI_UPSTREAM_CONTRACT_VERSION: &str = "20260812090000";
 
 const LEGACY_SQLITE_API_KEY_SCHEMA: &str = r#"
 CREATE TABLE api_key (
@@ -248,13 +249,21 @@ fn migrate_sqlite_to_before_r39(
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite upgrade migrations should load");
+    let r316 = migrations
+        .pop()
+        .expect("R3.16 sqlite migration should exist");
+    assert_eq!(
+        r316.name().version().to_string(),
+        R316_OPENAI_UPSTREAM_CONTRACT_VERSION,
+        "R3.16 must be the final sqlite migration in this release"
+    );
     let r312 = migrations
         .pop()
         .expect("R3.12 sqlite migration should exist");
     assert_eq!(
         r312.name().version().to_string(),
         R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION,
-        "R3.12 must be the final sqlite migration in this release"
+        "R3.12 must remain immediately before R3.16"
     );
     let r311 = migrations
         .pop()
@@ -296,13 +305,21 @@ fn migrate_postgres_to_before_r39(connection: &mut PgConnection) -> Box<dyn Migr
     let mut migrations = connection
         .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
         .expect("pending postgres upgrade migrations should load");
+    let r316 = migrations
+        .pop()
+        .expect("R3.16 postgres migration should exist");
+    assert_eq!(
+        r316.name().version().to_string(),
+        R316_OPENAI_UPSTREAM_CONTRACT_VERSION,
+        "R3.16 must be the final postgres migration in this release"
+    );
     let r312 = migrations
         .pop()
         .expect("R3.12 postgres migration should exist");
     assert_eq!(
         r312.name().version().to_string(),
         R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION,
-        "R3.12 must be the final postgres migration in this release"
+        "R3.12 must remain immediately before R3.16"
     );
     let r311 = migrations
         .pop()
@@ -332,6 +349,54 @@ fn migrate_postgres_to_before_r39(connection: &mut PgConnection) -> Box<dyn Migr
         .run_migrations(&migrations)
         .expect("postgres migrations before R3.9 should run");
     r39
+}
+
+fn migrate_sqlite_to_before_r316(
+    connection: &mut diesel::SqliteConnection,
+) -> Box<dyn Migration<Sqlite>> {
+    connection
+        .run_pending_migrations(SQLITE_CLEAN_BASELINE_MIGRATIONS)
+        .expect("sqlite clean baseline should run");
+    record_sqlite_migration_versions(connection, SQLITE_ARCHIVED_UPGRADE_VERSIONS)
+        .expect("sqlite archived versions should be recorded");
+
+    let mut migrations = connection
+        .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
+        .expect("pending sqlite upgrade migrations should load");
+    let r316 = migrations
+        .pop()
+        .expect("R3.16 sqlite migration should exist");
+    assert_eq!(
+        r316.name().version().to_string(),
+        R316_OPENAI_UPSTREAM_CONTRACT_VERSION
+    );
+    connection
+        .run_migrations(&migrations)
+        .expect("sqlite migrations before R3.16 should run");
+    r316
+}
+
+fn migrate_postgres_to_before_r316(connection: &mut PgConnection) -> Box<dyn Migration<Pg>> {
+    connection
+        .run_pending_migrations(POSTGRES_CLEAN_BASELINE_MIGRATIONS)
+        .expect("postgres clean baseline should run");
+    record_postgres_migration_versions(connection, POSTGRES_ARCHIVED_UPGRADE_VERSIONS)
+        .expect("postgres archived versions should be recorded");
+
+    let mut migrations = connection
+        .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
+        .expect("pending postgres upgrade migrations should load");
+    let r316 = migrations
+        .pop()
+        .expect("R3.16 postgres migration should exist");
+    assert_eq!(
+        r316.name().version().to_string(),
+        R316_OPENAI_UPSTREAM_CONTRACT_VERSION
+    );
+    connection
+        .run_migrations(&migrations)
+        .expect("postgres migrations before R3.16 should run");
+    r316
 }
 
 fn insert_legacy_sqlite_api_key(connection: &mut impl SimpleConnection, id: i64, hash_sql: &str) {
@@ -1156,6 +1221,128 @@ fn assert_postgres_r312_request_patch_schema(connection: &mut PgConnection) {
     assert_eq!(indexes, 5);
 }
 
+fn assert_sqlite_r316_openai_upstream_schema(connection: &mut diesel::SqliteConnection) {
+    for column in [
+        "base_url",
+        "chat_completions_enabled",
+        "chat_completions_path_override",
+        "embeddings_enabled",
+        "embeddings_path_override",
+        "rerank_enabled",
+        "rerank_path_override",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "upstream_source", column),
+            1,
+            "R3.16 SQLite Source column {column} should exist"
+        );
+    }
+    assert_eq!(
+        sqlite_table_column_count(connection, "upstream_source", "endpoint"),
+        0,
+        "R3.16 SQLite must remove the endpoint column"
+    );
+    assert_eq!(
+        sqlite_table_column_count(connection, "model", "model_kind"),
+        1,
+        "R3.16 SQLite ModelKind should exist"
+    );
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "model_kind_snapshot"),
+        1,
+        "R3.16 SQLite request log ModelKind snapshot should exist"
+    );
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "source_base_url_snapshot"),
+        1,
+        "R3.16 SQLite request log base URL snapshot should exist"
+    );
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "source_endpoint_snapshot"),
+        0,
+        "R3.16 SQLite must remove the endpoint snapshot"
+    );
+
+    let legacy_profile_mentions = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM sqlite_master
+         WHERE type IN ('table', 'index')
+           AND sql LIKE '%VERTEX_OPENAI%'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.16 SQLite profile schema should query")
+    .count;
+    assert_eq!(legacy_profile_mentions, 0);
+}
+
+fn assert_postgres_r316_openai_upstream_schema(connection: &mut PgConnection) {
+    let source_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'upstream_source'
+           AND column_name IN (
+               'base_url',
+               'chat_completions_enabled',
+               'chat_completions_path_override',
+               'embeddings_enabled',
+               'embeddings_path_override',
+               'rerank_enabled',
+               'rerank_path_override'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.16 PostgreSQL Source columns should query")
+    .count;
+    assert_eq!(source_columns, 7);
+
+    let removed_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND (
+               (table_name = 'upstream_source' AND column_name = 'endpoint')
+               OR (
+                   table_name = 'request_log'
+                   AND column_name = 'source_endpoint_snapshot'
+               )
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.16 PostgreSQL removed columns should query")
+    .count;
+    assert_eq!(removed_columns, 0);
+
+    let new_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND (
+               (table_name = 'model' AND column_name = 'model_kind')
+               OR (
+                   table_name = 'request_log'
+                   AND column_name IN ('model_kind_snapshot', 'source_base_url_snapshot')
+               )
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.16 PostgreSQL new columns should query")
+    .count;
+    assert_eq!(new_columns, 3);
+
+    let profile_values = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_enum e
+         JOIN pg_type t ON t.oid = e.enumtypid
+         WHERE t.typname = 'upstream_profile_type_enum'
+           AND e.enumlabel IN ('OPENAI_COMPATIBLE', 'VERTEX_OPENAI')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.16 PostgreSQL profile enum should query")
+    .count;
+    assert_eq!(profile_values, 1, "only OPENAI_COMPATIBLE should remain");
+}
+
 fn seed_sqlite_r39_boundary_fixture(connection: &mut diesel::SqliteConnection) {
     connection
         .batch_execute(
@@ -1466,6 +1653,291 @@ fn seed_postgres_r39_boundary_fixture(connection: &mut PgConnection) {
         .expect("PostgreSQL pre-R3.9 boundary fixture should insert");
 }
 
+fn seed_sqlite_r316_boundary_fixture(connection: &mut diesel::SqliteConnection) {
+    connection
+        .batch_execute(
+            r#"
+            INSERT INTO manager_credential (
+                manager_id, manager_subject, password_verifier, credential_epoch,
+                created_at, updated_at
+            ) VALUES (
+                0, 'admin', 'preserved-manager-verifier',
+                '018fa7d8-6a00-7c9a-8f7e-111111111111', 1, 1
+            );
+            INSERT INTO manager_auth_instance (
+                id, manager_id, manager_subject, current_refresh_jti,
+                refresh_generation, session_version, signing_key_id,
+                credential_epoch, created_at, last_rotated_at,
+                idle_expires_at, absolute_expires_at
+            ) VALUES (
+                1, 0, 'admin', 'preserved-refresh-jti', 1, 1,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                '018fa7d8-6a00-7c9a-8f7e-111111111111', 1, 2, 3, 4
+            );
+            INSERT INTO manager_totp_recovery_code (
+                code_id, manager_id, code_verifier, created_at
+            ) VALUES ('R316', 0, 'preserved-recovery-verifier', 1);
+
+            INSERT INTO api_key (
+                id, api_key_hash, key_prefix, key_last4, name, default_action,
+                is_enabled, created_at, updated_at
+            ) VALUES (
+                1, 'preserved-api-key-hash-r316', 'ck-r316', '0316',
+                'Preserved API key', 'ALLOW', 1, 1, 1
+            );
+            INSERT INTO api_key_rollup_daily (
+                api_key_id, day_bucket, currency, request_count,
+                total_input_tokens, total_output_tokens, total_reasoning_tokens,
+                total_tokens, billed_amount_nanos, last_request_at,
+                created_at, updated_at
+            ) VALUES (1, 0, 'USD', 7, 2, 3, 1, 6, 100, 10, 1, 1);
+            INSERT INTO api_key_rollup_monthly (
+                api_key_id, month_bucket, currency, request_count,
+                total_input_tokens, total_output_tokens, total_reasoning_tokens,
+                total_tokens, billed_amount_nanos, last_request_at,
+                created_at, updated_at
+            ) VALUES (1, 0, 'USD', 9, 2, 3, 1, 6, 100, 10, 1, 1);
+            INSERT INTO cost_catalogs (
+                id, name, description, created_at, updated_at
+            ) VALUES (100, 'Preserved catalog', 'R3.16 boundary fixture', 1, 1);
+            INSERT INTO cost_catalog_versions (
+                id, catalog_id, version, currency, source, effective_from,
+                is_archived, is_enabled, created_at, updated_at
+            ) VALUES (101, 100, 'r316-fixture', 'USD', 'test', 1, 0, 1, 1, 1);
+
+            INSERT INTO provider (
+                id, provider_key, name, is_enabled, created_at, updated_at,
+                provider_api_key_mode
+            ) VALUES (10, 'cleared-r316-provider', 'Cleared Provider', 1, 1, 1, 'QUEUE');
+            INSERT INTO provider_api_key (
+                id, provider_id, description, key_prefix, key_last4,
+                secret_ciphertext, secret_nonce, secret_format_version,
+                secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+            ) VALUES (
+                11, 10, 'cleared credential', 'sk-r316', '0316',
+                X'01', X'000000000000000000000000000000000000000000000000', 1,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                1, 1, 1
+            );
+            INSERT INTO upstream_source (
+                id, provider_id, profile_type, endpoint, use_proxy,
+                is_enabled, is_default, created_at, updated_at
+            ) VALUES (
+                12, 10, 'VERTEX_OPENAI', 'https://legacy.example/v1', 0,
+                1, 1, 1, 1
+            );
+            INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name,
+                source_selection_mode, is_enabled, created_at, updated_at
+            ) VALUES (
+                13, 10, 100, 'cleared-model', 'cleared-real-model',
+                'EXPLICIT', 1, 1, 1
+            );
+            INSERT INTO model_source_binding (
+                model_id, source_id, is_default, created_at, updated_at
+            ) VALUES (13, 12, 1, 1, 1);
+            INSERT INTO api_key_acl_rule (
+                id, api_key_id, effect, scope, provider_id, priority,
+                is_enabled, description, created_at, updated_at
+            ) VALUES (14, 1, 'ALLOW', 'PROVIDER', 10, 0, 1, 'cleared ACL', 1, 1);
+            INSERT INTO request_patch_variant (
+                id, source_id, model_id, suffix, enabled, expose_in_models,
+                created_at, updated_at
+            ) VALUES (15, 12, 13, 'high', 1, 1, 1, 1);
+            INSERT INTO request_patch_rule (
+                id, variant_id, placement, target, operation, value_json,
+                description, created_at, updated_at
+            ) VALUES (16, 15, 'BODY', '/temperature', 'SET', '0.3', 'cleared patch', 1, 1);
+            INSERT INTO request_log (
+                id, request_id, api_key_id, requested_model_name,
+                downstream_protocol, overall_status, request_received_at,
+                completed_at, is_stream, provider_id, provider_api_key_id,
+                model_id, source_id, source_selection_reason,
+                provider_key_snapshot, provider_name_snapshot,
+                model_name_snapshot, real_model_name_snapshot,
+                source_profile_type_snapshot, source_endpoint_snapshot,
+                upstream_protocol, cost_catalog_id, cost_catalog_version_id,
+                created_at, updated_at
+            ) VALUES (
+                20, '018fa7d8-6a00-4c9a-8f7e-222222222222', 1, 'cleared-model',
+                'OPENAI', 'SUCCESS', 10, 15, 0, 10, 11, 13, 12,
+                'model_default_transform', 'cleared-r316-provider', 'Cleared Provider',
+                'cleared-model', 'cleared-real-model', 'VERTEX_OPENAI',
+                'https://legacy.example/v1', 'OPENAI', 100, 101, 10, 15
+            );
+            INSERT INTO metric_ingested_request_log (
+                request_log_id, request_received_at, completed_at, ingested_at
+            ) VALUES (20, 10, 15, 16);
+            INSERT INTO metric_request_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, scope_label,
+                request_count, success_count, error_count, cancelled_count,
+                time_to_first_response_body_sum_ms,
+                time_to_first_response_body_count, ttft_sum_ms, ttft_count,
+                total_latency_sum_ms, total_latency_count,
+                input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                created_at, updated_at
+            ) VALUES (
+                0, 'provider', '10', 'Cleared Provider',
+                1, 1, 0, 0, 3, 1, 4, 1, 5, 1, 2, 3, 1, 6, 1, 1
+            );
+            INSERT INTO metric_http_status_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, http_status,
+                count, created_at, updated_at
+            ) VALUES (0, 'provider', '10', 200, 1, 1, 1);
+            INSERT INTO metric_cost_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, currency,
+                amount_nanos, created_at, updated_at
+            ) VALUES (0, 'provider', '10', 'USD', 100, 1, 1);
+            "#,
+        )
+        .expect("SQLite pre-R3.16 boundary fixture should insert");
+}
+
+fn seed_postgres_r316_boundary_fixture(connection: &mut PgConnection) {
+    connection
+        .batch_execute(
+            r#"
+            INSERT INTO manager_credential (
+                manager_id, manager_subject, password_verifier, credential_epoch,
+                created_at, updated_at
+            ) VALUES (
+                0, 'admin', 'preserved-manager-verifier',
+                '018fa7d8-6a00-7c9a-8f7e-111111111111', 1, 1
+            );
+            INSERT INTO manager_auth_instance (
+                id, manager_id, manager_subject, current_refresh_jti,
+                refresh_generation, session_version, signing_key_id,
+                credential_epoch, created_at, last_rotated_at,
+                idle_expires_at, absolute_expires_at
+            ) VALUES (
+                1, 0, 'admin', 'preserved-refresh-jti', 1, 1,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                '018fa7d8-6a00-7c9a-8f7e-111111111111', 1, 2, 3, 4
+            );
+            INSERT INTO manager_totp_recovery_code (
+                code_id, manager_id, code_verifier, created_at
+            ) VALUES ('R316', 0, 'preserved-recovery-verifier', 1);
+
+            INSERT INTO api_key (
+                id, api_key_hash, key_prefix, key_last4, name, default_action,
+                is_enabled, created_at, updated_at
+            ) VALUES (
+                1, 'preserved-api-key-hash-r316', 'ck-r316', '0316',
+                'Preserved API key', 'ALLOW', TRUE, 1, 1
+            );
+            INSERT INTO api_key_rollup_daily (
+                api_key_id, day_bucket, currency, request_count,
+                total_input_tokens, total_output_tokens, total_reasoning_tokens,
+                total_tokens, billed_amount_nanos, last_request_at,
+                created_at, updated_at
+            ) VALUES (1, 0, 'USD', 7, 2, 3, 1, 6, 100, 10, 1, 1);
+            INSERT INTO api_key_rollup_monthly (
+                api_key_id, month_bucket, currency, request_count,
+                total_input_tokens, total_output_tokens, total_reasoning_tokens,
+                total_tokens, billed_amount_nanos, last_request_at,
+                created_at, updated_at
+            ) VALUES (1, 0, 'USD', 9, 2, 3, 1, 6, 100, 10, 1, 1);
+            INSERT INTO cost_catalogs (
+                id, name, description, created_at, updated_at
+            ) VALUES (100, 'Preserved catalog', 'R3.16 boundary fixture', 1, 1);
+            INSERT INTO cost_catalog_versions (
+                id, catalog_id, version, currency, source, effective_from,
+                is_archived, is_enabled, created_at, updated_at
+            ) VALUES (101, 100, 'r316-fixture', 'USD', 'test', 1, FALSE, TRUE, 1, 1);
+
+            INSERT INTO provider (
+                id, provider_key, name, is_enabled, created_at, updated_at,
+                provider_api_key_mode
+            ) VALUES (10, 'cleared-r316-provider', 'Cleared Provider', TRUE, 1, 1, 'QUEUE');
+            INSERT INTO provider_api_key (
+                id, provider_id, description, key_prefix, key_last4,
+                secret_ciphertext, secret_nonce, secret_format_version,
+                secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+            ) VALUES (
+                11, 10, 'cleared credential', 'sk-r316', '0316',
+                decode('01', 'hex'),
+                decode('000000000000000000000000000000000000000000000000', 'hex'), 1,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                TRUE, 1, 1
+            );
+            INSERT INTO upstream_source (
+                id, provider_id, profile_type, endpoint, use_proxy,
+                is_enabled, is_default, created_at, updated_at
+            ) VALUES (
+                12, 10, 'VERTEX_OPENAI', 'https://legacy.example/v1', FALSE,
+                TRUE, TRUE, 1, 1
+            );
+            INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name,
+                source_selection_mode, is_enabled, created_at, updated_at
+            ) VALUES (
+                13, 10, 100, 'cleared-model', 'cleared-real-model',
+                'EXPLICIT', TRUE, 1, 1
+            );
+            INSERT INTO model_source_binding (
+                model_id, source_id, is_default, created_at, updated_at
+            ) VALUES (13, 12, TRUE, 1, 1);
+            INSERT INTO api_key_acl_rule (
+                id, api_key_id, effect, scope, provider_id, priority,
+                is_enabled, description, created_at, updated_at
+            ) VALUES (14, 1, 'ALLOW', 'PROVIDER', 10, 0, TRUE, 'cleared ACL', 1, 1);
+            INSERT INTO request_patch_variant (
+                id, source_id, model_id, suffix, enabled, expose_in_models,
+                created_at, updated_at
+            ) VALUES (15, 12, 13, 'high', TRUE, TRUE, 1, 1);
+            INSERT INTO request_patch_rule (
+                id, variant_id, placement, target, operation, value_json,
+                description, created_at, updated_at
+            ) VALUES (16, 15, 'BODY', '/temperature', 'SET', '0.3', 'cleared patch', 1, 1);
+            INSERT INTO request_log (
+                id, request_id, api_key_id, requested_model_name,
+                downstream_protocol, overall_status, request_received_at,
+                completed_at, is_stream, provider_id, provider_api_key_id,
+                model_id, source_id, source_selection_reason,
+                provider_key_snapshot, provider_name_snapshot,
+                model_name_snapshot, real_model_name_snapshot,
+                source_profile_type_snapshot, source_endpoint_snapshot,
+                upstream_protocol, cost_catalog_id, cost_catalog_version_id,
+                created_at, updated_at
+            ) VALUES (
+                20, '018fa7d8-6a00-4c9a-8f7e-222222222222', 1, 'cleared-model',
+                'OPENAI', 'SUCCESS', 10, 15, FALSE, 10, 11, 13, 12,
+                'model_default_transform', 'cleared-r316-provider', 'Cleared Provider',
+                'cleared-model', 'cleared-real-model', 'VERTEX_OPENAI',
+                'https://legacy.example/v1', 'OPENAI', 100, 101, 10, 15
+            );
+            INSERT INTO metric_ingested_request_log (
+                request_log_id, request_received_at, completed_at, ingested_at
+            ) VALUES (20, 10, 15, 16);
+            INSERT INTO metric_request_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, scope_label,
+                request_count, success_count, error_count, cancelled_count,
+                time_to_first_response_body_sum_ms,
+                time_to_first_response_body_count, ttft_sum_ms, ttft_count,
+                total_latency_sum_ms, total_latency_count,
+                input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                created_at, updated_at
+            ) VALUES (
+                0, 'provider', '10', 'Cleared Provider',
+                1, 1, 0, 0, 3, 1, 4, 1, 5, 1, 2, 3, 1, 6, 1, 1
+            );
+            INSERT INTO metric_http_status_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, http_status,
+                count, created_at, updated_at
+            ) VALUES (0, 'provider', '10', 200, 1, 1, 1);
+            INSERT INTO metric_cost_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, currency,
+                amount_nanos, created_at, updated_at
+            ) VALUES (0, 'provider', '10', 'USD', 100, 1, 1);
+            "#,
+        )
+        .expect("PostgreSQL pre-R3.16 boundary fixture should insert");
+}
+
 #[test]
 fn sqlite_clean_upgrade_chain_from_empty() {
     let (_temp_dir, mut connection) = open_test_sqlite_connection("r1-migration-smoke.sqlite");
@@ -1478,9 +1950,8 @@ fn sqlite_clean_upgrade_chain_from_empty() {
 
     run_sqlite_migrations(&mut connection).expect("sqlite clean + upgrade migrations should run");
     assert_sqlite_request_log_timing_schema(&mut connection);
-    assert_sqlite_r310_source_schema(&mut connection);
-    assert_sqlite_r311_model_source_schema(&mut connection);
     assert_sqlite_r312_request_patch_schema(&mut connection);
+    assert_sqlite_r316_openai_upstream_schema(&mut connection);
 
     let applied_versions = connection
         .applied_migrations()
@@ -1512,6 +1983,171 @@ fn sqlite_clean_upgrade_chain_from_empty() {
             .expect("sqlite pending migrations should remain queryable"),
         "sqlite second migration run should remain fully applied"
     );
+}
+
+#[test]
+fn sqlite_r316_destructive_upgrade_enforces_openai_upstream_contract() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("r316-openai-upstream-contract.sqlite");
+    let r316 = migrate_sqlite_to_before_r316(&mut connection);
+    seed_sqlite_r316_boundary_fixture(&mut connection);
+
+    for table in [
+        "provider",
+        "provider_api_key",
+        "upstream_source",
+        "model",
+        "model_source_binding",
+        "api_key_acl_rule",
+        "request_patch_variant",
+        "request_patch_rule",
+        "request_log",
+        "metric_ingested_request_log",
+        "metric_request_rollup_minute",
+        "metric_http_status_rollup_minute",
+        "metric_cost_rollup_minute",
+    ] {
+        let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+            .get_result::<CountRow>(&mut connection)
+            .expect("SQLite pre-R3.16 fixture count should query")
+            .count;
+        assert!(count > 0, "SQLite fixture should populate {table}");
+    }
+
+    connection
+        .run_migration(r316.as_ref())
+        .expect("R3.16 SQLite migration should run");
+    assert_sqlite_r316_openai_upstream_schema(&mut connection);
+
+    for table in [
+        "provider",
+        "provider_api_key",
+        "upstream_source",
+        "model",
+        "model_source_binding",
+        "api_key_acl_rule",
+        "request_patch_variant",
+        "request_patch_rule",
+        "request_log",
+        "metric_ingested_request_log",
+        "metric_request_rollup_minute",
+        "metric_http_status_rollup_minute",
+        "metric_cost_rollup_minute",
+    ] {
+        let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+            .get_result::<CountRow>(&mut connection)
+            .expect("SQLite post-R3.16 cleared count should query")
+            .count;
+        assert_eq!(count, 0, "R3.16 must clear SQLite table {table}");
+    }
+
+    for table in [
+        "manager_credential",
+        "manager_auth_instance",
+        "manager_totp_recovery_code",
+        "api_key",
+        "api_key_rollup_daily",
+        "api_key_rollup_monthly",
+        "cost_catalogs",
+        "cost_catalog_versions",
+    ] {
+        let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+            .get_result::<CountRow>(&mut connection)
+            .expect("SQLite post-R3.16 preserved count should query")
+            .count;
+        assert_eq!(count, 1, "R3.16 must preserve SQLite table {table}");
+    }
+
+    connection
+        .batch_execute(
+            "INSERT INTO provider (
+                id, provider_key, name, is_enabled, created_at, updated_at,
+                provider_api_key_mode
+             ) VALUES
+                (30, 'r316-provider', 'R3.16 Provider', 1, 1, 1, 'QUEUE'),
+                (31, 'r316-native-provider', 'R3.16 Native Provider', 1, 1, 1, 'QUEUE');
+             INSERT INTO upstream_source (
+                id, provider_id, profile_type, base_url, use_proxy,
+                chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                is_enabled, is_default, created_at, updated_at
+             ) VALUES (
+                40, 30, 'OPENAI', 'https://api.openai.com/v1', 0,
+                1, 1, 0, 1, 1, 1, 1
+             );",
+        )
+        .expect("valid R3.16 SQLite Provider and OpenAI Source should insert");
+
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, base_url, use_proxy,
+                    chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (
+                    41, 31, 'VERTEX_OPENAI', 'https://legacy.example/v1', 0,
+                    1, 1, 0, 1, 1, 1, 1
+                 );"
+            )
+            .is_err(),
+        "R3.16 SQLite must reject VERTEX_OPENAI"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, base_url, use_proxy,
+                    chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (
+                    42, 31, 'GEMINI', 'https://gemini.example/v1', 0,
+                    1, NULL, NULL, 1, 1, 1, 1
+                 );"
+            )
+            .is_err(),
+        "R3.16 SQLite native Profiles must reject OpenAI operation columns"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, base_url, use_proxy,
+                    chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (
+                    43, 31, 'GEMINI_OPENAI', 'https://gemini.example/openai', 0,
+                    1, 1, 1, 1, 1, 1, 1
+                 );"
+            )
+            .is_err(),
+        "R3.16 SQLite GEMINI_OPENAI must reject Rerank enablement"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO model (
+                    id, provider_id, model_name, source_selection_mode,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (50, 30, 'missing-kind', 'INHERIT_ALL', 1, 1, 1);"
+            )
+            .is_err(),
+        "R3.16 SQLite ModelKind must not have a database default"
+    );
+    connection
+        .batch_execute(
+            "INSERT INTO model (
+                id, provider_id, model_name, model_kind, source_selection_mode,
+                is_enabled, created_at, updated_at
+             ) VALUES (51, 30, 'chat-model', 'CHAT', 'INHERIT_ALL', 1, 1, 1);",
+        )
+        .expect("valid R3.16 SQLite ModelKind should insert");
+
+    let foreign_key_violations =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
+            .get_result::<CountRow>(&mut connection)
+            .expect("R3.16 SQLite foreign key check should run")
+            .count;
+    assert_eq!(foreign_key_violations, 0);
 }
 
 #[test]
@@ -1587,6 +2223,9 @@ fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
     let mut pending = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite migrations should load");
+    let _r316 = pending
+        .pop()
+        .expect("R3.16 sqlite migration should be pending");
     let r312 = pending
         .pop()
         .expect("R3.12 sqlite migration should be pending");
@@ -2211,6 +2850,9 @@ fn sqlite_request_log_timing_upgrade_preserves_body_timing_and_round_trips() {
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("sqlite upgrade migrations should load");
+    let _r316 = migrations
+        .pop()
+        .expect("R3.16 sqlite migration should exist");
     let r312 = migrations
         .pop()
         .expect("R3.12 sqlite migration should exist");
@@ -2947,9 +3589,8 @@ fn postgres_clean_upgrade_chain_from_empty() {
         assert_postgres_request_log_protocol_schema(&mut connection);
         assert_postgres_request_identity_schema(&mut connection);
         assert_postgres_request_log_timing_schema(&mut connection);
-        assert_postgres_r310_source_schema(&mut connection);
-        assert_postgres_r311_model_source_schema(&mut connection);
         assert_postgres_r312_request_patch_schema(&mut connection);
+        assert_postgres_r316_openai_upstream_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -2983,6 +3624,167 @@ fn postgres_clean_upgrade_chain_from_empty() {
                 .expect("postgres pending migrations should remain queryable"),
             "postgres second migration run should remain fully applied"
         );
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
+#[ignore = "requires the dedicated PostgreSQL 17 R3.16 migration smoke database"]
+fn postgres_r316_destructive_upgrade_enforces_openai_upstream_contract() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        let r316 = migrate_postgres_to_before_r316(&mut connection);
+        seed_postgres_r316_boundary_fixture(&mut connection);
+
+        for table in [
+            "provider",
+            "provider_api_key",
+            "upstream_source",
+            "model",
+            "model_source_binding",
+            "api_key_acl_rule",
+            "request_patch_variant",
+            "request_patch_rule",
+            "request_log",
+            "metric_ingested_request_log",
+            "metric_request_rollup_minute",
+            "metric_http_status_rollup_minute",
+            "metric_cost_rollup_minute",
+        ] {
+            let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+                .get_result::<CountRow>(&mut connection)
+                .expect("PostgreSQL pre-R3.16 fixture count should query")
+                .count;
+            assert!(count > 0, "PostgreSQL fixture should populate {table}");
+        }
+
+        connection
+            .run_migration(r316.as_ref())
+            .expect("R3.16 PostgreSQL migration should run");
+        assert_postgres_r316_openai_upstream_schema(&mut connection);
+
+        for table in [
+            "provider",
+            "provider_api_key",
+            "upstream_source",
+            "model",
+            "model_source_binding",
+            "api_key_acl_rule",
+            "request_patch_variant",
+            "request_patch_rule",
+            "request_log",
+            "metric_ingested_request_log",
+            "metric_request_rollup_minute",
+            "metric_http_status_rollup_minute",
+            "metric_cost_rollup_minute",
+        ] {
+            let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+                .get_result::<CountRow>(&mut connection)
+                .expect("PostgreSQL post-R3.16 cleared count should query")
+                .count;
+            assert_eq!(count, 0, "R3.16 must clear PostgreSQL table {table}");
+        }
+
+        for table in [
+            "manager_credential",
+            "manager_auth_instance",
+            "manager_totp_recovery_code",
+            "api_key",
+            "api_key_rollup_daily",
+            "api_key_rollup_monthly",
+            "cost_catalogs",
+            "cost_catalog_versions",
+        ] {
+            let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+                .get_result::<CountRow>(&mut connection)
+                .expect("PostgreSQL post-R3.16 preserved count should query")
+                .count;
+            assert_eq!(count, 1, "R3.16 must preserve PostgreSQL table {table}");
+        }
+
+        connection
+            .batch_execute(
+                "INSERT INTO provider (
+                    id, provider_key, name, is_enabled, created_at, updated_at,
+                    provider_api_key_mode
+                 ) VALUES
+                    (30, 'r316-provider', 'R3.16 Provider', TRUE, 1, 1, 'QUEUE'),
+                    (31, 'r316-native-provider', 'R3.16 Native Provider', TRUE, 1, 1, 'QUEUE');
+                 INSERT INTO upstream_source (
+                    id, provider_id, profile_type, base_url, use_proxy,
+                    chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (
+                    40, 30, 'OPENAI', 'https://api.openai.com/v1', FALSE,
+                    TRUE, TRUE, FALSE, TRUE, TRUE, 1, 1
+                 );",
+            )
+            .expect("valid R3.16 PostgreSQL Provider and OpenAI Source should insert");
+
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, base_url, use_proxy,
+                        chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES (
+                        41, 31, 'VERTEX_OPENAI', 'https://legacy.example/v1', FALSE,
+                        TRUE, TRUE, FALSE, TRUE, TRUE, 1, 1
+                     );"
+                )
+                .is_err(),
+            "R3.16 PostgreSQL must reject VERTEX_OPENAI"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, base_url, use_proxy,
+                        chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES (
+                        42, 31, 'GEMINI', 'https://gemini.example/v1', FALSE,
+                        TRUE, NULL, NULL, TRUE, TRUE, 1, 1
+                     );"
+                )
+                .is_err(),
+            "R3.16 PostgreSQL native Profiles must reject OpenAI operation columns"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO model (
+                        id, provider_id, model_name, source_selection_mode,
+                        is_enabled, created_at, updated_at
+                     ) VALUES (50, 30, 'missing-kind', 'INHERIT_ALL', TRUE, 1, 1);"
+                )
+                .is_err(),
+            "R3.16 PostgreSQL ModelKind must not have a database default"
+        );
+        connection
+            .batch_execute(
+                "INSERT INTO model (
+                    id, provider_id, model_name, model_kind, source_selection_mode,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (51, 30, 'chat-model', 'CHAT', 'INHERIT_ALL', TRUE, 1, 1);",
+            )
+            .expect("valid R3.16 PostgreSQL ModelKind should insert");
     }));
 
     rebuild_postgres_public_schema(&mut connection);
@@ -3075,6 +3877,9 @@ fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() 
         let mut pending = connection
             .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
             .expect("pending postgres migrations should load");
+        let _r316 = pending
+            .pop()
+            .expect("R3.16 postgres migration should be pending");
         let r312 = pending
             .pop()
             .expect("R3.12 postgres migration should be pending");

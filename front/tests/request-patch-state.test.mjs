@@ -6,23 +6,7 @@ import {
   buildRequestPatchVariantPayload,
   formatRequestPatchValueForDisplay,
   formatRequestPatchValueForEditor,
-  requestPatchTargetIdentity,
 } from "../src/utils/requestPatch.ts";
-
-test("dangerous target confirmation identities normalize Header casing", () => {
-  assert.equal(
-    requestPatchTargetIdentity("HEADER", "Authorization"),
-    "HEADER:authorization",
-  );
-  assert.equal(
-    requestPatchTargetIdentity("QUERY", "api-version"),
-    "QUERY:api-version",
-  );
-  assert.equal(
-    requestPatchTargetIdentity("BODY", "/generationConfig/model"),
-    "BODY:/generationConfig/model",
-  );
-});
 
 test("request patch rule editor parses and normalizes JSON values", () => {
   assert.deepEqual(

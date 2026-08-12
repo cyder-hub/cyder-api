@@ -388,11 +388,24 @@ mod tests {
         enabled: bool,
         default: bool,
     ) -> CacheUpstreamSource {
+        let (chat_completions_enabled, embeddings_enabled, rerank_enabled) = match profile_type {
+            UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai => {
+                (Some(true), Some(true), Some(false))
+            }
+            UpstreamProfileType::OpenaiCompatible => (Some(true), Some(false), Some(false)),
+            _ => (None, None, None),
+        };
         CacheUpstreamSource {
             id,
             profile_type,
-            endpoint: format!("https://source-{id}.example.com"),
+            base_url: format!("https://source-{id}.example.com"),
             use_proxy: false,
+            chat_completions_enabled,
+            chat_completions_path_override: None,
+            embeddings_enabled,
+            embeddings_path_override: None,
+            rerank_enabled,
+            rerank_path_override: None,
             is_enabled: enabled,
             is_default: default,
         }
@@ -415,6 +428,7 @@ mod tests {
             provider_id: 10,
             model_name: "model".to_string(),
             real_model_name: None,
+            model_kind: crate::schema::enum_def::ModelKind::Chat,
             cost_catalog_id: None,
             source_selection_mode: mode.to_string(),
             source_bindings: bindings,

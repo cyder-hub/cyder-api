@@ -24,16 +24,6 @@ export interface RequestPatchVariantEditorState {
   rules: RequestPatchRuleEditorState[];
 }
 
-export function requestPatchTargetIdentity(
-  placement: RequestPatchPlacement,
-  target: string,
-): string {
-  const normalizedTarget = placement === "HEADER"
-    ? target.trim().toLowerCase()
-    : target.trim();
-  return `${placement}:${normalizedTarget}`;
-}
-
 export function parseRequestPatchValue(
   valueJsonText: string,
   operation: RequestPatchOperation,

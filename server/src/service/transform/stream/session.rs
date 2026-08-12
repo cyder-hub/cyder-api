@@ -17,6 +17,18 @@ use crate::utils::sse::SseEvent;
 use crate::utils::usage::UsageInfo;
 
 const STREAM_DIAGNOSTIC_WINDOW: usize = 32;
+pub(in crate::service::transform) const MAX_STREAM_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
+
+pub(in crate::service::transform) fn try_append_tool_arguments(
+    buffer: &mut String,
+    delta: &str,
+) -> bool {
+    if buffer.len().saturating_add(delta.len()) > MAX_STREAM_TOOL_ARGUMENT_BYTES {
+        return false;
+    }
+    buffer.push_str(delta);
+    true
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct AnthropicSessionState {

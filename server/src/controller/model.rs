@@ -2,6 +2,7 @@ use crate::{
     controller::BaseError,
     database::model::{Model, ModelDetail, ModelSummaryItem},
     database::model_source_binding::ModelSourceConfig,
+    schema::enum_def::ModelKind,
     service::{
         admin::model::{
             CreateModelInput, ModelSourceConfigSummary, ModelSourceExplain,
@@ -28,6 +29,7 @@ pub struct InsertModelRequest {
     pub provider_id: i64,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub model_kind: ModelKind,
     #[serde(default = "default_true")]
     pub is_enabled: bool,
     pub source_config: Option<ModelSourceConfig>,
@@ -66,6 +68,7 @@ async fn insert_model(
                 provider_id: request.provider_id,
                 model_name: request.model_name,
                 real_model_name: request.real_model_name,
+                model_kind: request.model_kind,
                 is_enabled: request.is_enabled,
             },
             request.source_config,
@@ -96,6 +99,7 @@ pub struct UpdateModelRequest {
     // pub provider_id: Option<i64>, // Removed: Provider ID is not updatable this way
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub model_kind: Option<ModelKind>,
     pub is_enabled: bool,
     pub cost_catalog_id: Option<i64>,
 }
@@ -105,6 +109,11 @@ async fn update_model(
     Path(id): Path<i64>,
     Json(request): Json<UpdateModelRequest>,
 ) -> Result<HttpResult<Model>, BaseError> {
+    if request.model_kind.is_some() {
+        return Err(BaseError::ParamInvalid(Some(
+            "model_kind is immutable after model creation".to_string(),
+        )));
+    }
     let updated_model = app_state
         .admin
         .model
@@ -129,6 +138,7 @@ async fn list_models() -> Result<HttpResult<Vec<ModelResponse>>, BaseError> {
         .map(|model| ModelSourceSnapshotOwner {
             model_id: model.id,
             provider_id: model.provider_id,
+            model_kind: model.model_kind,
             source_selection_mode: model.source_selection_mode.clone(),
         })
         .collect::<Vec<_>>();
@@ -159,6 +169,7 @@ async fn list_model_summaries() -> Result<HttpResult<Vec<ModelSummaryResponse>>,
         .map(|model| ModelSourceSnapshotOwner {
             model_id: model.id,
             provider_id: model.provider_id,
+            model_kind: model.model_kind,
             source_selection_mode: model.source_selection_mode.clone(),
         })
         .collect::<Vec<_>>();
@@ -197,6 +208,7 @@ fn app_state_source_config_summary(model_id: i64) -> Result<ModelSourceConfigSum
     let summaries = load_model_source_config_summaries(&[ModelSourceSnapshotOwner {
         model_id: model.id,
         provider_id: model.provider_id,
+        model_kind: model.model_kind,
         source_selection_mode: model.source_selection_mode,
     }])?;
     summaries.get(&model.id).cloned().ok_or_else(|| {
@@ -301,8 +313,14 @@ mod tests {
                 id: source_id,
                 provider_id,
                 profile_type: UpstreamProfileType::Openai,
-                endpoint: "https://model-api.example.com/v1".to_string(),
+                base_url: "https://model-api.example.com/v1".to_string(),
                 use_proxy: false,
+                chat_completions_enabled: Some(true),
+                chat_completions_path_override: None,
+                embeddings_enabled: Some(true),
+                embeddings_path_override: None,
+                rerank_enabled: Some(false),
+                rerank_path_override: None,
                 is_enabled: true,
                 is_default: true,
                 created_at: 1,
@@ -318,12 +336,25 @@ mod tests {
         source_id: i64,
         profile_type: UpstreamProfileType,
     ) -> UpstreamSource {
+        let (chat_completions_enabled, embeddings_enabled, rerank_enabled) = match profile_type {
+            UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai => {
+                (Some(true), Some(true), Some(false))
+            }
+            UpstreamProfileType::OpenaiCompatible => (Some(true), Some(false), Some(false)),
+            _ => (None, None, None),
+        };
         UpstreamSource::create(&NewUpstreamSource {
             id: source_id,
             provider_id,
             profile_type,
-            endpoint: format!("https://model-api-{source_id}.example.com/v1"),
+            base_url: format!("https://model-api-{source_id}.example.com/v1"),
             use_proxy: false,
+            chat_completions_enabled,
+            chat_completions_path_override: None,
+            embeddings_enabled,
+            embeddings_path_override: None,
+            rerank_enabled,
+            rerank_path_override: None,
             is_enabled: true,
             is_default: false,
             created_at: 1,
@@ -392,6 +423,7 @@ mod tests {
                             "provider_id": provider.id,
                             "model_name": "configured-model",
                             "real_model_name": null,
+                            "model_kind": "CHAT",
                             "is_enabled": true,
                             "source_config": {
                                 "source_selection_mode": "EXPLICIT",
@@ -438,6 +470,29 @@ mod tests {
                 let model_id = create_body["data"]["id"]
                     .as_i64()
                     .expect("created model id should exist");
+
+                let immutable_kind_response = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/model/{model_id}"),
+                        json!({
+                            "model_name": "configured-model",
+                            "real_model_name": null,
+                            "model_kind": "EMBEDDING",
+                            "is_enabled": true,
+                            "cost_catalog_id": null
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(immutable_kind_response.status(), StatusCode::BAD_REQUEST);
+                let immutable_kind_body = response_json(immutable_kind_response).await;
+                assert_eq!(immutable_kind_body["code"], 1001);
+                assert_eq!(
+                    immutable_kind_body["msg"],
+                    "model_kind is immutable after model creation"
+                );
 
                 for uri in [
                     format!("/model/{model_id}/source-config"),
@@ -645,6 +700,7 @@ mod tests {
                             "provider_id": first_provider.id,
                             "model_name": "cross-provider-model",
                             "real_model_name": null,
+                            "model_kind": "CHAT",
                             "is_enabled": true,
                             "source_config": {
                                 "source_selection_mode": "EXPLICIT",

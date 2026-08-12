@@ -466,14 +466,8 @@ async fn finalize_guarded_stream_success(
             context.usage = usage;
             context.usage_normalization = usage_normalization;
             log_transform_summary(TransformLogStage::Stream, &context, &transform_summary);
-            if context.usage.is_none() {
-                crate::debug_event!(
-                    "proxy.stream_usage_missing_debug",
-                    request_id = &context.request_id,
-                    log_id = context.id,
-                    model = model_str,
-                    status_code = status_code.as_u16(),
-                );
+            if context.usage_normalization.is_none() {
+                crate::proxy::logging::log_upstream_usage_missing(&context, model_str, status_code);
             }
             crate::debug_event!(
                 "proxy.request_succeeded_debug",

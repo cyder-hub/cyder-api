@@ -7,7 +7,7 @@ use crate::database::model_source_binding::list_visible_by_model_id;
 use crate::database::request_patch::RequestPatchVariantAggregate;
 use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
-    Action, ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, RuleScope,
+    Action, ModelKind, ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, RuleScope,
     UpstreamProfileType,
 };
 use serde::{Deserialize, Serialize, de};
@@ -61,6 +61,7 @@ pub struct CacheModel {
     pub provider_id: i64,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub model_kind: ModelKind,
     pub cost_catalog_id: Option<i64>,
     pub source_selection_mode: String,
     pub source_bindings: Vec<CacheModelSourceBinding>,
@@ -83,10 +84,35 @@ pub struct CacheProvider {
 pub struct CacheUpstreamSource {
     pub id: i64,
     pub profile_type: UpstreamProfileType,
-    pub endpoint: String,
+    pub base_url: String,
     pub use_proxy: bool,
+    pub chat_completions_enabled: Option<bool>,
+    pub chat_completions_path_override: Option<String>,
+    pub embeddings_enabled: Option<bool>,
+    pub embeddings_path_override: Option<String>,
+    pub rerank_enabled: Option<bool>,
+    pub rerank_path_override: Option<String>,
     pub is_enabled: bool,
     pub is_default: bool,
+}
+
+impl From<crate::database::upstream_source::UpstreamSource> for CacheUpstreamSource {
+    fn from(source: crate::database::upstream_source::UpstreamSource) -> Self {
+        Self {
+            id: source.id,
+            profile_type: source.profile_type,
+            base_url: source.base_url,
+            use_proxy: source.use_proxy,
+            chat_completions_enabled: source.chat_completions_enabled,
+            chat_completions_path_override: source.chat_completions_path_override,
+            embeddings_enabled: source.embeddings_enabled,
+            embeddings_path_override: source.embeddings_path_override,
+            rerank_enabled: source.rerank_enabled,
+            rerank_path_override: source.rerank_path_override,
+            is_enabled: source.is_enabled,
+            is_default: source.is_default,
+        }
+    }
 }
 
 /// Immutable Source-bound Variant snapshot carried by the shared catalog.
@@ -405,6 +431,7 @@ impl CacheModel {
             provider_id: db.provider_id,
             real_model_name: db.real_model_name,
             model_name: db.model_name,
+            model_kind: db.model_kind,
             cost_catalog_id: db.cost_catalog_id,
             source_selection_mode: db.source_selection_mode,
             source_bindings,
@@ -424,6 +451,7 @@ mod tests {
             provider_id: 2,
             model_name: "model".to_string(),
             real_model_name: Some("real-model".to_string()),
+            model_kind: crate::schema::enum_def::ModelKind::Chat,
             cost_catalog_id: None,
             source_selection_mode: "EXPLICIT".to_string(),
             source_bindings: vec![CacheModelSourceBinding {
@@ -467,14 +495,7 @@ impl From<crate::database::provider::ProviderAggregate> for CacheProvider {
             upstream_sources: db
                 .upstream_sources
                 .into_iter()
-                .map(|source| CacheUpstreamSource {
-                    id: source.id,
-                    profile_type: source.profile_type,
-                    endpoint: source.endpoint,
-                    use_proxy: source.use_proxy,
-                    is_enabled: source.is_enabled,
-                    is_default: source.is_default,
-                })
+                .map(CacheUpstreamSource::from)
                 .collect(),
         }
     }

@@ -38,7 +38,7 @@ export interface ProviderRuntimeItem {
   provider_is_enabled: boolean;
   source_id: number;
   source_profile_type: string;
-  source_endpoint: string;
+  source_base_url: string;
   source_use_proxy: boolean;
   source_is_enabled: boolean;
   source_is_default: boolean;

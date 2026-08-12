@@ -96,6 +96,26 @@ impl From<OpenAiResponse> for UnifiedResponse {
                                             detail: image_url.detail,
                                         });
                                     }
+                                    OpenAiContentPart::InputAudio { input_audio } => {
+                                        content.push(UnifiedContentPart::AudioData {
+                                            data: input_audio.data,
+                                            format: input_audio.format,
+                                        });
+                                    }
+                                    OpenAiContentPart::File { file } => {
+                                        if let Some(file_id) = file.file_id {
+                                            content.push(UnifiedContentPart::FileId {
+                                                file_id,
+                                                filename: file.filename,
+                                            });
+                                        } else if let Some(file_data) = file.file_data {
+                                            content.push(UnifiedContentPart::FileData {
+                                                data: file_data,
+                                                mime_type: "application/octet-stream".to_string(),
+                                                filename: file.filename,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -225,6 +245,8 @@ impl From<UnifiedResponse> for OpenAiResponse {
                                 },
                             });
                         }
+                        UnifiedContentPart::AudioData { .. }
+                        | UnifiedContentPart::FileId { .. } => {}
                         UnifiedContentPart::FileUrl {
                             url,
                             mime_type,

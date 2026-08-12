@@ -5,13 +5,16 @@ pub(crate) mod audit;
 pub(crate) mod capability;
 pub(crate) mod diagnostics;
 pub(crate) mod facade;
+pub(crate) mod media;
 pub(crate) mod policy;
 pub(crate) mod providers;
 pub mod quality;
 pub(crate) mod request;
+mod request_conflict;
 pub(crate) mod response;
 pub(crate) mod stream;
 mod stream_audit;
+pub(crate) mod structured;
 pub mod unified;
 use capability::TransformValueKind;
 pub(crate) use diagnostics::TransformDiagnosticCollector;
@@ -23,6 +26,7 @@ pub use diagnostics::{
     TransformSuccess,
 };
 use diagnostics::{TransformDiagnosticFact as DiagnosticFact, record_captured_transform_fact};
+pub(crate) use facade::validate_final_generation_request;
 pub use facade::{
     ResponseTransformValue, finalize_request_data, transform_request_data, transform_result,
     transform_result_with_cost,

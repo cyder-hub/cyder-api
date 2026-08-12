@@ -5,16 +5,22 @@ import type {
   ModelSourceConfigSummary,
   UpstreamSource,
   ProviderUpdatePayload,
+  ModelKind,
+  UpstreamProfileType,
 } from "@/services/types";
 import type {
   EditingProviderData,
   LocalEditableModelItem,
   LocalProviderApiKeyItem,
 } from "../types";
+import {
+  buildSourceCreatePayload,
+  createProviderSourceDraft,
+  type ProviderSourceDraft,
+} from "./sourceProfileContract.ts";
 
 export interface ProviderBootstrapPreviewState {
-  profile_type: string;
-  endpoint: string;
+  profile_type: UpstreamProfileType;
   provider_name?: string;
   provider_key?: string;
   name?: string;
@@ -22,7 +28,9 @@ export interface ProviderBootstrapPreviewState {
   model_name?: string;
 }
 
-export interface ProviderBootstrapFormState extends ProviderBootstrapPreviewState {
+export interface ProviderBootstrapFormState
+  extends ProviderBootstrapPreviewState,
+    ProviderSourceDraft {
   api_key: string;
   model_name: string;
   api_key_description: string;
@@ -30,6 +38,7 @@ export interface ProviderBootstrapFormState extends ProviderBootstrapPreviewStat
   provider_name: string;
   provider_key: string;
   real_model_name?: string | null;
+  model_kind: ModelKind;
 }
 
 function getPreferredSource(editingData?: Partial<EditingProviderData> | null) {
@@ -45,14 +54,14 @@ export function createProviderBootstrapFormState(
 ): ProviderBootstrapFormState {
   const source = getPreferredSource(editingData);
   return {
-    profile_type: trimText(source?.profile_type) || "OPENAI",
-    endpoint: trimText(source?.endpoint),
+    ...createProviderSourceDraft(source),
     api_key: "",
     model_name: "",
     api_key_description: "",
     use_proxy: source?.use_proxy ?? false,
     provider_name: trimText(editingData?.name),
     provider_key: trimText(editingData?.provider_key),
+    model_kind: "CHAT",
   };
 }
 
@@ -65,9 +74,7 @@ export function syncProviderBootstrapFormState(
   }
 
   const source = getPreferredSource(editingData);
-  form.profile_type = trimText(source?.profile_type) || "OPENAI";
-  form.endpoint = trimText(source?.endpoint);
-  form.use_proxy = source?.use_proxy ?? false;
+  Object.assign(form, createProviderSourceDraft(source));
   form.provider_name = trimText(editingData.name);
   form.provider_key = trimText(editingData.provider_key);
 
@@ -95,6 +102,7 @@ function mapCreatedModel(
         id?: number;
         model_name?: string;
         real_model_name?: string | null;
+        model_kind?: ModelKind;
         source_selection_mode?: string;
         source_config?: ModelSourceConfigSummary;
         is_enabled?: boolean;
@@ -107,6 +115,7 @@ function mapCreatedModel(
     id: model?.id ?? null,
     model_name: model?.model_name ?? "",
     real_model_name: model?.real_model_name ?? null,
+    model_kind: model?.model_kind ?? "CHAT",
     source_config:
       model?.source_config ?? buildBootstrapSourceConfigSummary(model, sources),
     is_enabled: model?.is_enabled ?? true,
@@ -186,14 +195,13 @@ export function buildProviderBootstrapPayload(
 ): ProviderBootstrapPayload {
   const payload: ProviderBootstrapPayload = {
     initial_source: {
-      profile_type: trimText(form.profile_type),
-      endpoint: trimText(form.endpoint),
-      use_proxy: !!form.use_proxy,
+      ...buildSourceCreatePayload(form),
       is_enabled: true,
       is_default: true,
     },
     api_key: trimText(form.api_key),
     model_name: trimText(form.model_name),
+    model_kind: form.model_kind,
     key: trimText(form.key ?? form.provider_key),
     save_and_test: !!saveAndTest,
   };
@@ -265,7 +273,6 @@ export function hydrateEditingProviderDataFromBootstrap(
   const preview = buildProviderBootstrapPreview(
     {
       profile_type: source?.profile_type ?? "OPENAI",
-      endpoint: source?.endpoint ?? "",
       provider_name: editingData.name,
       provider_key: editingData.provider_key,
     },
@@ -286,16 +293,8 @@ export function hydrateEditingProviderDataFromBootstrap(
     editingData.is_enabled = provider.is_enabled;
     editingData.provider_api_key_mode = provider.provider_api_key_mode;
     editingData.upstream_sources = provider.upstream_sources.map((source) => ({
-      id: source.id,
-      provider_id: source.provider_id,
-      profile_type: trimText(source.profile_type),
-      endpoint: trimText(source.endpoint),
-      use_proxy: source.use_proxy,
-      is_enabled: source.is_enabled,
-      is_default: source.is_default,
-      deleted_at: source.deleted_at,
-      created_at: source.created_at,
-      updated_at: source.updated_at,
+      ...source,
+      base_url: trimText(source.base_url),
     }));
   }
 
@@ -364,6 +363,16 @@ export function normalizeBootstrapCheckResult(checkResult: unknown): {
 
   if (typeof checkResult === "object") {
     const record = checkResult as Record<string, unknown>;
+    if (
+      record.status === "success" ||
+      record.status === "failed" ||
+      record.status === "check_skipped"
+    ) {
+      return {
+        ok: record.status !== "failed",
+        message: trimText(record.message ?? ""),
+      };
+    }
     if ("ok" in record) {
       return {
         ok: !!record.ok,

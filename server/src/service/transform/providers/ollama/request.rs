@@ -100,6 +100,8 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         UnifiedContentPart::ImageData { data, .. } => {
                             images.push(data);
                         }
+                        UnifiedContentPart::AudioData { .. }
+                        | UnifiedContentPart::FileId { .. } => {}
                         UnifiedContentPart::ImageUrl { url, detail } => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,

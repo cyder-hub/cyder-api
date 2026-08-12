@@ -456,6 +456,33 @@ macro_rules! db_object {
     }
 }
 
+/// Variant of `db_object!` for aggregates that contain required domain enums
+/// and therefore must not acquire an implicit Rust `Default` contract.
+#[macro_export]
+macro_rules! db_object_no_default {
+    (
+        $(
+            $( #[$attr:meta] )*
+            pub struct $name:ident {
+                $( $( #[$field_attr:meta] )* $vis:vis $field:ident : $typ:ty ),+
+                $(,)?
+            }
+        )+
+    ) => {
+        $(
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            pub struct $name { $( $vis $field : $typ, )+ }
+        )+
+
+        pub mod _postgres_model {
+            $( $crate::db_object! { @expand postgres |  $( #[$attr] )* | $name |  $( $( #[$field_attr] )* $field : $typ ),+ } )+
+        }
+        pub mod _sqlite_model {
+            $( $crate::db_object! { @expand sqlite |  $( #[$attr] )* | $name |  $( $( #[$field_attr] )* $field : $typ ),+ } )+
+        }
+    };
+}
+
 #[macro_export]
 macro_rules! db_execute {
     ($conn:ident, $block:block) => {

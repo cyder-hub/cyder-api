@@ -46,12 +46,12 @@
   "utility_rejections": {
     "embeddings": {
       "status": 400,
-      "body": {"error":{"message":"'embeddings' is only supported for OpenAI-compatible providers.","type":"invalid_request_error","param":null,"code":"unsupported_capability_error"}},
+      "body": {"error":{"message":"Model kind Chat cannot execute an operation that requires Embedding.","type":"invalid_request_error","param":null,"code":"unsupported_capability_error"}},
       "cors": true
     },
     "rerank": {
       "status": 400,
-      "body": {"error":{"message":"'rerank' is only supported for OpenAI-compatible providers.","type":"invalid_request_error","param":null,"code":"unsupported_capability_error"}},
+      "body": {"error":{"message":"Model kind Chat cannot execute an operation that requires Rerank.","type":"invalid_request_error","param":null,"code":"unsupported_capability_error"}},
       "cors": true
     }
   }

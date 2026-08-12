@@ -763,11 +763,17 @@
     "table": {
       "provider": "渠道",
       "model": "模型",
+      "kind": "类型",
       "realModel": "真实模型",
       "sourceConfig": "Source 配置",
       "enabled": "启用"
     },
     "sourceWarnings": "{count} 个警告"
+  },
+  "modelKinds": {
+    "CHAT": "对话",
+    "EMBEDDING": "向量嵌入",
+    "RERANK": "重排"
   },
   "modelSourceConfig": {
     "title": "Source 配置",
@@ -960,11 +966,7 @@
       "executable": "可执行",
       "exposed": "公开到模型目录",
       "yes": "是",
-      "no": "否",
-      "dangerousTargets": "敏感目标",
-      "dangerousTitle": "确认敏感目标",
-      "dangerousDescription": "这个 Variant 会修改上游敏感目标。最终保存前请确认下列目标。",
-      "confirm": "确认并保存"
+      "no": "否"
     },
     "explain": {
       "layers": "四层评估",
@@ -1253,7 +1255,7 @@
       "profileTypeRequired": "初始 Source Profile 不能为空。",
       "nameRequired": "名称 不能为空。",
       "providerKeyRequired": "渠道标识 不能为空。",
-      "endpointRequired": "地址 不能为空。",
+      "baseUrlRequired": "当前 Profile 的 Base URL 不能为空。",
       "apiKeyRequired": "API Key 不能为空。",
       "modelNameRequired": "模型名称 不能为空。",
       "baseInfoUpdateSuccess": "渠道基本信息更新成功。",
@@ -1262,6 +1264,7 @@
       "bootstrapSaveSuccess": "渠道保存成功。",
       "bootstrapSaveAndTestSuccess": "渠道保存并测试成功。",
       "bootstrapSaveAndTestFailed": "渠道已保存，但 bootstrap 测试失败: {error}",
+      "bootstrapSaveAndTestSkipped": "渠道已保存但未执行连接测试：{reason}",
       "bootstrapFailed": "bootstrap 渠道失败: {error}",
       "providerNotSavedForApiKey": "必须先保存渠道，然后才能添加 API Key。",
       "apiKeyRequiredWithIndex": "API Key #{index} 不能为空。",
@@ -1281,8 +1284,9 @@
       "apiKeyDeleteSuccess": "API 密钥删除成功。",
       "providerNotSavedForCheck": "必须先保存渠道，然后才能执行检查。",
       "noApiKeyForCheck": "必须至少保存一个API密钥才能执行模型检查。",
-      "noModelForCheck": "必须至少保存一个模型才能执行API密钥检查。",
+      "noModelForCheck": "至少需要一个已启用的 CHAT 模型或草稿才能执行检查。",
       "noSourceForCheck": "必须至少保存一个 Source 才能执行检查。",
+      "sourceCheckChatOnly": "Source Check 当前仅支持 CHAT 模型。",
       "checkSuccess": "检查成功。连接有效。",
       "checkFailed": "检查失败: {error}",
       "apiKeyNameFallback": "以...{lastKeyChars}结尾的密钥"
@@ -1356,7 +1360,7 @@
     "labelProviderKey": "渠道标识",
     "labelProviderType": "渠道类型",
     "labelProfileType": "上游 Profile",
-    "labelEndpoint": "地址",
+    "labelBaseUrl": "Base URL",
     "labelUseProxy": "使用代理",
     "labelEnabled": "启用",
     "labelApiKeyMode": "API Key 模式",
@@ -1387,24 +1391,43 @@
     "buttonBackToList": "返回列表",
     "sources": {
       "title": "Provider Sources",
-      "description": "管理这个 Provider 所有上游 Source 的地址和持久启用/默认状态。",
+      "description": "管理这个 Provider 所有上游 Source 的 Base URL、操作能力和持久启用/默认状态。",
       "add": "添加 Source",
       "addTitle": "添加 Source",
       "editTitle": "编辑 Source",
-      "drawerDescription": "Source 创建后身份固定；这里只更新地址、代理和运行标记。",
+      "drawerDescription": "Source 创建后 Profile 固定；这里只更新 Base URL、操作能力、代理和运行标记。",
       "createHint": "请先在基础标签页保存渠道。初始 Source 会随 bootstrap 表单一起提交。",
       "zeroWarning": "这个 Provider 没有 Source。",
       "zeroDescription": "没有启用的 Source 时请求无法执行。现在可以添加 Source；删除最后一个 Source 也是允许的。",
       "profile": "上游 Profile",
       "profilePlaceholder": "选择上游 Profile",
-      "endpoint": "地址",
+      "baseUrl": "Base URL",
+      "officialDefault": "官方默认值",
+      "officialDefaultPlaceholder": "留空使用官方 Base URL",
+      "officialDefaultHelp": "留空时使用并持久化该 Profile 的官方 Base URL；如需代理或透明中转，可填写自定义地址。",
+      "operationPathOverride": "路径覆盖",
+      "operationPathPlaceholder": "可选，例如 /v1/embeddings",
+      "operations": {
+        "chatCompletions": {
+          "label": "Chat Completions",
+          "help": "允许该 Source 承载 OpenAI 兼容的对话补全操作。"
+        },
+        "embeddings": {
+          "label": "Embeddings",
+          "help": "允许该 Source 承载向量嵌入模型。"
+        },
+        "rerank": {
+          "label": "Rerank",
+          "help": "允许该 Source 通过配置的路径承载重排模型。"
+        }
+      },
       "enabled": "已启用",
       "disabled": "已停用",
       "default": "默认",
       "defaultHint": "每个 Provider 最多只有一个启用的默认 Source。",
       "table": {
         "profile": "Profile",
-        "endpoint": "地址",
+        "baseUrl": "Base URL",
         "state": "状态"
       },
       "editAction": "编辑 Source",
@@ -1416,7 +1439,7 @@
       "unsetDefaultAction": "取消默认 Source",
       "deleteAction": "删除 Source",
       "confirmDelete": "删除 Source {target}？最后一个 Source 也可以删除。",
-      "endpointRequired": "地址不能为空。",
+      "baseUrlRequired": "当前 Profile 的 Base URL 不能为空。",
       "createSuccess": "Source 创建成功。",
       "updateSuccess": "Source 更新成功。",
       "deleteSuccess": "Source 删除成功。",
@@ -1459,6 +1482,9 @@
     },
     "labelModelName": "模型名称",
     "labelRealModelName": "真实模型名称",
+    "labelModelKind": "模型类型",
+    "modelKindCreateHelp": "选择模型所属的操作类别；模型创建后不可修改。",
+    "modelKindImmutableHelp": "模型类型在创建后固定不变。",
     "labelEnabled": "已启用",
     "alert": {
       "missingId": "缺少模型ID，无法编辑。",

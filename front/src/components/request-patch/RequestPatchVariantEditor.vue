@@ -128,12 +128,6 @@
           <p v-if="previewResponse.preview.failure_reason" class="text-xs leading-5 text-red-700">
             {{ previewResponse.preview.failure_reason }}
           </p>
-          <div v-if="previewResponse.preview.dangerous_targets.length > 0" class="space-y-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-900">
-            <p class="font-medium">{{ t("requestPatchVariant.preview.dangerousTargets") }}</p>
-            <p v-for="target in previewResponse.preview.dangerous_targets" :key="`${target.placement}-${target.target}`" class="font-mono">
-              {{ target.placement }} · {{ target.target }}
-            </p>
-          </div>
           <div v-if="previewResponse.preview.conflicts.length > 0" class="space-y-2 text-xs text-red-700">
             <p v-for="conflict in previewResponse.preview.conflicts" :key="`${conflict.existing_variant_id}-${conflict.candidate_target}-${conflict.existing_target}`">
               {{ conflict.reason }}
@@ -271,27 +265,6 @@
     </DrawerContent>
   </Drawer>
 
-  <Dialog :open="isDangerDialogOpen" @update:open="(open) => (isDangerDialogOpen = open)">
-    <DialogContent class="flex max-h-[92dvh] flex-col border border-gray-200 bg-white p-0 sm:max-w-lg">
-      <DialogHeader class="border-b border-gray-100 px-4 py-4 text-left sm:px-6">
-        <DialogTitle class="text-lg font-semibold text-gray-900">{{ t("requestPatchVariant.preview.dangerousTitle") }}</DialogTitle>
-        <DialogDescription class="mt-1 text-sm text-gray-500">{{ t("requestPatchVariant.preview.dangerousDescription") }}</DialogDescription>
-      </DialogHeader>
-      <div class="space-y-3 px-4 py-4 sm:px-6">
-        <div v-for="target in pendingDangerousTargets" :key="`${target.placement}-${target.target}`" class="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
-          <p class="font-mono">{{ target.placement }} · {{ target.target }}</p>
-          <p class="mt-1 text-xs leading-5">{{ target.reason }}</p>
-        </div>
-      </div>
-      <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
-        <Button variant="ghost" class="w-full text-gray-600 sm:w-auto" :disabled="isSaving" @click="isDangerDialogOpen = false">{{ t("common.cancel") }}</Button>
-        <Button class="w-full sm:w-auto" :disabled="isSaving" @click="confirmDangerousSave">
-          <Loader2 v-if="isSaving" class="mr-1.5 h-4 w-4 animate-spin" />
-          {{ t("requestPatchVariant.preview.confirm") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
 </template>
 
 <script setup lang="ts">
@@ -303,14 +276,6 @@ import { Loader2, Pencil, Plus, Trash2 } from "lucide-vue-next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   Drawer,
   DrawerContent,
@@ -333,13 +298,11 @@ import {
   buildRequestPatchRuleInput,
   buildRequestPatchVariantPayload,
   formatRequestPatchValueForDisplay,
-  requestPatchTargetIdentity,
   type RequestPatchRuleEditorState,
   type RequestPatchVariantEditorState,
   variantEditorStateFromAggregate,
 } from "@/utils/requestPatch";
 import type {
-  RequestPatchDangerousTargetConfirmation,
   RequestPatchExplainStatus,
   RequestPatchOperation,
   RequestPatchPlacement,
@@ -372,14 +335,11 @@ const draft = ref<RequestPatchVariantEditorState>(createEmptyVariant());
 const ruleForm = ref<RequestPatchRuleEditorState>(createEmptyRule());
 const activeRuleIndex = ref<number | null>(null);
 const isRuleEditorOpen = ref(false);
-const isDangerDialogOpen = ref(false);
 const isPreviewing = ref(false);
 const isSaving = ref(false);
 const formError = ref<string | null>(null);
 const ruleError = ref<string | null>(null);
 const previewResponse = ref<RequestPatchPreviewResponse | null>(null);
-const pendingDangerousTargets = ref<RequestPatchDangerousTargetConfirmation[]>([]);
-const pendingPayload = ref<RequestPatchVariantInput | null>(null);
 
 function statusVariant(status: RequestPatchExplainStatus) {
   if (status === "Conflicted") return "destructive" as const;
@@ -420,8 +380,6 @@ function resetDraft() {
     ? variantEditorStateFromAggregate(props.variant)
     : createEmptyVariant();
   previewResponse.value = null;
-  pendingDangerousTargets.value = [];
-  pendingPayload.value = null;
   formError.value = null;
   ruleError.value = null;
 }
@@ -534,54 +492,11 @@ async function handleSave() {
   }
   const preview = await runPreview(result.payload);
   if (!preview) return;
-  if (preview.preview.dangerous_targets.length > 0) {
-    pendingDangerousTargets.value = preview.preview.dangerous_targets;
-    pendingPayload.value = result.payload;
-    isDangerDialogOpen.value = true;
-    return;
-  }
   if (!preview.preview.valid) {
     formError.value = preview.preview.failure_reason || t("requestPatchVariant.errors.previewInvalid");
     return;
   }
   await commit(result.payload);
-}
-
-async function confirmDangerousSave() {
-  const currentPayload = pendingPayload.value;
-  if (!currentPayload) return;
-  const confirmedTargets = new Set(
-    pendingDangerousTargets.value.map((target) =>
-      requestPatchTargetIdentity(target.placement, target.target),
-    ),
-  );
-  const rawRules = currentPayload.rules as unknown as Array<{
-    placement: RequestPatchPlacement;
-    target: string;
-    operation: RequestPatchOperation;
-    value_json: unknown;
-    description: string | null;
-  }>;
-  const confirmedRules = rawRules.map((rule) => ({
-      placement: rule.placement,
-      target: rule.target,
-      operation: rule.operation,
-      value_json: rule.value_json,
-      description: rule.description,
-      confirm_dangerous_target: confirmedTargets.has(
-        requestPatchTargetIdentity(rule.placement, rule.target),
-      ),
-    }));
-  const payload = {
-    source_id: currentPayload.source_id,
-    model_id: currentPayload.model_id,
-    suffix: currentPayload.suffix,
-    enabled: currentPayload.enabled,
-    expose_in_models: currentPayload.expose_in_models,
-    rules: confirmedRules,
-  } as unknown as RequestPatchVariantInput;
-  isDangerDialogOpen.value = false;
-  await commit(payload);
 }
 
 async function commit(payload: RequestPatchVariantInput) {

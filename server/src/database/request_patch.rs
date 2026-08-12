@@ -12,8 +12,13 @@ use crate::schema::enum_def::{RequestPatchOperation, RequestPatchPlacement};
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
-const CONFIRM_DANGEROUS_TARGET_FIELD: &str = "confirm_dangerous_target";
 const HARD_FORBIDDEN_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "api-key",
+    "x-api-key",
+    "x-goog-api-key",
+    "cookie",
     "host",
     "content-length",
     "transfer-encoding",
@@ -21,10 +26,9 @@ const HARD_FORBIDDEN_HEADERS: &[&str] = &[
     "x-request-id",
     "x-client-request-id",
 ];
-const DANGEROUS_HEADERS: &[&str] = &["authorization", "x-api-key", "x-goog-api-key"];
-const HARD_FORBIDDEN_BODY_PREFIXES: &[&str] = &["/messages", "/tools", "/contents", "/input"];
-const DANGEROUS_BODY_TARGETS: &[&str] = &["/model"];
-const DANGEROUS_QUERY_TARGETS: &[&str] = &["key"];
+const HARD_FORBIDDEN_BODY_TARGETS: &[&str] =
+    &["/model", "/stream", "/stream_options/include_usage"];
+const HARD_FORBIDDEN_QUERY_TARGETS: &[&str] = &["key"];
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug, Clone, Serialize)]
@@ -111,16 +115,6 @@ pub struct RequestPatchRuleInput {
     #[serde(default, with = "::serde_with::rust::double_option")]
     pub value_json: Option<Option<Value>>,
     pub description: Option<String>,
-    #[serde(default)]
-    pub confirm_dangerous_target: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RequestPatchDangerousTargetConfirmation {
-    pub placement: RequestPatchPlacement,
-    pub target: String,
-    pub reason: String,
-    pub confirm_field: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,7 +132,6 @@ pub struct RequestPatchPreviewConflict {
 pub struct RequestPatchVariantPreview {
     pub suffix: Option<String>,
     pub rule_count: usize,
-    pub dangerous_targets: Vec<RequestPatchDangerousTargetConfirmation>,
     pub conflicts: Vec<RequestPatchPreviewConflict>,
     pub affected_model_count: usize,
     pub valid: bool,
@@ -345,56 +338,41 @@ fn is_body_ancestor_or_descendant(left: &str, right: &str) -> bool {
     left != right && (matches_body_prefix(left, right) || matches_body_prefix(right, left))
 }
 
-pub fn validate_reserved_target(
-    placement: RequestPatchPlacement,
-    target: &str,
-) -> DbResult<Option<RequestPatchDangerousTargetConfirmation>> {
+fn is_request_id_header(target: &str) -> bool {
+    target == "request-id"
+        || target.ends_with("-request-id")
+        || matches!(target, "x-amzn-requestid" | "x-amz-request-id")
+}
+
+pub fn validate_reserved_target(placement: RequestPatchPlacement, target: &str) -> DbResult<()> {
     match placement {
         RequestPatchPlacement::Header => {
-            if HARD_FORBIDDEN_HEADERS.contains(&target) {
+            if HARD_FORBIDDEN_HEADERS.contains(&target) || is_request_id_header(target) {
                 return Err(BaseError::ParamInvalid(Some(format!(
                     "HEADER target '{target}' is reserved and cannot be modified"
                 ))));
             }
-            if DANGEROUS_HEADERS.contains(&target) {
-                return Ok(Some(RequestPatchDangerousTargetConfirmation {
-                    placement,
-                    target: target.to_string(),
-                    reason: "This target changes upstream authentication semantics".to_string(),
-                    confirm_field: CONFIRM_DANGEROUS_TARGET_FIELD.to_string(),
-                }));
-            }
         }
         RequestPatchPlacement::Query => {
-            if DANGEROUS_QUERY_TARGETS.contains(&target) {
-                return Ok(Some(RequestPatchDangerousTargetConfirmation {
-                    placement,
-                    target: target.to_string(),
-                    reason: "This target changes query-based upstream credentials".to_string(),
-                    confirm_field: CONFIRM_DANGEROUS_TARGET_FIELD.to_string(),
-                }));
+            if HARD_FORBIDDEN_QUERY_TARGETS.contains(&target) {
+                return Err(BaseError::ParamInvalid(Some(format!(
+                    "QUERY target '{target}' is reserved and cannot be modified"
+                ))));
             }
         }
         RequestPatchPlacement::Body => {
-            if HARD_FORBIDDEN_BODY_PREFIXES
-                .iter()
-                .any(|prefix| matches_body_prefix(target, prefix))
-            {
+            if HARD_FORBIDDEN_BODY_TARGETS.iter().any(|reserved| {
+                target == *reserved
+                    || matches_body_prefix(target, reserved)
+                    || matches_body_prefix(reserved, target)
+            }) {
                 return Err(BaseError::ParamInvalid(Some(format!(
                     "BODY target '{target}' is reserved and cannot be modified"
                 ))));
             }
-            if DANGEROUS_BODY_TARGETS.contains(&target) {
-                return Ok(Some(RequestPatchDangerousTargetConfirmation {
-                    placement,
-                    target: target.to_string(),
-                    reason: "This target changes upstream model routing semantics".to_string(),
-                    confirm_field: CONFIRM_DANGEROUS_TARGET_FIELD.to_string(),
-                }));
-            }
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 fn normalize_rules(inputs: &[RequestPatchRuleInput]) -> DbResult<Vec<NormalizedRule>> {
@@ -410,14 +388,7 @@ fn normalize_rules(inputs: &[RequestPatchRuleInput]) -> DbResult<Vec<NormalizedR
             ))));
         }
         identities.push((input.placement, target.clone()));
-        if let Some(confirmation) = validate_reserved_target(input.placement, &target)? {
-            if !input.confirm_dangerous_target {
-                return Err(BaseError::ParamInvalid(Some(format!(
-                    "request patch target '{}' requires {} confirmation",
-                    confirmation.target, confirmation.confirm_field
-                ))));
-            }
-        }
+        validate_reserved_target(input.placement, &target)?;
         let value_json =
             validate_value_for_placement(input.placement, input.operation, &input.value_json)?;
         normalized.push(NormalizedRule {
@@ -994,56 +965,39 @@ impl RequestPatchVariantRepository {
                         )));
                     }
                 }
-                let mut confirmed_input = input.clone();
-                let mut dangerous_targets = Vec::new();
-                let mut unconfirmed_dangerous = false;
-                for rule in &mut confirmed_input.rules {
+                for rule in &input.rules {
                     let normalized_target = normalize_target(rule.placement, &rule.target)?;
-                    if let Some(confirmation) =
-                        validate_reserved_target(rule.placement, &normalized_target)?
-                    {
-                        dangerous_targets.push(confirmation);
-                        if !rule.confirm_dangerous_target {
-                            unconfirmed_dangerous = true;
-                        }
-                        rule.confirm_dangerous_target = true;
-                    }
+                    validate_reserved_target(rule.placement, &normalized_target)?;
                 }
                 let (suffix, normalized_rules) = if exclude_variant_id.is_some() {
-                    normalize_variant_input_for_replace(&confirmed_input)?
+                    normalize_variant_input_for_replace(input)?
                 } else {
-                    normalize_variant_input(&confirmed_input)?
+                    normalize_variant_input(input)?
                 };
-                validate_model_suffix_inheritance!(
-                    conn,
-                    &confirmed_input,
-                    &suffix,
-                    &normalized_rules
-                )?;
+                validate_model_suffix_inheritance!(conn, input, &suffix, &normalized_rules)?;
                 let candidate = RequestPatchVariant {
                     id: exclude_variant_id.unwrap_or_default(),
-                    source_id: confirmed_input.source_id,
-                    model_id: confirmed_input.model_id,
+                    source_id: input.source_id,
+                    model_id: input.model_id,
                     suffix: suffix.clone(),
-                    enabled: confirmed_input.enabled,
-                    expose_in_models: confirmed_input.expose_in_models,
+                    enabled: input.enabled,
+                    expose_in_models: input.expose_in_models,
                     deleted_at: None,
                     created_at: 0,
                     updated_at: 0,
                 };
-                let existing =
-                    load_existing_variants!(conn, confirmed_input.source_id, exclude_variant_id)?;
+                let existing = load_existing_variants!(conn, input.source_id, exclude_variant_id)?;
                 let duplicate_identity = duplicate_variant_identity(&candidate, &existing);
                 let conflicts =
                     collect_cross_layer_conflicts(&candidate, &normalized_rules, &existing);
                 let provider_id = upstream_source::table
-                    .filter(upstream_source::dsl::id.eq(confirmed_input.source_id))
+                    .filter(upstream_source::dsl::id.eq(input.source_id))
                     .select(upstream_source::dsl::provider_id)
                     .first::<i64>(conn)
                     .map_err(|error| {
                         database_error("failed to load Source provider for Variant preview", error)
                     })?;
-                let affected_model_count = if confirmed_input.model_id.is_some() {
+                let affected_model_count = if input.model_id.is_some() {
                     1
                 } else {
                     model::table
@@ -1055,9 +1009,7 @@ impl RequestPatchVariantRepository {
                         .map_err(|error| database_error("failed to count affected Models", error))?
                         as usize
                 };
-                let failure_reason = if unconfirmed_dangerous {
-                    Some("one or more dangerous targets require confirmation".to_string())
-                } else if duplicate_identity {
+                let failure_reason = if duplicate_identity {
                     Some(
                         "an active request patch Variant already has this owner and suffix"
                             .to_string(),
@@ -1070,10 +1022,9 @@ impl RequestPatchVariantRepository {
                 Ok(RequestPatchVariantPreview {
                     suffix,
                     rule_count: normalized_rules.len(),
-                    dangerous_targets,
                     conflicts,
                     affected_model_count,
-                    valid: !unconfirmed_dangerous && failure_reason.is_none(),
+                    valid: failure_reason.is_none(),
                     failure_reason,
                 })
             })
@@ -1550,7 +1501,7 @@ mod tests {
     use crate::database::upstream_source::{
         NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource,
     };
-    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+    use crate::schema::enum_def::{ModelKind, ProviderApiKeyMode, UpstreamProfileType};
     use serde_json::json;
 
     fn rule(
@@ -1558,7 +1509,6 @@ mod tests {
         target: &str,
         operation: RequestPatchOperation,
         value_json: Option<Value>,
-        confirm_dangerous_target: bool,
     ) -> RequestPatchRuleInput {
         RequestPatchRuleInput {
             placement,
@@ -1566,7 +1516,6 @@ mod tests {
             operation,
             value_json: value_json.map(Some),
             description: None,
-            confirm_dangerous_target,
         }
     }
 
@@ -1615,14 +1564,12 @@ mod tests {
                 "X-Test",
                 RequestPatchOperation::Set,
                 Some(json!(true)),
-                false,
             ),
             rule(
                 RequestPatchPlacement::Header,
                 "x-test",
                 RequestPatchOperation::Set,
                 Some(json!(false)),
-                false,
             ),
         ];
         assert!(normalize_rules(&duplicate).is_err());
@@ -1633,37 +1580,51 @@ mod tests {
                 "/generation_config",
                 RequestPatchOperation::Set,
                 Some(json!({"temperature": 1})),
-                false,
             ),
             rule(
                 RequestPatchPlacement::Body,
                 "/generation_config/temperature",
                 RequestPatchOperation::Set,
                 Some(json!(1)),
-                false,
             ),
         ];
         assert!(normalize_rules(&body_conflict).is_err());
     }
 
     #[test]
-    fn dangerous_targets_require_explicit_confirmation() {
-        let unconfirmed = vec![rule(
-            RequestPatchPlacement::Header,
-            "authorization",
-            RequestPatchOperation::Set,
-            Some(json!("Bearer demo")),
-            false,
-        )];
-        assert!(normalize_rules(&unconfirmed).is_err());
-        let confirmed = vec![rule(
-            RequestPatchPlacement::Header,
-            "authorization",
-            RequestPatchOperation::Set,
-            Some(json!("Bearer demo")),
-            true,
-        )];
-        assert!(normalize_rules(&confirmed).is_ok());
+    fn reserved_targets_are_always_rejected_without_confirmation_override() {
+        for (placement, target) in [
+            (RequestPatchPlacement::Header, "authorization"),
+            (RequestPatchPlacement::Header, "proxy-authorization"),
+            (RequestPatchPlacement::Header, "api-key"),
+            (RequestPatchPlacement::Header, "x-api-key"),
+            (RequestPatchPlacement::Header, "x-goog-api-key"),
+            (RequestPatchPlacement::Header, "cookie"),
+            (RequestPatchPlacement::Header, "openai-request-id"),
+            (RequestPatchPlacement::Query, "key"),
+            (RequestPatchPlacement::Body, "/model"),
+            (RequestPatchPlacement::Body, "/stream"),
+            (RequestPatchPlacement::Body, "/stream_options"),
+            (RequestPatchPlacement::Body, "/stream_options/include_usage"),
+        ] {
+            let rules = vec![rule(
+                placement,
+                target,
+                RequestPatchOperation::Set,
+                Some(json!("forbidden")),
+            )];
+            assert!(normalize_rules(&rules).is_err(), "{placement:?} {target}");
+        }
+
+        assert!(
+            normalize_rules(&[rule(
+                RequestPatchPlacement::Body,
+                "/messages/0/content",
+                RequestPatchOperation::Set,
+                Some(json!("allowed")),
+            )])
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1674,7 +1635,6 @@ mod tests {
                 "x-test",
                 RequestPatchOperation::Remove,
                 Some(json!("not-allowed")),
-                false,
             )])
             .is_err()
         );
@@ -1684,7 +1644,6 @@ mod tests {
                 "x-test",
                 RequestPatchOperation::Set,
                 Some(json!({"object": true})),
-                false,
             )])
             .is_err()
         );
@@ -1694,7 +1653,6 @@ mod tests {
                 "/metadata/tag",
                 RequestPatchOperation::Set,
                 Some(Value::Null),
-                false,
             )])
             .is_ok()
         );
@@ -1774,7 +1732,6 @@ mod tests {
             "/metadata/tag",
             RequestPatchOperation::Set,
             Some(json!(1)),
-            false,
         );
         let exact_normalized = normalize_rules(&[exact]).expect("exact rule should normalize");
         let exact_existing = VariantSnapshot {
@@ -1801,7 +1758,6 @@ mod tests {
             "/metadata",
             RequestPatchOperation::Set,
             Some(json!({})),
-            false,
         );
         let ancestor_normalized = normalize_rules(&[ancestor]).expect("ancestor should normalize");
         assert!(
@@ -1943,12 +1899,13 @@ mod tests {
                 id: source_id,
                 provider_id,
                 profile_type: UpstreamProfileType::Openai,
-                endpoint: format!("https://source-{source_id}.example/v1"),
+                base_url: format!("https://source-{source_id}.example/v1"),
                 use_proxy: false,
                 is_enabled: true,
                 is_default: true,
                 created_at: 1,
                 updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
         .expect("provider seed should succeed");
@@ -1979,7 +1936,6 @@ mod tests {
             target,
             RequestPatchOperation::Set,
             Some(value),
-            false,
         )
     }
 
@@ -2040,7 +1996,6 @@ mod tests {
                         "Authorization",
                         RequestPatchOperation::Set,
                         Some(json!("secret")),
-                        false,
                     )],
                 );
                 assert!(RequestPatchVariantRepository::create(&invalid).is_err());
@@ -2060,8 +2015,9 @@ mod tests {
             .run_async(async {
                 let (_provider, source) = seed_provider(8301, 8311);
                 let (_other_provider, other_source) = seed_provider(8302, 8312);
-                let model = Model::create(source.provider_id, "model-a", None, true)
-                    .expect("model should be created");
+                let model =
+                    Model::create(source.provider_id, "model-a", None, ModelKind::Chat, true)
+                        .expect("model should be created");
                 let first = RequestPatchVariantRepository::create(&variant_input(
                     source.id,
                     None,
@@ -2172,8 +2128,14 @@ mod tests {
         database
             .run_async(async {
                 let (_provider, source) = seed_provider(8471, 8481);
-                let model = Model::create(source.provider_id, "dependent-model", None, true)
-                    .expect("model should be created");
+                let model = Model::create(
+                    source.provider_id,
+                    "dependent-model",
+                    None,
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("model should be created");
                 let source_variant = RequestPatchVariantRepository::create(&variant_input(
                     source.id,
                     None,
@@ -2237,8 +2199,14 @@ mod tests {
         database
             .run_async(async {
                 let (_provider, source) = seed_provider(8491, 8501);
-                let model = Model::create(source.provider_id, "reactivated-model", None, true)
-                    .expect("model should be created");
+                let model = Model::create(
+                    source.provider_id,
+                    "reactivated-model",
+                    None,
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("model should be created");
                 let source_variant = RequestPatchVariantRepository::create(&variant_input(
                     source.id,
                     None,
@@ -2261,11 +2229,12 @@ mod tests {
                     source.id,
                     source.provider_id,
                     &UpdateUpstreamSourceData {
-                        endpoint: None,
+                        base_url: None,
                         use_proxy: None,
                         is_enabled: Some(false),
                         is_default: None,
                         updated_at: 2,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect("Source should be disabled");
@@ -2286,8 +2255,14 @@ mod tests {
         database
             .run_async(async {
                 let (_provider, source) = seed_provider(8501, 8511);
-                let model = Model::create(source.provider_id, "preview-model", None, true)
-                    .expect("model should be created");
+                let model = Model::create(
+                    source.provider_id,
+                    "preview-model",
+                    None,
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("model should be created");
                 RequestPatchVariantRepository::create(&variant_input(
                     source.id,
                     None,

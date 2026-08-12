@@ -13,6 +13,9 @@
             {{ t("modelPage.table.realModel") }}
           </TableHead>
           <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
+            {{ t("modelPage.table.kind") }}
+          </TableHead>
+          <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
             {{ t("modelPage.table.sourceConfig") }}
           </TableHead>
           <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
@@ -38,6 +41,11 @@
           </TableCell>
           <TableCell class="font-mono text-sm text-gray-700">
             {{ model.real_model_name || t("common.notAvailable") }}
+          </TableCell>
+          <TableCell>
+            <Badge variant="outline" class="font-mono text-[11px]">
+              {{ t(`modelKinds.${model.model_kind}`) }}
+            </Badge>
           </TableCell>
           <TableCell>
             <div class="flex max-w-md flex-wrap items-center gap-1.5">

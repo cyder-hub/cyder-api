@@ -161,6 +161,27 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
       "front/src/components/model-source-config/ModelSourceConfigEditor.vue warning summary",
   },
   {
+    id: "model-kind",
+    keyTemplates: ["modelKinds.{kind}"],
+    values: ["CHAT", "EMBEDDING", "RERANK"],
+    placeholders: {
+      kind: ["CHAT", "EMBEDDING", "RERANK"],
+    },
+    valueSource: "front/src/pages/model*/** model kind selectors and summaries",
+  },
+  {
+    id: "provider-source-operation",
+    keyTemplates: [
+      "providerEditPage.sources.operations.{operation}.label",
+      "providerEditPage.sources.operations.{operation}.help",
+    ],
+    values: ["chatCompletions", "embeddings", "rerank"],
+    placeholders: {
+      operation: ["chatCompletions", "embeddings", "rerank"],
+    },
+    valueSource: "front/src/pages/provider-edit/** operationRows",
+  },
+  {
     id: "cost-options",
     keyTemplates: ["{option.labelKey}"],
     values: [],

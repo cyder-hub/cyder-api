@@ -266,6 +266,7 @@ pub fn create_model_with_config(
                     model::dsl::provider_id.eq(new_model.provider_id),
                     model::dsl::model_name.eq(new_model.model_name.clone()),
                     model::dsl::real_model_name.eq(new_model.real_model_name.clone()),
+                    model::dsl::model_kind.eq(new_model.model_kind),
                     model::dsl::source_selection_mode.eq(new_model.source_selection_mode.clone()),
                     model::dsl::is_enabled.eq(new_model.is_enabled),
                     model::dsl::created_at.eq(new_model.created_at),
@@ -571,12 +572,13 @@ mod tests {
             id,
             provider_id,
             profile_type: UpstreamProfileType::Openai,
-            endpoint: format!("https://example.com/{id}"),
+            base_url: format!("https://example.com/{id}"),
             use_proxy: false,
             is_enabled: true,
             is_default,
             created_at: 1,
             updated_at: 1,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
         }
     }
 
@@ -591,6 +593,12 @@ mod tests {
             .expect("provider should be created");
             let mut second_source = source_input(7102, 7001, false);
             second_source.profile_type = UpstreamProfileType::Anthropic;
+            second_source.chat_completions_enabled = None;
+            second_source.chat_completions_path_override = None;
+            second_source.embeddings_enabled = None;
+            second_source.embeddings_path_override = None;
+            second_source.rerank_enabled = None;
+            second_source.rerank_path_override = None;
             let second =
                 UpstreamSource::create(&second_source).expect("second source should be created");
             assert_eq!(second.id, 7102);
@@ -599,6 +607,7 @@ mod tests {
                 7001,
                 "model-a",
                 None,
+                crate::schema::enum_def::ModelKind::Chat,
                 true,
                 Some(&ModelSourceConfig::explicit(vec![
                     ModelSourceBindingInput {
@@ -673,11 +682,12 @@ mod tests {
                 7201,
                 7201,
                 &crate::database::upstream_source::UpdateUpstreamSourceData {
-                    endpoint: None,
+                    base_url: None,
                     use_proxy: None,
                     is_enabled: Some(false),
                     is_default: Some(false),
                     updated_at: 2,
+                    ..crate::database::upstream_source::UpdateUpstreamSourceData::test_defaults()
                 },
             )
             .expect("source should be disabled");
@@ -686,6 +696,7 @@ mod tests {
                 7201,
                 "model-b",
                 None,
+                crate::schema::enum_def::ModelKind::Chat,
                 true,
                 Some(&ModelSourceConfig::explicit(vec![
                     ModelSourceBindingInput {

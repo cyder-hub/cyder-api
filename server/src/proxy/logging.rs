@@ -24,13 +24,15 @@ use crate::{
             timing::{TimingSnapshot, TransportTimingState},
         },
     },
-    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProfileType, UpstreamProtocol},
+    schema::enum_def::{
+        DownstreamProtocol, ModelKind, RequestStatus, UpstreamProfileType, UpstreamProtocol,
+    },
     service::{
         app_state::AppState,
         cache::types::{
             CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider, CacheUpstreamSource,
         },
-        provider_http::normalize_provider_endpoint,
+        provider_http::normalize_provider_base_url,
         runtime::ApiKeyCompletionDelta,
         transform::{
             TransformAction, TransformFailure, TransformOutcomeKind, TransformOutcomeSummary,
@@ -56,13 +58,14 @@ pub struct RequestLogContext {
     pub source_id: i64,
     pub source_selection_reason: Option<String>,
     pub source_profile_type: UpstreamProfileType,
-    pub source_endpoint: Option<String>,
+    pub source_base_url: Option<String>,
     pub provider_api_key_id: Option<i64>,
     pub requested_model_name: String,
     pub base_requested_model_name: String,
     pub resolved_patch_suffix: Option<String>,
     pub model_name: String,
     pub real_model_name: String,
+    pub model_kind: crate::schema::enum_def::ModelKind,
     pub downstream_protocol: DownstreamProtocol,
     pub upstream_protocol: UpstreamProtocol,
     pub request_received_at: i64,
@@ -116,13 +119,14 @@ impl RequestLogContext {
             source_id: source.id,
             source_selection_reason: Some(selection_reason.as_key().to_string()),
             source_profile_type: source.profile_type,
-            source_endpoint: None,
+            source_base_url: None,
             provider_api_key_id,
             requested_model_name: requested_model_name.to_string(),
             base_requested_model_name: requested_model_name.to_string(),
             resolved_patch_suffix: None,
             model_name: model.model_name.clone(),
             real_model_name: real_model_name.to_string(),
+            model_kind: model.model_kind,
             downstream_protocol,
             upstream_protocol,
             request_received_at: request_context.received_at_ms,
@@ -162,8 +166,8 @@ impl RequestLogContext {
         self.resolved_patch_suffix = resolved_patch_suffix.map(str::to_string);
     }
 
-    pub(crate) fn set_source_endpoint_snapshot(&mut self, normalized_endpoint: &str) {
-        self.source_endpoint = safe_source_endpoint_snapshot(normalized_endpoint);
+    pub(crate) fn set_source_base_url_snapshot(&mut self, normalized_base_url: &str) {
+        self.source_base_url = safe_source_base_url_snapshot(normalized_base_url);
     }
 }
 
@@ -190,6 +194,8 @@ struct TransformSummaryLogFields {
     request_id: String,
     log_id: i64,
     source_id: i64,
+    source_profile_type: &'static str,
+    model_kind: &'static str,
     downstream_protocol: &'static str,
     upstream_protocol: &'static str,
     selection_reason: Option<String>,
@@ -213,6 +219,8 @@ struct TransformLogIdentity<'a> {
     request_id: &'a str,
     log_id: i64,
     source_id: i64,
+    source_profile_type: UpstreamProfileType,
+    model_kind: ModelKind,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     selection_reason: Option<&'a str>,
@@ -224,6 +232,8 @@ impl<'a> From<&'a RequestLogContext> for TransformLogIdentity<'a> {
             request_id: context.request_id.as_str(),
             log_id: context.id,
             source_id: context.source_id,
+            source_profile_type: context.source_profile_type,
+            model_kind: context.model_kind,
             downstream_protocol: context.downstream_protocol,
             upstream_protocol: context.upstream_protocol,
             selection_reason: context.source_selection_reason.as_deref(),
@@ -246,6 +256,8 @@ fn transform_summary_log_fields(
         request_id: identity.request_id.to_string(),
         log_id: identity.log_id,
         source_id: identity.source_id,
+        source_profile_type: upstream_profile_type_name(identity.source_profile_type),
+        model_kind: model_kind_name(identity.model_kind),
         downstream_protocol: downstream_protocol_name(identity.downstream_protocol),
         upstream_protocol: upstream_protocol_name(identity.upstream_protocol),
         selection_reason: identity.selection_reason.map(str::to_string),
@@ -315,6 +327,27 @@ fn upstream_protocol_name(protocol: UpstreamProtocol) -> &'static str {
     }
 }
 
+fn upstream_profile_type_name(profile_type: UpstreamProfileType) -> &'static str {
+    match profile_type {
+        UpstreamProfileType::Openai => "openai",
+        UpstreamProfileType::OpenaiCompatible => "openai_compatible",
+        UpstreamProfileType::Gemini => "gemini",
+        UpstreamProfileType::Vertex => "vertex",
+        UpstreamProfileType::Ollama => "ollama",
+        UpstreamProfileType::Anthropic => "anthropic",
+        UpstreamProfileType::Responses => "responses",
+        UpstreamProfileType::GeminiOpenai => "gemini_openai",
+    }
+}
+
+fn model_kind_name(model_kind: ModelKind) -> &'static str {
+    match model_kind {
+        ModelKind::Chat => "chat",
+        ModelKind::Embedding => "embedding",
+        ModelKind::Rerank => "rerank",
+    }
+}
+
 fn protocols_share_wire(
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
@@ -335,6 +368,11 @@ fn transform_summary_event_fields(
         ("request_id", Some(fields.request_id.clone())),
         ("log_id", Some(fields.log_id.to_string())),
         ("source_id", Some(fields.source_id.to_string())),
+        (
+            "source_profile_type",
+            Some(fields.source_profile_type.to_string()),
+        ),
+        ("model_kind", Some(fields.model_kind.to_string())),
         ("stage", Some(fields.stage.to_string())),
         (
             "downstream_protocol",
@@ -433,15 +471,34 @@ pub(in crate::proxy) fn log_transform_failure(
     crate::logging::log_structured_event(level, "proxy.transform_failure", &event_fields);
 }
 
-fn safe_source_endpoint_snapshot(endpoint: &str) -> Option<String> {
-    normalize_provider_endpoint(endpoint).ok()
+pub(in crate::proxy) fn log_upstream_usage_missing(
+    context: &RequestLogContext,
+    model: &str,
+    status_code: StatusCode,
+) {
+    crate::warn_event!(
+        "proxy.upstream_usage_missing",
+        request_id = &context.request_id,
+        log_id = context.id,
+        source_id = context.source_id,
+        source_profile_type = upstream_profile_type_name(context.source_profile_type),
+        model_kind = model_kind_name(context.model_kind),
+        downstream_protocol = downstream_protocol_name(context.downstream_protocol),
+        upstream_protocol = upstream_protocol_name(context.upstream_protocol),
+        model = model,
+        status_code = status_code.as_u16(),
+    );
+}
+
+fn safe_source_base_url_snapshot(base_url: &str) -> Option<String> {
+    normalize_provider_base_url(base_url).ok()
 }
 
 fn total_tokens_for_context(context: &RequestLogContext) -> i64 {
     context
         .usage_normalization
         .as_ref()
-        .map(|usage| (usage.total_input_tokens + usage.total_output_tokens) as i64)
+        .map(UsageNormalization::normalized_total_tokens)
         .or_else(|| {
             context
                 .usage
@@ -734,8 +791,9 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         provider_name_snapshot: Some(context.provider_name.clone()),
         model_name_snapshot: Some(context.model_name.clone()),
         real_model_name_snapshot: Some(context.real_model_name.clone()),
+        model_kind_snapshot: Some(context.model_kind),
         source_profile_type_snapshot: Some(context.source_profile_type),
-        source_endpoint_snapshot: context.source_endpoint.clone(),
+        source_base_url_snapshot: context.source_base_url.clone(),
         upstream_protocol: Some(context.upstream_protocol),
         upstream_http_status: context.llm_status.map(|status| i32::from(status.as_u16())),
         estimated_cost_nanos: cost.estimated_cost_nanos,
@@ -746,30 +804,33 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         total_input_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.total_input_tokens as i32)
+            .and_then(|usage| i32::try_from(usage.total_input_tokens).ok())
             .or_else(|| context.usage.as_ref().map(|usage| usage.input_tokens)),
         total_output_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.total_output_tokens as i32)
+            .filter(|usage| usage.output_tokens_applicable)
+            .and_then(|usage| i32::try_from(usage.total_output_tokens).ok())
             .or_else(|| context.usage.as_ref().map(|usage| usage.output_tokens)),
         input_text_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.input_text_tokens as i32),
+            .and_then(|usage| i32::try_from(usage.input_text_tokens).ok()),
         output_text_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.output_text_tokens as i32),
+            .filter(|usage| usage.output_tokens_applicable)
+            .and_then(|usage| i32::try_from(usage.output_text_tokens).ok()),
         input_image_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.input_image_tokens as i32)
+            .and_then(|usage| i32::try_from(usage.input_image_tokens).ok())
             .or_else(|| context.usage.as_ref().map(|usage| usage.input_image_tokens)),
         output_image_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.output_image_tokens as i32)
+            .filter(|usage| usage.output_tokens_applicable)
+            .and_then(|usage| i32::try_from(usage.output_image_tokens).ok())
             .or_else(|| {
                 context
                     .usage
@@ -779,21 +840,22 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         cache_read_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.cache_read_tokens as i32)
+            .and_then(|usage| i32::try_from(usage.cache_read_tokens).ok())
             .or_else(|| context.usage.as_ref().map(|usage| usage.cached_tokens)),
         cache_write_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.cache_write_tokens as i32),
+            .and_then(|usage| i32::try_from(usage.cache_write_tokens).ok()),
         reasoning_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| usage.reasoning_tokens as i32)
+            .filter(|usage| usage.output_tokens_applicable)
+            .and_then(|usage| i32::try_from(usage.reasoning_tokens).ok())
             .or_else(|| context.usage.as_ref().map(|usage| usage.reasoning_tokens)),
         total_tokens: context
             .usage_normalization
             .as_ref()
-            .map(|usage| (usage.total_input_tokens + usage.total_output_tokens) as i32)
+            .and_then(|usage| i32::try_from(usage.normalized_total_tokens()).ok())
             .or_else(|| context.usage.as_ref().map(|usage| usage.total_tokens)),
         created_at: context.request_received_at,
         updated_at: now,
@@ -809,22 +871,27 @@ struct CostOutcome {
 }
 
 fn build_cost_outcome(context: &RequestLogContext) -> CostOutcome {
-    let (Some(normalization), Some(version)) = (
-        context.usage_normalization.as_ref(),
-        context.cost_catalog_version.as_ref(),
-    ) else {
+    let Some(version) = context.cost_catalog_version.as_ref() else {
         return CostOutcome::default();
     };
-    let ledger = CostLedger::from(normalization);
+    if context.overall_status != RequestStatus::Success {
+        return CostOutcome::default();
+    }
+    let normalization = context.usage_normalization.as_ref();
+    let ledger = CostLedger::for_successful_invocation(normalization);
     let snapshot = match rate_cost(
         &ledger,
         &CostRatingContext {
-            total_input_tokens: normalization.total_input_tokens,
+            total_input_tokens: normalization
+                .map(|usage| usage.total_input_tokens)
+                .unwrap_or_default(),
         },
         version,
     ) {
         Ok(rating) => {
-            let mut warnings = normalization.warnings.clone();
+            let mut warnings = normalization
+                .map(|usage| usage.warnings.clone())
+                .unwrap_or_default();
             warnings.extend(rating.warnings);
             CostSnapshot {
                 schema_version: crate::cost::COST_SNAPSHOT_SCHEMA_VERSION_V1,
@@ -865,14 +932,14 @@ mod tests {
     };
 
     #[test]
-    fn source_endpoint_snapshot_is_normalized_and_rejects_secret_bearing_urls() {
+    fn source_base_url_snapshot_is_normalized_and_rejects_secret_bearing_urls() {
         assert_eq!(
-            safe_source_endpoint_snapshot("  HTTPS://API.EXAMPLE.COM:443/v1///  ").as_deref(),
+            safe_source_base_url_snapshot("  HTTPS://API.EXAMPLE.COM:443/v1///  ").as_deref(),
             Some("https://api.example.com/v1")
         );
-        assert!(safe_source_endpoint_snapshot("https://user:secret@api.example.com/v1").is_none());
-        assert!(safe_source_endpoint_snapshot("https://api.example.com/v1?key=secret").is_none());
-        assert!(safe_source_endpoint_snapshot("https://api.example.com/v1#secret").is_none());
+        assert!(safe_source_base_url_snapshot("https://user:secret@api.example.com/v1").is_none());
+        assert!(safe_source_base_url_snapshot("https://api.example.com/v1?key=secret").is_none());
+        assert!(safe_source_base_url_snapshot("https://api.example.com/v1#secret").is_none());
     }
 
     #[test]
@@ -889,6 +956,8 @@ mod tests {
                     request_id: "req-safe",
                     log_id: 41,
                     source_id: 42,
+                    source_profile_type: UpstreamProfileType::Openai,
+                    model_kind: ModelKind::Chat,
                     downstream_protocol: DownstreamProtocol::Openai,
                     upstream_protocol: UpstreamProtocol::Openai,
                     selection_reason: Some(selection_reason),
@@ -896,6 +965,8 @@ mod tests {
                 &summary,
             );
             assert_eq!(fields.selection_reason.as_deref(), Some(selection_reason));
+            assert_eq!(fields.source_profile_type, "openai");
+            assert_eq!(fields.model_kind, "chat");
             assert!(!fields.transform_applied);
         }
 
@@ -905,6 +976,8 @@ mod tests {
                 request_id: "req-safe",
                 log_id: 41,
                 source_id: 42,
+                source_profile_type: UpstreamProfileType::Responses,
+                model_kind: ModelKind::Chat,
                 downstream_protocol: DownstreamProtocol::Openai,
                 upstream_protocol: UpstreamProtocol::Responses,
                 selection_reason: Some("protocol_match"),
@@ -944,6 +1017,8 @@ mod tests {
                 request_id: "req-safe",
                 log_id: 41,
                 source_id: 42,
+                source_profile_type: UpstreamProfileType::Openai,
+                model_kind: ModelKind::Chat,
                 downstream_protocol: DownstreamProtocol::Openai,
                 upstream_protocol: UpstreamProtocol::Openai,
                 selection_reason: Some("protocol_match"),
@@ -958,6 +1033,8 @@ mod tests {
         assert_eq!(fields.total_fact_count, 35);
         assert_eq!(fields.retained_fact_count, 32);
         assert_eq!(fields.dropped_diagnostic_count, 3);
+        assert_eq!(fields.source_profile_type, "openai");
+        assert_eq!(fields.model_kind, "chat");
         assert_eq!(fields.safe_summary_count, 1);
         assert_eq!(
             fields.safe_summary_sha256.as_deref().map(str::len),
@@ -965,6 +1042,8 @@ mod tests {
         );
         assert!(fields.outcome_counts.contains("passthrough:34"));
         assert!(fields.outcome_counts.contains("observation_degraded:1"));
+        assert!(rendered.contains("source_profile_type=openai"));
+        assert!(rendered.contains("model_kind=chat"));
         for forbidden in ["must-not-appear", "tool_arguments", "private"] {
             assert!(!rendered.contains(forbidden));
         }

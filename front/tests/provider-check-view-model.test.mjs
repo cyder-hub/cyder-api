@@ -48,7 +48,7 @@ const source = (id, { enabled = true, defaultSource = false, deleted = null } = 
   id,
   provider_id: 1,
   profile_type: id === 1 ? "OPENAI" : "GEMINI",
-  endpoint: `https://source-${id}.test`,
+  base_url: `https://source-${id}.test`,
   use_proxy: false,
   is_enabled: enabled,
   is_default: defaultSource,
@@ -82,12 +82,14 @@ test("automatic check options exclude disabled targets while preserving source i
       id: 10,
       model_name: "disabled-model",
       real_model_name: null,
+      model_kind: "CHAT",
       is_enabled: false,
     },
     {
       id: 11,
       model_name: "enabled-model",
       real_model_name: null,
+      model_kind: "CHAT",
       is_enabled: true,
     },
   ];
@@ -126,6 +128,7 @@ test("explicit models constrain check Sources and fixed-Source model candidates"
       id: 10,
       model_name: "explicit-one",
       real_model_name: null,
+      model_kind: "CHAT",
       is_enabled: true,
       source_config: {
         source_selection_mode: "EXPLICIT",
@@ -140,6 +143,7 @@ test("explicit models constrain check Sources and fixed-Source model candidates"
       id: 11,
       model_name: "inherited",
       real_model_name: null,
+      model_kind: "CHAT",
       is_enabled: true,
       source_config: {
         source_selection_mode: "INHERIT_ALL",
@@ -164,4 +168,44 @@ test("explicit models constrain check Sources and fixed-Source model candidates"
     status: "selected",
     sourceId: 2,
   });
+});
+
+test("Source Check candidates include CHAT drafts and exclude non-CHAT models", () => {
+  const models = [
+    {
+      id: null,
+      model_name: "draft-chat",
+      real_model_name: "draft-chat-upstream",
+      model_kind: "CHAT",
+      is_enabled: true,
+      source_config: {
+        source_selection_mode: "EXPLICIT",
+        bindings: [{ source_id: 2, is_default: true }],
+      },
+    },
+    {
+      id: 12,
+      model_name: "embedding",
+      real_model_name: null,
+      model_kind: "EMBEDDING",
+      is_enabled: true,
+    },
+    {
+      id: 13,
+      model_name: "rerank",
+      real_model_name: null,
+      model_kind: "RERANK",
+      is_enabled: true,
+    },
+  ];
+
+  assert.deepEqual(
+    buildEnabledModelOptions(models, (item) => item.model_name, 1),
+    [{ value: 0, label: "#1 draft-chat" }],
+  );
+  assert.equal(modelAllowsSource(models[0], 1), true);
+  assert.deepEqual(buildEnabledSourceOptions([source(1), source(2)], models[0]), [
+    { value: 1, label: "OPENAI · #1" },
+    { value: 2, label: "GEMINI · #2" },
+  ]);
 });

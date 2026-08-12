@@ -187,19 +187,29 @@ pub async fn authenticate_anthropic_request(
 }
 
 // Checks if the request is allowed by the API key's embedded ACL snapshot.
+pub(crate) fn evaluate_access_control(
+    api_key: &CacheApiKey,
+    provider: &CacheProvider,
+    model: &CacheModel,
+) -> Result<(), String> {
+    ACL_EVALUATOR
+        .authorize(
+            &api_key.name,
+            &api_key.default_action,
+            &api_key.acl_rules,
+            provider.id,
+            model.id,
+        )
+        .map(|_| ())
+}
+
 pub async fn check_access_control(
     api_key: &CacheApiKey,
     provider: &CacheProvider,
     model: &CacheModel,
     _app_state: &Arc<AppState>,
 ) -> Result<(), ProxyError> {
-    if let Err(reason) = ACL_EVALUATOR.authorize(
-        &api_key.name,
-        &api_key.default_action,
-        &api_key.acl_rules,
-        provider.id,
-        model.id,
-    ) {
+    if let Err(reason) = evaluate_access_control(api_key, provider, model) {
         return Err(governance_error(
             ProxyErrorCode::PermissionError,
             format!("Access denied by api key access control: {}", reason,),

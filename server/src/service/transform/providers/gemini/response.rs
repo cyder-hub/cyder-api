@@ -38,6 +38,26 @@ impl From<GeminiResponse> for UnifiedResponse {
                         .unwrap_or_else(|| u32::try_from(candidate_position).unwrap_or(u32::MAX));
                     for (part_index, p) in content.parts.into_iter().enumerate() {
                         match p {
+                            GeminiPart::Thought { text, thought, .. } => {
+                                let part = if thought {
+                                    UnifiedContentPart::Reasoning { text }
+                                } else {
+                                    UnifiedContentPart::Text { text }
+                                };
+                                content_parts.push(part.clone());
+                                if thought {
+                                    items.push(UnifiedItem::Reasoning(UnifiedReasoningItem {
+                                        content: vec![part],
+                                        annotations: Vec::new(),
+                                    }));
+                                } else {
+                                    items.push(UnifiedItem::Message(UnifiedMessageItem {
+                                        role: role.clone(),
+                                        content: vec![part],
+                                        annotations: Vec::new(),
+                                    }));
+                                }
+                            }
                             GeminiPart::Text { text } => {
                                 content_parts.push(UnifiedContentPart::Text { text: text.clone() });
                                 items.push(UnifiedItem::Message(UnifiedMessageItem {
@@ -285,13 +305,36 @@ impl From<UnifiedResponse> for GeminiResponse {
                             for part in message.content {
                                 match part {
                                     UnifiedContentPart::Text { text }
-                                    | UnifiedContentPart::Reasoning { text }
                                     | UnifiedContentPart::Refusal { text } => {
                                         parts.push(GeminiPart::Text { text });
                                     }
+                                    UnifiedContentPart::Reasoning { text } => {
+                                        parts.push(GeminiPart::Thought {
+                                            text,
+                                            thought: true,
+                                            thought_signature: None,
+                                        });
+                                    }
                                     UnifiedContentPart::ImageData { mime_type, data } => {
                                         parts.push(GeminiPart::InlineData {
-                                            inline_data: GeminiInlineData { mime_type, data },
+                                            inline_data: GeminiInlineData {
+                                                mime_type,
+                                                data,
+                                                display_name: None,
+                                            },
+                                        });
+                                    }
+                                    UnifiedContentPart::AudioData { data, format } => {
+                                        parts.push(GeminiPart::InlineData {
+                                            inline_data: GeminiInlineData {
+                                                mime_type: if format == "mp3" {
+                                                    "audio/mpeg".to_string()
+                                                } else {
+                                                    "audio/wav".to_string()
+                                                },
+                                                data,
+                                                display_name: None,
+                                            },
                                         });
                                     }
                                     UnifiedContentPart::FileUrl { url, mime_type, .. } => {
@@ -301,6 +344,7 @@ impl From<UnifiedResponse> for GeminiResponse {
                                                     "application/octet-stream".to_string()
                                                 }),
                                                 file_uri: url,
+                                                display_name: None,
                                             },
                                         });
                                     }
@@ -308,9 +352,14 @@ impl From<UnifiedResponse> for GeminiResponse {
                                         data, mime_type, ..
                                     } => {
                                         parts.push(GeminiPart::InlineData {
-                                            inline_data: GeminiInlineData { mime_type, data },
+                                            inline_data: GeminiInlineData {
+                                                mime_type,
+                                                data,
+                                                display_name: None,
+                                            },
                                         });
                                     }
+                                    UnifiedContentPart::FileId { .. } => {}
                                     UnifiedContentPart::ExecutableCode { language, code } => {
                                         parts.push(GeminiPart::ExecutableCode {
                                             executable_code: GeminiExecutableCode {
@@ -357,7 +406,11 @@ impl From<UnifiedResponse> for GeminiResponse {
                                     UnifiedContentPart::Reasoning { text }
                                     | UnifiedContentPart::Text { text }
                                     | UnifiedContentPart::Refusal { text } => {
-                                        parts.push(GeminiPart::Text { text });
+                                        parts.push(GeminiPart::Thought {
+                                            text,
+                                            thought: true,
+                                            thought_signature: None,
+                                        });
                                     }
                                     UnifiedContentPart::ExecutableCode { language, code } => {
                                         parts.push(GeminiPart::ExecutableCode {
@@ -400,6 +453,7 @@ impl From<UnifiedResponse> for GeminiResponse {
                                             "application/octet-stream".to_string()
                                         }),
                                         file_uri,
+                                        display_name: file.filename,
                                     },
                                 });
                             }

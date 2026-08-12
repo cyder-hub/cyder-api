@@ -352,10 +352,15 @@ fn test_responses_request_to_unified_preserves_input_file_id_and_data() {
         ]
         if matches!(
             &content[..],
-            [UnifiedContentPart::FileData { data, mime_type, filename }]
+            [
+                UnifiedContentPart::FileData { data, mime_type, filename },
+                UnifiedContentPart::FileId { file_id: content_file_id, filename: content_filename }
+            ]
             if data == "ZmFrZV9maWxl"
                 && mime_type == "application/pdf"
                 && filename.as_deref() == Some("inline.pdf")
+                && content_file_id == "file_123"
+                && content_filename.as_deref() == Some("report.pdf")
         )
         && filename.as_deref() == Some("report.pdf")
         && file_id.as_deref() == Some("file_123")
@@ -477,16 +482,20 @@ fn test_responses_request_to_unified_preserves_responses_extensions() {
     assert!(unified.tools.as_ref().is_some_and(|tools| tools.len() == 1));
     let ext = unified.responses_extension().expect("responses extension");
     assert_eq!(ext.instructions.as_deref(), Some("Follow the house style"));
-    assert_eq!(ext.parallel_tool_calls, Some(false));
-    assert_eq!(ext.tool_choice.as_ref(), Some(&json!("required")));
+    assert_eq!(ext.parallel_tool_calls, None);
+    assert_eq!(ext.tool_choice, None);
+    assert_eq!(unified.parallel_tool_calls, Some(false));
+    assert_eq!(unified.tool_choice, Some(UnifiedToolChoice::Required));
+    assert_eq!(ext.text_format, None);
     assert_eq!(
-        ext.text_format.as_ref(),
-        Some(&json!({"type":"json_object"}))
+        unified.structured_output,
+        Some(UnifiedStructuredOutput::JsonObject)
     );
     assert_eq!(
         ext.reasoning.as_ref(),
         Some(&json!({"effort":"high","summary":"detailed"}))
     );
+    assert_eq!(unified.reasoning_effort, Some(UnifiedReasoningEffort::High));
 }
 
 #[test]
@@ -522,6 +531,8 @@ fn test_unified_request_items_to_responses_input() {
             }),
         ],
         tools: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
         stream: false,
         temperature: None,
         max_tokens: None,
@@ -530,6 +541,8 @@ fn test_unified_request_items_to_responses_input() {
         seed: None,
         presence_penalty: None,
         frequency_penalty: None,
+        reasoning_effort: None,
+        structured_output: None,
         extensions: None,
     };
 

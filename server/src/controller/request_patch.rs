@@ -556,6 +556,21 @@ mod tests {
                 .expect("Variant input required fields should exist")
                 .contains(&serde_yaml::Value::from("source_id"))
         );
+        let retired_confirmation_field = ["confirm", "dangerous", "target"].join("_");
+        let rule_input_properties =
+            document["components"]["schemas"]["RequestPatchRuleInput"]["properties"]
+                .as_mapping()
+                .expect("Rule input properties should exist");
+        assert!(
+            !rule_input_properties
+                .contains_key(serde_yaml::Value::from(retired_confirmation_field))
+        );
+        let retired_preview_field = ["dangerous", "targets"].join("_");
+        let preview_properties =
+            document["components"]["schemas"]["RequestPatchPreviewData"]["properties"]
+                .as_mapping()
+                .expect("Preview response properties should exist");
+        assert!(!preview_properties.contains_key(serde_yaml::Value::from(retired_preview_field)));
 
         let model_detail = &document["components"]["schemas"]["ModelDetail"];
         let model_detail_properties = model_detail["properties"]
@@ -634,18 +649,31 @@ mod tests {
                 id: source_id,
                 provider_id,
                 profile_type: UpstreamProfileType::Openai,
-                endpoint: format!("https://source-{source_id}.example/v1"),
+                base_url: format!("https://source-{source_id}.example/v1"),
                 use_proxy: false,
+                chat_completions_enabled: Some(true),
+                chat_completions_path_override: None,
+                embeddings_enabled: Some(true),
+                embeddings_path_override: None,
+                rerank_enabled: Some(false),
+                rerank_path_override: None,
                 is_enabled: true,
                 is_default: true,
                 created_at: 1,
                 updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
         .expect("provider seed should succeed")
         .provider;
-        let model =
-            Model::create(provider.id, "model-a", None, true).expect("model seed should succeed");
+        let model = Model::create(
+            provider.id,
+            "model-a",
+            None,
+            crate::schema::enum_def::ModelKind::Chat,
+            true,
+        )
+        .expect("model seed should succeed");
         (provider, model)
     }
 
@@ -687,8 +715,7 @@ mod tests {
                 "target": target,
                 "operation": RequestPatchOperation::Set,
                 "value_json": 0.2,
-                "description": "controller test",
-                "confirm_dangerous_target": false
+                "description": "controller test"
             }]
         })
     }
@@ -769,22 +796,16 @@ mod tests {
                                 "target": "Authorization",
                                 "operation": "SET",
                                 "value_json": "would-not-be-saved",
-                                "description": null,
-                                "confirm_dangerous_target": false
+                                "description": null
                             }]
                         }),
                     ),
                 )
                 .await;
-                assert_eq!(preview.status(), StatusCode::OK);
+                assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
                 let preview_body = response_json(preview).await;
-                assert_eq!(preview_body["data"]["preview"]["valid"], false);
-                assert_eq!(
-                    preview_body["data"]["preview"]["dangerous_targets"][0]["target"],
-                    "authorization"
-                );
-                assert_eq!(preview_body["data"]["preview"]["valid"], false);
-                assert!(preview_body["data"]["evaluation"].is_null());
+                assert!(preview_body.to_string().contains("reserved"));
+                assert!(!preview_body.to_string().contains("would-not-be-saved"));
                 assert!(
                     app_state
                         .admin
@@ -795,7 +816,21 @@ mod tests {
                     "Preview must not emit an audit event"
                 );
 
-                let confirmed_preview = send(
+                let mut legacy_rule = json!({
+                    "placement": "HEADER",
+                    "target": "Authorization",
+                    "operation": "SET",
+                    "value_json": "would-not-be-saved",
+                    "description": null
+                });
+                legacy_rule
+                    .as_object_mut()
+                    .expect("legacy rule should be an object")
+                    .insert(
+                        ["confirm", "dangerous", "target"].join("_"),
+                        Value::Bool(true),
+                    );
+                let legacy_confirmation = send(
                     &app_state,
                     json_request(
                         Method::POST,
@@ -806,23 +841,19 @@ mod tests {
                             "suffix": "secret",
                             "enabled": true,
                             "expose_in_models": true,
-                            "rules": [{
-                                "placement": "HEADER",
-                                "target": "Authorization",
-                                "operation": "SET",
-                                "value_json": "would-not-be-saved",
-                                "description": null,
-                                "confirm_dangerous_target": true
-                            }]
+                            "rules": [legacy_rule]
                         }),
                     ),
                 )
                 .await;
-                assert_eq!(confirmed_preview.status(), StatusCode::OK);
                 assert_eq!(
-                    response_json(confirmed_preview).await["data"]["preview"]["valid"],
-                    true
+                    legacy_confirmation.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
                 );
+                let legacy_body = to_bytes(legacy_confirmation.into_body(), usize::MAX)
+                    .await
+                    .expect("legacy rejection body should read");
+                assert!(!String::from_utf8_lossy(&legacy_body).contains("would-not-be-saved"));
                 assert!(
                     app_state
                         .admin
@@ -830,7 +861,7 @@ mod tests {
                         .mutation_runner()
                         .drain_audit_events()
                         .is_empty(),
-                    "confirmed Preview must not emit an audit event"
+                    "rejected legacy confirmation must not emit an audit event"
                 );
 
                 let listed_after_preview = send(

@@ -20,18 +20,22 @@ impl CostLedger {
             MeterKey::LlmInputTextTokens,
             normalization.input_text_tokens,
         );
-        ledger.push_meter(
-            MeterKey::LlmOutputTextTokens,
-            normalization.output_text_tokens,
-        );
+        if normalization.output_tokens_applicable {
+            ledger.push_meter(
+                MeterKey::LlmOutputTextTokens,
+                normalization.output_text_tokens,
+            );
+        }
         ledger.push_meter(
             MeterKey::LlmInputImageTokens,
             normalization.input_image_tokens,
         );
-        ledger.push_meter(
-            MeterKey::LlmOutputImageTokens,
-            normalization.output_image_tokens,
-        );
+        if normalization.output_tokens_applicable {
+            ledger.push_meter(
+                MeterKey::LlmOutputImageTokens,
+                normalization.output_image_tokens,
+            );
+        }
         ledger.push_meter(
             MeterKey::LlmCacheReadTokens,
             normalization.cache_read_tokens,
@@ -40,7 +44,14 @@ impl CostLedger {
             MeterKey::LlmCacheWriteTokens,
             normalization.cache_write_tokens,
         );
-        ledger.push_meter(MeterKey::LlmReasoningTokens, normalization.reasoning_tokens);
+        if normalization.output_tokens_applicable {
+            ledger.push_meter(MeterKey::LlmReasoningTokens, normalization.reasoning_tokens);
+        }
+        ledger
+    }
+
+    pub fn for_successful_invocation(normalization: Option<&UsageNormalization>) -> Self {
+        let mut ledger = normalization.map_or_else(Self::default, Self::from_normalization);
         ledger.push_meter(MeterKey::InvokeRequestCalls, 1);
         ledger
     }
@@ -86,7 +97,7 @@ mod tests {
     use crate::cost::{CostUnit, MeterKey, UsageNormalization};
 
     #[test]
-    fn builds_text_only_ledger_with_invocation_meter() {
+    fn normalization_builds_only_usage_meters() {
         let normalization = UsageNormalization {
             input_text_tokens: 120,
             output_text_tokens: 80,
@@ -97,15 +108,12 @@ mod tests {
 
         let ledger = CostLedger::from(&normalization);
 
-        assert_eq!(ledger.items.len(), 3);
+        assert_eq!(ledger.items.len(), 2);
         assert_eq!(ledger.items[0].meter_key, MeterKey::LlmInputTextTokens);
         assert_eq!(ledger.items[0].quantity, 120);
         assert_eq!(ledger.items[0].unit, CostUnit::Token);
         assert_eq!(ledger.items[1].meter_key, MeterKey::LlmOutputTextTokens);
         assert_eq!(ledger.items[1].quantity, 80);
-        assert_eq!(ledger.items[2].meter_key, MeterKey::InvokeRequestCalls);
-        assert_eq!(ledger.items[2].quantity, 1);
-        assert_eq!(ledger.items[2].unit, CostUnit::Call);
     }
 
     #[test]
@@ -138,7 +146,6 @@ mod tests {
                 (MeterKey::LlmOutputImageTokens, 25),
                 (MeterKey::LlmCacheReadTokens, 10),
                 (MeterKey::LlmReasoningTokens, 5),
-                (MeterKey::InvokeRequestCalls, 1),
             ]
         );
     }
@@ -153,21 +160,35 @@ mod tests {
 
         let ledger = CostLedger::from(&normalization);
 
-        assert_eq!(ledger.items.len(), 2);
+        assert_eq!(ledger.items.len(), 1);
         assert_eq!(ledger.items[0].meter_key, MeterKey::LlmOutputImageTokens);
         assert_eq!(ledger.items[0].quantity, 512);
-        assert_eq!(ledger.items[1].meter_key, MeterKey::InvokeRequestCalls);
     }
 
     #[test]
-    fn skips_zero_quantity_meters_but_keeps_invocation_meter() {
-        let normalization = UsageNormalization::default();
-
-        let ledger = CostLedger::from(&normalization);
+    fn invocation_is_explicit_and_does_not_require_usage() {
+        let ledger = CostLedger::for_successful_invocation(None);
 
         assert_eq!(ledger.items.len(), 1);
         assert_eq!(ledger.items[0].meter_key, MeterKey::InvokeRequestCalls);
         assert_eq!(ledger.items[0].quantity, 1);
         assert!(ledger.items[0].attributes.is_empty());
+    }
+
+    #[test]
+    fn successful_invocation_combines_usage_and_call_meter() {
+        let normalization = UsageNormalization {
+            total_input_tokens: 3,
+            input_text_tokens: 3,
+            output_tokens_applicable: false,
+            ..Default::default()
+        };
+
+        let ledger = CostLedger::for_successful_invocation(Some(&normalization));
+
+        assert_eq!(ledger.items.len(), 2);
+        assert_eq!(ledger.items[0].meter_key, MeterKey::LlmInputTextTokens);
+        assert_eq!(ledger.items[1].meter_key, MeterKey::InvokeRequestCalls);
+        assert_eq!(ledger.items[1].unit, CostUnit::Call);
     }
 }

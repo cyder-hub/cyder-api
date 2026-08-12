@@ -1,5 +1,15 @@
-import type { ModelDetail, ModelDetailModel } from "./models";
+import type { ModelDetail, ModelDetailModel, ModelKind } from "./models";
 import type { RequestPatchVariantAggregate } from "./requestPatch";
+
+export type UpstreamProfileType =
+  | "OPENAI"
+  | "OPENAI_COMPATIBLE"
+  | "GEMINI_OPENAI"
+  | "GEMINI"
+  | "VERTEX"
+  | "OLLAMA"
+  | "ANTHROPIC"
+  | "RESPONSES";
 
 // ========== Provider Types ==========
 export interface ProviderBase {
@@ -14,11 +24,11 @@ export interface ProviderBase {
   upstream_sources: UpstreamSource[];
 }
 
-export interface UpstreamSource {
+interface UpstreamSourceCommon {
   id: number;
   provider_id: number;
-  profile_type: string;
-  endpoint: string;
+  base_url: string;
+  base_url_is_default: boolean;
   use_proxy: boolean;
   is_enabled: boolean;
   is_default: boolean;
@@ -27,17 +37,74 @@ export interface UpstreamSource {
   updated_at: number;
 }
 
-export interface UpstreamSourcePayload {
-  profile_type: string;
-  endpoint: string;
+export type UpstreamSource =
+  | (UpstreamSourceCommon & {
+      profile_type: "OPENAI" | "GEMINI_OPENAI";
+      chat_completions_enabled: boolean;
+      chat_completions_path_override: string | null;
+      embeddings_enabled: boolean;
+      embeddings_path_override: string | null;
+      rerank_enabled?: never;
+      rerank_path_override?: never;
+    })
+  | (UpstreamSourceCommon & {
+      profile_type: "OPENAI_COMPATIBLE";
+      chat_completions_enabled: boolean;
+      chat_completions_path_override: string | null;
+      embeddings_enabled: boolean;
+      embeddings_path_override: string | null;
+      rerank_enabled: boolean;
+      rerank_path_override: string | null;
+    })
+  | (UpstreamSourceCommon & {
+      profile_type: "GEMINI" | "VERTEX" | "OLLAMA" | "ANTHROPIC" | "RESPONSES";
+      chat_completions_enabled?: never;
+      chat_completions_path_override?: never;
+      embeddings_enabled?: never;
+      embeddings_path_override?: never;
+      rerank_enabled?: never;
+      rerank_path_override?: never;
+    });
+
+interface SourceLifecyclePayload {
   use_proxy: boolean;
   is_enabled: boolean;
   is_default: boolean;
 }
 
+export type UpstreamSourcePayload =
+  | (SourceLifecyclePayload & {
+      profile_type: "OPENAI" | "GEMINI_OPENAI";
+      base_url?: string | null;
+      chat_completions_enabled?: boolean;
+      chat_completions_path_override?: string;
+      embeddings_enabled?: boolean;
+      embeddings_path_override?: string;
+    })
+  | (SourceLifecyclePayload & {
+      profile_type: "OPENAI_COMPATIBLE";
+      base_url: string;
+      chat_completions_enabled?: boolean;
+      chat_completions_path_override?: string;
+      embeddings_enabled?: boolean;
+      embeddings_path_override?: string;
+      rerank_enabled?: boolean;
+      rerank_path_override?: string;
+    })
+  | (SourceLifecyclePayload & {
+      profile_type: "GEMINI" | "VERTEX" | "OLLAMA" | "ANTHROPIC" | "RESPONSES";
+      base_url: string;
+    });
+
 export interface UpstreamSourceUpdatePayload {
-  endpoint?: string;
+  base_url?: string | null;
   use_proxy?: boolean;
+  chat_completions_enabled?: boolean;
+  chat_completions_path_override?: string | null;
+  embeddings_enabled?: boolean;
+  embeddings_path_override?: string | null;
+  rerank_enabled?: boolean;
+  rerank_path_override?: string | null;
   is_enabled?: boolean;
   is_default?: boolean;
 }
@@ -99,12 +166,22 @@ export interface SourceImpactReport {
   protocols: SourceImpactProtocolSummary[];
 }
 
-export interface ProviderCheckPayload {
-  model_id?: number;
-  model_name?: string;
+export type ProviderCheckPayload = (
+  | {
+      model_id: number;
+      draft_model?: never;
+    }
+  | {
+      model_id?: never;
+      draft_model: {
+        model_kind: "CHAT";
+        upstream_model_name: string;
+      };
+    }
+) & {
   provider_api_key_id?: number;
   provider_api_key?: string;
-}
+};
 
 export interface ProviderCheckResponse {
   source_id: number;
@@ -116,6 +193,7 @@ export interface ProviderBootstrapPayload {
   initial_source: UpstreamSourcePayload;
   api_key: string;
   model_name: string;
+  model_kind: ModelKind;
   key: string;
   name?: string;
   real_model_name?: string | null;
@@ -126,12 +204,17 @@ export interface ProviderBootstrapPayload {
 export interface ProviderBootstrapResponse {
   provider?: ProviderBase;
   created_key?: ProviderApiKeySummary | null;
-  // The bootstrap endpoint returns the raw Model core row. Source Config is
+  // The bootstrap API returns the raw Model core row. Source Config is
   // hydrated from the returned Provider Sources by the provider editor.
   created_model?: ModelDetailModel | null;
   provider_name?: string | null;
   provider_key?: string | null;
-  check_result?: unknown;
+  check_result?: ProviderBootstrapCheckResult | null;
+}
+
+export interface ProviderBootstrapCheckResult {
+  status: "success" | "failed" | "check_skipped";
+  message: string;
 }
 
 export interface ProviderCreatePayload {

@@ -5,17 +5,17 @@ use serde::Serialize;
 
 use super::{
     ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, auth::admit_api_key_request,
-    request_context::ProxyRequestContext,
+    auth::evaluate_access_control, request_context::ProxyRequestContext,
 };
 use crate::{
-    schema::enum_def::DownstreamProtocol,
+    schema::enum_def::{DownstreamProtocol, ModelKind, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::{CacheApiKey, CacheModel, CacheModelsCatalog, CacheProvider},
         request_patch::evaluate_request_patch_variants,
-        source_selector::select_source,
+        source_selector::{select_source, upstream_wire_family},
+        upstream_profile::{UpstreamOperation, resolve_source_operation_url},
     },
-    utils::acl::ACL_EVALUATOR,
 };
 use cyder_tools::log::{debug, error};
 
@@ -163,12 +163,23 @@ fn collect_accessible_models(
             let Ok(selection) = select_source(provider, model, downstream_protocol) else {
                 continue;
             };
+            if !is_selected_model_statically_executable(
+                model,
+                &selection.source,
+                downstream_protocol,
+            ) {
+                continue;
+            }
             push_model(
                 &mut result,
                 &mut seen_ids,
                 format!("{}/{}", provider.provider_key, model.model_name),
                 provider,
             );
+
+            if model.model_kind != ModelKind::Chat {
+                continue;
+            }
 
             let mut suffixes = catalog
                 .request_patch_variants
@@ -220,13 +231,7 @@ fn push_model(
 }
 
 fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &CacheModel) -> bool {
-    match ACL_EVALUATOR.authorize(
-        &api_key.name,
-        &api_key.default_action,
-        &api_key.acl_rules,
-        provider.id,
-        model.id,
-    ) {
+    match evaluate_access_control(api_key, provider, model) {
         Ok(_) => true,
         Err(reason) => {
             debug!(
@@ -236,6 +241,38 @@ fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &Cac
             false
         }
     }
+}
+
+fn is_selected_model_statically_executable(
+    model: &CacheModel,
+    source: &crate::service::cache::types::CacheUpstreamSource,
+    downstream_protocol: DownstreamProtocol,
+) -> bool {
+    if downstream_protocol != DownstreamProtocol::Openai && model.model_kind != ModelKind::Chat {
+        return false;
+    }
+
+    let operation = match model.model_kind {
+        ModelKind::Chat => {
+            if upstream_wire_family(source) != UpstreamProtocol::Openai {
+                return true;
+            }
+            UpstreamOperation::ChatCompletions
+        }
+        ModelKind::Embedding => {
+            if upstream_wire_family(source) != UpstreamProtocol::Openai {
+                return false;
+            }
+            UpstreamOperation::Embeddings
+        }
+        ModelKind::Rerank => {
+            if upstream_wire_family(source) != UpstreamProtocol::Openai {
+                return false;
+            }
+            UpstreamOperation::Rerank
+        }
+    };
+    resolve_source_operation_url(source, operation).is_ok()
 }
 
 #[cfg(test)]
@@ -303,8 +340,14 @@ mod tests {
                 upstream_sources: vec![CacheUpstreamSource {
                     id: 2,
                     profile_type: UpstreamProfileType::Openai,
-                    endpoint: "https://example.test".to_string(),
+                    base_url: "https://example.test".to_string(),
                     use_proxy: false,
+                    chat_completions_enabled: Some(true),
+                    chat_completions_path_override: None,
+                    embeddings_enabled: Some(true),
+                    embeddings_path_override: None,
+                    rerank_enabled: Some(false),
+                    rerank_path_override: None,
                     is_enabled: source_enabled,
                     is_default: true,
                 }],
@@ -314,6 +357,7 @@ mod tests {
                 provider_id: 1,
                 model_name: "gpt-4o".to_string(),
                 real_model_name: None,
+                model_kind: crate::schema::enum_def::ModelKind::Chat,
                 cost_catalog_id: None,
                 source_selection_mode: "INHERIT_ALL".to_string(),
                 source_bindings: vec![],
@@ -388,6 +432,74 @@ mod tests {
     }
 
     #[test]
+    fn models_listing_filters_model_kinds_and_source_operations_without_exposing_kind() {
+        let mut catalog = catalog(true, true);
+        catalog.models.push(CacheModel {
+            id: 4,
+            provider_id: 1,
+            model_name: "embed-small".to_string(),
+            real_model_name: None,
+            model_kind: ModelKind::Embedding,
+            cost_catalog_id: None,
+            source_selection_mode: "INHERIT_ALL".to_string(),
+            source_bindings: Vec::new(),
+            is_enabled: true,
+        });
+        catalog.models.push(CacheModel {
+            id: 5,
+            provider_id: 1,
+            model_name: "rerank-small".to_string(),
+            real_model_name: None,
+            model_kind: ModelKind::Rerank,
+            cost_catalog_id: None,
+            source_selection_mode: "INHERIT_ALL".to_string(),
+            source_bindings: Vec::new(),
+            is_enabled: true,
+        });
+
+        let openai =
+            collect_accessible_models(&catalog, &allow_all_api_key(), DownstreamProtocol::Openai);
+        let openai_ids = openai
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(openai_ids.contains(&"openai/gpt-4o"));
+        assert!(openai_ids.contains(&"openai/gpt-4o-fast"));
+        assert!(openai_ids.contains(&"openai/embed-small"));
+        assert!(!openai_ids.contains(&"openai/embed-small-fast"));
+        assert!(!openai_ids.contains(&"openai/rerank-small"));
+
+        catalog.providers[0].upstream_sources[0].profile_type =
+            UpstreamProfileType::OpenaiCompatible;
+        catalog.providers[0].upstream_sources[0].rerank_enabled = Some(true);
+        let compatible =
+            collect_accessible_models(&catalog, &allow_all_api_key(), DownstreamProtocol::Openai);
+        assert!(
+            compatible
+                .iter()
+                .any(|model| model.id == "openai/rerank-small")
+        );
+
+        for protocol in [
+            DownstreamProtocol::Responses,
+            DownstreamProtocol::Anthropic,
+            DownstreamProtocol::Gemini,
+        ] {
+            let ids = collect_accessible_models(&catalog, &allow_all_api_key(), protocol)
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>();
+            assert!(ids.contains(&"openai/gpt-4o".to_string()));
+            assert!(!ids.contains(&"openai/embed-small".to_string()));
+            assert!(!ids.contains(&"openai/rerank-small".to_string()));
+        }
+
+        let rendered = render_models_response(DownstreamProtocol::Openai, &compatible)
+            .expect("OpenAI models response should render");
+        assert!(!rendered.contains("model_kind"));
+    }
+
+    #[test]
     fn model_exposure_override_is_respected_without_disabling_explicit_resolution() {
         let mut catalog = catalog(true, true);
         catalog
@@ -425,8 +537,14 @@ mod tests {
             .push(CacheUpstreamSource {
                 id: 3,
                 profile_type: UpstreamProfileType::Gemini,
-                endpoint: "https://gemini.example".to_string(),
+                base_url: "https://gemini.example".to_string(),
                 use_proxy: false,
+                chat_completions_enabled: None,
+                chat_completions_path_override: None,
+                embeddings_enabled: None,
+                embeddings_path_override: None,
+                rerank_enabled: None,
+                rerank_path_override: None,
                 is_enabled: true,
                 is_default: false,
             });

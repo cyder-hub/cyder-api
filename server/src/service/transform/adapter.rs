@@ -1,15 +1,13 @@
-use cyder_tools::log::warn;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::audit::{
-    audit_target_request, audit_target_response, validate_downstream_request,
-    validate_upstream_response,
+    audit_target_request, audit_target_response, normalize_portable_tool_request,
+    validate_downstream_request, validate_upstream_response,
 };
 use super::diagnostics::{transform_failure, transform_success};
 use super::providers::{anthropic, gemini, ollama, openai, responses};
-use super::request::apply_stream_options;
 use super::stream::StreamTransformContext;
 use super::stream_audit::{
     SourceStreamSemanticError, audit_target_legacy_chunk, audit_target_stream_events,
@@ -117,24 +115,10 @@ pub(in crate::service::transform) fn noop_finalize_request(
 }
 
 fn finalize_openai_request(
-    mut data: Value,
-    profile_type: &UpstreamProfileType,
-    downstream_path: &str,
+    data: Value,
+    _profile_type: &UpstreamProfileType,
+    _downstream_path: &str,
 ) -> Value {
-    apply_stream_options(&mut data);
-
-    let (openai_variant, sanitize_report) = openai::finalize_openai_compatible_request_payload(
-        &mut data,
-        profile_type,
-        downstream_path,
-    );
-    if !sanitize_report.removed_fields.is_empty() || !sanitize_report.injected_defaults.is_empty() {
-        warn!(
-            "[transform] Sanitized OpenAI-compatible payload for variant {:?}. removed={:?}, injected_defaults={:?}",
-            openai_variant, sanitize_report.removed_fields, sanitize_report.injected_defaults
-        );
-    }
-
     data
 }
 
@@ -196,7 +180,9 @@ fn encode_json<T: Serialize>(
     }
 }
 
-fn decode_openai_request(data: Value) -> TransformResult<UnifiedRequest> {
+fn decode_openai_request(mut data: Value) -> TransformResult<UnifiedRequest> {
+    normalize_portable_tool_request(DownstreamProtocol::Openai, &mut data)
+        .map_err(|error| source_request_failure(error, &data))?;
     validate_request_source(DownstreamProtocol::Openai, &data)?;
     decode_json::<openai::OpenAiRequestPayload, _>(
         data,
@@ -215,7 +201,9 @@ fn encode_openai_request(unified: UnifiedRequest) -> TransformResult<Value> {
     )
 }
 
-fn decode_gemini_request(data: Value) -> TransformResult<UnifiedRequest> {
+fn decode_gemini_request(mut data: Value) -> TransformResult<UnifiedRequest> {
+    normalize_portable_tool_request(DownstreamProtocol::Gemini, &mut data)
+        .map_err(|error| source_request_failure(error, &data))?;
     validate_request_source(DownstreamProtocol::Gemini, &data)?;
     decode_json::<gemini::GeminiRequestPayload, _>(
         data,
@@ -243,7 +231,9 @@ fn encode_ollama_request(unified: UnifiedRequest) -> TransformResult<Value> {
     )
 }
 
-fn decode_anthropic_request(data: Value) -> TransformResult<UnifiedRequest> {
+fn decode_anthropic_request(mut data: Value) -> TransformResult<UnifiedRequest> {
+    normalize_portable_tool_request(DownstreamProtocol::Anthropic, &mut data)
+        .map_err(|error| source_request_failure(error, &data))?;
     validate_request_source(DownstreamProtocol::Anthropic, &data)?;
     decode_json::<anthropic::AnthropicRequestPayload, _>(
         data,
@@ -262,7 +252,9 @@ fn encode_anthropic_request(unified: UnifiedRequest) -> TransformResult<Value> {
     )
 }
 
-fn decode_responses_request(data: Value) -> TransformResult<UnifiedRequest> {
+fn decode_responses_request(mut data: Value) -> TransformResult<UnifiedRequest> {
+    normalize_portable_tool_request(DownstreamProtocol::Responses, &mut data)
+        .map_err(|error| source_request_failure(error, &data))?;
     validate_request_source(DownstreamProtocol::Responses, &data)?;
     decode_json::<responses::ResponsesRequestPayload, _>(
         data,
@@ -398,6 +390,19 @@ fn validate_request_source(protocol: DownstreamProtocol, data: &Value) -> Transf
             Some(TransformSafeSummary::from_json(data)),
         )),
     }
+}
+
+fn source_request_failure(
+    error: super::audit::SourceSemanticError,
+    data: &Value,
+) -> super::TransformFailure {
+    transform_failure(
+        TransformFailureOrigin::DownstreamInput,
+        TransformPhase::RequestDecode,
+        error.semantic_unit,
+        error.reason_code,
+        Some(TransformSafeSummary::from_json(data)),
+    )
 }
 
 fn validate_response_source(protocol: UpstreamProtocol, data: &Value) -> TransformResult<()> {

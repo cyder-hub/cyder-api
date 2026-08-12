@@ -18,11 +18,17 @@ fn test_gemini_request_to_unified() {
             "You are a helpful assistant.".to_string(),
         )),
         tools: None,
+        tool_config: None,
         generation_config: Some(GeminiGenerationConfig {
             temperature: Some(0.8),
             max_output_tokens: Some(100),
             top_p: Some(0.9),
             stop_sequences: Some(vec!["stop".to_string()]),
+            thinking_config: None,
+            response_mime_type: None,
+            response_schema: None,
+            response_json_schema: None,
+            response_format: None,
         }),
         safety_settings: None,
     };
@@ -236,6 +242,7 @@ fn test_gemini_request_to_unified_preserves_structured_tool_result_output() {
         }],
         system_instruction: None,
         tools: None,
+        tool_config: None,
         generation_config: None,
         safety_settings: None,
     };
@@ -293,7 +300,7 @@ fn test_unified_request_to_gemini_preserves_reasoning_and_executable_code() {
     assert_eq!(gemini_req.contents.len(), 2);
     assert!(matches!(
         &gemini_req.contents[0].parts[0],
-        GeminiPart::Text { text } if text == "step by step"
+        GeminiPart::Thought { text, thought: true, .. } if text == "step by step"
     ));
     assert!(matches!(
         &gemini_req.contents[0].parts[1],
@@ -302,7 +309,7 @@ fn test_unified_request_to_gemini_preserves_reasoning_and_executable_code() {
     ));
     assert!(matches!(
         &gemini_req.contents[1].parts[0],
-        GeminiPart::Text { text } if text == "internal summary"
+        GeminiPart::Thought { text, thought: true, .. } if text == "internal summary"
     ));
 }
 
@@ -518,6 +525,7 @@ fn test_gemini_response_to_unified_preserves_inline_file_data_as_typed_file() {
                     inline_data: GeminiInlineData {
                         mime_type: "application/pdf".to_string(),
                         data: "dGVzdA==".to_string(),
+                        display_name: None,
                     },
                 }],
             }),
@@ -917,8 +925,10 @@ fn test_gemini_response_to_unified_with_thinking() {
             content: Some(GeminiResponseContent {
                 role: "model".to_string(),
                 parts: vec![
-                    GeminiPart::Text {
+                    GeminiPart::Thought {
                         text: "I should call a tool".to_string(),
+                        thought: true,
+                        thought_signature: None,
                     },
                     GeminiPart::FunctionCall {
                         function_call: GeminiFunctionCall {
@@ -946,8 +956,8 @@ fn test_gemini_response_to_unified_with_thinking() {
     assert_eq!(choice.finish_reason, Some("tool_calls".to_string()));
 
     match &choice.message.content[0] {
-        UnifiedContentPart::Text { text } => assert_eq!(text, "I should call a tool"),
-        _ => panic!("Expected text content"),
+        UnifiedContentPart::Reasoning { text } => assert_eq!(text, "I should call a tool"),
+        _ => panic!("Expected reasoning content"),
     }
     match &choice.message.content[1] {
         UnifiedContentPart::ToolCall(tc) => {
@@ -967,7 +977,7 @@ fn test_unified_response_to_gemini_with_thinking() {
             message: UnifiedMessage {
                 role: UnifiedRole::Assistant,
                 content: vec![
-                    UnifiedContentPart::Text {
+                    UnifiedContentPart::Reasoning {
                         text: "I will call a tool".to_string(),
                     },
                     UnifiedContentPart::ToolCall(UnifiedToolCall {
@@ -998,7 +1008,10 @@ fn test_unified_response_to_gemini_with_thinking() {
     let content = candidate.content.as_ref().unwrap();
     assert_eq!(content.role, "model");
     assert_eq!(content.parts.len(), 2);
-    assert!(matches!(&content.parts[0], GeminiPart::Text { text } if text == "I will call a tool"));
+    assert!(matches!(
+        &content.parts[0],
+        GeminiPart::Thought { text, thought: true, .. } if text == "I will call a tool"
+    ));
     assert!(
         matches!(&content.parts[1], GeminiPart::FunctionCall { function_call } if function_call.name == "get_weather")
     );
@@ -1050,6 +1063,39 @@ fn test_transform_unified_chunk_to_gemini_events_keeps_diagnostic_internal_for_i
         summary.facts[0].semantic_unit,
         crate::service::transform::TransformSemanticUnit::ImageDelta
     );
+}
+
+#[test]
+fn test_unified_reasoning_events_emit_native_gemini_thought_parts() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
+    let events = transform_unified_stream_events_to_gemini_events(
+        vec![
+            UnifiedStreamEvent::ReasoningStart { index: 0 },
+            UnifiedStreamEvent::ReasoningDelta {
+                index: 0,
+                item_index: None,
+                item_id: None,
+                part_index: None,
+                text: "considering the answer".to_string(),
+            },
+            UnifiedStreamEvent::ReasoningStop { index: 0 },
+        ],
+        &mut transformer.stream_context(),
+    )
+    .expect("Gemini reasoning delta should produce one thought chunk");
+
+    assert_eq!(events.len(), 1);
+    let chunk: Value = serde_json::from_str(&events[0].data).unwrap();
+    assert_eq!(
+        chunk.pointer("/candidates/0/content/parts/0/text"),
+        Some(&json!("considering the answer"))
+    );
+    assert_eq!(
+        chunk.pointer("/candidates/0/content/parts/0/thought"),
+        Some(&json!(true))
+    );
+    assert!(transformer.diagnostics_snapshot().facts.is_empty());
 }
 
 #[test]

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 import {
-  formatSafeSourceEndpoint,
+  formatSafeSourceBaseUrl,
   formatSourceIdentity,
 } from "../src/utils/sourceEvidence.ts";
 import {
@@ -38,15 +38,15 @@ test("Source evidence distinguishes a selected Source from a pre-routing failure
   );
 });
 
-test("Source endpoint display strips credentials, query, and fragment", () => {
+test("Source base URL display strips credentials, query, and fragment", () => {
   assert.equal(
-    formatSafeSourceEndpoint(
+    formatSafeSourceBaseUrl(
       "https://user:secret@example.com/v1?api-key=secret#fragment",
       "/",
     ),
     "https://example.com/v1",
   );
-  assert.equal(formatSafeSourceEndpoint("not a url", "/"), "/");
+  assert.equal(formatSafeSourceBaseUrl("not a url", "/"), "/");
 });
 
 test("Record Source filter round-trips to the source_id API query", () => {
@@ -81,14 +81,14 @@ test("Record and Runtime views render Source-first evidence without legacy Runti
   }
   assert.doesNotMatch(recordTypes, /source_key:/);
   assert.doesNotMatch(runtimeTypes, /source_key:/);
-  assert.match(recordTypes, /source_endpoint:/);
+  assert.match(recordTypes, /source_base_url:/);
   assert.match(recordTypes, /source_selection_reason:\s*string\s*\|\s*null/);
-  assert.match(runtimeTypes, /source_endpoint:/);
+  assert.match(runtimeTypes, /source_base_url:/);
   assert.doesNotMatch(runtimeTypes, /provider_type:/);
   assert.doesNotMatch(runtimeTypes, /\n\s*use_proxy:/);
 
   assert.match(recordTable, /record\.sourceDisplay/);
-  assert.match(recordDetail, /formatSafeSourceEndpoint\(record\.source_endpoint/);
+  assert.match(recordDetail, /formatSafeSourceBaseUrl\(record\.source_base_url/);
   assert.match(recordDetail, /record\.source_selection_reason/);
   assert.match(recordDetail, /transformLabel/);
   assert.match(recordDetail, /transformRequired/);
@@ -97,6 +97,6 @@ test("Record and Runtime views render Source-first evidence without legacy Runti
   assert.match(runtimeTable, /providerRuntimePage\.table\.runtime/);
   assert.doesNotMatch(runtimeCards, /circuitScope/);
   assert.doesNotMatch(runtimeTable, /sourceCircuit/);
-  assert.doesNotMatch(runtimeCards, /\{\{\s*item\.source_endpoint\s*\}\}/);
-  assert.doesNotMatch(runtimeTable, /\{\{\s*item\.source_endpoint\s*\}\}/);
+  assert.doesNotMatch(runtimeCards, /\{\{\s*item\.source_base_url\s*\}\}/);
+  assert.doesNotMatch(runtimeTable, /\{\{\s*item\.source_base_url\s*\}\}/);
 });

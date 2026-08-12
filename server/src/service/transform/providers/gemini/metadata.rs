@@ -76,6 +76,7 @@ pub(crate) fn gemini_inline_data_from_blob(value: &Value) -> Option<GeminiInline
     Some(GeminiInlineData {
         mime_type: mime_type.to_string(),
         data: data.to_string(),
+        display_name: None,
     })
 }
 
@@ -118,9 +119,7 @@ pub(crate) fn gemini_function_response_to_unified_output(
             if let Some(result) = object.get("result") {
                 unified_tool_result_output_from_value(result.clone())
             } else {
-                UnifiedToolResultOutput::Json {
-                    value: Value::Object(object),
-                }
+                unified_tool_result_output_from_value(Value::Object(object))
             }
         }
         other => unified_tool_result_output_from_value(other),
@@ -190,17 +189,35 @@ pub(crate) fn build_unified_tool_name_lookup(
 pub(crate) fn gemini_inline_data_to_unified_content(
     inline_data: GeminiInlineData,
 ) -> UnifiedContentPart {
-    if inline_data.mime_type.starts_with("image/") {
-        UnifiedContentPart::ImageData {
-            mime_type: inline_data.mime_type,
-            data: inline_data.data,
+    use crate::service::transform::media::{InlineMediaKind, classify_inline_mime};
+
+    let GeminiInlineData {
+        mime_type,
+        data,
+        display_name,
+    } = inline_data;
+    match classify_inline_mime(&mime_type) {
+        Some(InlineMediaKind::Image) => UnifiedContentPart::ImageData { mime_type, data },
+        Some(InlineMediaKind::Audio(format)) => UnifiedContentPart::AudioData {
+            data,
+            format: format.as_str().to_string(),
+        },
+        Some(InlineMediaKind::File) => {
+            let filename = display_name.or_else(|| {
+                crate::service::transform::media::default_filename_for_mime(&mime_type)
+                    .map(ToString::to_string)
+            });
+            UnifiedContentPart::FileData {
+                data,
+                mime_type,
+                filename,
+            }
         }
-    } else {
-        UnifiedContentPart::FileData {
-            data: inline_data.data,
-            mime_type: inline_data.mime_type,
-            filename: None,
-        }
+        Some(InlineMediaKind::Video) | None => UnifiedContentPart::FileData {
+            data,
+            mime_type,
+            filename: display_name,
+        },
     }
 }
 pub(crate) fn gemini_safety_ratings_to_unified(

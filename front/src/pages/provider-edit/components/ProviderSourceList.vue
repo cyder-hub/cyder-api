@@ -49,7 +49,7 @@
                 {{ $t("providerEditPage.sources.table.profile") }}
               </TableHead>
               <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
-                {{ $t("providerEditPage.sources.table.endpoint") }}
+                {{ $t("providerEditPage.sources.table.baseUrl") }}
               </TableHead>
               <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
                 {{ $t("providerEditPage.sources.table.state") }}
@@ -70,9 +70,14 @@
                 </div>
               </TableCell>
               <TableCell class="max-w-[22rem]">
-                <span class="block truncate font-mono text-xs text-gray-700" :title="source.endpoint">
-                  {{ source.endpoint }}
-                </span>
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="block truncate font-mono text-xs text-gray-700" :title="source.base_url">
+                    {{ source.base_url }}
+                  </span>
+                  <Badge v-if="source.base_url_is_default" variant="secondary" class="shrink-0 font-mono text-[9px]">
+                    {{ $t("providerEditPage.sources.officialDefault") }}
+                  </Badge>
+                </div>
               </TableCell>
               <TableCell>
                 <div class="flex flex-wrap gap-1.5">
@@ -187,9 +192,12 @@
           <div class="space-y-2 text-xs text-gray-500">
             <div class="rounded-lg border border-gray-100 px-3 py-2.5">
               <span class="text-[11px] uppercase tracking-wide text-gray-400">
-                {{ $t("providerEditPage.sources.table.endpoint") }}
+                {{ $t("providerEditPage.sources.table.baseUrl") }}
               </span>
-              <p class="mt-1 break-all font-mono text-gray-700">{{ source.endpoint }}</p>
+              <p class="mt-1 break-all font-mono text-gray-700">{{ source.base_url }}</p>
+              <Badge v-if="source.base_url_is_default" variant="secondary" class="mt-2 font-mono text-[9px]">
+                {{ $t("providerEditPage.sources.officialDefault") }}
+              </Badge>
             </div>
             <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
               <span>{{ $t("providerEditPage.sources.table.profile") }}</span>
@@ -261,10 +269,48 @@
 
         <div class="space-y-1.5">
           <Label class="text-gray-700">
-            {{ $t("providerEditPage.sources.endpoint") }}
-            <span class="ml-0.5 text-red-500">*</span>
+            {{ $t("providerEditPage.sources.baseUrl") }}
+            <span v-if="!sourceBaseUrlMayBeEmpty(draft.profile_type)" class="ml-0.5 text-red-500">*</span>
           </Label>
-          <Input v-model="draft.endpoint" class="font-mono text-sm" />
+          <Input
+            v-model="draft.base_url"
+            class="font-mono text-sm"
+            :placeholder="sourceBaseUrlMayBeEmpty(draft.profile_type) ? $t('providerEditPage.sources.officialDefaultPlaceholder') : ''"
+          />
+          <p v-if="sourceBaseUrlMayBeEmpty(draft.profile_type)" class="text-xs leading-5 text-gray-500">
+            {{ $t("providerEditPage.sources.officialDefaultHelp") }}
+          </p>
+        </div>
+
+        <div
+          v-for="operation in operationRows"
+          :key="operation.key"
+          class="space-y-3 rounded-lg border border-gray-200 bg-gray-50/40 p-3.5"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <Label :for="`source-operation-${operation.key}`" class="cursor-pointer text-gray-700">
+                {{ $t(`providerEditPage.sources.operations.${operation.key}.label`) }}
+              </Label>
+              <p class="mt-1 text-xs leading-5 text-gray-500">
+                {{ $t(`providerEditPage.sources.operations.${operation.key}.help`) }}
+              </p>
+            </div>
+            <Checkbox
+              :id="`source-operation-${operation.key}`"
+              v-model="draft[operation.enabledKey]"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-xs text-gray-600">
+              {{ $t("providerEditPage.sources.operationPathOverride") }}
+            </Label>
+            <Input
+              v-model="draft[operation.pathKey]"
+              class="font-mono text-sm"
+              :placeholder="$t('providerEditPage.sources.operationPathPlaceholder')"
+            />
+          </div>
         </div>
 
         <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5">
@@ -345,6 +391,7 @@ import {
 } from "@/components/ui/table";
 import type { EditingProviderData } from "../types";
 import { providerProfileTypes, useProviderSources } from "../composables/useProviderSources";
+import { sourceBaseUrlMayBeEmpty, sourceSupportsOperation } from "../composables/sourceProfileContract";
 
 const { t: $t } = useI18n();
 const isDesktop = useMediaQuery("(min-width: 768px)");
@@ -372,6 +419,40 @@ const {
 const enabledClass = computed(() => "border-emerald-200 bg-emerald-50 text-emerald-700");
 const disabledClass = computed(() => "border-gray-200 bg-gray-100 text-gray-500");
 const isBusy = (sourceId: number) => busySourceId.value === sourceId;
+const operationRows = computed(() =>
+  [
+    {
+      key: "chatCompletions",
+      operation: "chat_completions",
+      enabledKey: "chat_completions_enabled",
+      pathKey: "chat_completions_path_override",
+    },
+    {
+      key: "embeddings",
+      operation: "embeddings",
+      enabledKey: "embeddings_enabled",
+      pathKey: "embeddings_path_override",
+    },
+    {
+      key: "rerank",
+      operation: "rerank",
+      enabledKey: "rerank_enabled",
+      pathKey: "rerank_path_override",
+    },
+  ].filter((item) =>
+    sourceSupportsOperation(
+      draft.profile_type,
+      item.operation as "chat_completions" | "embeddings" | "rerank",
+    ),
+  ) as Array<{
+    key: string;
+    enabledKey: "chat_completions_enabled" | "embeddings_enabled" | "rerank_enabled";
+    pathKey:
+      | "chat_completions_path_override"
+      | "embeddings_path_override"
+      | "rerank_path_override";
+  }>,
+);
 
 const runtimeBySourceId = ref<Record<number, ProviderRuntimeItem>>({});
 

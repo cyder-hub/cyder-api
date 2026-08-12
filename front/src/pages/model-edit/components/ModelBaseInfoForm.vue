@@ -16,6 +16,23 @@
           </Label>
           <Input id="real_model_name" v-model="editingData.real_model_name" />
         </div>
+
+        <div class="grid gap-1.5 sm:col-span-2">
+          <Label class="text-gray-700">{{ t("modelEditPage.labelModelKind") }}</Label>
+          <Select v-model="editingData.model_kind" disabled>
+            <SelectTrigger class="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="kind in ['CHAT', 'EMBEDDING', 'RERANK']" :key="kind" :value="kind">
+                {{ t(`modelKinds.${kind}`) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <p class="text-xs leading-5 text-gray-500">
+            {{ t("modelEditPage.modelKindImmutableHelp") }}
+          </p>
+        </div>
       </div>
 
       <div class="flex items-center justify-between p-3.5 border border-gray-200 rounded-lg">
@@ -34,6 +51,13 @@ import { useI18n } from "vue-i18n";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { EditingModelData } from "../types";
 
 const editingData = defineModel<EditingModelData>("editingData", {

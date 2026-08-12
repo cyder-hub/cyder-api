@@ -3,6 +3,7 @@ use serde_json::Value;
 use super::adapter::{downstream_adapter_for, upstream_adapter_for};
 use super::diagnostics::{
     capture_transform_diagnostics, merge_transform_summaries, transform_success,
+    upstream_usage_missing_summary,
 };
 use super::{
     TransformAction, TransformDiagnosticCollector, TransformDiagnosticFact, TransformFailure,
@@ -55,19 +56,24 @@ pub(in crate::service::transform) fn transform_result_with_cost(
         let source_adapter = upstream_adapter_for(upstream_protocol);
         let observation = (source_adapter.response.decode)(data.clone());
         let (usage_info, usage_normalization, observation_summary) = match observation {
-            Ok(decoded) => (
-                decoded.value.usage.clone().map(Into::into),
-                decoded.value.usage.as_ref().map(Into::into),
-                transform_success(
-                    (),
-                    TransformPhase::ResponseObserve,
-                    TransformSemanticUnit::Usage,
-                    TransformOutcomeKind::Lossless,
-                    TransformAction::PassThrough,
-                    TransformReasonCode::LosslessConversion,
-                )
-                .summary,
-            ),
+            Ok(decoded) => {
+                let usage_info = decoded.value.usage.clone().map(Into::into);
+                let usage_normalization = decoded.value.usage.as_ref().map(Into::into);
+                let observation_summary = if decoded.value.usage.is_some() {
+                    transform_success(
+                        (),
+                        TransformPhase::ResponseObserve,
+                        TransformSemanticUnit::Usage,
+                        TransformOutcomeKind::Lossless,
+                        TransformAction::PassThrough,
+                        TransformReasonCode::LosslessConversion,
+                    )
+                    .summary
+                } else {
+                    upstream_usage_missing_summary(TransformPhase::ResponseObserve)
+                };
+                (usage_info, usage_normalization, observation_summary)
+            }
             Err(failure) => {
                 let mut collector = TransformDiagnosticCollector::default();
                 collector.record(TransformDiagnosticFact {
@@ -151,6 +157,19 @@ fn transform_result_with_cost_inner(
     let decoded = (source_adapter.response.decode)(data)?;
     let usage_info = decoded.value.usage.clone().map(Into::into);
     let usage_normalization = decoded.value.usage.as_ref().map(Into::into);
+    let usage_summary = if decoded.value.usage.is_some() {
+        transform_success(
+            (),
+            TransformPhase::ResponseObserve,
+            TransformSemanticUnit::Usage,
+            TransformOutcomeKind::Lossless,
+            TransformAction::PassThrough,
+            TransformReasonCode::LosslessConversion,
+        )
+        .summary
+    } else {
+        upstream_usage_missing_summary(TransformPhase::ResponseObserve)
+    };
 
     match (target_adapter.response.encode)(decoded.value) {
         Ok(encoded) => Ok(TransformSuccess {
@@ -159,10 +178,11 @@ fn transform_result_with_cost_inner(
                 usage_info,
                 usage_normalization,
             },
-            summary: merge_transform_summaries([decoded.summary, encoded.summary]),
+            summary: merge_transform_summaries([decoded.summary, usage_summary, encoded.summary]),
         }),
         Err(mut failure) => {
-            failure.summary = merge_transform_summaries([decoded.summary, failure.summary]);
+            failure.summary =
+                merge_transform_summaries([decoded.summary, usage_summary, failure.summary]);
             Err(failure)
         }
     }

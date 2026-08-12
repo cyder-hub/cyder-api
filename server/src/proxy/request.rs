@@ -81,4 +81,18 @@ mod tests {
 
         assert_eq!(err.code(), ProxyErrorCode::RequestBodyTooLargeError);
     }
+
+    #[tokio::test]
+    async fn inline_media_uses_the_same_request_body_limit() {
+        let request = Request::builder()
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"model":"gpt-test","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ=="}}]}]}"#,
+            ))
+            .unwrap();
+
+        let err = parse_json_request(request, 64).await.unwrap_err();
+
+        assert_eq!(err.code(), ProxyErrorCode::RequestBodyTooLargeError);
+    }
 }

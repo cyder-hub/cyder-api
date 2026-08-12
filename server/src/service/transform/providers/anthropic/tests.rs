@@ -21,8 +21,11 @@ fn test_anthropic_request_to_unified() {
         stop_sequences: None,
         stream: Some(true),
         tools: None,
+        tool_choice: None,
         metadata: None,
         top_k: None,
+        thinking: None,
+        output_config: None,
     };
 
     let unified_request: UnifiedRequest = anthropic_request.into();
@@ -121,11 +124,14 @@ fn test_anthropic_request_round_trip_preserves_metadata_and_top_k() {
         stop_sequences: Some(vec!["done".to_string()]),
         stream: Some(true),
         tools: None,
+        tool_choice: None,
         metadata: Some(json!({
             "trace_id": "trace_123",
             "user_tier": "pro"
         })),
         top_k: Some(32),
+        thinking: None,
+        output_config: None,
     };
 
     let unified_request: UnifiedRequest = anthropic_request.into();

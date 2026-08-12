@@ -1635,10 +1635,12 @@ mod tests {
             );
 
             INSERT INTO upstream_source (
-                id, provider_id, profile_type, endpoint, use_proxy,
+                id, provider_id, profile_type, base_url, use_proxy,
+                chat_completions_enabled, embeddings_enabled, rerank_enabled,
                 is_enabled, is_default, deleted_at, created_at, updated_at
             ) VALUES (
                 15, 10, 'OPENAI', 'https://api.example.com/v1', 0,
+                1, 1, 0,
                 1, 1, NULL, 1, 1
             );
 
@@ -1657,10 +1659,11 @@ mod tests {
 
             INSERT INTO model (
                 id, provider_id, cost_catalog_id, model_name, real_model_name,
-                source_selection_mode, is_enabled, deleted_at, created_at, updated_at
+                model_kind, source_selection_mode,
+                is_enabled, deleted_at, created_at, updated_at
             ) VALUES (
                 30, 10, NULL, 'gpt-test', 'gpt-test-real',
-                'INHERIT_ALL', 1, NULL, 1, 1
+                'CHAT', 'INHERIT_ALL', 1, NULL, 1, 1
             );
 
             INSERT INTO request_log (
@@ -1671,7 +1674,8 @@ mod tests {
                 provider_id, provider_api_key_id, model_id, source_id,
                 provider_key_snapshot, provider_name_snapshot,
                 model_name_snapshot, real_model_name_snapshot,
-                source_profile_type_snapshot, source_endpoint_snapshot,
+                model_kind_snapshot,
+                source_profile_type_snapshot, source_base_url_snapshot,
                 upstream_protocol,
                 estimated_cost_nanos, estimated_cost_currency,
                 total_input_tokens, total_output_tokens, reasoning_tokens, total_tokens,
@@ -1685,7 +1689,7 @@ mod tests {
                 10, 20, 30, 15,
                 'openai-main', 'OpenAI Main',
                 'gpt-test', 'gpt-test-real',
-                'OPENAI', 'https://api.example.com/v1', 'OPENAI',
+                'CHAT', 'OPENAI', 'https://api.example.com/v1', 'OPENAI',
                 500, 'USD',
                 10, 20, 5, 35,
                 1000, 1500
@@ -1698,7 +1702,7 @@ mod tests {
                 10, 20, 30, 15,
                 'openai-main', 'OpenAI Main',
                 'gpt-test', 'gpt-test-real',
-                'OPENAI', 'https://api.example.com/v1', 'OPENAI',
+                'CHAT', 'OPENAI', 'https://api.example.com/v1', 'OPENAI',
                 300, 'USD',
                 7, 13, 2, 22,
                 2000, 2550
@@ -1711,7 +1715,7 @@ mod tests {
                 NULL, NULL, NULL, NULL,
                 NULL, NULL,
                 NULL, NULL,
-                NULL, NULL, NULL,
+                NULL, NULL, NULL, NULL,
                 NULL, NULL,
                 1, 2, 0, 3,
                 3000, 3100

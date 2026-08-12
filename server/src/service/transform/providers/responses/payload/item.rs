@@ -165,8 +165,13 @@ pub enum ItemContentPart {
     },
     InputImage {
         image_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
         #[serde(default = "default_input_image_detail")]
         detail: String,
+    },
+    InputAudio {
+        input_audio: ResponsesInputAudio,
     },
     InputFile {
         filename: Option<String>,
@@ -177,6 +182,12 @@ pub enum ItemContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         file_data: Option<String>,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ResponsesInputAudio {
+    pub data: String,
+    pub format: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -1,12 +1,8 @@
 use cyder_tools::log::warn;
 use serde_json::{Map, Value};
 
-pub const REGISTERED_PASSTHROUGH_KEYS: &[&str] = &[
-    "logprobs",
-    "top_logprobs",
-    "parallel_tool_calls",
-    "reasoning_effort",
-];
+pub const REGISTERED_PASSTHROUGH_KEYS: &[&str] =
+    &["logprobs", "top_logprobs", "parallel_tool_calls"];
 
 pub fn is_registered_passthrough_key(key: &str) -> bool {
     REGISTERED_PASSTHROUGH_KEYS.contains(&key)

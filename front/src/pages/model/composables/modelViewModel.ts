@@ -21,8 +21,9 @@ export const buildModelPageState = (
         const haystack = [
           item.provider_name,
           item.provider_key,
-          item.model_name,
-          item.real_model_name || "",
+        item.model_name,
+        item.real_model_name || "",
+        item.model_kind,
         ]
           .join(" ")
           .toLowerCase();

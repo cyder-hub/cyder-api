@@ -12,7 +12,7 @@ use crate::{db_execute, db_object};
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
 use crate::controller::BaseError;
 use crate::database::request_patch::{RequestPatchVariantAggregate, RequestPatchVariantRepository};
-use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+use crate::schema::enum_def::{ModelKind, ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::secret_encryption::{
     EncryptedSecret, ProviderSecretFingerprint, SecretEncryptionError,
 };
@@ -324,10 +324,7 @@ pub struct BootstrapProviderInput {
     pub provider_id: i64,
     pub provider_key: String,
     pub name: String,
-    pub source_id: i64,
-    pub endpoint: String,
-    pub use_proxy: bool,
-    pub profile_type: UpstreamProfileType,
+    pub source: NewUpstreamSource,
     pub provider_api_key_mode: ProviderApiKeyMode,
     pub provider_api_key_id: i64,
     pub api_key_description: Option<String>,
@@ -337,6 +334,7 @@ pub struct BootstrapProviderInput {
     pub secret_hmac: ProviderSecretFingerprint,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub model_kind: ModelKind,
 }
 
 #[derive(Debug, Serialize)]
@@ -393,17 +391,7 @@ macro_rules! bootstrap_transaction {
                 })?;
             let provider = provider_db.from_db();
 
-            let new_source_data = NewUpstreamSource {
-                id: bootstrap_input.source_id,
-                provider_id: provider.id,
-                profile_type: bootstrap_input.profile_type,
-                endpoint: bootstrap_input.endpoint.clone(),
-                use_proxy: bootstrap_input.use_proxy,
-                is_enabled: true,
-                is_default: true,
-                created_at: current_time,
-                updated_at: current_time,
-            };
+            let new_source_data = bootstrap_input.source.clone();
             let source_db = diesel::insert_into(upstream_source::table)
                 .values($source_new_db::to_db(&new_source_data))
                 .returning($source_db::as_returning())
@@ -436,6 +424,7 @@ macro_rules! bootstrap_transaction {
                 provider_id: provider.id,
                 model_name: bootstrap_input.model_name.clone(),
                 real_model_name: bootstrap_input.real_model_name.clone(),
+                model_kind: bootstrap_input.model_kind,
                 source_selection_mode: "INHERIT_ALL".to_string(),
                 is_enabled: true,
                 created_at: current_time,
@@ -1493,10 +1482,18 @@ mod tests {
             provider_id,
             provider_key: "openai-api-example-com".to_string(),
             name: "OpenAI api.example.com".to_string(),
-            source_id: 103,
-            endpoint: "https://api.example.com/v1".to_string(),
-            use_proxy: false,
-            profile_type: UpstreamProfileType::Openai,
+            source: NewUpstreamSource {
+                id: 103,
+                provider_id,
+                profile_type: UpstreamProfileType::Openai,
+                base_url: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                is_enabled: true,
+                is_default: true,
+                created_at: 1,
+                updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
+            },
             provider_api_key_mode: ProviderApiKeyMode::Queue,
             provider_api_key_id,
             api_key_description: Some("bootstrap key".to_string()),
@@ -1510,6 +1507,7 @@ mod tests {
                 .expect("test provider secret should fingerprint"),
             model_name: "gpt-4o-mini".to_string(),
             real_model_name: real_model_name.map(ToString::to_string),
+            model_kind: ModelKind::Chat,
         }
     }
 
@@ -1683,13 +1681,14 @@ mod tests {
                     id: 2,
                     provider_id: 1,
                     profile_type: UpstreamProfileType::Openai,
-                    endpoint: "https://api.example.com/v1".to_string(),
+                    base_url: "https://api.example.com/v1".to_string(),
                     use_proxy: false,
                     is_enabled: true,
                     is_default: true,
                     deleted_at: None,
                     created_at: 1,
                     updated_at: 1,
+                    ..UpstreamSource::test_defaults(UpstreamProfileType::Openai)
                 }],
             },
             api_keys: vec![],
@@ -1735,12 +1734,13 @@ mod tests {
                         id: 402,
                         provider_id: 401,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: "https://old.example.com/v1".to_string(),
+                        base_url: "https://old.example.com/v1".to_string(),
                         use_proxy: false,
                         is_enabled: true,
                         is_default: true,
                         created_at: 1,
                         updated_at: 1,
+                        ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
                     },
                 )
                 .expect("aggregate should create");
@@ -1762,16 +1762,17 @@ mod tests {
                     402,
                     401,
                     &UpdateUpstreamSourceData {
-                        endpoint: Some("https://new.example.com/v1".to_string()),
+                        base_url: Some("https://new.example.com/v1".to_string()),
                         use_proxy: Some(true),
                         is_enabled: None,
                         is_default: None,
                         updated_at: 2,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect("source should update");
                 assert_eq!(updated_source.profile_type, UpstreamProfileType::Openai);
-                assert_eq!(updated_source.endpoint, "https://new.example.com/v1");
+                assert_eq!(updated_source.base_url, "https://new.example.com/v1");
                 assert!(updated_source.use_proxy);
 
                 assert_eq!(Provider::delete_with_dependents(401).expect("delete"), 1);
@@ -1815,12 +1816,13 @@ mod tests {
                     id: 412,
                     provider_id: 411,
                     profile_type: UpstreamProfileType::Openai,
-                    endpoint: "https://first.example.com/v1".to_string(),
+                    base_url: "https://first.example.com/v1".to_string(),
                     use_proxy: false,
                     is_enabled: true,
                     is_default: true,
                     created_at: 1,
                     updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
                 })
                 .expect("first source should create");
                 assert!(source.is_default);
@@ -1829,12 +1831,13 @@ mod tests {
                     id: 413,
                     provider_id: 411,
                     profile_type: UpstreamProfileType::Gemini,
-                    endpoint: "https://second.example.com/v1".to_string(),
+                    base_url: "https://second.example.com/v1".to_string(),
                     use_proxy: true,
                     is_enabled: true,
                     is_default: false,
                     created_at: 1,
                     updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Gemini)
                 })
                 .expect("different source family should coexist");
                 assert!(!second.is_default);
@@ -1869,12 +1872,13 @@ mod tests {
                     id: 503,
                     provider_id: 501,
                     profile_type: UpstreamProfileType::Openai,
-                    endpoint: "https://api.example.com/v1".to_string(),
+                    base_url: "https://api.example.com/v1".to_string(),
                     use_proxy: false,
                     is_enabled: true,
                     is_default: true,
                     created_at: 1,
                     updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
                 })
                 .expect("provider should seed");
                 Provider::create(&NewProvider {
@@ -1889,12 +1893,13 @@ mod tests {
                     id: 504,
                     provider_id: 502,
                     profile_type: UpstreamProfileType::Openai,
-                    endpoint: "https://other.example.com/v1".to_string(),
+                    base_url: "https://other.example.com/v1".to_string(),
                     use_proxy: false,
                     is_enabled: true,
                     is_default: true,
                     created_at: 1,
                     updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
                 })
                 .expect("other provider should seed");
 

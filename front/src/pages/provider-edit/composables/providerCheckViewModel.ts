@@ -57,6 +57,9 @@ export function modelAllowsSource(
   model: LocalEditableModelItem | null | undefined,
   sourceId: number,
 ): boolean {
+  if (model?.id === null) {
+    return true;
+  }
   if (model?.source_config?.source_selection_mode !== "EXPLICIT") {
     return true;
   }
@@ -72,7 +75,7 @@ export function buildEnabledModelOptions(
     .map((model, index) => ({ model, index }))
     .filter(
       ({ model }) =>
-        model.id !== null &&
+        model.model_kind === "CHAT" &&
         model.is_enabled &&
         (sourceId === null || modelAllowsSource(model, sourceId)),
     )

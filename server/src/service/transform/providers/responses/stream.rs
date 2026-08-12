@@ -59,13 +59,13 @@ fn responses_message_blob_events(
     parts
         .iter()
         .filter_map(|part| match part {
-            ItemContentPart::InputImage { .. } | ItemContentPart::InputFile { .. } => {
-                Some(UnifiedStreamEvent::BlobDelta {
-                    index: Some(output_index),
-                    data: serde_json::to_value(part)
-                        .expect("Responses content serialization is structurally infallible"),
-                })
-            }
+            ItemContentPart::InputImage { .. }
+            | ItemContentPart::InputAudio { .. }
+            | ItemContentPart::InputFile { .. } => Some(UnifiedStreamEvent::BlobDelta {
+                index: Some(output_index),
+                data: serde_json::to_value(part)
+                    .expect("Responses content serialization is structurally infallible"),
+            }),
             _ => None,
         })
         .collect()

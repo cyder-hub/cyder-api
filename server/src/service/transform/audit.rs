@@ -1,9 +1,16 @@
 use serde_json::Value;
+use std::collections::VecDeque;
 
 use super::capability::TransformValueKind;
 use super::diagnostics::record_captured_transform_fact;
+use super::media::{
+    InlineMediaKind, classify_inline_mime, is_valid_base64, is_valid_http_url,
+    is_valid_image_reference, mime_type_from_filename, parse_base64_data_url,
+};
+use super::structured::{is_valid_schema_name, schema_contains_property_ordering};
 use super::unified::{
     UnifiedContentPart, UnifiedItem, UnifiedRequest, UnifiedResponse, UnifiedRole,
+    UnifiedToolChoice, UnifiedToolResultOutput,
 };
 use super::{
     TransformAction, TransformDiagnosticFact, TransformOutcomeKind, TransformPhase,
@@ -75,6 +82,40 @@ fn record_minor_drop(phase: TransformPhase, semantic_unit: TransformSemanticUnit
     );
 }
 
+fn record_minor_reasoning_drop(phase: TransformPhase) {
+    record_fact(
+        phase,
+        TransformSemanticUnit::ReasoningContent,
+        TransformOutcomeKind::ControlledLossMinor,
+        TransformAction::Drop,
+        TransformReasonCode::UnsupportedReasoning,
+    );
+}
+
+fn record_minor_reasoning_mapping(phase: TransformPhase) {
+    record_fact(
+        phase,
+        TransformSemanticUnit::ReasoningContent,
+        TransformOutcomeKind::ControlledLossMinor,
+        TransformAction::Synthesize,
+        TransformReasonCode::UnsupportedReasoning,
+    );
+}
+
+fn record_minor_mapping(
+    phase: TransformPhase,
+    semantic_unit: TransformSemanticUnit,
+    reason_code: TransformReasonCode,
+) {
+    record_fact(
+        phase,
+        semantic_unit,
+        TransformOutcomeKind::ControlledLossMinor,
+        TransformAction::Synthesize,
+        reason_code,
+    );
+}
+
 fn record_no_semantic_output(phase: TransformPhase, semantic_unit: TransformSemanticUnit) {
     record_fact(
         phase,
@@ -123,6 +164,393 @@ fn require_non_empty_string(
     }
 }
 
+fn stable_tool_call_id(
+    protocol: &str,
+    message_index: usize,
+    call_index: usize,
+    name: &str,
+) -> String {
+    let normalized = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("call-{protocol}-{message_index}-{call_index}-{normalized}")
+}
+
+fn source_forces_tool_selection(protocol: DownstreamProtocol, data: &Value) -> bool {
+    match protocol {
+        DownstreamProtocol::Openai | DownstreamProtocol::Responses => {
+            match data.get("tool_choice") {
+                Some(Value::String(value)) => value == "required",
+                Some(Value::Object(_)) => true,
+                _ => false,
+            }
+        }
+        DownstreamProtocol::Anthropic => data
+            .get("tool_choice")
+            .and_then(|choice| choice.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|choice| matches!(choice, "any" | "tool")),
+        DownstreamProtocol::Gemini => {
+            let config = data
+                .get("toolConfig")
+                .and_then(|config| config.get("functionCallingConfig"));
+            config
+                .and_then(|config| config.get("mode"))
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode == "ANY")
+                || config
+                    .and_then(|config| config.get("allowedFunctionNames"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|names| !names.is_empty())
+        }
+    }
+}
+
+fn normalize_openai_tool_call_ids(data: &mut Value) {
+    let Some(messages) = data.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut pending = VecDeque::new();
+    for (message_index, message) in messages.iter_mut().enumerate() {
+        if let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
+            for (call_index, call) in calls.iter_mut().enumerate() {
+                let name = call
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("function")
+                    .to_string();
+                let id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| {
+                        let id = stable_tool_call_id("openai", message_index, call_index, &name);
+                        call.as_object_mut()
+                            .expect("OpenAI tool call must be an object")
+                            .insert("id".to_string(), Value::String(id.clone()));
+                        record_synthesis(
+                            TransformPhase::RequestDecode,
+                            TransformSemanticUnit::ToolCall,
+                            TransformReasonCode::SyntheticCorrelationId,
+                        );
+                        id
+                    });
+                pending.push_back(id);
+            }
+        }
+        if message.get("role").and_then(Value::as_str) == Some("tool")
+            && message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            let id = pending.pop_front().unwrap_or_else(|| {
+                stable_tool_call_id("openai-result", message_index, 0, "function")
+            });
+            message
+                .as_object_mut()
+                .expect("OpenAI message must be an object")
+                .insert("tool_call_id".to_string(), Value::String(id));
+            record_synthesis(
+                TransformPhase::RequestDecode,
+                TransformSemanticUnit::ToolResult,
+                TransformReasonCode::SyntheticCorrelationId,
+            );
+        }
+    }
+}
+
+fn normalize_responses_tool_call_ids(data: &mut Value) {
+    let Some(items) = data.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut pending = VecDeque::new();
+    for (item_index, item) in items.iter_mut().enumerate() {
+        let type_name = item.get("type").and_then(Value::as_str);
+        match type_name {
+            Some("function_call") => {
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("function")
+                    .to_string();
+                let call_id = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| {
+                        let id = stable_tool_call_id("responses", item_index, 0, &name);
+                        item.as_object_mut()
+                            .expect("Responses input item must be an object")
+                            .insert("call_id".to_string(), Value::String(id.clone()));
+                        record_synthesis(
+                            TransformPhase::RequestDecode,
+                            TransformSemanticUnit::ToolCall,
+                            TransformReasonCode::SyntheticCorrelationId,
+                        );
+                        id
+                    });
+                pending.push_back(call_id);
+                if item.get("id").is_none() {
+                    item.as_object_mut()
+                        .expect("Responses input item must be an object")
+                        .insert("id".to_string(), Value::String(format!("fc-{item_index}")));
+                }
+            }
+            Some("function_call_output") => {
+                if item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    let id = pending.pop_front().unwrap_or_else(|| {
+                        stable_tool_call_id("responses-output", item_index, 0, "function")
+                    });
+                    item.as_object_mut()
+                        .expect("Responses input item must be an object")
+                        .insert("call_id".to_string(), Value::String(id));
+                    record_synthesis(
+                        TransformPhase::RequestDecode,
+                        TransformSemanticUnit::ToolResult,
+                        TransformReasonCode::SyntheticCorrelationId,
+                    );
+                }
+                if item.get("id").is_none() {
+                    item.as_object_mut()
+                        .expect("Responses input item must be an object")
+                        .insert("id".to_string(), Value::String(format!("fco-{item_index}")));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn normalize_anthropic_tool_call_ids(data: &mut Value) {
+    let Some(messages) = data.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut pending = VecDeque::new();
+    for (message_index, message) in messages.iter_mut().enumerate() {
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for (block_index, block) in blocks.iter_mut().enumerate() {
+            match block.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("function")
+                        .to_string();
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| {
+                            let id =
+                                stable_tool_call_id("anthropic", message_index, block_index, &name);
+                            block
+                                .as_object_mut()
+                                .expect("Anthropic content block must be an object")
+                                .insert("id".to_string(), Value::String(id.clone()));
+                            record_synthesis(
+                                TransformPhase::RequestDecode,
+                                TransformSemanticUnit::ToolCall,
+                                TransformReasonCode::SyntheticCorrelationId,
+                            );
+                            id
+                        });
+                    pending.push_back(id);
+                }
+                Some("tool_result")
+                    if block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty) =>
+                {
+                    let id = pending.pop_front().unwrap_or_else(|| {
+                        stable_tool_call_id(
+                            "anthropic-result",
+                            message_index,
+                            block_index,
+                            "function",
+                        )
+                    });
+                    block
+                        .as_object_mut()
+                        .expect("Anthropic content block must be an object")
+                        .insert("tool_use_id".to_string(), Value::String(id));
+                    record_synthesis(
+                        TransformPhase::RequestDecode,
+                        TransformSemanticUnit::ToolResult,
+                        TransformReasonCode::SyntheticCorrelationId,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+pub(in crate::service::transform) fn normalize_portable_tool_request(
+    protocol: DownstreamProtocol,
+    data: &mut Value,
+) -> Result<(), SourceSemanticError> {
+    let forced = source_forces_tool_selection(protocol, data);
+    let mut dropped = false;
+    if let Some(tools) = data.get_mut("tools").and_then(Value::as_array_mut) {
+        match protocol {
+            DownstreamProtocol::Openai | DownstreamProtocol::Responses => {
+                tools.retain(|tool| {
+                    let portable = tool.get("type").and_then(Value::as_str) == Some("function");
+                    dropped |= !portable;
+                    portable
+                });
+            }
+            DownstreamProtocol::Anthropic => {
+                tools.retain(|tool| {
+                    let portable = tool.get("type").is_none()
+                        && tool.get("name").and_then(Value::as_str).is_some()
+                        && tool.get("input_schema").is_some();
+                    dropped |= !portable;
+                    portable
+                });
+            }
+            DownstreamProtocol::Gemini => {
+                let mut declarations = Vec::new();
+                for tool in std::mem::take(tools) {
+                    if let Some(functions) =
+                        tool.get("functionDeclarations").and_then(Value::as_array)
+                    {
+                        declarations.extend(functions.iter().cloned());
+                    }
+                    dropped |= tool.as_object().is_none_or(|object| {
+                        object.len() != 1 || !object.contains_key("functionDeclarations")
+                    });
+                }
+                if !declarations.is_empty() {
+                    tools.push(serde_json::json!({ "functionDeclarations": declarations }));
+                }
+            }
+        }
+    }
+    if data
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        data.as_object_mut()
+            .expect("request envelope must be an object")
+            .remove("tools");
+    }
+    if dropped && forced {
+        return Err(SourceSemanticError {
+            semantic_unit: TransformSemanticUnit::ToolDefinitions,
+            reason_code: TransformReasonCode::UnsupportedToolDefinitions,
+        });
+    }
+    if dropped {
+        record_minor_drop(
+            TransformPhase::RequestDecode,
+            TransformSemanticUnit::ToolDefinitions,
+        );
+    }
+    match protocol {
+        DownstreamProtocol::Openai => normalize_openai_tool_call_ids(data),
+        DownstreamProtocol::Responses => normalize_responses_tool_call_ids(data),
+        DownstreamProtocol::Anthropic => normalize_anthropic_tool_call_ids(data),
+        DownstreamProtocol::Gemini => {}
+    }
+    Ok(())
+}
+
+fn validate_named_json_schema(
+    definition: Option<&serde_json::Map<String, Value>>,
+) -> Result<(), SourceSemanticError> {
+    let Some(definition) = definition else {
+        return Err(SourceSemanticError::invalid(
+            TransformSemanticUnit::StructuredOutput,
+        ));
+    };
+    if !definition
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(is_valid_schema_name)
+        || !definition.get("schema").is_some_and(Value::is_object)
+        || definition
+            .get("description")
+            .is_some_and(|description| !description.is_null() && !description.is_string())
+        || definition
+            .get("strict")
+            .is_some_and(|strict| !strict.is_null() && !strict.is_boolean())
+    {
+        return Err(SourceSemanticError::invalid(
+            TransformSemanticUnit::StructuredOutput,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_openai_response_format(format: &Value) -> Result<(), SourceSemanticError> {
+    let Some(format) = format.as_object() else {
+        return Err(SourceSemanticError::invalid(
+            TransformSemanticUnit::StructuredOutput,
+        ));
+    };
+    match format.get("type").and_then(Value::as_str) {
+        Some("text" | "json_object") => Ok(()),
+        Some("json_schema") => {
+            validate_named_json_schema(format.get("json_schema").and_then(Value::as_object))
+        }
+        Some(_) => Err(SourceSemanticError {
+            semantic_unit: TransformSemanticUnit::StructuredOutput,
+            reason_code: TransformReasonCode::UnsupportedContent,
+        }),
+        None => Err(SourceSemanticError::invalid(
+            TransformSemanticUnit::StructuredOutput,
+        )),
+    }
+}
+
+fn validate_responses_text_format(format: &Value) -> Result<(), SourceSemanticError> {
+    let Some(format) = format.as_object() else {
+        return Err(SourceSemanticError::invalid(
+            TransformSemanticUnit::StructuredOutput,
+        ));
+    };
+    match format.get("type").and_then(Value::as_str) {
+        Some("text" | "json_object") => Ok(()),
+        Some("json_schema") => validate_named_json_schema(Some(format)),
+        Some(_) => Err(SourceSemanticError {
+            semantic_unit: TransformSemanticUnit::StructuredOutput,
+            reason_code: TransformReasonCode::UnsupportedContent,
+        }),
+        None => Err(SourceSemanticError::invalid(
+            TransformSemanticUnit::StructuredOutput,
+        )),
+    }
+}
+
+fn record_structured_name_synthesis() {
+    record_minor_mapping(
+        TransformPhase::RequestDecode,
+        TransformSemanticUnit::StructuredOutput,
+        TransformReasonCode::SyntheticEnvelope,
+    );
+}
+
 fn validate_openai_tool_calls(
     messages: &[Value],
     phase: TransformPhase,
@@ -140,6 +568,86 @@ fn validate_openai_tool_calls(
         }
         if !matches!(role, "system" | "user" | "assistant" | "tool") {
             return Err(SourceSemanticError::unknown(TransformSemanticUnit::Role));
+        }
+
+        if let Some(parts) = message.get("content").and_then(Value::as_array) {
+            for part in parts {
+                let kind = part.get("type").and_then(Value::as_str);
+                if role != "user" && !matches!(kind, Some("text")) {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::RequestEnvelope,
+                    ));
+                }
+                match kind {
+                    Some("text") if part.get("text").and_then(Value::as_str).is_some() => {}
+                    Some("image_url") => {
+                        let image_url = part.get("image_url").and_then(Value::as_object);
+                        if !image_url
+                            .and_then(|image| image.get("url"))
+                            .and_then(Value::as_str)
+                            .is_some_and(is_valid_image_reference)
+                            || image_url.and_then(|image| image.get("detail")).is_some_and(
+                                |detail| {
+                                    !detail.is_null()
+                                        && !matches!(detail.as_str(), Some("auto" | "low" | "high"))
+                                },
+                            )
+                        {
+                            return Err(SourceSemanticError::invalid(
+                                TransformSemanticUnit::ImageUrl,
+                            ));
+                        }
+                    }
+                    Some("input_audio") => {
+                        let input_audio = part.get("input_audio").and_then(Value::as_object);
+                        if !input_audio
+                            .and_then(|audio| audio.get("data"))
+                            .and_then(Value::as_str)
+                            .is_some_and(is_valid_base64)
+                            || !matches!(
+                                input_audio
+                                    .and_then(|audio| audio.get("format"))
+                                    .and_then(Value::as_str),
+                                Some("wav" | "mp3")
+                            )
+                        {
+                            return Err(SourceSemanticError::invalid(
+                                TransformSemanticUnit::AudioData,
+                            ));
+                        }
+                    }
+                    Some("file") => {
+                        let Some(file) = part.get("file").and_then(Value::as_object) else {
+                            return Err(SourceSemanticError::invalid(
+                                TransformSemanticUnit::FileData,
+                            ));
+                        };
+                        let file_data = file.get("file_data").filter(|value| !value.is_null());
+                        let file_id = file.get("file_id").filter(|value| !value.is_null());
+                        if (file_data.is_some() == file_id.is_some())
+                            || file_data.is_some_and(|data| {
+                                !data.as_str().is_some_and(is_valid_base64)
+                                    || !file
+                                        .get("filename")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|filename| !filename.trim().is_empty())
+                            })
+                            || file_id.is_some_and(|id| {
+                                !id.as_str().is_some_and(|id| !id.trim().is_empty())
+                            })
+                        {
+                            return Err(SourceSemanticError::invalid(
+                                TransformSemanticUnit::FileData,
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(SourceSemanticError::unknown(
+                            TransformSemanticUnit::RequestEnvelope,
+                        ));
+                    }
+                }
+            }
         }
 
         if message.get("tool_call_id").is_some() && message.get("content").is_none() {
@@ -206,26 +714,126 @@ fn validate_responses_items(
                 }
                 for part in object_array(item, "content") {
                     match part.get("type").and_then(Value::as_str) {
-                        Some("input_image")
-                            if !part
-                                .get("image_url")
+                        Some("input_image") => {
+                            let image_url = part.get("image_url").filter(|value| !value.is_null());
+                            let file_id = part.get("file_id").filter(|value| !value.is_null());
+                            if image_url.is_some() == file_id.is_some()
+                                || image_url.is_some_and(|url| {
+                                    !url.as_str().is_some_and(is_valid_image_reference)
+                                })
+                                || file_id.is_some_and(|id| {
+                                    !id.as_str().is_some_and(|id| !id.trim().is_empty())
+                                })
+                                || part.get("detail").is_some_and(|detail| {
+                                    !detail.is_null()
+                                        && !matches!(detail.as_str(), Some("auto" | "low" | "high"))
+                                })
+                            {
+                                return Err(SourceSemanticError::invalid(
+                                    TransformSemanticUnit::ImageUrl,
+                                ));
+                            }
+                            if file_id.is_some() {
+                                record_minor_mapping(
+                                    phase,
+                                    TransformSemanticUnit::FileId,
+                                    TransformReasonCode::UnsupportedContent,
+                                );
+                            }
+                        }
+                        Some("input_audio") => {
+                            let input_audio = part.get("input_audio").and_then(Value::as_object);
+                            if !input_audio
+                                .and_then(|audio| audio.get("data"))
                                 .and_then(Value::as_str)
-                                .is_some_and(|url| !url.is_empty()) =>
-                        {
-                            return Err(SourceSemanticError::invalid(
-                                TransformSemanticUnit::ImageUrl,
+                                .is_some_and(is_valid_base64)
+                                || !matches!(
+                                    input_audio
+                                        .and_then(|audio| audio.get("format"))
+                                        .and_then(Value::as_str),
+                                    Some("wav" | "mp3")
+                                )
+                            {
+                                return Err(SourceSemanticError::invalid(
+                                    TransformSemanticUnit::AudioData,
+                                ));
+                            }
+                        }
+                        Some("input_file") => {
+                            let present = ["file_url", "file_id", "file_data"]
+                                .into_iter()
+                                .filter(|field| {
+                                    part.get(*field).is_some_and(|value| !value.is_null())
+                                })
+                                .collect::<Vec<_>>();
+                            if present.len() != 1 {
+                                return Err(SourceSemanticError::invalid(
+                                    TransformSemanticUnit::FileData,
+                                ));
+                            }
+                            match present[0] {
+                                "file_url"
+                                    if !part
+                                        .get("file_url")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(is_valid_http_url) =>
+                                {
+                                    return Err(SourceSemanticError::invalid(
+                                        TransformSemanticUnit::FileUrl,
+                                    ));
+                                }
+                                "file_id"
+                                    if !part
+                                        .get("file_id")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|id| !id.trim().is_empty()) =>
+                                {
+                                    return Err(SourceSemanticError::invalid(
+                                        TransformSemanticUnit::FileId,
+                                    ));
+                                }
+                                "file_data" => {
+                                    let filename = part
+                                        .get("filename")
+                                        .and_then(Value::as_str)
+                                        .filter(|filename| !filename.trim().is_empty());
+                                    let Some(file_data) =
+                                        part.get("file_data").and_then(Value::as_str)
+                                    else {
+                                        return Err(SourceSemanticError::invalid(
+                                            TransformSemanticUnit::FileData,
+                                        ));
+                                    };
+                                    let valid =
+                                        if let Some(data_url) = parse_base64_data_url(file_data) {
+                                            classify_inline_mime(data_url.mime_type)
+                                                == Some(InlineMediaKind::File)
+                                        } else {
+                                            filename.and_then(mime_type_from_filename).is_some_and(
+                                                |mime_type| {
+                                                    classify_inline_mime(mime_type)
+                                                        == Some(InlineMediaKind::File)
+                                                },
+                                            ) && is_valid_base64(file_data)
+                                        };
+                                    if filename.is_none() || !valid {
+                                        return Err(SourceSemanticError::invalid(
+                                            TransformSemanticUnit::FileData,
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(
+                            "input_text" | "output_text" | "text" | "summary_text"
+                            | "reasoning_text" | "refusal",
+                        ) => {}
+                        _ => {
+                            return Err(SourceSemanticError::unknown(
+                                TransformSemanticUnit::ResponsesUnknownItem,
                             ));
                         }
-                        Some("input_file")
-                            if !["file_url", "file_id", "file_data"].iter().any(|field| {
-                                part.get(*field).is_some_and(|value| !value.is_null())
-                            }) =>
-                        {
-                            return Err(SourceSemanticError::invalid(
-                                TransformSemanticUnit::FileUrl,
-                            ));
-                        }
-                        _ => {}
                     }
                 }
                 if object_array(item, "content").is_empty() {
@@ -355,16 +963,79 @@ fn validate_anthropic_messages(messages: &[Value]) -> Result<(), SourceSemanticE
                     }
                     let required_fields_present = match source_type {
                         Some("base64") => {
-                            source.get("media_type").and_then(Value::as_str).is_some()
-                                && source.get("data").and_then(Value::as_str).is_some()
+                            source
+                                .get("media_type")
+                                .and_then(Value::as_str)
+                                .is_some_and(|mime_type| {
+                                    classify_inline_mime(mime_type) == Some(InlineMediaKind::Image)
+                                })
+                                && source
+                                    .get("data")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(is_valid_base64)
                         }
-                        Some("url") => source.get("url").and_then(Value::as_str).is_some(),
+                        Some("url") => source
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_valid_image_reference),
                         _ => false,
                     };
                     if !required_fields_present {
                         return Err(SourceSemanticError::invalid(
                             TransformSemanticUnit::ImageData,
                         ));
+                    }
+                    if block.get("cache_control").is_some() {
+                        record_minor_drop(
+                            TransformPhase::RequestDecode,
+                            TransformSemanticUnit::Metadata,
+                        );
+                    }
+                }
+                Some("document") => {
+                    let source = block.get("source").ok_or_else(|| {
+                        SourceSemanticError::invalid(TransformSemanticUnit::FileData)
+                    })?;
+                    if source.get("type").and_then(Value::as_str) != Some("base64")
+                        || source.get("media_type").and_then(Value::as_str).is_none_or(
+                            |mime_type| {
+                                classify_inline_mime(mime_type) != Some(InlineMediaKind::File)
+                            },
+                        )
+                        || !source
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_valid_base64)
+                    {
+                        return Err(SourceSemanticError {
+                            semantic_unit: TransformSemanticUnit::FileData,
+                            reason_code: TransformReasonCode::UnsupportedContent,
+                        });
+                    }
+                    if block
+                        .get("title")
+                        .is_some_and(|title| !title.is_string() && !title.is_null())
+                    {
+                        return Err(SourceSemanticError::invalid(
+                            TransformSemanticUnit::Metadata,
+                        ));
+                    }
+                    if !block
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .is_some_and(|title| !title.trim().is_empty())
+                    {
+                        record_synthesis(
+                            TransformPhase::RequestDecode,
+                            TransformSemanticUnit::FileData,
+                            TransformReasonCode::SyntheticEnvelope,
+                        );
+                    }
+                    if block.get("context").is_some() || block.get("citations").is_some() {
+                        return Err(SourceSemanticError {
+                            semantic_unit: TransformSemanticUnit::FileData,
+                            reason_code: TransformReasonCode::UnsupportedContent,
+                        });
                     }
                 }
                 Some("tool_use") if role == "assistant" => {
@@ -375,11 +1046,13 @@ fn validate_anthropic_messages(messages: &[Value]) -> Result<(), SourceSemanticE
                     }
                 }
                 Some("tool_result") if role == "user" => {
-                    if block.get("is_error").is_some() {
-                        return Err(SourceSemanticError {
-                            semantic_unit: TransformSemanticUnit::ToolResult,
-                            reason_code: TransformReasonCode::UnsupportedContent,
-                        });
+                    if block
+                        .get("is_error")
+                        .is_some_and(|value| !value.is_boolean() && !value.is_null())
+                    {
+                        return Err(SourceSemanticError::invalid(
+                            TransformSemanticUnit::ToolResult,
+                        ));
                     }
                     if block.get("content").is_none() {
                         record_synthesis(
@@ -410,6 +1083,12 @@ fn validate_gemini_parts(
     phase: TransformPhase,
 ) -> Result<(), SourceSemanticError> {
     for part in parts {
+        if part.get("videoMetadata").is_some() {
+            return Err(SourceSemanticError {
+                semantic_unit: TransformSemanticUnit::ImageData,
+                reason_code: TransformReasonCode::UnsupportedContent,
+            });
+        }
         let known_keys = [
             "text",
             "executableCode",
@@ -428,12 +1107,109 @@ fn validate_gemini_parts(
                 TransformSemanticUnit::RequestEnvelope,
             ));
         }
+        if part
+            .get("thought")
+            .is_some_and(|thought| !thought.is_boolean() && !thought.is_null())
+        {
+            return Err(SourceSemanticError::invalid(
+                TransformSemanticUnit::ReasoningContent,
+            ));
+        }
+        if part
+            .get("thoughtSignature")
+            .is_some_and(|signature| !signature.is_string() && !signature.is_null())
+        {
+            return Err(SourceSemanticError::invalid(
+                TransformSemanticUnit::Metadata,
+            ));
+        }
         if let Some(call) = part.get("functionCall")
             && !call.get("args").is_some_and(Value::is_object)
         {
             return Err(SourceSemanticError::invalid(
                 TransformSemanticUnit::ToolCall,
             ));
+        }
+        if let Some(inline_data) = part.get("inlineData") {
+            let Some(inline_data) = inline_data.as_object() else {
+                return Err(SourceSemanticError::invalid(
+                    TransformSemanticUnit::FileData,
+                ));
+            };
+            let Some(mime_type) = inline_data.get("mimeType").and_then(Value::as_str) else {
+                return Err(SourceSemanticError::invalid(
+                    TransformSemanticUnit::FileData,
+                ));
+            };
+            let Some(kind) = classify_inline_mime(mime_type) else {
+                return Err(SourceSemanticError {
+                    semantic_unit: TransformSemanticUnit::FileData,
+                    reason_code: TransformReasonCode::UnsupportedContent,
+                });
+            };
+            if kind == InlineMediaKind::Video
+                || !inline_data
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_valid_base64)
+            {
+                return Err(SourceSemanticError {
+                    semantic_unit: TransformSemanticUnit::FileData,
+                    reason_code: TransformReasonCode::UnsupportedContent,
+                });
+            }
+            if inline_data
+                .get("displayName")
+                .is_some_and(|name| !name.is_string() && !name.is_null())
+            {
+                return Err(SourceSemanticError::invalid(
+                    TransformSemanticUnit::Metadata,
+                ));
+            }
+            let display_name = inline_data
+                .get("displayName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty());
+            if matches!(kind, InlineMediaKind::Image | InlineMediaKind::Audio(_))
+                && display_name.is_some()
+            {
+                record_minor_drop(phase, TransformSemanticUnit::Metadata);
+            }
+            if kind == InlineMediaKind::File && display_name.is_none() {
+                record_synthesis(
+                    phase,
+                    TransformSemanticUnit::FileData,
+                    TransformReasonCode::SyntheticEnvelope,
+                );
+            }
+        }
+        if let Some(file_data) = part.get("fileData") {
+            let Some(file_data) = file_data.as_object() else {
+                return Err(SourceSemanticError::invalid(TransformSemanticUnit::FileUrl));
+            };
+            let mime_type = file_data.get("mimeType").and_then(Value::as_str);
+            let file_uri = file_data.get("fileUri").and_then(Value::as_str);
+            let public_image_url = mime_type.is_some_and(|mime_type| {
+                classify_inline_mime(mime_type) == Some(InlineMediaKind::Image)
+            }) && file_uri.is_some_and(|uri| {
+                is_valid_http_url(uri)
+                    && reqwest::Url::parse(uri).is_ok_and(|url| {
+                        url.host_str() != Some("generativelanguage.googleapis.com")
+                    })
+            });
+            if !public_image_url {
+                return Err(SourceSemanticError {
+                    semantic_unit: TransformSemanticUnit::FileUrl,
+                    reason_code: TransformReasonCode::UnsupportedContent,
+                });
+            }
+            if file_data
+                .get("displayName")
+                .and_then(Value::as_str)
+                .is_some_and(|name| !name.trim().is_empty())
+            {
+                record_minor_drop(phase, TransformSemanticUnit::Metadata);
+            }
         }
         if part.get("text").and_then(Value::as_str) == Some("") {
             record_no_semantic_output(phase, TransformSemanticUnit::Text);
@@ -452,14 +1228,35 @@ pub(in crate::service::transform) fn validate_downstream_request(
             if let Some(tool_choice) = data.get("tool_choice") {
                 let valid = match tool_choice {
                     Value::String(value) => matches!(value.as_str(), "none" | "auto" | "required"),
-                    Value::Object(value) => {
-                        value.get("type").and_then(Value::as_str) == Some("function")
-                            && value
-                                .get("function")
-                                .and_then(|function| function.get("name"))
-                                .and_then(Value::as_str)
-                                .is_some_and(|name| !name.is_empty())
-                    }
+                    Value::Object(value) => match value.get("type").and_then(Value::as_str) {
+                        Some("function") => value
+                            .get("function")
+                            .and_then(|function| function.get("name"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| !name.is_empty()),
+                        Some("allowed_tools") => {
+                            value.get("allowed_tools").is_some_and(|allowed| {
+                                matches!(
+                                    allowed.get("mode").and_then(Value::as_str),
+                                    Some("auto" | "required")
+                                ) && allowed.get("tools").and_then(Value::as_array).is_some_and(
+                                    |tools| {
+                                        !tools.is_empty()
+                                            && tools.iter().all(|tool| {
+                                                tool.get("type").and_then(Value::as_str)
+                                                    == Some("function")
+                                                    && tool
+                                                        .get("function")
+                                                        .and_then(|function| function.get("name"))
+                                                        .and_then(Value::as_str)
+                                                        .is_some_and(|name| !name.is_empty())
+                                            })
+                                    },
+                                )
+                            })
+                        }
+                        _ => false,
+                    },
                     _ => false,
                 };
                 if !valid {
@@ -469,19 +1266,7 @@ pub(in crate::service::transform) fn validate_downstream_request(
                 }
             }
             if let Some(format) = data.get("response_format") {
-                let valid = match format.get("type").and_then(Value::as_str) {
-                    Some("text" | "json_object") => true,
-                    Some("json_schema") => format.get("json_schema").is_some_and(|schema| {
-                        schema.get("name").and_then(Value::as_str).is_some()
-                            && schema.get("schema").is_some_and(Value::is_object)
-                    }),
-                    _ => false,
-                };
-                if !valid {
-                    return Err(SourceSemanticError::unknown(
-                        TransformSemanticUnit::StructuredOutput,
-                    ));
-                }
+                validate_openai_response_format(format)?;
             }
             if data
                 .get("logit_bias")
@@ -502,6 +1287,15 @@ pub(in crate::service::transform) fn validate_downstream_request(
                         TransformSemanticUnit::ToolDefinitions,
                     ));
                 }
+                if tool
+                    .get("function")
+                    .and_then(|function| function.get("strict"))
+                    .is_some_and(|strict| !strict.is_boolean() && !strict.is_null())
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                }
             }
             validate_openai_tool_calls(
                 object_array(data, "messages"),
@@ -510,10 +1304,89 @@ pub(in crate::service::transform) fn validate_downstream_request(
         }
         DownstreamProtocol::Responses => {
             require_non_empty_string(data, "model", TransformSemanticUnit::Model)?;
+            if let Some(choice) = data.get("tool_choice").filter(|value| !value.is_null()) {
+                let valid = match choice {
+                    Value::String(value) => matches!(value.as_str(), "none" | "auto" | "required"),
+                    Value::Object(value) => match value.get("type").and_then(Value::as_str) {
+                        Some("function") => value
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| !name.is_empty()),
+                        Some("allowed_tools") => {
+                            matches!(
+                                value.get("mode").and_then(Value::as_str),
+                                Some("auto" | "required")
+                            ) && value
+                                .get("tools")
+                                .and_then(Value::as_array)
+                                .is_some_and(|tools| {
+                                    !tools.is_empty()
+                                        && tools.iter().all(|tool| {
+                                            tool.get("type").and_then(Value::as_str)
+                                                == Some("function")
+                                                && tool
+                                                    .get("name")
+                                                    .and_then(Value::as_str)
+                                                    .is_some_and(|name| !name.is_empty())
+                                        })
+                                })
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if !valid {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                }
+            }
+            if let Some(text) = data.get("text").filter(|value| !value.is_null()) {
+                let Some(text) = text.as_object() else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::StructuredOutput,
+                    ));
+                };
+                if let Some(format) = text.get("format").filter(|value| !value.is_null()) {
+                    validate_responses_text_format(format)?;
+                }
+            }
+            if let Some(reasoning) = data.get("reasoning").filter(|value| !value.is_null()) {
+                let Some(reasoning) = reasoning.as_object() else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                };
+                if reasoning.get("effort").is_some_and(|effort| {
+                    !effort.is_null()
+                        && !matches!(
+                            effort.as_str(),
+                            Some("none" | "minimal" | "low" | "medium" | "high" | "xhigh")
+                        )
+                }) || reasoning.get("summary").is_some_and(|summary| {
+                    !summary.is_null()
+                        && !matches!(summary.as_str(), Some("concise" | "detailed" | "auto"))
+                }) {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if reasoning
+                    .get("summary")
+                    .is_some_and(|summary| !summary.is_null())
+                {
+                    record_minor_reasoning_drop(TransformPhase::RequestDecode);
+                }
+            }
             if let Some(items) = data.get("input").and_then(Value::as_array) {
                 validate_responses_items(items, TransformPhase::RequestDecode)?;
             }
             for tool in object_array(data, "tools") {
+                if tool.get("type").and_then(Value::as_str) != Some("function") {
+                    return Err(SourceSemanticError::unknown(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                }
                 if tool
                     .get("parameters")
                     .is_some_and(|parameters| !parameters.is_object())
@@ -529,11 +1402,142 @@ pub(in crate::service::transform) fn validate_downstream_request(
                         TransformReasonCode::SyntheticEnvelope,
                     );
                 }
+                if tool
+                    .get("strict")
+                    .is_some_and(|strict| !strict.is_boolean() && !strict.is_null())
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                }
             }
             Ok(())
         }
         DownstreamProtocol::Anthropic => {
             require_non_empty_string(data, "model", TransformSemanticUnit::Model)?;
+            if let Some(choice) = data.get("tool_choice").filter(|value| !value.is_null()) {
+                let Some(choice) = choice.as_object() else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                };
+                let choice_type = choice.get("type").and_then(Value::as_str);
+                if !matches!(choice_type, Some("auto" | "any" | "tool"))
+                    || (choice_type == Some("tool")
+                        && !choice
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| !name.is_empty()))
+                    || choice
+                        .get("disable_parallel_tool_use")
+                        .is_some_and(|disabled| !disabled.is_boolean() && !disabled.is_null())
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                }
+            }
+            let thinking = data.get("thinking").filter(|value| !value.is_null());
+            let output_config = data.get("output_config").filter(|value| !value.is_null());
+            if let Some(thinking) = thinking {
+                let Some(thinking) = thinking.as_object() else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                };
+                let Some(thinking_type) = thinking.get("type").and_then(Value::as_str) else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                };
+                if !matches!(thinking_type, "adaptive" | "enabled" | "disabled") {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if thinking_type == "enabled"
+                    && !thinking
+                        .get("budget_tokens")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|budget| budget > 0)
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if thinking.get("budget_tokens").is_some() && thinking_type != "enabled" {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if thinking_type == "enabled" {
+                    record_minor_reasoning_mapping(TransformPhase::RequestDecode);
+                }
+                if thinking.get("display").is_some_and(|display| {
+                    !display.is_null()
+                        && !matches!(display.as_str(), Some("summarized" | "omitted"))
+                }) {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if thinking
+                    .get("display")
+                    .is_some_and(|display| !display.is_null())
+                {
+                    record_minor_reasoning_drop(TransformPhase::RequestDecode);
+                }
+            }
+            if let Some(output_config) = output_config {
+                let Some(output_config) = output_config.as_object() else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                };
+                let effort = output_config.get("effort").filter(|value| !value.is_null());
+                if effort.is_some_and(|effort| {
+                    !matches!(
+                        effort.as_str(),
+                        Some("low" | "medium" | "high" | "xhigh" | "max")
+                    )
+                }) {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if effort.and_then(Value::as_str) == Some("max") {
+                    record_minor_reasoning_mapping(TransformPhase::RequestDecode);
+                }
+                if let Some(format) = output_config.get("format").filter(|value| !value.is_null()) {
+                    let Some(format) = format.as_object() else {
+                        return Err(SourceSemanticError::invalid(
+                            TransformSemanticUnit::StructuredOutput,
+                        ));
+                    };
+                    if format.get("type").and_then(Value::as_str) != Some("json_schema")
+                        || !format.get("schema").is_some_and(Value::is_object)
+                    {
+                        return Err(SourceSemanticError {
+                            semantic_unit: TransformSemanticUnit::StructuredOutput,
+                            reason_code: TransformReasonCode::UnsupportedContent,
+                        });
+                    }
+                    record_structured_name_synthesis();
+                }
+            }
+            if thinking
+                .and_then(|thinking| thinking.get("type"))
+                .and_then(Value::as_str)
+                == Some("disabled")
+                && output_config
+                    .and_then(|config| config.get("effort"))
+                    .is_some_and(|effort| !effort.is_null())
+            {
+                return Err(SourceSemanticError {
+                    semantic_unit: TransformSemanticUnit::ReasoningContent,
+                    reason_code: TransformReasonCode::UnsupportedReasoning,
+                });
+            }
             if let Some(blocks) = data.get("system").and_then(Value::as_array) {
                 for block in blocks {
                     if block.get("type").and_then(Value::as_str) != Some("text") {
@@ -555,10 +1559,47 @@ pub(in crate::service::transform) fn validate_downstream_request(
                         TransformSemanticUnit::ToolDefinitions,
                     ));
                 }
+                if tool
+                    .get("strict")
+                    .is_some_and(|strict| !strict.is_boolean() && !strict.is_null())
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                }
             }
             validate_anthropic_messages(object_array(data, "messages"))
         }
         DownstreamProtocol::Gemini => {
+            if let Some(tool_config) = data.get("toolConfig").filter(|value| !value.is_null()) {
+                let Some(config) = tool_config
+                    .get("functionCallingConfig")
+                    .and_then(Value::as_object)
+                else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                };
+                let mode = config.get("mode").and_then(Value::as_str);
+                if !matches!(mode, Some("AUTO" | "ANY" | "NONE" | "VALIDATED")) {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ToolDefinitions,
+                    ));
+                }
+                if let Some(names) = config.get("allowedFunctionNames") {
+                    if !names.as_array().is_some_and(|names| {
+                        !names.is_empty()
+                            && names
+                                .iter()
+                                .all(|name| name.as_str().is_some_and(|name| !name.is_empty()))
+                    }) || !matches!(mode, Some("ANY" | "VALIDATED"))
+                    {
+                        return Err(SourceSemanticError::invalid(
+                            TransformSemanticUnit::ToolDefinitions,
+                        ));
+                    }
+                }
+            }
             if !object_array(data, "safetySettings").is_empty() {
                 return Err(SourceSemanticError {
                     semantic_unit: TransformSemanticUnit::Metadata,
@@ -572,6 +1613,146 @@ pub(in crate::service::transform) fn validate_downstream_request(
                 return Err(SourceSemanticError::unknown(
                     TransformSemanticUnit::RequestEnvelope,
                 ));
+            }
+            if let Some(config) = data
+                .get("generationConfig")
+                .filter(|value| !value.is_null())
+            {
+                let Some(config) = config.as_object() else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::RequestEnvelope,
+                    ));
+                };
+                let response_format = config
+                    .get("responseFormat")
+                    .filter(|value| !value.is_null());
+                let response_mime_type = config
+                    .get("responseMimeType")
+                    .filter(|value| !value.is_null());
+                let response_schema = config
+                    .get("responseSchema")
+                    .filter(|value| !value.is_null());
+                let response_json_schema = config
+                    .get("responseJsonSchema")
+                    .filter(|value| !value.is_null());
+                let legacy_schema_count = usize::from(response_schema.is_some())
+                    + usize::from(response_json_schema.is_some());
+                if response_format.is_some()
+                    && (response_mime_type.is_some() || legacy_schema_count > 0)
+                    || legacy_schema_count > 1
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::StructuredOutput,
+                    ));
+                }
+                let schema = if let Some(response_format) = response_format {
+                    let Some(response_format) = response_format.as_object() else {
+                        return Err(SourceSemanticError::invalid(
+                            TransformSemanticUnit::StructuredOutput,
+                        ));
+                    };
+                    if response_format.keys().any(|key| key != "text") {
+                        return Err(SourceSemanticError {
+                            semantic_unit: TransformSemanticUnit::StructuredOutput,
+                            reason_code: TransformReasonCode::UnsupportedContent,
+                        });
+                    }
+                    let Some(text) = response_format.get("text").and_then(Value::as_object) else {
+                        return Err(SourceSemanticError::invalid(
+                            TransformSemanticUnit::StructuredOutput,
+                        ));
+                    };
+                    if text.get("mimeType").and_then(Value::as_str) != Some("application/json") {
+                        return Err(SourceSemanticError {
+                            semantic_unit: TransformSemanticUnit::StructuredOutput,
+                            reason_code: TransformReasonCode::UnsupportedContent,
+                        });
+                    }
+                    text.get("schema").filter(|value| !value.is_null())
+                } else if response_mime_type.is_some() || legacy_schema_count > 0 {
+                    if response_mime_type.and_then(Value::as_str) != Some("application/json") {
+                        return Err(SourceSemanticError {
+                            semantic_unit: TransformSemanticUnit::StructuredOutput,
+                            reason_code: TransformReasonCode::UnsupportedContent,
+                        });
+                    }
+                    response_json_schema.or(response_schema)
+                } else {
+                    None
+                };
+                if schema.is_some_and(|schema| !schema.is_object()) {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::StructuredOutput,
+                    ));
+                }
+                if let Some(schema) = schema {
+                    record_structured_name_synthesis();
+                    if schema_contains_property_ordering(schema) {
+                        record_minor_drop(
+                            TransformPhase::RequestDecode,
+                            TransformSemanticUnit::StructuredOutput,
+                        );
+                    }
+                }
+            }
+            if let Some(thinking) = data
+                .get("generationConfig")
+                .and_then(|config| config.get("thinkingConfig"))
+                .filter(|value| !value.is_null())
+            {
+                let Some(thinking) = thinking.as_object() else {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                };
+                let level = thinking
+                    .get("thinkingLevel")
+                    .filter(|value| !value.is_null());
+                if level.is_some_and(|level| {
+                    !matches!(level.as_str(), Some("minimal" | "low" | "medium" | "high"))
+                }) {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                let budget = thinking
+                    .get("thinkingBudget")
+                    .filter(|value| !value.is_null());
+                if budget.is_some_and(|budget| budget.as_i64().is_none())
+                    || (level.is_some() && budget.is_some())
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if budget
+                    .and_then(Value::as_i64)
+                    .is_some_and(|budget| budget < -1)
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if budget
+                    .and_then(Value::as_i64)
+                    .is_some_and(|budget| budget > 0)
+                {
+                    return Err(SourceSemanticError {
+                        semantic_unit: TransformSemanticUnit::ReasoningContent,
+                        reason_code: TransformReasonCode::UnsupportedReasoning,
+                    });
+                }
+                if thinking
+                    .get("includeThoughts")
+                    .is_some_and(|include| !include.is_null() && include.as_bool().is_none())
+                {
+                    return Err(SourceSemanticError::invalid(
+                        TransformSemanticUnit::ReasoningContent,
+                    ));
+                }
+                if thinking.get("includeThoughts").and_then(Value::as_bool) == Some(true) {
+                    record_minor_reasoning_drop(TransformPhase::RequestDecode);
+                }
             }
             for content in object_array(data, "contents") {
                 match content.get("role").and_then(Value::as_str) {
@@ -881,7 +2062,14 @@ fn collect_item_kinds(kinds: &mut Vec<TransformValueKind>, item: &UnifiedItem) {
         }
         UnifiedItem::FunctionCall(_) => push_kind(kinds, TransformValueKind::ToolCall),
         UnifiedItem::FunctionCallOutput(_) => push_kind(kinds, TransformValueKind::ToolResult),
-        UnifiedItem::FileReference(_) => push_kind(kinds, TransformValueKind::FileUrl),
+        UnifiedItem::FileReference(file) => {
+            if file.file_url.is_some() {
+                push_kind(kinds, TransformValueKind::FileUrl);
+            }
+            if file.file_id.is_some() {
+                push_kind(kinds, TransformValueKind::FileId);
+            }
+        }
     }
 }
 
@@ -903,12 +2091,6 @@ fn collect_request_kinds(request: &UnifiedRequest) -> Vec<TransformValueKind> {
     }
     for item in &request.items {
         collect_item_kinds(&mut kinds, item);
-        if let UnifiedItem::FileReference(file) = item
-            && file.file_url.is_none()
-        {
-            // Provider-native file IDs have no cross-wire dereference contract.
-            push_kind(&mut kinds, TransformValueKind::FileUrl);
-        }
     }
     kinds
 }
@@ -933,6 +2115,59 @@ pub(in crate::service::transform) fn audit_target_request(
             TransformProtocol::Upstream(target),
             kind,
             "non-stream request adapter audit",
+        );
+    }
+
+    let tool_names = request
+        .tools
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|tool| tool.function.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let selected_names = match request.tool_choice.as_ref() {
+        Some(UnifiedToolChoice::Named { name }) => vec![name.as_str()],
+        Some(UnifiedToolChoice::Allowed { names, .. }) => {
+            names.iter().map(String::as_str).collect()
+        }
+        _ => Vec::new(),
+    };
+    if !selected_names.is_empty() && selected_names.iter().any(|name| !tool_names.contains(name)) {
+        record_rejection(
+            TransformPhase::RequestEncode,
+            TransformSemanticUnit::ToolDefinitions,
+            TransformReasonCode::InvalidProtocolShape,
+        );
+    }
+
+    if target == UpstreamProtocol::Openai {
+        for message in &request.messages {
+            for part in &message.content {
+                if let UnifiedContentPart::ToolResult(result) = part
+                    && !matches!(result.output, UnifiedToolResultOutput::Text { .. })
+                {
+                    record_fact(
+                        TransformPhase::RequestEncode,
+                        TransformSemanticUnit::ToolResult,
+                        TransformOutcomeKind::ControlledLossMajor,
+                        TransformAction::Send,
+                        TransformReasonCode::DeterministicTextDowngrade,
+                    );
+                }
+            }
+        }
+    }
+
+    if target == UpstreamProtocol::Gemini
+        && request
+            .tools
+            .as_deref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.function.strict == Some(true)))
+    {
+        record_minor_mapping(
+            TransformPhase::RequestEncode,
+            TransformSemanticUnit::ToolDefinitions,
+            TransformReasonCode::UnsupportedContent,
         );
     }
 
@@ -972,17 +2207,65 @@ pub(in crate::service::transform) fn audit_target_request(
         }
     }
 
-    if target != UpstreamProtocol::Responses
-        && request
-            .items
-            .iter()
-            .any(|item| matches!(item, UnifiedItem::FileReference(file) if file.file_url.is_none()))
+    for message in request
+        .messages
+        .iter()
+        .filter(|message| message.role != UnifiedRole::User)
     {
-        record_rejection(
-            TransformPhase::RequestEncode,
-            TransformSemanticUnit::FileUrl,
-            TransformReasonCode::UnsupportedContent,
-        );
+        for part in &message.content {
+            if matches!(
+                part,
+                UnifiedContentPart::ImageUrl { .. }
+                    | UnifiedContentPart::ImageData { .. }
+                    | UnifiedContentPart::AudioData { .. }
+                    | UnifiedContentPart::FileUrl { .. }
+                    | UnifiedContentPart::FileData { .. }
+                    | UnifiedContentPart::FileId { .. }
+            ) {
+                record_rejection(
+                    TransformPhase::RequestEncode,
+                    TransformSemanticUnit::from(TransformValueKind::from(part)),
+                    TransformReasonCode::UnsupportedContent,
+                );
+            }
+        }
+    }
+
+    if target == UpstreamProtocol::Openai {
+        for message in &request.messages {
+            for part in &message.content {
+                match part {
+                    UnifiedContentPart::AudioData { format, .. }
+                        if !matches!(format.as_str(), "wav" | "mp3") =>
+                    {
+                        record_rejection(
+                            TransformPhase::RequestEncode,
+                            TransformSemanticUnit::AudioData,
+                            TransformReasonCode::UnsupportedContent,
+                        );
+                    }
+                    UnifiedContentPart::FileData { filename, .. }
+                        if filename
+                            .as_deref()
+                            .is_none_or(|filename| filename.trim().is_empty()) =>
+                    {
+                        record_rejection(
+                            TransformPhase::RequestEncode,
+                            TransformSemanticUnit::FileData,
+                            TransformReasonCode::UnsupportedContent,
+                        );
+                    }
+                    UnifiedContentPart::FileId { file_id, .. } if file_id.trim().is_empty() => {
+                        record_rejection(
+                            TransformPhase::RequestEncode,
+                            TransformSemanticUnit::FileId,
+                            TransformReasonCode::UnsupportedContent,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     if request.model.as_deref().is_none_or(str::is_empty) {
@@ -1003,22 +2286,24 @@ pub(in crate::service::transform) fn audit_target_request(
         );
     }
 
-    let has_structured_output = request
-        .openai_extension()
-        .and_then(|extension| extension.response_format.as_ref())
-        .is_some()
-        || request
-            .responses_extension()
-            .and_then(|extension| extension.text_format.as_ref())
-            .is_some();
+    if request.reasoning_effort.is_some()
+        && !matches!(
+            target,
+            UpstreamProtocol::Openai | UpstreamProtocol::Responses
+        )
+    {
+        record_rejection(
+            TransformPhase::RequestEncode,
+            TransformSemanticUnit::ReasoningContent,
+            TransformReasonCode::UnsupportedReasoning,
+        );
+    }
+
+    let has_structured_output = request.structured_output.is_some();
     let structured_output_supported = matches!(
         target,
         UpstreamProtocol::Openai | UpstreamProtocol::Responses
-    ) && !(target == UpstreamProtocol::Openai
-        && request
-            .responses_extension()
-            .and_then(|extension| extension.text_format.as_ref())
-            .is_some());
+    );
     if has_structured_output && !structured_output_supported {
         record_rejection(
             TransformPhase::RequestEncode,
@@ -1073,15 +2358,6 @@ pub(in crate::service::transform) fn audit_target_request(
             );
         }
         if let Some(passthrough) = openai.passthrough.as_ref() {
-            if passthrough.get("reasoning_effort").is_some()
-                && target != UpstreamProtocol::Responses
-            {
-                record_rejection(
-                    TransformPhase::RequestEncode,
-                    TransformSemanticUnit::ReasoningContent,
-                    TransformReasonCode::UnsupportedReasoning,
-                );
-            }
             if passthrough.get("parallel_tool_calls").is_some()
                 && !matches!(
                     target,
@@ -1115,7 +2391,12 @@ pub(in crate::service::transform) fn audit_target_request(
                 TransformReasonCode::UnsupportedContent,
             );
         }
-        if responses.reasoning.is_some() && target != UpstreamProtocol::Responses {
+        if responses.reasoning.is_some()
+            && !matches!(
+                target,
+                UpstreamProtocol::Openai | UpstreamProtocol::Responses
+            )
+        {
             record_rejection(
                 TransformPhase::RequestEncode,
                 TransformSemanticUnit::ReasoningContent,
@@ -1510,7 +2791,7 @@ mod tests {
                 .any(|fact| { fact.outcome == TransformOutcomeKind::ControlledLossMinor })
         );
 
-        let major = transform_request_data(
+        let structured = transform_request_data(
             json!({
                 "model": "gpt-4.1",
                 "input": "hello",
@@ -1520,8 +2801,11 @@ mod tests {
             UpstreamProtocol::Openai,
             false,
         )
-        .expect_err("Responses structured output cannot be silently dropped by OpenAI");
-        assert_eq!(major.origin, TransformFailureOrigin::TargetCapability);
+        .expect("Responses structured output must map to OpenAI");
+        assert_eq!(
+            structured.value["response_format"],
+            json!({"type":"json_object"})
+        );
 
         let unknown = transform_request_data(
             json!({
@@ -1595,7 +2879,7 @@ mod tests {
                 && fact.semantic_unit == TransformSemanticUnit::Metadata
         }));
 
-        let major = transform_request_data(
+        let preserved = transform_request_data(
             json!({
                 "model": "claude-sonnet",
                 "max_tokens": 64,
@@ -1608,8 +2892,11 @@ mod tests {
             UpstreamProtocol::Responses,
             false,
         )
-        .expect_err("Anthropic tool error semantics cannot be erased");
-        assert_eq!(major.semantic_unit, TransformSemanticUnit::ToolResult);
+        .expect("Anthropic tool error semantics must survive in the Responses output");
+        assert_eq!(
+            preserved.value["input"][0]["output"],
+            json!({"error": "bad"})
+        );
 
         let unknown = transform_request_data(
             json!({

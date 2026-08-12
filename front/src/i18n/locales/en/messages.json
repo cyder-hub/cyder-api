@@ -257,7 +257,7 @@
     "editProvider": "Edit Provider",
     "viewRecords": "View Records",
     "activeOnly": "Enabled providers only",
-    "searchPlaceholder": "Search Provider or Source Profile, ID, endpoint",
+    "searchPlaceholder": "Search Provider or Source Profile, ID, or base URL",
     "empty": "No providers match the current filters.",
     "noData": "No provider runtime data is available yet.",
     "summary": {
@@ -763,11 +763,17 @@
     "table": {
       "provider": "Provider",
       "model": "Model",
+      "kind": "Kind",
       "realModel": "Real Model",
       "sourceConfig": "Source Config",
       "enabled": "Enabled"
     },
     "sourceWarnings": "{count} warning(s)"
+  },
+  "modelKinds": {
+    "CHAT": "Chat",
+    "EMBEDDING": "Embedding",
+    "RERANK": "Rerank"
   },
   "modelSourceConfig": {
     "title": "Source Config",
@@ -960,11 +966,7 @@
       "executable": "Executable",
       "exposed": "Exposed in models",
       "yes": "Yes",
-      "no": "No",
-      "dangerousTargets": "Sensitive targets",
-      "dangerousTitle": "Confirm Sensitive Target",
-      "dangerousDescription": "This Variant changes an upstream-sensitive target. Confirm each listed target before the final save.",
-      "confirm": "Confirm and Save"
+      "no": "No"
     },
     "explain": {
       "layers": "Four-layer evaluation",
@@ -1253,7 +1255,7 @@
       "profileTypeRequired": "Initial Source Profile cannot be empty.",
       "nameRequired": "Name cannot be empty.",
       "providerKeyRequired": "Provider Key cannot be empty.",
-      "endpointRequired": "Endpoint cannot be empty.",
+      "baseUrlRequired": "Base URL cannot be empty for this profile.",
       "apiKeyRequired": "API Key cannot be empty.",
       "modelNameRequired": "Model Name cannot be empty.",
       "baseInfoUpdateSuccess": "Provider base information updated successfully.",
@@ -1262,6 +1264,7 @@
       "bootstrapSaveSuccess": "Provider saved successfully.",
       "bootstrapSaveAndTestSuccess": "Provider saved and tested successfully.",
       "bootstrapSaveAndTestFailed": "Provider saved, but the bootstrap test failed: {error}",
+      "bootstrapSaveAndTestSkipped": "Provider saved without a connection test: {reason}",
       "bootstrapFailed": "Failed to bootstrap provider: {error}",
       "providerNotSavedForApiKey": "Provider must be saved before API Keys can be added.",
       "apiKeyRequiredWithIndex": "API Key #{index} cannot be empty.",
@@ -1281,8 +1284,9 @@
       "apiKeyDeleteSuccess": "API Key deleted successfully.",
       "providerNotSavedForCheck": "Provider must be saved before a check can be performed.",
       "noApiKeyForCheck": "At least one API Key must be saved to perform a model check.",
-      "noModelForCheck": "At least one model must be saved to perform an API key check.",
+      "noModelForCheck": "At least one enabled CHAT model or draft is required for this check.",
       "noSourceForCheck": "At least one Source must be saved before a check can be performed.",
+      "sourceCheckChatOnly": "Source Check currently supports CHAT models only.",
       "checkSuccess": "Check successful. The connection is valid.",
       "checkFailed": "Check failed: {error}",
       "apiKeyNameFallback": "Key ending in ...{lastKeyChars}"
@@ -1356,7 +1360,7 @@
     "labelProviderKey": "Provider Key",
     "labelProviderType": "Provider Type",
     "labelProfileType": "Upstream Profile",
-    "labelEndpoint": "Endpoint",
+    "labelBaseUrl": "Base URL",
     "labelUseProxy": "Use Proxy",
     "labelEnabled": "Enabled",
     "labelApiKeyMode": "API Key Mode",
@@ -1387,24 +1391,43 @@
     "buttonBackToList": "Back to List",
     "sources": {
       "title": "Provider Sources",
-      "description": "Manage the endpoint and persistent enabled/default state for every upstream Source owned by this Provider.",
+      "description": "Manage the base URL, operation availability, and persistent enabled/default state for every upstream Source owned by this Provider.",
       "add": "Add Source",
       "addTitle": "Add Source",
       "editTitle": "Edit Source",
-      "drawerDescription": "Source identity is fixed after creation. Update only its endpoint, proxy, and runtime flags.",
+      "drawerDescription": "Source profile is fixed after creation. Update its base URL, supported operations, proxy, and runtime flags.",
       "createHint": "Save the Provider from the Basic tab first. The initial Source is submitted with the bootstrap form.",
       "zeroWarning": "This Provider has no Sources.",
       "zeroDescription": "Requests cannot execute until an enabled Source is available. You can add one now; deleting the last Source is allowed.",
       "profile": "Upstream Profile",
       "profilePlaceholder": "Select Upstream Profile",
-      "endpoint": "Endpoint",
+      "baseUrl": "Base URL",
+      "officialDefault": "Official default",
+      "officialDefaultPlaceholder": "Leave blank to use the official base URL",
+      "officialDefaultHelp": "An empty value uses and persists the profile's official base URL. Enter a custom URL for a proxy or transparent relay.",
+      "operationPathOverride": "Path override",
+      "operationPathPlaceholder": "Optional, for example /v1/embeddings",
+      "operations": {
+        "chatCompletions": {
+          "label": "Chat completions",
+          "help": "Allow this Source to serve the OpenAI-compatible chat completions operation."
+        },
+        "embeddings": {
+          "label": "Embeddings",
+          "help": "Allow this Source to serve embedding models."
+        },
+        "rerank": {
+          "label": "Rerank",
+          "help": "Allow this Source to serve rerank models through its configured path."
+        }
+      },
       "enabled": "Enabled",
       "disabled": "Disabled",
       "default": "Default",
       "defaultHint": "Only one enabled Source can be the Provider default.",
       "table": {
         "profile": "Profile",
-        "endpoint": "Endpoint",
+        "baseUrl": "Base URL",
         "state": "State"
       },
       "editAction": "Edit Source",
@@ -1416,7 +1439,7 @@
       "unsetDefaultAction": "Unset Default Source",
       "deleteAction": "Delete Source",
       "confirmDelete": "Delete Source {target}? The last Source may also be deleted.",
-      "endpointRequired": "Endpoint cannot be empty.",
+      "baseUrlRequired": "Base URL cannot be empty for this profile.",
       "createSuccess": "Source created successfully.",
       "updateSuccess": "Source updated successfully.",
       "deleteSuccess": "Source deleted successfully.",
@@ -1459,6 +1482,9 @@
     },
     "labelModelName": "Model Name",
     "labelRealModelName": "Real Model Name",
+    "labelModelKind": "Model Kind",
+    "modelKindCreateHelp": "Choose the model's operation family. Model kind cannot be changed after creation.",
+    "modelKindImmutableHelp": "Model kind is fixed after creation.",
     "labelEnabled": "Enabled",
     "alert": {
       "missingId": "Model ID is missing. Cannot edit.",

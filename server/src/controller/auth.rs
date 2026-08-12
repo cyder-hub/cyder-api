@@ -2933,7 +2933,7 @@ mod tests {
                             "name": "Sensitive Provider",
                             "key": "sensitive-provider",
                             "initial_source": {
-                                "endpoint": "https://api.example.com/v1",
+                                "base_url": "https://api.example.com/v1",
                                 "use_proxy": false,
                                 "profile_type": "OPENAI",
                                 "is_enabled": true,
@@ -3129,7 +3129,7 @@ mod tests {
                             "name": "Delete Provider",
                             "key": "delete-provider",
                             "initial_source": {
-                                "endpoint": "https://delete.example.com/v1",
+                                "base_url": "https://delete.example.com/v1",
                                 "use_proxy": false,
                                 "profile_type": "OPENAI",
                                 "is_enabled": true,
@@ -3323,7 +3323,7 @@ mod tests {
                             "name": "Unavailable Provider",
                             "key": "unavailable-provider",
                             "initial_source": {
-                                "endpoint": "https://api.example.com/v1",
+                                "base_url": "https://api.example.com/v1",
                                 "use_proxy": false,
                                 "profile_type": "OPENAI",
                                 "is_enabled": true,

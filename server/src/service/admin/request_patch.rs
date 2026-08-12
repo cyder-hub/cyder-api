@@ -366,7 +366,6 @@ mod tests {
                 operation: RequestPatchOperation::Set,
                 value_json: Some(Some(serde_json::json!(0.2))),
                 description: Some("operator temperature override".to_string()),
-                confirm_dangerous_target: false,
             }],
         }
     }
@@ -390,12 +389,13 @@ mod tests {
                         id: 9102,
                         provider_id: 9101,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: "https://request-patch-admin.example/v1".to_string(),
+                        base_url: "https://request-patch-admin.example/v1".to_string(),
                         use_proxy: false,
                         is_enabled: true,
                         is_default: true,
                         created_at: 1,
                         updated_at: 1,
+                        ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
                     },
                 )
                 .expect("provider should be seeded");
@@ -403,7 +403,7 @@ mod tests {
                 let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
                 let service = RequestPatchAdminService::new(Arc::clone(&runner));
 
-                let preview = service
+                let preview_error = service
                     .preview_source_variant(
                         9102,
                         RequestPatchVariantInput {
@@ -413,15 +413,13 @@ mod tests {
                                 operation: RequestPatchOperation::Set,
                                 value_json: Some(Some(serde_json::json!("Bearer preview"))),
                                 description: None,
-                                confirm_dangerous_target: false,
                             }],
                             ..variant_input(9102, "/options/temperature")
                         },
                         None,
                     )
-                    .expect("preview should return a confirmation result");
-                assert!(!preview.valid);
-                assert_eq!(preview.dangerous_targets.len(), 1);
+                    .expect_err("reserved targets must fail Preview without an override");
+                assert!(format!("{preview_error:?}").contains("reserved"));
                 assert!(
                     RequestPatchVariantRepository::list_by_source(9102)
                         .expect("preview should not write")

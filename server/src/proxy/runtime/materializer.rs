@@ -20,7 +20,9 @@ use crate::{
             transport::ProxyResponseMode,
         },
         util::format_model_str,
-        utility::{UtilityOperation, UtilityProtocol},
+        utility::{
+            UtilityOperation, UtilityProtocol, validate_embeddings_request, validate_rerank_request,
+        },
     },
     schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
     service::{
@@ -28,8 +30,11 @@ use crate::{
             CacheModel, CacheProvider, CacheUpstreamSource, RuntimeResolvedRequestPatch,
         },
         provider_credential::{ProviderCredential, apply_provider_request_auth_header},
+        provider_http::join_base_url_and_operation_path,
         transform::{
-            TransformFailure, TransformSuccess, finalize_request_data, transform_request_data,
+            TransformFailure, TransformFailureOrigin, TransformPhase, TransformReasonCode,
+            TransformSemanticUnit, TransformSuccess, finalize_request_data, transform_request_data,
+            validate_final_generation_request,
         },
         upstream_response::apply_upstream_accept_encoding,
     },
@@ -53,7 +58,6 @@ struct PreparedGenerationRequest {
     final_url: String,
     final_headers: HeaderMap,
     final_body_value: Value,
-    provider_api_key_id: i64,
 }
 
 #[derive(Debug)]
@@ -112,7 +116,7 @@ fn build_gemini_url(
     params: &HashMap<String, String>,
     is_stream: bool,
 ) -> Result<Url, ProxyError> {
-    let target_url_str = format!("{}/{}:{}", source.endpoint, real_model_name, action);
+    let target_url_str = format!("{}/{}:{}", source.base_url, real_model_name, action);
     let mut url = Url::parse(&target_url_str).map_err(|error| {
         ProxyError::gateway(
             ProxyErrorCode::ProviderConfigurationError,
@@ -154,7 +158,7 @@ fn build_new_headers(pre_headers: &HeaderMap) -> Result<HeaderMap, ProxyError> {
     Ok(headers)
 }
 
-fn apply_provider_authentication(
+pub(in crate::proxy) fn apply_provider_authentication(
     headers: &mut HeaderMap,
     source: &CacheUpstreamSource,
     upstream_protocol: UpstreamProtocol,
@@ -207,16 +211,27 @@ async fn prepare_llm_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credential: &ProviderCredential,
     upstream_protocol: UpstreamProtocol,
     path: &str,
-) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
+    resolved_target_url: Option<&str>,
+) -> Result<(String, HeaderMap, Value), ProxyError> {
     debug!(
         "Preparing LLM request for provider: {}, model: {}",
         provider.name, model.model_name
     );
 
-    let target_url = format!("{}/{}", source.endpoint, path);
+    let target_url = match resolved_target_url {
+        Some(target_url) => target_url.to_string(),
+        None => join_base_url_and_operation_path(&source.base_url, path).map_err(|error| {
+            ProxyError::gateway(
+                ProxyErrorCode::ProviderConfigurationError,
+                ExecutionStage::Materialize,
+                ResponseVisibility::NotVisible,
+                None,
+                format!("failed to resolve target URL: {error}"),
+            )
+        })?,
+    };
     let mut url = Url::parse(&target_url).map_err(|error| {
         ProxyError::gateway(
             ProxyErrorCode::ProviderConfigurationError,
@@ -235,9 +250,8 @@ async fn prepare_llm_request(
 
     data = finalize_request_data(data, upstream_protocol, &source.profile_type, path);
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
-    apply_provider_authentication(&mut headers, source, upstream_protocol, provider_credential)?;
 
-    Ok((url.to_string(), headers, data, provider_credential.key_id()))
+    Ok((url.to_string(), headers, data))
 }
 
 async fn prepare_generation_request(
@@ -247,52 +261,47 @@ async fn prepare_generation_request(
     data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credential: &ProviderCredential,
     upstream_protocol: UpstreamProtocol,
     is_stream: bool,
     params: &HashMap<String, String>,
+    operation_url: Option<&str>,
 ) -> Result<PreparedGenerationRequest, ProxyError> {
     match select_generation_prepare_kind(upstream_protocol, is_stream)? {
         GenerationPrepareKind::Llm { path } => {
-            let (final_url, final_headers, final_body_value, provider_api_key_id) =
-                prepare_llm_request(
-                    provider,
-                    source,
-                    model,
-                    data,
-                    original_headers,
-                    request_patches,
-                    provider_credential,
-                    upstream_protocol,
-                    path,
-                )
-                .await?;
+            let (final_url, final_headers, final_body_value) = prepare_llm_request(
+                provider,
+                source,
+                model,
+                data,
+                original_headers,
+                request_patches,
+                upstream_protocol,
+                path,
+                operation_url,
+            )
+            .await?;
             Ok(PreparedGenerationRequest {
                 final_url,
                 final_headers,
                 final_body_value,
-                provider_api_key_id,
             })
         }
         GenerationPrepareKind::Gemini { is_stream } => {
-            let (final_url, final_headers, final_body_value, provider_api_key_id) =
-                prepare_gemini_llm_request(
-                    provider,
-                    source,
-                    model,
-                    data,
-                    original_headers,
-                    request_patches,
-                    provider_credential,
-                    is_stream,
-                    params,
-                )
-                .await?;
+            let (final_url, final_headers, final_body_value) = prepare_gemini_llm_request(
+                provider,
+                source,
+                model,
+                data,
+                original_headers,
+                request_patches,
+                is_stream,
+                params,
+            )
+            .await?;
             Ok(PreparedGenerationRequest {
                 final_url,
                 final_headers,
                 final_body_value,
-                provider_api_key_id,
             })
         }
     }
@@ -305,10 +314,9 @@ async fn prepare_simple_gemini_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credential: &ProviderCredential,
     action: &str,
     params: &HashMap<String, String>,
-) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
+) -> Result<(String, HeaderMap, Value), ProxyError> {
     debug!(
         "Preparing simple Gemini request for provider: {}, model: {}, action: {}",
         provider.name, model.model_name, action
@@ -318,14 +326,8 @@ async fn prepare_simple_gemini_request(
     let mut url = build_gemini_url(source, real_model_name, action, params, false)?;
     let mut headers = build_gemini_headers(original_headers)?;
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
-    apply_provider_authentication(
-        &mut headers,
-        source,
-        UpstreamProtocol::Gemini,
-        provider_credential,
-    )?;
 
-    Ok((url.to_string(), headers, data, provider_credential.key_id()))
+    Ok((url.to_string(), headers, data))
 }
 
 async fn prepare_gemini_llm_request(
@@ -335,10 +337,9 @@ async fn prepare_gemini_llm_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credential: &ProviderCredential,
     is_stream: bool,
     params: &HashMap<String, String>,
-) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
+) -> Result<(String, HeaderMap, Value), ProxyError> {
     debug!(
         "Preparing Gemini LLM request for provider: {}, model: {}",
         provider.name, model.model_name
@@ -354,14 +355,8 @@ async fn prepare_gemini_llm_request(
     let mut headers = build_gemini_headers(original_headers)?;
 
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
-    apply_provider_authentication(
-        &mut headers,
-        source,
-        UpstreamProtocol::Gemini,
-        provider_credential,
-    )?;
 
-    Ok((url.to_string(), headers, data, provider_credential.key_id()))
+    Ok((url.to_string(), headers, data))
 }
 
 pub(in crate::proxy) async fn materialize_generation_request(
@@ -372,7 +367,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credential: &ProviderCredential,
+    operation_url: Option<&str>,
 ) -> Result<MaterializedRequest, ProxyError> {
     let upstream_protocol = target.upstream_protocol;
     let mut prepared_request = prepare_generation_request(
@@ -382,17 +377,26 @@ pub(in crate::proxy) async fn materialize_generation_request(
         data,
         original_headers,
         request_patches,
-        provider_credential,
         upstream_protocol,
         is_stream,
         query_params,
+        operation_url,
     )
     .await?;
+    if let Err(error) = validate_final_generation_request(
+        &prepared_request.final_body_value,
+        upstream_protocol,
+        &target.upstream_source.profile_type,
+    ) {
+        return Err(ProxyError::gateway(
+            ProxyErrorCode::ProviderConfigurationError,
+            ExecutionStage::Patch,
+            ResponseVisibility::NotVisible,
+            None,
+            format!("final target Profile validation failed at {error}"),
+        ));
+    }
     apply_upstream_accept_encoding(&mut prepared_request.final_headers, is_stream);
-    debug_assert_eq!(
-        prepared_request.provider_api_key_id,
-        provider_credential.key_id()
-    );
     let final_url = prepared_request.final_url;
     let final_body_value = prepared_request.final_body_value;
     let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
@@ -421,7 +425,7 @@ pub(in crate::proxy) fn preflight_generation_request(
     downstream_protocol: DownstreamProtocol,
     is_stream: bool,
 ) -> Result<TransformSuccess<Value>, PreflightGenerationFailure> {
-    transform_request_data(
+    let mut transformed = transform_request_data(
         data,
         downstream_protocol,
         target.upstream_protocol,
@@ -430,7 +434,42 @@ pub(in crate::proxy) fn preflight_generation_request(
     .map_err(|transform_failure| PreflightGenerationFailure {
         proxy_error: classify_transform_failure(&transform_failure, ResponseVisibility::NotVisible),
         transform_failure,
-    })
+    })?;
+
+    if target.upstream_protocol == UpstreamProtocol::Openai {
+        if let Value::Object(object) = &mut transformed.value {
+            object.insert(
+                "model".to_string(),
+                json!(resolve_real_model_name(&target.model)),
+            );
+        }
+    }
+
+    if let Err(error) = validate_final_generation_request(
+        &transformed.value,
+        target.upstream_protocol,
+        &target.upstream_source.profile_type,
+    ) {
+        let transform_failure = TransformFailure {
+            origin: TransformFailureOrigin::DownstreamInput,
+            phase: TransformPhase::RequestEncode,
+            semantic_unit: TransformSemanticUnit::RequestEnvelope,
+            reason_code: TransformReasonCode::InvalidProtocolShape,
+            summary: transformed.summary.clone(),
+        };
+        return Err(PreflightGenerationFailure {
+            proxy_error: ProxyError::gateway(
+                ProxyErrorCode::InvalidRequestError,
+                ExecutionStage::Parse,
+                ResponseVisibility::NotVisible,
+                None,
+                format!("target Profile validation failed at {error}"),
+            ),
+            transform_failure,
+        });
+    }
+
+    Ok(transformed)
 }
 
 pub(in crate::proxy) async fn materialize_utility_request(
@@ -439,42 +478,47 @@ pub(in crate::proxy) async fn materialize_utility_request(
     data: Value,
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
-    request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credential: &ProviderCredential,
+    operation_url: Option<&str>,
 ) -> Result<MaterializedRequest, ProxyError> {
-    let (final_url, mut final_headers, final_body_value, provider_api_key_id) =
-        match operation.protocol {
-            UtilityProtocol::OpenaiCompatible => {
-                prepare_llm_request(
-                    &target.provider,
-                    &target.upstream_source,
-                    &target.model,
-                    data,
-                    original_headers,
-                    request_patches,
-                    provider_credential,
-                    target.upstream_protocol,
-                    &operation.downstream_path,
-                )
-                .await?
-            }
-            UtilityProtocol::GeminiCompatible => {
-                prepare_simple_gemini_request(
-                    &target.provider,
-                    &target.upstream_source,
-                    &target.model,
-                    data,
-                    original_headers,
-                    request_patches,
-                    provider_credential,
-                    &operation.downstream_path,
-                    query_params,
-                )
-                .await?
-            }
-        };
+    match operation.upstream_operation() {
+        Some(crate::service::upstream_profile::UpstreamOperation::Embeddings) => {
+            validate_embeddings_request(&data, target.upstream_source.profile_type)?;
+        }
+        Some(crate::service::upstream_profile::UpstreamOperation::Rerank) => {
+            validate_rerank_request(&data, target.upstream_source.profile_type)?;
+        }
+        Some(crate::service::upstream_profile::UpstreamOperation::ChatCompletions) | None => {}
+    }
+    let (final_url, mut final_headers, final_body_value) = match operation.protocol {
+        UtilityProtocol::OpenaiCompatible => {
+            prepare_llm_request(
+                &target.provider,
+                &target.upstream_source,
+                &target.model,
+                data,
+                original_headers,
+                &[],
+                target.upstream_protocol,
+                &operation.downstream_path,
+                operation_url,
+            )
+            .await?
+        }
+        UtilityProtocol::GeminiCompatible => {
+            prepare_simple_gemini_request(
+                &target.provider,
+                &target.upstream_source,
+                &target.model,
+                data,
+                original_headers,
+                &[],
+                &operation.downstream_path,
+                query_params,
+            )
+            .await?
+        }
+    };
     apply_upstream_accept_encoding(&mut final_headers, false);
-    debug_assert_eq!(provider_api_key_id, provider_credential.key_id());
     let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
         protocol_transform_error(
             ExecutionStage::Materialize,
@@ -492,6 +536,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
         response_mode: ProxyResponseMode::Utility {
             downstream_protocol: operation.downstream_protocol,
             upstream_protocol: target.upstream_protocol,
+            operation: operation.upstream_operation(),
         },
     })
 }

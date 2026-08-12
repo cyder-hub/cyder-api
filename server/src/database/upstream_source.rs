@@ -13,8 +13,14 @@ db_object! {
         pub id: i64,
         pub provider_id: i64,
         pub profile_type: UpstreamProfileType,
-        pub endpoint: String,
+        pub base_url: String,
         pub use_proxy: bool,
+        pub chat_completions_enabled: Option<bool>,
+        pub chat_completions_path_override: Option<String>,
+        pub embeddings_enabled: Option<bool>,
+        pub embeddings_path_override: Option<String>,
+        pub rerank_enabled: Option<bool>,
+        pub rerank_path_override: Option<String>,
         pub is_enabled: bool,
         pub is_default: bool,
         pub deleted_at: Option<i64>,
@@ -28,8 +34,14 @@ db_object! {
         pub id: i64,
         pub provider_id: i64,
         pub profile_type: UpstreamProfileType,
-        pub endpoint: String,
+        pub base_url: String,
         pub use_proxy: bool,
+        pub chat_completions_enabled: Option<bool>,
+        pub chat_completions_path_override: Option<String>,
+        pub embeddings_enabled: Option<bool>,
+        pub embeddings_path_override: Option<String>,
+        pub rerank_enabled: Option<bool>,
+        pub rerank_path_override: Option<String>,
         pub is_enabled: bool,
         pub is_default: bool,
         pub created_at: i64,
@@ -39,8 +51,14 @@ db_object! {
     #[derive(AsChangeset)]
     #[diesel(table_name = upstream_source)]
     pub struct UpdateUpstreamSourceData {
-        pub endpoint: Option<String>,
+        pub base_url: Option<String>,
         pub use_proxy: Option<bool>,
+        pub chat_completions_enabled: Option<bool>,
+        pub chat_completions_path_override: Option<Option<String>>,
+        pub embeddings_enabled: Option<bool>,
+        pub embeddings_path_override: Option<Option<String>>,
+        pub rerank_enabled: Option<bool>,
+        pub rerank_path_override: Option<Option<String>>,
         pub is_enabled: Option<bool>,
         pub is_default: Option<bool>,
         pub updated_at: i64,
@@ -107,8 +125,18 @@ impl UpstreamSource {
                         upstream_source::dsl::id.eq(new_source.id),
                         upstream_source::dsl::provider_id.eq(new_source.provider_id),
                         upstream_source::dsl::profile_type.eq(new_source.profile_type.clone()),
-                        upstream_source::dsl::endpoint.eq(new_source.endpoint.clone()),
+                        upstream_source::dsl::base_url.eq(new_source.base_url.clone()),
                         upstream_source::dsl::use_proxy.eq(new_source.use_proxy),
+                        upstream_source::dsl::chat_completions_enabled
+                            .eq(new_source.chat_completions_enabled),
+                        upstream_source::dsl::chat_completions_path_override
+                            .eq(new_source.chat_completions_path_override.clone()),
+                        upstream_source::dsl::embeddings_enabled.eq(new_source.embeddings_enabled),
+                        upstream_source::dsl::embeddings_path_override
+                            .eq(new_source.embeddings_path_override.clone()),
+                        upstream_source::dsl::rerank_enabled.eq(new_source.rerank_enabled),
+                        upstream_source::dsl::rerank_path_override
+                            .eq(new_source.rerank_path_override.clone()),
                         upstream_source::dsl::is_enabled.eq(new_source.is_enabled),
                         upstream_source::dsl::is_default.eq(new_source.is_default),
                         upstream_source::dsl::created_at.eq(new_source.created_at),
@@ -190,10 +218,37 @@ impl UpstreamSource {
                         .and(upstream_source::dsl::deleted_at.is_null()),
                 ))
                 .set((
-                    upstream_source::dsl::endpoint
-                        .eq(update.endpoint.clone().unwrap_or(current.endpoint)),
+                    upstream_source::dsl::base_url
+                        .eq(update.base_url.clone().unwrap_or(current.base_url)),
                     upstream_source::dsl::use_proxy
                         .eq(update.use_proxy.unwrap_or(current.use_proxy)),
+                    upstream_source::dsl::chat_completions_enabled.eq(
+                        update
+                            .chat_completions_enabled
+                            .or(current.chat_completions_enabled),
+                    ),
+                    upstream_source::dsl::chat_completions_path_override.eq(
+                        update
+                            .chat_completions_path_override
+                            .clone()
+                            .unwrap_or(current.chat_completions_path_override),
+                    ),
+                    upstream_source::dsl::embeddings_enabled
+                        .eq(update.embeddings_enabled.or(current.embeddings_enabled)),
+                    upstream_source::dsl::embeddings_path_override.eq(
+                        update
+                            .embeddings_path_override
+                            .clone()
+                            .unwrap_or(current.embeddings_path_override),
+                    ),
+                    upstream_source::dsl::rerank_enabled
+                        .eq(update.rerank_enabled.or(current.rerank_enabled)),
+                    upstream_source::dsl::rerank_path_override.eq(
+                        update
+                            .rerank_path_override
+                            .clone()
+                            .unwrap_or(current.rerank_path_override),
+                    ),
                     upstream_source::dsl::is_enabled.eq(is_enabled),
                     upstream_source::dsl::is_default.eq(is_default),
                     upstream_source::dsl::updated_at.eq(update.updated_at),
@@ -383,6 +438,88 @@ fn map_source_write_error(action: &'static str, error: diesel::result::Error) ->
 }
 
 #[cfg(test)]
+impl UpdateUpstreamSourceData {
+    pub(crate) fn test_defaults() -> Self {
+        Self {
+            base_url: None,
+            use_proxy: None,
+            chat_completions_enabled: None,
+            chat_completions_path_override: None,
+            embeddings_enabled: None,
+            embeddings_path_override: None,
+            rerank_enabled: None,
+            rerank_path_override: None,
+            is_enabled: None,
+            is_default: None,
+            updated_at: 1,
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_operation_defaults(
+    profile_type: &UpstreamProfileType,
+) -> (Option<bool>, Option<bool>, Option<bool>) {
+    match profile_type {
+        UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai => {
+            (Some(true), Some(true), Some(false))
+        }
+        UpstreamProfileType::OpenaiCompatible => (Some(true), Some(false), Some(false)),
+        _ => (None, None, None),
+    }
+}
+
+#[cfg(test)]
+impl NewUpstreamSource {
+    pub(crate) fn test_defaults(profile_type: UpstreamProfileType) -> Self {
+        let (chat_completions_enabled, embeddings_enabled, rerank_enabled) =
+            test_operation_defaults(&profile_type);
+        Self {
+            id: 0,
+            provider_id: 0,
+            profile_type: profile_type.clone(),
+            base_url: "https://example.test/v1".to_string(),
+            use_proxy: false,
+            chat_completions_enabled,
+            chat_completions_path_override: None,
+            embeddings_enabled,
+            embeddings_path_override: None,
+            rerank_enabled,
+            rerank_path_override: None,
+            is_enabled: true,
+            is_default: false,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+}
+
+#[cfg(test)]
+impl UpstreamSource {
+    pub(crate) fn test_defaults(profile_type: UpstreamProfileType) -> Self {
+        let seed = NewUpstreamSource::test_defaults(profile_type);
+        Self {
+            id: seed.id,
+            provider_id: seed.provider_id,
+            profile_type: seed.profile_type,
+            base_url: seed.base_url,
+            use_proxy: seed.use_proxy,
+            chat_completions_enabled: seed.chat_completions_enabled,
+            chat_completions_path_override: seed.chat_completions_path_override,
+            embeddings_enabled: seed.embeddings_enabled,
+            embeddings_path_override: seed.embeddings_path_override,
+            rerank_enabled: seed.rerank_enabled,
+            rerank_path_override: seed.rerank_path_override,
+            is_enabled: seed.is_enabled,
+            is_default: seed.is_default,
+            deleted_at: None,
+            created_at: seed.created_at,
+            updated_at: seed.updated_at,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource};
     use crate::database::TestDbContext;
@@ -417,13 +554,14 @@ mod tests {
         NewUpstreamSource {
             id,
             provider_id,
-            profile_type,
-            endpoint: format!("https://source-{id}.example/v1"),
+            profile_type: profile_type.clone(),
+            base_url: format!("https://source-{id}.example/v1"),
             use_proxy: false,
             is_enabled,
             is_default,
             created_at: 1,
             updated_at: 1,
+            ..NewUpstreamSource::test_defaults(profile_type)
         }
     }
 
@@ -454,11 +592,12 @@ mod tests {
                     responses.id,
                     1,
                     &UpdateUpstreamSourceData {
-                        endpoint: Some("https://responses.changed.example/v1".to_string()),
+                        base_url: Some("https://responses.changed.example/v1".to_string()),
                         use_proxy: Some(true),
                         is_enabled: None,
                         is_default: Some(true),
                         updated_at: 2,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect("default switch should succeed");
@@ -474,11 +613,12 @@ mod tests {
                     responses.id,
                     1,
                     &UpdateUpstreamSourceData {
-                        endpoint: None,
+                        base_url: None,
                         use_proxy: None,
                         is_enabled: Some(false),
                         is_default: None,
                         updated_at: 3,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect("disabling a default should clear default automatically");
@@ -489,11 +629,12 @@ mod tests {
                     responses.id,
                     1,
                     &UpdateUpstreamSourceData {
-                        endpoint: None,
+                        base_url: None,
                         use_proxy: None,
                         is_enabled: Some(true),
                         is_default: Some(true),
                         updated_at: 4,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect("source should re-enable as default");
@@ -503,11 +644,12 @@ mod tests {
                     responses.id,
                     1,
                     &UpdateUpstreamSourceData {
-                        endpoint: None,
+                        base_url: None,
                         use_proxy: None,
                         is_enabled: Some(false),
                         is_default: Some(true),
                         updated_at: 5,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect_err("explicit disabled default must fail");
@@ -523,11 +665,12 @@ mod tests {
                     openai.id,
                     1,
                     &UpdateUpstreamSourceData {
-                        endpoint: None,
+                        base_url: None,
                         use_proxy: None,
                         is_enabled: Some(false),
                         is_default: None,
                         updated_at: 5,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect("non-default source should be disableable");
@@ -546,7 +689,6 @@ mod tests {
                             operation: RequestPatchOperation::Set,
                             value_json: Some(Some(json!(0.2))),
                             description: None,
-                            confirm_dangerous_target: false,
                         }],
                     })
                     .expect("source Variant should be created before source delete");
@@ -554,7 +696,7 @@ mod tests {
                 let duplicate_family = UpstreamSource::create(&source(
                     13,
                     1,
-                    UpstreamProfileType::VertexOpenai,
+                    UpstreamProfileType::OpenaiCompatible,
                     true,
                     true,
                 ))
@@ -573,11 +715,12 @@ mod tests {
                     openai.id,
                     2,
                     &UpdateUpstreamSourceData {
-                        endpoint: Some("https://wrong-owner.example/v1".to_string()),
+                        base_url: Some("https://wrong-owner.example/v1".to_string()),
                         use_proxy: None,
                         is_enabled: None,
                         is_default: None,
                         updated_at: 6,
+                        ..UpdateUpstreamSourceData::test_defaults()
                     },
                 )
                 .expect_err("cross-provider source mutation must be hidden");
@@ -608,12 +751,15 @@ mod tests {
                 let replacement = UpstreamSource::create(&source(
                     13,
                     1,
-                    UpstreamProfileType::VertexOpenai,
+                    UpstreamProfileType::OpenaiCompatible,
                     true,
                     false,
                 ))
                 .expect("soft deletion should release the wire family");
-                assert_eq!(replacement.profile_type, UpstreamProfileType::VertexOpenai);
+                assert_eq!(
+                    replacement.profile_type,
+                    UpstreamProfileType::OpenaiCompatible
+                );
                 assert_eq!(
                     Provider::get_by_id(1)
                         .expect("provider should load")

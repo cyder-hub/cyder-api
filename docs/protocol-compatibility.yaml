@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 
 downstream_protocols:
   - OPENAI
@@ -88,23 +88,23 @@ evidence:
   - id: direct-non-stream
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_non_stream_request_response_usage_and_log_golden"
-    summary: "Exercises routing, request materialization, non-stream response conversion, usage, logging, and one upstream call for the four representative cells."
+    summary: "Exercises routing, request materialization, non-stream response conversion, usage, logging, and one upstream call for all four OpenAI-target cells plus the retained native Gemini cell."
   - id: direct-stream
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_stream_events_usage_and_single_call_golden"
-    summary: "Exercises streaming request materialization, ordered downstream events, text, usage, and one upstream call for the four representative cells."
+    summary: "Exercises streaming request materialization, ordered downstream events, text, usage, and one upstream call for all four OpenAI-target cells plus the retained native Gemini cell."
   - id: direct-upstream-error
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_upstream_429_is_authentic_logged_and_never_retried"
-    summary: "Exercises authentic upstream error conversion, complete protocol bodies, safe logging, and the no-retry contract for the four representative cells."
+    summary: "Exercises authentic upstream error conversion, complete protocol bodies, safe logging, and the no-retry contract for all four OpenAI-target cells plus native Gemini."
   - id: direct-cancellation
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_client_cancellation_closes_upstream_and_logs_cancelled"
-    summary: "Exercises client cancellation, upstream connection closure, cancelled logging, and the no-retry contract for the four representative cells."
+    summary: "Exercises client cancellation, upstream connection closure, cancelled logging, and the no-retry contract for all four OpenAI-target cells plus native Gemini."
   - id: direct-call-count
     kind: test
     reference: "proxy::direct_execution_regression::four_public_downstream_generation_paths_call_upstream_at_most_once"
-    summary: "Pins each representative public generation path to exactly one real upstream request."
+    summary: "Pins each of the four public downstream generation paths to one frozen OpenAI Source and exactly one real Chat Completions request."
   - id: r3-9-primary-source-aggregate
     kind: test
     reference: "database::provider::tests::provider_aggregate_reads_fail_closed_for_missing_or_ambiguous_source"
@@ -116,7 +116,7 @@ evidence:
   - id: representative-fixture-scope
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols"
-    summary: "Proves that the direct-execution suite contains exactly the four representative cells and no downstream Ollama fixture."
+    summary: "Proves that the R3.16 baseline evidence contains exactly four public-downstream-to-OpenAI cells and no downstream Ollama fixture."
   - id: reachable-materializers-without-cell-regression
     kind: code
     reference: "server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind"
@@ -137,6 +137,114 @@ evidence:
     kind: test
     reference: "cargo run -p cyder-api --bin transform_quality_gate -- --quick"
     summary: "Transform quality evidence exists, but it does not satisfy the router-to-upstream direct-execution bar for advanced dimensions."
+  - id: r3-16-reasoning-direct
+    kind: test
+    reference: "proxy::direct_execution_regression::all_public_downstream_reasoning_controls_reach_the_openai_target"
+    summary: "Executes the representative reasoning main path from every public downstream through one frozen OpenAI Source."
+  - id: r3-16-reasoning-responses-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::responses_reasoning_effort_maps_to_openai_and_summary_is_safely_ignored"
+    summary: "Pins Responses effort mapping and the typed controlled-loss fact for ignored summary semantics."
+  - id: r3-16-reasoning-anthropic-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::anthropic_qualitative_reasoning_maps_to_openai_without_injecting_cot"
+    summary: "Pins Anthropic qualitative reasoning mapping and proves no chain-of-thought text is synthesized."
+  - id: r3-16-reasoning-gemini-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::gemini_reasoning_controls_map_to_openai_with_budget_sentinels"
+    summary: "Pins Gemini thinking-level and sentinel mapping with bounded controlled-loss diagnostics."
+  - id: r3-16-reasoning-conflict-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::registered_request_conflicts_are_rejected_before_credential_or_upstream_use"
+    summary: "Pins positive Gemini thinkingBudget rejection before credentials and network; Anthropic budget_tokens uses an audited qualitative downgrade."
+  - id: r3-16-reasoning-responses-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::malformed_responses_reasoning_is_rejected_before_credential_or_upstream_use"
+    summary: "Pins a representative unrepresentable Responses reasoning shape to a payload-safe zero-call rejection."
+  - id: r3-16-multimodal-direct
+    kind: test
+    reference: "proxy::direct_execution_regression::all_public_downstream_multimodal_inputs_reach_the_openai_target"
+    summary: "Executes image, supported audio, file_data, and same-target file inputs through one OpenAI call for every downstream."
+  - id: r3-16-multimodal-responses-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::responses_multimodal_input_maps_to_openai_image_audio_and_file_parts"
+    summary: "Pins Responses multimodal mapping and audited safe metadata loss."
+  - id: r3-16-multimodal-anthropic-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::anthropic_multimodal_input_maps_to_openai_without_textualizing_payloads"
+    summary: "Pins Anthropic image/document mapping without textualizing binary payloads."
+  - id: r3-16-multimodal-gemini-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::gemini_multimodal_input_classifies_inline_media_for_openai"
+    summary: "Pins Gemini inline image/audio/file classification and controlled metadata loss."
+  - id: r3-16-multimodal-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::all_public_downstreams_reject_unportable_media_before_credentials"
+    summary: "Pins representative unportable media and foreign file references to payload-safe zero-call rejection."
+  - id: r3-16-structured-direct
+    kind: test
+    reference: "proxy::direct_execution_regression::all_public_downstream_structured_outputs_reach_the_openai_target"
+    summary: "Executes JSON schema requirements from every downstream and preserves constraints at the OpenAI target."
+  - id: r3-16-structured-responses-transform
+    kind: test
+    reference: "service::transform::facade::tests::responses_structured_outputs_preserve_json_object_and_schema_contracts"
+    summary: "Pins lossless Responses JSON object/schema mapping including name, strict, and schema constraints."
+  - id: r3-16-structured-anthropic-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::anthropic_structured_output_synthesizes_a_stable_openai_name"
+    summary: "Pins Anthropic JSON schema mapping with stable synthesized name and a typed controlled-loss fact."
+  - id: r3-16-structured-gemini-diagnostic
+    kind: test
+    reference: "service::transform::facade::tests::gemini_structured_output_preserves_constraints_and_drops_only_property_ordering"
+    summary: "Pins Gemini JSON schema constraint preservation and the audited property-ordering loss."
+  - id: r3-16-structured-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::all_public_downstreams_reject_unrepresentable_structured_outputs_before_credentials"
+    summary: "Pins grammar and non-JSON structured requirements to payload-safe zero-call rejection."
+  - id: r3-16-tools-direct
+    kind: test
+    reference: "proxy::direct_execution_regression::all_public_downstream_portable_tool_lifecycles_reach_the_openai_target"
+    summary: "Executes portable function definitions, selection, parallel control, call/result correlation, and strict through one OpenAI call."
+  - id: r3-16-tools-cross-wire-transform
+    kind: test
+    reference: "service::transform::facade::tests::portable_tool_controls_from_each_cross_wire_protocol_reach_openai"
+    summary: "Pins typed tool-control mappings for Responses, Anthropic, and Gemini with controlled-loss diagnostics."
+  - id: r3-16-tools-stable-results
+    kind: test
+    reference: "service::transform::facade::tests::missing_tool_call_ids_are_stable_and_structured_results_are_canonical_text"
+    summary: "Pins stable synthesized IDs and deterministic structured-result textualization without logging payloads."
+  - id: r3-16-tools-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::forced_nonportable_cross_wire_tools_reject_before_credentials"
+    summary: "Pins forced built-in/custom provider tools to payload-safe zero-call rejection."
+  - id: r3-16-profile-field-policy
+    kind: test
+    reference: "service::transform::providers::openai::target::tests::profiles_apply_distinct_unknown_field_policies"
+    summary: "Pins official-known/unknown passthrough, compatible core passthrough, and Gemini recursive-closed Chat field policy."
+  - id: r3-16-profile-source-contract
+    kind: test
+    reference: "database::migration_smoke_tests::sqlite_r316_destructive_upgrade_enforces_openai_upstream_contract"
+    summary: "Pins OpenAI-wire defaults, Base URL persistence, operation columns, unsupported combinations, and destructive enum replacement."
+  - id: r3-16-gemini-openai-closed-policy
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_openai_profile_rejects_unknown_and_conflicting_chat_fields_before_credentials"
+    summary: "Pins Gemini OpenAI recursive allowlist and reasoning conflict rejection before credentials and network."
+  - id: r3-16-embeddings-direct
+    kind: test
+    reference: "proxy::direct_execution_regression::embeddings_execute_once_for_each_openai_wire_profile_and_preserve_the_response"
+    summary: "Pins all three OpenAI-wire Embeddings field policies, exact operation path, response preservation, usage, and cost."
+  - id: r3-16-embeddings-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::invalid_embeddings_requests_are_rejected_before_credentials_and_network"
+    summary: "Pins Profile-specific invalid Embeddings requests to zero-decrypt, zero-network rejection."
+  - id: r3-16-rerank-direct
+    kind: test
+    reference: "proxy::direct_execution_regression::compatible_rerank_is_a_single_call_transparent_transport_without_private_usage_parsing"
+    summary: "Pins the explicitly enabled OPENAI_COMPATIBLE opaque Rerank envelope and one-call transparent response."
+  - id: r3-16-rerank-profile-guard
+    kind: test
+    reference: "proxy::direct_execution_regression::rerank_requires_an_enabled_compatible_source_before_credential_decryption"
+    summary: "Pins unsupported or disabled Rerank Profile combinations to zero-decrypt, zero-network rejection."
   - id: router-contract
     kind: test
     reference: "proxy::router::tests::four_protocol_version_aliases_are_direct_and_equivalent"
@@ -244,7 +352,12 @@ transform_runtime_contract:
   same_wire_observation_failure: observation_degraded
   cross_wire_pipeline: [source_decode, unified_ir, target_encode]
   cross_wire_failure_behavior: fail_closed
-  unknown_semantic_behavior: explicit_reject
+  unknown_field_policy:
+    ordinary_object_fields: serde_default_silent_ignore
+    unknown_tagged_semantics: pre_send_explicit_reject
+    registered_conflicts: targeted_borrowed_value_check
+    full_second_schema_audit: false
+    strict_target_profile_exception: gemini_openai_recursive_closed_allowlist
   loss_policy:
     minor: controlled_loss_with_internal_fact
     major: explicit_reject
@@ -263,7 +376,6 @@ transform_runtime_contract:
     enabled: false
     owner: R4.6
   advanced_cell_owners:
-    - { upstream_protocol: OPENAI, owner: R3.16 }
     - { upstream_protocol: RESPONSES, owner: R3.17 }
     - { upstream_protocol: ANTHROPIC, owner: R3.18 }
     - { upstream_protocol: GEMINI, owner: R3.19 }
@@ -309,11 +421,11 @@ upstream_source_profiles:
     dialect: standard
     auth: vertex_oauth
     endpoint: vertex_gemini
-  - profile_type: VERTEX_OPENAI
+  - profile_type: OPENAI_COMPATIBLE
     upstream_protocol: OPENAI
-    dialect: gemini_openai_compatibility
-    auth: vertex_oauth
-    endpoint: vertex_openai
+    dialect: standard
+    auth: bearer_api_key
+    endpoint: base_url
   - profile_type: OLLAMA
     upstream_protocol: OLLAMA
     dialect: standard
@@ -334,6 +446,35 @@ upstream_source_profiles:
     dialect: gemini_openai_compatibility
     auth: bearer_api_key
     endpoint: base_url
+
+openai_wire_profiles:
+  - profile_type: OPENAI
+    base_url_requirement: optional_with_default
+    default_base_url: https://api.openai.com/v1
+    base_url_customizable: true
+    auth: bearer_api_key
+    chat: { availability: configurable, default_enabled: true, field_policy: official_fields_validated_unknown_extensions_passthrough }
+    embeddings: { availability: configurable, default_enabled: true, field_policy: official_fields_validated_unknown_extensions_passthrough }
+    rerank: { availability: unsupported, default_enabled: false, field_policy: unsupported }
+    evidence: [r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-profile-guard]
+  - profile_type: OPENAI_COMPATIBLE
+    base_url_requirement: required
+    default_base_url: null
+    base_url_customizable: true
+    auth: bearer_api_key
+    chat: { availability: configurable, default_enabled: true, field_policy: core_fields_validated_vendor_extensions_passthrough }
+    embeddings: { availability: configurable, default_enabled: false, field_policy: core_fields_validated_vendor_extensions_passthrough }
+    rerank: { availability: configurable, default_enabled: false, field_policy: opaque_envelope_passthrough }
+    evidence: [r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-direct]
+  - profile_type: GEMINI_OPENAI
+    base_url_requirement: optional_with_default
+    default_base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    base_url_customizable: true
+    auth: bearer_api_key
+    chat: { availability: configurable, default_enabled: true, field_policy: recursive_closed_allowlist }
+    embeddings: { availability: configurable, default_enabled: true, field_policy: model_input_closed_contract }
+    rerank: { availability: unsupported, default_enabled: false, field_policy: unsupported }
+    evidence: [r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-gemini-openai-closed-policy, r3-16-embeddings-direct, r3-16-rerank-profile-guard]
 
 routes:
   - downstream_protocol: OPENAI
@@ -380,10 +521,10 @@ generation_cells:
       upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
       cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      tools: { status: full, evidence: [r3-16-tools-direct] }
+      reasoning: { status: full, evidence: [r3-16-reasoning-direct] }
+      multimodal: { status: full, evidence: [r3-16-multimodal-direct] }
+      structured_output: { status: full, evidence: [r3-16-structured-direct] }
   - downstream: OPENAI
     upstream: RESPONSES
     base:
@@ -451,10 +592,10 @@ generation_cells:
       upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
       cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      tools: { status: controlled_loss, evidence: [r3-16-tools-direct, r3-16-tools-cross-wire-transform, r3-16-tools-stable-results, r3-16-tools-reject] }
+      reasoning: { status: controlled_loss, evidence: [r3-16-reasoning-direct, r3-16-reasoning-responses-diagnostic, r3-16-reasoning-responses-reject] }
+      multimodal: { status: controlled_loss, evidence: [r3-16-multimodal-direct, r3-16-multimodal-responses-diagnostic, r3-16-multimodal-reject] }
+      structured_output: { status: full, evidence: [r3-16-structured-direct, r3-16-structured-responses-transform] }
   - downstream: RESPONSES
     upstream: RESPONSES
     base:
@@ -522,10 +663,10 @@ generation_cells:
       upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
       cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      tools: { status: controlled_loss, evidence: [r3-16-tools-direct, r3-16-tools-cross-wire-transform, r3-16-tools-stable-results, r3-16-tools-reject] }
+      reasoning: { status: controlled_loss, evidence: [r3-16-reasoning-direct, r3-16-reasoning-anthropic-diagnostic] }
+      multimodal: { status: controlled_loss, evidence: [r3-16-multimodal-direct, r3-16-multimodal-anthropic-diagnostic, r3-16-multimodal-reject] }
+      structured_output: { status: controlled_loss, evidence: [r3-16-structured-direct, r3-16-structured-anthropic-diagnostic, r3-16-structured-reject] }
   - downstream: ANTHROPIC
     upstream: RESPONSES
     base:
@@ -586,17 +727,17 @@ generation_cells:
   - downstream: GEMINI
     upstream: OPENAI
     base:
-      non_stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
-      stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
-      usage: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
-      normal_termination: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
-      upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
-      cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.16 }
+      non_stream_text: { status: verified, evidence: [direct-non-stream, direct-call-count] }
+      stream_text: { status: verified, evidence: [direct-stream, direct-call-count] }
+      usage: { status: verified, evidence: [direct-non-stream, direct-stream] }
+      normal_termination: { status: verified, evidence: [direct-non-stream, direct-stream] }
+      upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
+      cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.16 }
+      tools: { status: controlled_loss, evidence: [r3-16-tools-direct, r3-16-tools-cross-wire-transform, r3-16-tools-stable-results, r3-16-tools-reject] }
+      reasoning: { status: controlled_loss, evidence: [r3-16-reasoning-direct, r3-16-reasoning-gemini-diagnostic, r3-16-reasoning-conflict-reject] }
+      multimodal: { status: controlled_loss, evidence: [r3-16-multimodal-direct, r3-16-multimodal-gemini-diagnostic, r3-16-multimodal-reject] }
+      structured_output: { status: controlled_loss, evidence: [r3-16-structured-direct, r3-16-structured-gemini-diagnostic, r3-16-structured-reject] }
   - downstream: GEMINI
     upstream: RESPONSES
     base:
@@ -628,12 +769,12 @@ generation_cells:
   - downstream: GEMINI
     upstream: GEMINI
     base:
-      non_stream_text: { status: verified, evidence: [direct-non-stream, direct-call-count] }
-      stream_text: { status: verified, evidence: [direct-stream, direct-call-count] }
+      non_stream_text: { status: verified, evidence: [direct-non-stream] }
+      stream_text: { status: verified, evidence: [direct-stream] }
       usage: { status: verified, evidence: [direct-non-stream, direct-stream] }
       normal_termination: { status: verified, evidence: [direct-non-stream, direct-stream] }
-      upstream_error: { status: verified, evidence: [direct-upstream-error, direct-call-count] }
-      cancellation: { status: verified, evidence: [direct-cancellation, direct-call-count] }
+      upstream_error: { status: verified, evidence: [direct-upstream-error] }
+      cancellation: { status: verified, evidence: [direct-cancellation] }
     advanced:
       tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
       reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
@@ -675,9 +816,8 @@ utilities:
     allowed_upstreams: [OPENAI]
     incompatible_upstream_behavior: pre_send_reject
     verification:
-      status: partial
-      evidence: [router-contract, router-method-contract, utility-pre-send-reject]
-      owner: R3.16
+      status: verified
+      evidence: [router-contract, router-method-contract, utility-pre-send-reject, r3-16-embeddings-direct, r3-16-embeddings-reject]
   - name: rerank
     route_suffix: /rerank
     method: POST
@@ -687,9 +827,8 @@ utilities:
     allowed_upstreams: [OPENAI]
     incompatible_upstream_behavior: pre_send_reject
     verification:
-      status: partial
-      evidence: [router-contract, router-method-contract, utility-pre-send-reject]
-      owner: R3.16
+      status: verified
+      evidence: [router-contract, router-method-contract, utility-pre-send-reject, r3-16-rerank-direct, r3-16-rerank-profile-guard]
   - name: countTokens
     route_suffix: "/models/{model}:countTokens"
     method: POST

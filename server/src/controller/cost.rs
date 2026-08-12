@@ -302,7 +302,7 @@ async fn preview_cost(
     let normalization = payload.normalization;
     let (ledger, total_input_tokens) = match (&normalization, payload.ledger) {
         (Some(normalization), None) => (
-            CostLedger::from(normalization),
+            CostLedger::for_successful_invocation(Some(normalization)),
             normalization.total_input_tokens,
         ),
         (None, Some(ledger)) => (ledger, payload.total_input_tokens.unwrap_or(0)),

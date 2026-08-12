@@ -58,8 +58,95 @@ pub(super) fn render_anthropic_executable_code_text(language: &str, code: &str) 
     format!("```{language}\n{code}\n```")
 }
 
+fn choice_parallel_setting(choice: Option<&AnthropicToolChoice>) -> Option<bool> {
+    choice.and_then(|choice| choice.disable_parallel_tool_use.map(|disabled| !disabled))
+}
+
+fn anthropic_tool_choice(
+    choice: Option<UnifiedToolChoice>,
+    parallel_tool_calls: Option<bool>,
+) -> Option<AnthropicToolChoice> {
+    if choice.is_none() && parallel_tool_calls.is_none() {
+        return None;
+    }
+    let (type_, name) = match choice.unwrap_or(UnifiedToolChoice::Auto) {
+        UnifiedToolChoice::Required => ("any", None),
+        UnifiedToolChoice::Named { name } => ("tool", Some(name)),
+        UnifiedToolChoice::Allowed {
+            mode: UnifiedAllowedToolMode::Required,
+            ..
+        } => ("any", None),
+        UnifiedToolChoice::None
+        | UnifiedToolChoice::Auto
+        | UnifiedToolChoice::Allowed {
+            mode: UnifiedAllowedToolMode::Auto,
+            ..
+        } => ("auto", None),
+    };
+    Some(AnthropicToolChoice {
+        type_: type_.to_string(),
+        name,
+        disable_parallel_tool_use: parallel_tool_calls.map(|enabled| !enabled),
+    })
+}
+
 impl From<AnthropicRequestPayload> for UnifiedRequest {
     fn from(anthropic_req: AnthropicRequestPayload) -> Self {
+        let (tool_choice, parallel_tool_calls) = anthropic_req
+            .tool_choice
+            .as_ref()
+            .map(|choice| {
+                let choice = match choice.type_.as_str() {
+                    "any" => UnifiedToolChoice::Required,
+                    "tool" => UnifiedToolChoice::Named {
+                        name: choice
+                            .name
+                            .clone()
+                            .expect("Anthropic named tool choice is adapter-validated"),
+                    },
+                    _ => UnifiedToolChoice::Auto,
+                };
+                (
+                    Some(choice),
+                    choice_parallel_setting(anthropic_req.tool_choice.as_ref()),
+                )
+            })
+            .unwrap_or((None, None));
+        let structured_output = anthropic_req
+            .output_config
+            .as_ref()
+            .and_then(|config| config.format.as_ref())
+            .map(|format| match format {
+                AnthropicOutputFormat::JsonSchema { schema } => {
+                    UnifiedStructuredOutput::JsonSchema {
+                        name: crate::service::transform::structured::stable_schema_name(schema),
+                        description: None,
+                        schema: schema.clone(),
+                        strict: true,
+                    }
+                }
+            });
+        let reasoning_effort = anthropic_req
+            .output_config
+            .as_ref()
+            .and_then(|config| config.effort.as_ref())
+            .map(|effort| match effort {
+                AnthropicEffort::Low => UnifiedReasoningEffort::Low,
+                AnthropicEffort::Medium => UnifiedReasoningEffort::Medium,
+                AnthropicEffort::High => UnifiedReasoningEffort::High,
+                AnthropicEffort::Xhigh | AnthropicEffort::Max => UnifiedReasoningEffort::Xhigh,
+            })
+            .or_else(|| {
+                anthropic_req
+                    .thinking
+                    .as_ref()
+                    .map(|thinking| match thinking.type_ {
+                        AnthropicThinkingType::Disabled => UnifiedReasoningEffort::None,
+                        AnthropicThinkingType::Adaptive | AnthropicThinkingType::Enabled => {
+                            UnifiedReasoningEffort::High
+                        }
+                    })
+            });
         let mut messages = Vec::new();
         // Track tool call ID to name mapping for tool results
         let mut tool_id_to_name: std::collections::HashMap<String, String> =
@@ -144,6 +231,36 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                                 _ => unreachable!("Anthropic image source is adapter-validated"),
                             }
                         }
+                        Some("document") => {
+                            let source = block
+                                .get("source")
+                                .expect("Anthropic document source is adapter-validated");
+                            let mime_type = source
+                                .get("media_type")
+                                .and_then(Value::as_str)
+                                .expect("Anthropic document media type is adapter-validated")
+                                .to_string();
+                            let filename = block
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .filter(|title| !title.trim().is_empty())
+                                .map(ToString::to_string)
+                                .or_else(|| {
+                                    crate::service::transform::media::default_filename_for_mime(
+                                        &mime_type,
+                                    )
+                                    .map(ToString::to_string)
+                                });
+                            content_parts.push(UnifiedContentPart::FileData {
+                                data: source
+                                    .get("data")
+                                    .and_then(Value::as_str)
+                                    .expect("Anthropic document data is adapter-validated")
+                                    .to_string(),
+                                mime_type,
+                                filename,
+                            });
+                        }
                         Some("tool_use") if role == UnifiedRole::Assistant => {
                             if let (Some(id), Some(name), Some(input)) = (
                                 block.get("id").and_then(|v| v.as_str()),
@@ -175,11 +292,26 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                                     .map(Some)
                                     .unwrap_or(None);
 
+                                let output = unified_tool_result_output_from_value(content_val);
+                                let output = if block.get("is_error").and_then(Value::as_bool)
+                                    == Some(true)
+                                {
+                                    match output {
+                                        UnifiedToolResultOutput::Error { error } => {
+                                            UnifiedToolResultOutput::Error { error }
+                                        }
+                                        output => UnifiedToolResultOutput::Error {
+                                            error: unified_tool_result_output_to_value(&output),
+                                        },
+                                    }
+                                } else {
+                                    output
+                                };
                                 content_parts.push(UnifiedContentPart::ToolResult(
                                     UnifiedToolResult {
                                         tool_call_id: tool_use_id.to_string(),
                                         name: tool_name,
-                                        output: unified_tool_result_output_from_value(content_val),
+                                        output,
                                     },
                                 ));
                             }
@@ -214,6 +346,7 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                         name: tool.name,
                         description: tool.description,
                         parameters: tool.input_schema,
+                        strict: tool.strict,
                     },
                 })
                 .collect()
@@ -229,6 +362,8 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
             messages,
             items: Vec::new(),
             tools,
+            tool_choice,
+            parallel_tool_calls,
             stream: anthropic_req.stream.unwrap_or(false),
             temperature: anthropic_req.temperature,
             max_tokens: Some(anthropic_req.max_tokens),
@@ -237,6 +372,8 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
             seed: None,
             presence_penalty: None,
             frequency_penalty: None,
+            reasoning_effort,
+            structured_output,
             extensions: (!anthropic_extension.is_empty()).then_some(UnifiedRequestExtensions {
                 anthropic: Some(anthropic_extension),
                 ..Default::default()
@@ -337,6 +474,8 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                             UnifiedContentPart::ImageData { mime_type, data } => {
                                 content_blocks.push(build_anthropic_image_block(&mime_type, &data));
                             }
+                            UnifiedContentPart::AudioData { .. }
+                            | UnifiedContentPart::FileId { .. } => {}
                             UnifiedContentPart::FileUrl {
                                 url,
                                 mime_type,
@@ -393,11 +532,19 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                                 }));
                             }
                             UnifiedContentPart::ToolResult(result) => {
-                                content_blocks.push(json!({
+                                let (content, is_error) = match result.output {
+                                    UnifiedToolResultOutput::Error { error } => (error, Some(true)),
+                                    output => (unified_tool_result_output_to_value(&output), None),
+                                };
+                                let mut block = json!({
                                     "type": "tool_result",
                                     "tool_use_id": result.tool_call_id,
-                                    "content": result.output_value()
-                                }));
+                                    "content": content
+                                });
+                                if is_error == Some(true) {
+                                    block["is_error"] = Value::Bool(true);
+                                }
+                                content_blocks.push(block);
                             }
                         }
                     }
@@ -420,15 +567,25 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
             }
         }
 
+        let allowed_names = match unified_req.tool_choice.as_ref() {
+            Some(UnifiedToolChoice::Allowed { names, .. }) => Some(names),
+            _ => None,
+        };
         let tools = unified_req.tools.map(|ts| {
             ts.into_iter()
+                .filter(|tool| {
+                    allowed_names.is_none_or(|names| names.contains(&tool.function.name))
+                })
                 .map(|tool| AnthropicTool {
                     name: tool.function.name,
                     description: tool.function.description,
                     input_schema: tool.function.parameters,
+                    strict: tool.function.strict,
                 })
                 .collect()
         });
+        let tool_choice =
+            anthropic_tool_choice(unified_req.tool_choice, unified_req.parallel_tool_calls);
 
         AnthropicRequestPayload {
             model: unified_req.model.unwrap_or_default(),
@@ -436,12 +593,15 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
             messages,
             max_tokens: unified_req.max_tokens.unwrap_or(4096), // Anthropic requires max_tokens
             tools,
+            tool_choice,
             temperature: unified_req.temperature,
             top_p: unified_req.top_p,
             stop_sequences: unified_req.stop,
             stream: Some(unified_req.stream),
             metadata: anthropic_extension.metadata,
             top_k: anthropic_extension.top_k,
+            thinking: None,
+            output_config: None,
         }
     }
 }

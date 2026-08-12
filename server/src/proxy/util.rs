@@ -59,7 +59,7 @@ pub(super) fn parse_utility_usage_normalization(
 ) -> Option<UsageNormalization> {
     let tokens = response_body
         .get("usage")
-        .and_then(|u| u.get("total_tokens"))
+        .and_then(|u| u.get("prompt_tokens").or_else(|| u.get("total_tokens")))
         .and_then(|t| t.as_i64())
         .or_else(|| response_body.get("totalTokens").and_then(|t| t.as_i64()))
         .or_else(|| {
@@ -70,21 +70,14 @@ pub(super) fn parse_utility_usage_normalization(
                 .and_then(|it| it.as_i64())
         });
 
-    tokens.map(|t| UsageNormalization {
-        total_input_tokens: t,
-        total_output_tokens: 0,
-        input_text_tokens: t,
-        output_text_tokens: 0,
-        input_image_tokens: 0,
-        output_image_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        reasoning_tokens: 0,
-        warnings: vec![
-            "utility usage only reported aggregate token totals; normalized as input_text_tokens"
-                .to_string(),
-        ],
-    })
+    tokens
+        .filter(|tokens| (0..=i64::from(i32::MAX)).contains(tokens))
+        .map(|tokens| {
+            UsageNormalization::input_only(
+                tokens,
+                "utility usage was normalized as input_text_tokens; output tokens are not applicable",
+            )
+        })
 }
 
 pub(crate) fn determine_upstream_protocol(source: &CacheUpstreamSource) -> UpstreamProtocol {
@@ -131,8 +124,14 @@ mod tests {
             upstream_sources: vec![CacheUpstreamSource {
                 id: 2,
                 profile_type: UpstreamProfileType::GeminiOpenai,
-                endpoint: "https://example.com".to_string(),
+                base_url: "https://example.com".to_string(),
                 use_proxy: false,
+                chat_completions_enabled: Some(true),
+                chat_completions_path_override: None,
+                embeddings_enabled: Some(true),
+                embeddings_path_override: None,
+                rerank_enabled: Some(false),
+                rerank_path_override: None,
                 is_enabled: true,
                 is_default: true,
             }],
@@ -146,16 +145,31 @@ mod tests {
 
     #[test]
     fn parse_utility_usage_normalization_supports_openai_and_gemini_shapes() {
-        let openai_usage =
-            parse_utility_usage_normalization(&serde_json::json!({"usage": {"total_tokens": 4}}))
-                .unwrap();
+        let openai_usage = parse_utility_usage_normalization(&serde_json::json!({
+            "usage": {"prompt_tokens": 4, "total_tokens": 7}
+        }))
+        .unwrap();
         let gemini_usage =
             parse_utility_usage_normalization(&serde_json::json!({"totalTokens": 9})).unwrap();
 
         assert_eq!(openai_usage.total_input_tokens, 4);
         assert_eq!(openai_usage.total_output_tokens, 0);
+        assert!(!openai_usage.output_tokens_applicable);
         assert_eq!(gemini_usage.total_input_tokens, 9);
         assert_eq!(gemini_usage.total_output_tokens, 0);
+        assert!(!gemini_usage.output_tokens_applicable);
+        assert!(
+            parse_utility_usage_normalization(&serde_json::json!({
+                "usage": {"prompt_tokens": -1}
+            }))
+            .is_none()
+        );
+        assert!(
+            parse_utility_usage_normalization(&serde_json::json!({
+                "usage": {"prompt_tokens": i64::from(i32::MAX) + 1}
+            }))
+            .is_none()
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use reqwest::{
 use serde_json::{Map, Value};
 
 use crate::{
+    database::request_patch::validate_reserved_target,
     proxy::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility},
     schema::enum_def::{RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType},
     service::{
@@ -364,6 +365,14 @@ pub(crate) fn apply_request_patches(
     request_patches: &[RuntimeResolvedRequestPatch],
 ) -> Result<(), ProxyError> {
     for rule in request_patches {
+        if validate_reserved_target(rule.placement, &rule.target).is_err() {
+            return Err(patch_error(format!(
+                "{} targets reserved {:?} path '{}'",
+                rule.source_label(),
+                rule.placement,
+                rule.target
+            )));
+        }
         debug!(
             "Applying request patch {} to {:?} '{}'",
             rule.source_label(),
@@ -508,5 +517,40 @@ mod tests {
         .unwrap();
         assert_eq!(body["options"]["temperature"], serde_json::json!(0.2));
         assert!(body["options"].get("top_p").is_none());
+    }
+
+    #[test]
+    fn runtime_rejects_persisted_forbidden_targets_before_mutation() {
+        let mut body = serde_json::json!({"model": "safe-model", "messages": []});
+        let mut url = Url::parse("https://example.test?existing=safe").unwrap();
+        let mut headers = HeaderMap::new();
+
+        let forbidden_body = runtime_rule(RequestPatchOperation::Set, "/model", Some("\"other\""));
+        let error = apply_request_patches(
+            &mut body,
+            &mut url,
+            &mut headers,
+            std::slice::from_ref(&forbidden_body),
+        )
+        .expect_err("runtime must defend against a corrupted forbidden body Patch");
+        assert!(error.operator_message().contains("/model"));
+        assert_eq!(body["model"], "safe-model");
+
+        let mut forbidden_header = runtime_rule(
+            RequestPatchOperation::Set,
+            "authorization",
+            Some("\"Bearer leaked\""),
+        );
+        forbidden_header.placement = RequestPatchPlacement::Header;
+        let error = apply_request_patches(
+            &mut body,
+            &mut url,
+            &mut headers,
+            std::slice::from_ref(&forbidden_header),
+        )
+        .expect_err("runtime must defend against a corrupted credential header Patch");
+        assert!(error.operator_message().contains("authorization"));
+        assert!(!headers.contains_key("authorization"));
+        assert_eq!(url.query(), Some("existing=safe"));
     }
 }

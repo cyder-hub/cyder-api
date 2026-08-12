@@ -156,7 +156,7 @@ pub struct ProviderRuntimeItem {
     pub provider_is_enabled: bool,
     pub source_id: i64,
     pub source_profile_type: UpstreamProfileType,
-    pub source_endpoint: String,
+    pub source_base_url: String,
     pub source_use_proxy: bool,
     pub source_is_enabled: bool,
     pub source_is_default: bool,
@@ -509,7 +509,7 @@ impl MetricsService {
                     provider_is_enabled,
                     source_id: source.id,
                     source_profile_type: source.profile_type.clone(),
-                    source_endpoint: source.endpoint.clone(),
+                    source_base_url: source.base_url.clone(),
                     source_use_proxy: source.use_proxy,
                     source_is_enabled: source.is_enabled,
                     source_is_default: source.is_default,
@@ -729,7 +729,7 @@ pub(crate) fn search_matches(item: &ProviderRuntimeItem, search: &str) -> bool {
     [
         item.provider_name.as_str(),
         item.provider_key.as_str(),
-        item.source_endpoint.as_str(),
+        item.source_base_url.as_str(),
     ]
     .into_iter()
     .any(|value| normalize(value).contains(&needle))

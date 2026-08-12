@@ -1,4 +1,4 @@
-import { computed, reactive, ref, type Ref } from "vue";
+import { computed, reactive, ref, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import * as providerService from "@/services/providers";
@@ -6,46 +6,18 @@ import { confirm, toastController } from "@/services/uiFeedback";
 import type { SourceImpactAction, SourceImpactReport, UpstreamSource } from "@/services/types";
 import type { EditingProviderData, EditingProviderSource } from "../types";
 import { summarizeSourceImpact } from "./sourceImpactViewModel";
+import {
+  applySourceProfileDefaults,
+  buildSourceCreatePayload,
+  buildSourceUpdatePayload,
+  createProviderSourceDraft,
+  sourceBaseUrlMayBeEmpty,
+  type ProviderSourceDraft,
+} from "./sourceProfileContract";
 
-export const providerProfileTypes = [
-  "OPENAI",
-  "GEMINI",
-  "GEMINI_OPENAI",
-  "VERTEX",
-  "VERTEX_OPENAI",
-  "ANTHROPIC",
-  "RESPONSES",
-  "OLLAMA",
-] as const;
+export { providerProfileTypes } from "./sourceProfileContract";
 
-export interface ProviderSourceDraft {
-  profile_type: string;
-  endpoint: string;
-  use_proxy: boolean;
-  is_enabled: boolean;
-  is_default: boolean;
-}
-
-const emptyDraft = (): ProviderSourceDraft => ({
-  profile_type: "OPENAI",
-  endpoint: "",
-  use_proxy: false,
-  is_enabled: true,
-  is_default: false,
-});
-
-const mapSource = (source: UpstreamSource): EditingProviderSource => ({
-  id: source.id,
-  provider_id: source.provider_id,
-  profile_type: source.profile_type,
-  endpoint: source.endpoint,
-  use_proxy: source.use_proxy,
-  is_enabled: source.is_enabled,
-  is_default: source.is_default,
-  deleted_at: source.deleted_at,
-  created_at: source.created_at,
-  updated_at: source.updated_at,
-});
+const mapSource = (source: UpstreamSource): EditingProviderSource => ({ ...source });
 
 export function useProviderSources(editingData: Ref<EditingProviderData>) {
   const { t } = useI18n();
@@ -53,7 +25,7 @@ export function useProviderSources(editingData: Ref<EditingProviderData>) {
   const editingSourceId = ref<number | null>(null);
   const isSaving = ref(false);
   const busySourceId = ref<number | null>(null);
-  const draft = reactive<ProviderSourceDraft>(emptyDraft());
+  const draft = reactive<ProviderSourceDraft>(createProviderSourceDraft());
 
   const isEditing = computed(() => editingSourceId.value !== null);
   const editingSource = computed(() =>
@@ -139,31 +111,35 @@ export function useProviderSources(editingData: Ref<EditingProviderData>) {
   const closeDrawer = () => {
     isDrawerOpen.value = false;
     editingSourceId.value = null;
-    Object.assign(draft, emptyDraft());
+    Object.assign(draft, createProviderSourceDraft());
   };
 
   const openCreate = () => {
     editingSourceId.value = null;
-    Object.assign(draft, emptyDraft());
+    Object.assign(draft, createProviderSourceDraft());
     isDrawerOpen.value = true;
   };
 
   const openEdit = (source: EditingProviderSource) => {
     editingSourceId.value = source.id;
-    Object.assign(draft, {
-      profile_type: source.profile_type,
-      endpoint: source.endpoint,
-      use_proxy: source.use_proxy,
-      is_enabled: source.is_enabled,
-      is_default: source.is_default,
-    });
+    Object.assign(draft, createProviderSourceDraft(source));
     isDrawerOpen.value = true;
   };
 
+  watch(
+    () => draft.profile_type,
+    (profile, previous) => {
+      if (profile !== previous && editingSourceId.value === null) {
+        applySourceProfileDefaults(draft, profile);
+      }
+    },
+  );
+
   const save = async () => {
     const providerId = editingData.value.id;
-    if (!providerId || !draft.endpoint.trim()) {
-      toastController.warn(t("providerEditPage.sources.endpointRequired"));
+    if (!providerId) return;
+    if (!sourceBaseUrlMayBeEmpty(draft.profile_type) && !draft.base_url.trim()) {
+      toastController.warn(t("providerEditPage.sources.baseUrlRequired"));
       return;
     }
 
@@ -201,9 +177,7 @@ export function useProviderSources(editingData: Ref<EditingProviderData>) {
     try {
       if (editingSourceId.value === null) {
         const createdSource = await providerService.createProviderSource(providerId, {
-          profile_type: draft.profile_type,
-          endpoint: draft.endpoint.trim(),
-          use_proxy: draft.use_proxy,
+          ...buildSourceCreatePayload(draft),
           is_enabled: nextIsEnabled,
           // A newly-created Source has no stable ID until the create commits.
           // Keep it non-default so the default mutation can be previewed against
@@ -229,10 +203,8 @@ export function useProviderSources(editingData: Ref<EditingProviderData>) {
         }
       } else {
         await providerService.updateProviderSource(providerId, editingSourceId.value, {
-          endpoint: draft.endpoint.trim(),
-          use_proxy: draft.use_proxy,
+          ...buildSourceUpdatePayload(draft),
           is_enabled: nextIsEnabled,
-          is_default: draft.is_default,
         });
         await refreshSources();
       }

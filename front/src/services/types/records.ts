@@ -52,7 +52,8 @@ export interface RecordRequest extends RecordListItem {
   provider_api_key_id: number | null;
   provider_key: string | null;
   upstream_protocol: UpstreamProtocol | null;
-  source_endpoint: string | null;
+  source_base_url: string | null;
+  model_kind: import("./models").ModelKind | null;
   cost_catalog_id: number | null;
   cost_catalog_version_id: number | null;
   cost_snapshot_json: string | null;

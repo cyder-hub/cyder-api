@@ -13,7 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ProviderRuntimeItem, ProviderRuntimeLevel } from "@/services/types";
-import { formatSafeSourceEndpoint } from "@/utils/sourceEvidence";
+import { formatSafeSourceBaseUrl } from "@/utils/sourceEvidence";
 
 const props = defineProps<{
   items: ProviderRuntimeItem[];
@@ -87,9 +87,9 @@ const { t: $t } = useAppI18n();
             </div>
             <p
               class="mt-1 truncate font-mono text-[11px] text-gray-500"
-              :title="formatSafeSourceEndpoint(item.source_endpoint, '-')"
+              :title="formatSafeSourceBaseUrl(item.source_base_url, '-')"
             >
-              {{ formatSafeSourceEndpoint(item.source_endpoint, "-") }}
+              {{ formatSafeSourceBaseUrl(item.source_base_url, "-") }}
             </p>
             <p class="mt-1 font-mono text-[11px] text-gray-400">
               #{{ item.source_id }} · {{ $t("providerRuntimePage.metrics.proxy") }}:

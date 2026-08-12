@@ -153,13 +153,26 @@ export function useProviderCheck(
     const model = data.models[modelIndex];
     const key = data.provider_keys[apiKeyIndex];
     if (!model || !key) return;
+    if (model.model_kind !== "CHAT") {
+      failTarget(
+        kind,
+        kind === "model" ? modelIndex : kind === "apiKey" ? apiKeyIndex : null,
+        $t("providerEditPage.alert.sourceCheckChatOnly"),
+      );
+      return;
+    }
 
     const targetIndex = kind === "model" ? modelIndex : kind === "apiKey" ? apiKeyIndex : null;
     setTargetStatus(kind, targetIndex, "checking");
     const payload: ProviderCheckPayload = {
       ...(model.id
         ? { model_id: model.id }
-        : { model_name: model.real_model_name || model.model_name }),
+        : {
+            draft_model: {
+              model_kind: "CHAT" as const,
+              upstream_model_name: model.real_model_name || model.model_name,
+            },
+          }),
       provider_api_key_id: key.id,
     };
 
@@ -190,6 +203,17 @@ export function useProviderCheck(
     const data = editingData.value;
     if (!data?.id) {
       toastController.warn($t("providerEditPage.alert.providerNotSavedForCheck"));
+      return;
+    }
+    if (
+      kind === "model" &&
+      data.models[indexOrId]?.model_kind !== "CHAT"
+    ) {
+      failTarget(
+        kind,
+        indexOrId,
+        $t("providerEditPage.alert.sourceCheckChatOnly"),
+      );
       return;
     }
 

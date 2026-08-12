@@ -35,16 +35,24 @@ use tokio::{
 use tower::ServiceExt;
 
 use super::{
-    ExecutionStage, ResponseVisibility, create_proxy_router,
+    ExecutionStage, ResponseVisibility,
+    cancellation::ProxyCancellationContext,
+    create_proxy_router,
     logging::{RequestLogPersistedContext, RequestLogPersistedSink},
     request_context::{X_CLIENT_REQUEST_ID, X_REQUEST_ID},
 };
 use crate::{
     config::{ClientIdentityConfig, OutboundHttpConfig, ProxyRequestConfig},
+    cost::{CostSnapshot, MeterKey},
     database::{
         DbConnection, TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
+        cost::{
+            CostCatalog, CostCatalogVersion, CostComponent, NewCostCatalogPayload,
+            NewCostCatalogVersionPayload, NewCostComponentPayload,
+        },
         get_connection,
+        model::{Model, UpdateModelData},
         model_source_binding::{ModelSourceBindingInput, ModelSourceConfig, replace_for_model},
         provider::Provider,
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
@@ -53,8 +61,8 @@ use crate::{
     },
     ingress::client_identity::ClientIdentityResolver,
     schema::enum_def::{
-        Action, DownstreamProtocol, ProviderApiKeyMode, RequestPatchOperation,
-        RequestPatchPlacement, RequestStatus, UpstreamProfileType,
+        Action, DownstreamProtocol, ModelKind, ProviderApiKeyMode, RequestPatchOperation,
+        RequestPatchPlacement, RequestStatus, UpstreamProfileType, UpstreamProtocol,
     },
     service::{
         admin::provider::BootstrapProviderCommand,
@@ -191,6 +199,85 @@ pub(super) fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
             (*name, fixture)
         })
         .collect()
+}
+
+fn openai_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
+    let fixtures = fixtures();
+    let openai = fixtures
+        .iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture.clone())
+        .expect("OpenAI direct execution fixture");
+
+    fixtures
+        .into_iter()
+        .map(|(name, mut fixture)| {
+            if fixture.protocol == DownstreamProtocol::Gemini {
+                fixture.profile_type = UpstreamProfileType::Openai;
+                fixture.upstream_headers = openai.upstream_headers.clone();
+                fixture.request.upstream = openai.request.upstream.clone();
+                fixture.request.upstream["stream"] = json!(false);
+                fixture.request.upstream_path = openai.request.upstream_path.clone();
+                fixture.request.upstream_query = openai.request.upstream_query.clone();
+                fixture.non_stream.upstream_response =
+                    openai.non_stream.upstream_response.clone();
+                fixture.non_stream.downstream_response["usageMetadata"]
+                    ["promptTokensDetails"] =
+                    json!([{"modality": "TEXT", "tokenCount": fixture.usage.input}]);
+                fixture.non_stream.downstream_response["usageMetadata"]
+                    ["candidatesTokensDetails"] =
+                    json!([{"modality": "TEXT", "tokenCount": fixture.usage.output}]);
+                fixture.stream.upstream_request = openai.stream.upstream_request.clone();
+                fixture.stream.upstream_path = openai.stream.upstream_path.clone();
+                fixture.stream.upstream_query = openai.stream.upstream_query.clone();
+                fixture.stream.upstream_events = openai.stream.upstream_events.clone();
+                fixture.stream.downstream_events = vec![
+                    GoldenEvent {
+                        event: None,
+                        data: json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"baseline "}]}}]}),
+                    },
+                    GoldenEvent {
+                        event: None,
+                        data: json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"pong"}]}}]}),
+                    },
+                    GoldenEvent {
+                        event: None,
+                        data: json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+                    },
+                    GoldenEvent {
+                        event: None,
+                        data: json!({
+                            "candidates":[{"index":0}],
+                            "usageMetadata":{
+                                "promptTokenCount":11,
+                                "candidatesTokenCount":7,
+                                "totalTokenCount":18
+                            }
+                        }),
+                    },
+                ];
+                fixture.error.upstream_response = openai.error.upstream_response.clone();
+                fixture.cancellation.upstream_request =
+                    openai.cancellation.upstream_request.clone();
+                fixture.cancellation.upstream_path = openai.cancellation.upstream_path.clone();
+                fixture.cancellation.upstream_query = openai.cancellation.upstream_query.clone();
+                fixture.cancellation.first_upstream_event =
+                    openai.cancellation.first_upstream_event.clone();
+            }
+            (name, fixture)
+        })
+        .collect()
+}
+
+fn generation_evidence_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
+    let mut fixtures = openai_target_fixtures();
+    let native_gemini = self::fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .map(|(_, fixture)| fixture)
+        .expect("native Gemini direct execution fixture");
+    fixtures.push(("gemini-native", native_gemini));
+    fixtures
 }
 
 fn ollama_non_stream_response() -> Value {
@@ -362,6 +449,11 @@ enum ScriptedReply {
         content_type: String,
         first_chunk: Vec<u8>,
     },
+    HangingBody {
+        content_type: String,
+        first_chunk: Vec<u8>,
+        dropped: Arc<DropSignal>,
+    },
     Redirect {
         status: StatusCode,
         location: String,
@@ -526,6 +618,22 @@ impl TestUpstream {
                                 .body(Body::from_stream(stream))
                                 .unwrap()
                         }
+                        ScriptedReply::HangingBody {
+                            content_type,
+                            first_chunk,
+                            dropped,
+                        } => {
+                            let stream = async_stream::stream! {
+                                let _guard = ResponseBodyDropGuard(dropped);
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from(first_chunk));
+                                std::future::pending::<()>().await;
+                            };
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, content_type)
+                                .body(Body::from_stream(stream))
+                                .unwrap()
+                        }
                         ScriptedReply::Redirect { status, location } => Response::builder()
                             .status(status)
                             .header(LOCATION, location)
@@ -649,6 +757,25 @@ impl RouterFixture {
         .await
     }
 
+    async fn new_with_model_kind(
+        context: TestDbContext,
+        fixture: &DirectExecutionFixture,
+        base_url: &str,
+        model_kind: ModelKind,
+    ) -> Self {
+        Self::new_with_default_action_identity_and_kind(
+            context,
+            fixture,
+            base_url,
+            Action::Allow,
+            "kind-guard-provider",
+            "Kind Guard Provider",
+            "kind-guard-model",
+            model_kind,
+        )
+        .await
+    }
+
     async fn new_with_default_action(
         context: TestDbContext,
         fixture: &DirectExecutionFixture,
@@ -676,6 +803,30 @@ impl RouterFixture {
         provider_name_prefix: &str,
         model_name: &str,
     ) -> Self {
+        Self::new_with_default_action_identity_and_kind(
+            context,
+            fixture,
+            base_url,
+            default_action,
+            provider_key_prefix,
+            provider_name_prefix,
+            model_name,
+            ModelKind::Chat,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn new_with_default_action_identity_and_kind(
+        context: TestDbContext,
+        fixture: &DirectExecutionFixture,
+        base_url: &str,
+        default_action: Action,
+        provider_key_prefix: &str,
+        provider_name_prefix: &str,
+        model_name: &str,
+        model_kind: ModelKind,
+    ) -> Self {
         let nonce = ID_GENERATOR.generate_id();
         let endpoint = match fixture.profile_type {
             UpstreamProfileType::Gemini => format!("{base_url}/v1beta/models"),
@@ -691,14 +842,25 @@ impl RouterFixture {
                 provider_id: nonce,
                 provider_key: provider_key.clone(),
                 name: provider_name.clone(),
-                endpoint,
-                use_proxy: false,
-                profile_type: fixture.profile_type.clone(),
+                source: crate::service::admin::provider::UpstreamSourceCreateInput {
+                    profile_type: fixture.profile_type.clone(),
+                    base_url: Some(endpoint),
+                    use_proxy: false,
+                    chat_completions_enabled: None,
+                    chat_completions_path_override: None,
+                    embeddings_enabled: None,
+                    embeddings_path_override: None,
+                    rerank_enabled: None,
+                    rerank_path_override: None,
+                    is_enabled: true,
+                    is_default: true,
+                },
                 provider_api_key_mode: ProviderApiKeyMode::Queue,
                 api_key: PROVIDER_SECRET.to_string(),
                 api_key_description: Some("direct execution regression".to_string()),
                 model_name: model_name.to_string(),
                 real_model_name: Some(UPSTREAM_MODEL.to_string()),
+                model_kind,
             })
             .await
             .expect("provider fixture should bootstrap");
@@ -774,24 +936,26 @@ impl RouterFixture {
         let source = UpstreamSource::create(&NewUpstreamSource {
             id: ID_GENERATOR.generate_id(),
             provider_id: self.provider_id,
-            profile_type,
-            endpoint,
+            profile_type: profile_type.clone(),
+            base_url: endpoint,
             use_proxy: false,
             is_enabled: true,
             is_default: false,
             created_at: now,
             updated_at: now,
+            ..NewUpstreamSource::test_defaults(profile_type)
         })
         .expect("replacement Source should be created");
         UpstreamSource::update(
             self.source_id,
             self.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: None,
                 is_enabled: Some(false),
                 is_default: Some(false),
                 updated_at: now.saturating_add(1),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("original Source should be disabled");
@@ -799,11 +963,12 @@ impl RouterFixture {
             source.id,
             self.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: None,
                 is_enabled: Some(true),
                 is_default: Some(true),
                 updated_at: now.saturating_add(1),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("replacement Source should become default");
@@ -813,6 +978,120 @@ impl RouterFixture {
             .await
             .expect("Source replacement should invalidate catalog");
         source.id
+    }
+
+    async fn replace_default_openai_profile_in_place(
+        &self,
+        base_url: &str,
+        profile_type: UpstreamProfileType,
+    ) -> i64 {
+        let profile_name = match profile_type {
+            UpstreamProfileType::Openai => "OPENAI",
+            UpstreamProfileType::OpenaiCompatible => "OPENAI_COMPATIBLE",
+            UpstreamProfileType::GeminiOpenai => "GEMINI_OPENAI",
+            _ => panic!("in-place replacement is only for the unique OpenAI wire family"),
+        };
+        let endpoint = format!("{base_url}/v1");
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut connection = get_connection().expect("test database connection");
+        match &mut connection {
+            DbConnection::Sqlite(connection) => diesel::sql_query(
+                "UPDATE upstream_source SET profile_type = ?, base_url = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind::<diesel::sql_types::Text, _>(profile_name)
+            .bind::<diesel::sql_types::Text, _>(&endpoint)
+            .bind::<diesel::sql_types::BigInt, _>(now)
+            .bind::<diesel::sql_types::BigInt, _>(self.source_id)
+            .execute(connection)
+            .expect("OpenAI wire Profile should update in place"),
+            DbConnection::Postgres(_) => {
+                panic!("direct execution regression uses the isolated SQLite fixture")
+            }
+        };
+        self.app_state
+            .catalog
+            .invalidate_provider(self.provider_id, Some(&self.provider_key))
+            .await
+            .expect("in-place Source Profile replacement should invalidate catalog");
+        self.source_id
+    }
+
+    async fn update_source_operation(&self, update: UpdateUpstreamSourceData) {
+        UpstreamSource::update(self.source_id, self.provider_id, &update)
+            .expect("Source operation test state should update");
+        self.app_state
+            .catalog
+            .invalidate_provider(self.provider_id, Some(&self.provider_key))
+            .await
+            .expect("Source operation update should invalidate catalog");
+    }
+
+    async fn attach_cost_catalog(
+        &self,
+        invocation_fee_nanos: Option<i64>,
+        input_token_price_nanos: Option<i64>,
+    ) -> (i64, i64) {
+        let nonce = ID_GENERATOR.generate_id();
+        let catalog = CostCatalog::create(&NewCostCatalogPayload {
+            name: format!("direct execution cost {nonce}"),
+            description: Some("direct execution cost regression".to_string()),
+        })
+        .expect("cost catalog should create");
+        let now = chrono::Utc::now().timestamp_millis();
+        let version = CostCatalogVersion::create(&NewCostCatalogVersionPayload {
+            catalog_id: catalog.id,
+            version: format!("v-{nonce}"),
+            currency: "USD".to_string(),
+            source: Some("direct-execution".to_string()),
+            effective_from: now.saturating_sub(1_000),
+            effective_until: None,
+            is_enabled: true,
+        })
+        .expect("cost catalog version should create");
+        if let Some(flat_fee_nanos) = invocation_fee_nanos {
+            CostComponent::create(&NewCostComponentPayload {
+                catalog_version_id: version.id,
+                meter_key: "invoke.request_calls".to_string(),
+                charge_kind: "flat".to_string(),
+                unit_price_nanos: None,
+                flat_fee_nanos: Some(flat_fee_nanos),
+                tier_config_json: None,
+                match_attributes_json: None,
+                priority: 0,
+                description: Some("request fee".to_string()),
+            })
+            .expect("invocation component should create");
+        }
+        if let Some(unit_price_nanos) = input_token_price_nanos {
+            CostComponent::create(&NewCostComponentPayload {
+                catalog_version_id: version.id,
+                meter_key: "llm.input_text_tokens".to_string(),
+                charge_kind: "per_unit".to_string(),
+                unit_price_nanos: Some(unit_price_nanos),
+                flat_fee_nanos: None,
+                tier_config_json: None,
+                match_attributes_json: None,
+                priority: 0,
+                description: Some("input tokens".to_string()),
+            })
+            .expect("input token component should create");
+        }
+        Model::update(
+            self.model_id,
+            &UpdateModelData {
+                model_name: None,
+                real_model_name: None,
+                is_enabled: None,
+                cost_catalog_id: Some(Some(catalog.id)),
+            },
+        )
+        .expect("model cost catalog should update");
+        self.app_state
+            .catalog
+            .invalidate_provider(self.provider_id, Some(&self.provider_key))
+            .await
+            .expect("model cost catalog update should invalidate provider cache");
+        (catalog.id, version.id)
     }
 
     fn install_recording_persisted_sink(&self) -> Arc<RecordingPersistedSink> {
@@ -935,6 +1214,79 @@ impl RouterFixture {
         .expect("proxy router should respond")
     }
 
+    async fn send_raw_post_with_cancellation(
+        &self,
+        uri: String,
+        body: Value,
+        auth: DownstreamAuth,
+        cancellation: ProxyCancellationContext,
+    ) -> Response<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json");
+        match auth {
+            DownstreamAuth::Bearer => {
+                builder = builder.header("authorization", format!("Bearer {}", self.downstream_key))
+            }
+            DownstreamAuth::XApiKey => builder = builder.header("x-api-key", &self.downstream_key),
+            DownstreamAuth::GeminiQuery => {
+                panic!("Gemini query authentication must be included in the supplied URI")
+            }
+        }
+        let mut request = builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("cancellable downstream utility request should build");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                3004,
+            ))));
+        request.extensions_mut().insert(cancellation);
+        create_proxy_router(Arc::new(ClientIdentityResolver::new(
+            &ClientIdentityConfig::default(),
+        )))
+        .with_state(Arc::clone(&self.app_state))
+        .oneshot(request)
+        .await
+        .expect("proxy router should respond")
+    }
+
+    async fn send_models(&self, path: &str, auth: DownstreamAuth) -> Response<Body> {
+        let mut uri = path.to_string();
+        let mut builder = Request::builder().method(Method::GET);
+        match auth {
+            DownstreamAuth::Bearer => {
+                builder = builder.header("authorization", format!("Bearer {}", self.downstream_key))
+            }
+            DownstreamAuth::XApiKey => builder = builder.header("x-api-key", &self.downstream_key),
+            DownstreamAuth::GeminiQuery => {
+                let separator = if uri.contains('?') { '&' } else { '?' };
+                uri.push(separator);
+                uri.push_str("key=");
+                uri.push_str(&self.downstream_key);
+            }
+        }
+        let mut request = builder
+            .uri(uri)
+            .body(Body::empty())
+            .expect("models request should build");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                3003,
+            ))));
+        create_proxy_router(Arc::new(ClientIdentityResolver::new(
+            &ClientIdentityConfig::default(),
+        )))
+        .with_state(Arc::clone(&self.app_state))
+        .oneshot(request)
+        .await
+        .expect("proxy models router should respond")
+    }
+
     async fn send_malformed_generation_body(
         &self,
         fixture: &DirectExecutionFixture,
@@ -1003,9 +1355,9 @@ impl RouterFixture {
                 assert_eq!(log.source_id, Some(source_id));
                 assert!(log.source_profile_type_snapshot.is_some());
                 if expected == RequestStatus::Success {
-                    assert!(log.source_endpoint_snapshot.is_some());
+                    assert!(log.source_base_url_snapshot.is_some());
                 }
-                if let Some(endpoint) = log.source_endpoint_snapshot.as_deref() {
+                if let Some(endpoint) = log.source_base_url_snapshot.as_deref() {
                     assert!(!endpoint.contains('@'));
                     assert!(!endpoint.contains('?'));
                     assert!(!endpoint.contains('#'));
@@ -1370,6 +1722,23 @@ fn assert_log_common(
     assert_eq!(log.provider_id, Some(router.provider_id));
     assert_eq!(log.provider_api_key_id, Some(router.provider_api_key_id));
     assert_eq!(log.model_id, Some(router.model_id));
+    assert_eq!(log.model_kind_snapshot, Some(ModelKind::Chat));
+    assert_eq!(log.source_id, Some(router.source_id));
+    assert_eq!(
+        log.source_profile_type_snapshot,
+        Some(fixture.profile_type.clone())
+    );
+    let expected_selection_reason = match (fixture.protocol, upstream_protocol) {
+        (DownstreamProtocol::Openai, UpstreamProtocol::Openai)
+        | (DownstreamProtocol::Responses, UpstreamProtocol::Responses)
+        | (DownstreamProtocol::Anthropic, UpstreamProtocol::Anthropic)
+        | (DownstreamProtocol::Gemini, UpstreamProtocol::Gemini) => "protocol_match",
+        _ => "provider_default_transform",
+    };
+    assert_eq!(
+        log.source_selection_reason.as_deref(),
+        Some(expected_selection_reason)
+    );
     assert_eq!(
         log.provider_key_snapshot.as_deref(),
         Some(router.provider_key.as_str())
@@ -1559,10 +1928,15 @@ fn assert_native_fatal_stream_event(
 
 #[test]
 fn direct_execution_regression_fixtures_define_four_complete_protocols() {
-    let fixtures = fixtures();
+    let fixtures = openai_target_fixtures();
     assert_eq!(fixtures.len(), 4);
     for (name, fixture) in fixtures {
         validate_fixture(name, &fixture);
+        assert_eq!(
+            fixture.profile_type,
+            UpstreamProfileType::Openai,
+            "{name}: R3.16 baseline evidence must execute against OpenAI Chat Completions"
+        );
     }
 }
 
@@ -1658,6 +2032,223 @@ fn cross_protocol_shape_failure_is_rejected_before_credential_or_upstream_use() 
 }
 
 #[test]
+fn registered_request_conflicts_are_rejected_before_credential_or_upstream_use() {
+    for (name, fixture) in fixtures().into_iter().filter(|(name, _)| *name == "gemini") {
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: fixture.non_stream.upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let source_id = router
+                .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                .await;
+            let mut request = fixture.request.downstream.clone();
+            request.as_object_mut().unwrap().insert(
+                "generationConfig".to_string(),
+                json!({"thinkingConfig": {"thinkingBudget": 1024}}),
+            );
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}: conflict registry must run before credential decryption"
+            );
+            assert!(upstream.requests().await.is_empty(), "{name}");
+            router
+                .wait_for_log_for_source(source_id, RequestStatus::Error)
+                .await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn malformed_responses_reasoning_is_rejected_before_credential_or_upstream_use() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "responses")
+        .expect("responses fixture");
+    run_case(name, move |context| async move {
+        const PRIVATE_MARKER: &str = "reasoning-private-marker";
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let mut request = fixture.request.downstream.clone();
+        request["reasoning"] = json!({"effort": {"private": PRIVATE_MARKER}});
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router.send(&fixture, false, &request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("reasoning rejection response should read");
+        assert!(!String::from_utf8_lossy(&body).contains(PRIVATE_MARKER));
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        router.wait_for_log(RequestStatus::Error).await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn gemini_openai_profile_rejects_unknown_and_conflicting_chat_fields_before_credentials() {
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    for (case, extension) in [
+        (
+            "unknown",
+            json!({"payload-secret-marker": {"enabled": true}}),
+        ),
+        (
+            "reasoning-conflict",
+            json!({
+                "reasoning_effort": "low",
+                "extra_body": {
+                    "google": {"thinking_config": {"thinking_level": "low"}}
+                }
+            }),
+        ),
+    ] {
+        let fixture = fixture.clone();
+        run_case(case, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: fixture.non_stream.upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let source_id = router
+                .replace_default_openai_profile_in_place(
+                    &upstream.base_url,
+                    UpstreamProfileType::GeminiOpenai,
+                )
+                .await;
+            let mut request = fixture.request.downstream.clone();
+            request
+                .as_object_mut()
+                .expect("request must be an object")
+                .extend(
+                    extension
+                        .as_object()
+                        .expect("extension fixture must be an object")
+                        .clone(),
+                );
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("strict Profile rejection response should read");
+            assert!(
+                !String::from_utf8_lossy(&response_body).contains("payload-secret-marker"),
+                "{case}: rejected request data must not leak"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{case}: strict validation must precede credential decryption"
+            );
+            assert!(upstream.requests().await.is_empty(), "{case}");
+            router
+                .wait_for_log_for_source(source_id, RequestStatus::Error)
+                .await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn gemini_openai_profile_revalidates_patch_output_before_credentials() {
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case("gemini-openai-patch", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let source_id = router
+            .replace_default_openai_profile_in_place(
+                &upstream.base_url,
+                UpstreamProfileType::GeminiOpenai,
+            )
+            .await;
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_source_variant(
+                source_id,
+                RequestPatchVariantInput {
+                    source_id,
+                    model_id: None,
+                    suffix: None,
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/payload-secret-marker".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!({"enabled": true}))),
+                        description: Some("strict post-Patch validation".to_string()),
+                    }],
+                },
+            )
+            .await
+            .expect("unknown extension Patch should save before Profile validation");
+        router
+            .app_state
+            .catalog
+            .invalidate_models_catalog()
+            .await
+            .expect("Patch catalog should invalidate");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("strict post-Patch rejection response should read");
+        assert!(!String::from_utf8_lossy(&response_body).contains("payload-secret-marker"));
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
 fn major_capability_rejection_is_zero_call_and_precedes_credential_use() {
     let (name, fixture) = fixtures()
         .into_iter()
@@ -1674,12 +2265,13 @@ fn major_capability_rejection_is_zero_call_and_precedes_credential_use() {
             id: ID_GENERATOR.generate_id(),
             provider_id: router.provider_id,
             profile_type: UpstreamProfileType::Ollama,
-            endpoint: upstream.base_url.clone(),
+            base_url: upstream.base_url.clone(),
             use_proxy: false,
             is_enabled: true,
             is_default: false,
             created_at: 2,
             updated_at: 2,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
         })
         .expect("Ollama default Source should be created");
         let mutation_time = chrono::Utc::now().timestamp_millis();
@@ -1687,11 +2279,12 @@ fn major_capability_rejection_is_zero_call_and_precedes_credential_use() {
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: None,
                 is_enabled: Some(false),
                 is_default: Some(false),
                 updated_at: mutation_time,
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("exact OpenAI Source should be disabled");
@@ -1699,11 +2292,12 @@ fn major_capability_rejection_is_zero_call_and_precedes_credential_use() {
             ollama_source.id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: None,
                 is_enabled: Some(true),
                 is_default: Some(true),
                 updated_at: mutation_time,
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("Ollama Source should become default");
@@ -1996,7 +2590,7 @@ fn cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata() {
 }
 
 #[test]
-fn acl_rejection_precedes_invalid_provider_endpoint_preflight() {
+fn acl_rejection_precedes_model_kind_and_invalid_provider_base_url_preflight() {
     let (name, fixture) = fixtures()
         .into_iter()
         .find(|(name, _)| *name == "openai")
@@ -2007,25 +2601,30 @@ fn acl_rejection_precedes_invalid_provider_endpoint_preflight() {
             body: fixture.non_stream.upstream_response.clone(),
         })
         .await;
-        let router = RouterFixture::new_with_default_action(
+        let router = RouterFixture::new_with_default_action_identity_and_kind(
             context,
             &fixture,
             &upstream.base_url,
             Action::Deny,
+            "acl-kind-provider",
+            "ACL Kind Provider",
+            "acl-kind-model",
+            ModelKind::Embedding,
         )
         .await;
         UpstreamSource::update(
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
+                base_url: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
                 use_proxy: None,
                 is_enabled: None,
                 is_default: None,
                 updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
-        .expect("legacy invalid endpoint should be seeded directly");
+        .expect("legacy invalid base URL should be seeded directly");
         router
             .app_state
             .catalog
@@ -2092,7 +2691,6 @@ fn acl_rejection_precedes_masked_request_patch_suffix_validation() {
                         operation: RequestPatchOperation::Set,
                         value_json: Some(Some(json!(0.2))),
                         description: Some("ACL ordering regression".to_string()),
-                        confirm_dangerous_target: false,
                     }],
                 },
             )
@@ -2177,11 +2775,12 @@ fn acl_rejection_precedes_missing_proxy_preflight() {
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: Some(true),
                 is_enabled: None,
                 is_default: None,
                 updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("proxy requirement should be seeded directly");
@@ -2239,7 +2838,6 @@ fn request_patch_conflict_rejection_does_not_decrypt_provider_credential() {
                 operation: RequestPatchOperation::Set,
                 value_json: Some(Some(json!({"temperature": 0.2}))),
                 description: Some("decrypt ordering regression".to_string()),
-                confirm_dangerous_target: false,
             }],
         };
         router
@@ -2295,6 +2893,167 @@ fn request_patch_conflict_rejection_does_not_decrypt_provider_credential() {
 }
 
 #[test]
+fn invalid_final_profile_patch_is_rejected_before_credential_for_all_downstreams() {
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            const INVALID_PATCH_VALUE: &str = "invalid-final-profile-secret-marker";
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: fixture.non_stream.upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let target = if matches!(&fixture.profile_type, UpstreamProfileType::Gemini) {
+                "/contents"
+            } else {
+                "/messages"
+            };
+            router
+                .app_state
+                .admin
+                .request_patch
+                .create_source_variant(
+                    router.source_id,
+                    RequestPatchVariantInput {
+                        source_id: router.source_id,
+                        model_id: None,
+                        suffix: None,
+                        enabled: true,
+                        expose_in_models: false,
+                        rules: vec![RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Body,
+                            target: target.to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!(INVALID_PATCH_VALUE))),
+                            description: Some("final Profile validation regression".to_string()),
+                        }],
+                    },
+                )
+                .await
+                .expect("shape-changing Patch should be valid before Profile materialization");
+            router
+                .app_state
+                .catalog
+                .invalidate_models_catalog()
+                .await
+                .expect("Patch catalog should invalidate");
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{name}"
+            );
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("final Profile rejection response should read");
+            assert!(
+                !String::from_utf8_lossy(&response_body).contains(INVALID_PATCH_VALUE),
+                "{name}: rejected Patch values must not leak downstream"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}: final Profile validation must precede credential decryption"
+            );
+            assert!(upstream.requests().await.is_empty(), "{name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            let final_message = log
+                .final_error_message
+                .as_deref()
+                .expect("operator log should preserve the safe validation path");
+            assert!(final_message.contains(target), "{name}: {final_message}");
+            assert!(!final_message.contains(INVALID_PATCH_VALUE), "{name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn utility_execution_does_not_resolve_or_apply_request_patch() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: json!({
+                "object": "list",
+                "data": [],
+                "model": UPSTREAM_MODEL,
+                "usage": {"prompt_tokens": 1, "total_tokens": 1}
+            }),
+        })
+        .await;
+        let router = RouterFixture::new_with_model_kind(
+            context,
+            &fixture,
+            &upstream.base_url,
+            ModelKind::Embedding,
+        )
+        .await;
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_source_variant(
+                router.source_id,
+                RequestPatchVariantInput {
+                    source_id: router.source_id,
+                    model_id: None,
+                    suffix: None,
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/metadata/from_patch".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!(true))),
+                        description: Some("utility scope regression".to_string()),
+                    }],
+                },
+            )
+            .await
+            .expect("generation Patch should persist independently of model kind");
+        router
+            .app_state
+            .catalog
+            .invalidate_models_catalog()
+            .await
+            .expect("Patch catalog should invalidate");
+
+        let response = router
+            .send_raw_post(
+                "/openai/v1/embeddings".to_string(),
+                json!({"model": router.requested_model(), "input": "hello"}),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("utility response should be consumed");
+        let requests = upstream.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/embeddings");
+        let upstream_body: Value = serde_json::from_slice(&requests[0].body)
+            .expect("captured utility request should contain JSON");
+        assert!(upstream_body.get("metadata").is_none());
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
 fn request_patch_query_value_reaches_upstream_but_not_request_log() {
     let (name, fixture) = fixtures()
         .into_iter()
@@ -2302,7 +3061,6 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
         .expect("openai fixture");
     run_case(name, move |context| async move {
         const PATCH_QUERY_SECRET: &str = "patch-query-secret-marker";
-        const PATCH_AUTH_SECRET: &str = "patch-auth-overwrite-marker";
         let upstream = TestUpstream::spawn(ScriptedReply::Json {
             status: StatusCode::OK,
             body: fixture.non_stream.upstream_response.clone(),
@@ -2321,24 +3079,13 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
                     suffix: Some("tool-use-v2".to_string()),
                     enabled: true,
                     expose_in_models: false,
-                    rules: vec![
-                        RequestPatchRuleInput {
-                            placement: RequestPatchPlacement::Query,
-                            target: "diagnostic".to_string(),
-                            operation: RequestPatchOperation::Set,
-                            value_json: Some(Some(json!(PATCH_QUERY_SECRET))),
-                            description: Some("transient query regression".to_string()),
-                            confirm_dangerous_target: false,
-                        },
-                        RequestPatchRuleInput {
-                            placement: RequestPatchPlacement::Header,
-                            target: "authorization".to_string(),
-                            operation: RequestPatchOperation::Set,
-                            value_json: Some(Some(json!(PATCH_AUTH_SECRET))),
-                            description: Some("credential ordering regression".to_string()),
-                            confirm_dangerous_target: true,
-                        },
-                    ],
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Query,
+                        target: "diagnostic".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!(PATCH_QUERY_SECRET))),
+                        description: Some("transient query regression".to_string()),
+                    }],
                 },
             )
             .await
@@ -2374,14 +3121,7 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
                 .get("authorization")
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer provider-baseline-secret"),
-            "provider credential must be applied after Header Patch"
-        );
-        assert!(
-            captured[0]
-                .headers
-                .get("authorization")
-                .is_none_or(|value| value != PATCH_AUTH_SECRET),
-            "Header Patch must not replace the provider credential"
+            "provider credential must remain platform-owned"
         );
 
         let log = router.wait_for_log(RequestStatus::Success).await;
@@ -2398,7 +3138,6 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
         let persisted = serde_json::to_string(&log).expect("request log should serialize");
         for secret in [
             PATCH_QUERY_SECRET,
-            PATCH_AUTH_SECRET,
             PROVIDER_SECRET,
             router.downstream_key.as_str(),
         ] {
@@ -2414,7 +3153,7 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
 
 #[test]
 fn direct_execution_regression_non_stream_request_response_usage_and_log_golden() {
-    for (name, fixture) in fixtures() {
+    for (name, fixture) in generation_evidence_fixtures() {
         run_case(name, move |context| async move {
             let upstream = TestUpstream::spawn(ScriptedReply::Json {
                 status: StatusCode::OK,
@@ -2532,7 +3271,7 @@ fn persisted_log_sink_receives_the_canonical_request_id() {
 
 #[test]
 fn four_public_downstream_generation_paths_call_upstream_at_most_once() {
-    for (name, fixture) in fixtures() {
+    for (name, fixture) in openai_target_fixtures() {
         run_case(name, move |context| async move {
             let upstream = TestUpstream::spawn(ScriptedReply::Json {
                 status: StatusCode::OK,
@@ -2595,12 +3334,13 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                 id: ID_GENERATOR.generate_id(),
                 provider_id: router.provider_id,
                 profile_type: alternate_profile.clone(),
-                endpoint: alternate_endpoint,
+                base_url: alternate_endpoint,
                 use_proxy: false,
                 is_enabled: true,
                 is_default: false,
                 created_at: 1,
                 updated_at: 1,
+                ..NewUpstreamSource::test_defaults(alternate_profile)
             })
             .expect("DeepSeek alternate Source should be created");
             router
@@ -2642,11 +3382,12 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                 router.source_id,
                 router.provider_id,
                 &UpdateUpstreamSourceData {
-                    endpoint: None,
+                    base_url: None,
                     use_proxy: None,
                     is_enabled: Some(false),
                     is_default: Some(false),
                     updated_at: mutation_time,
+                    ..UpdateUpstreamSourceData::test_defaults()
                 },
             )
             .expect("the initial Source should be disabled");
@@ -2654,11 +3395,12 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                 alternate_source.id,
                 router.provider_id,
                 &UpdateUpstreamSourceData {
-                    endpoint: None,
+                    base_url: None,
                     use_proxy: None,
                     is_enabled: Some(true),
                     is_default: Some(true),
                     updated_at: mutation_time,
+                    ..UpdateUpstreamSourceData::test_defaults()
                 },
             )
             .expect("the alternate Source should become default");
@@ -2783,11 +3525,12 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: None,
                 is_enabled: Some(false),
                 is_default: Some(false),
                 updated_at: mutation_time,
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("exact Source should be disabled");
@@ -2795,12 +3538,13 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
             id: ID_GENERATOR.generate_id(),
             provider_id: router.provider_id,
             profile_type: UpstreamProfileType::Ollama,
-            endpoint: upstream.base_url.clone(),
+            base_url: upstream.base_url.clone(),
             use_proxy: false,
             is_enabled: true,
             is_default: true,
             created_at: mutation_time,
             updated_at: mutation_time,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
         })
         .expect("default fallback Source should be created");
         router
@@ -2878,12 +3622,13 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
             id: ID_GENERATOR.generate_id(),
             provider_id: router.provider_id,
             profile_type: UpstreamProfileType::Ollama,
-            endpoint: upstream.base_url.clone(),
+            base_url: upstream.base_url.clone(),
             use_proxy: false,
             is_enabled: true,
             is_default: false,
             created_at: mutation_time,
             updated_at: mutation_time,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
         })
         .expect("explicit-scope alternate Source should be created");
 
@@ -2948,11 +3693,12 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
             alternate_source.id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: None,
                 is_enabled: Some(false),
                 is_default: None,
                 updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("model default Source should be disabled");
@@ -3009,12 +3755,13 @@ fn direct_execution_model_default_selection_reason_is_persisted_after_flush() {
             id: ID_GENERATOR.generate_id(),
             provider_id: router.provider_id,
             profile_type: UpstreamProfileType::Ollama,
-            endpoint: upstream.base_url.clone(),
+            base_url: upstream.base_url.clone(),
             use_proxy: false,
             is_enabled: true,
             is_default: false,
             created_at: 1,
             updated_at: 1,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
         })
         .expect("model default Source should be created");
         replace_for_model(
@@ -3070,7 +3817,13 @@ fn direct_execution_openai_utility_exact_source_issues_one_call() {
             }),
         })
         .await;
-        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let router = RouterFixture::new_with_model_kind(
+            context,
+            &fixture,
+            &upstream.base_url,
+            ModelKind::Embedding,
+        )
+        .await;
         let response = router
             .send_raw_post(
                 "/openai/v1/embeddings".to_string(),
@@ -3087,6 +3840,817 @@ fn direct_execution_openai_utility_exact_source_issues_one_call() {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].path, "/v1/embeddings");
         router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn embeddings_execute_once_for_each_openai_wire_profile_and_preserve_the_response() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    for profile_type in [
+        UpstreamProfileType::Openai,
+        UpstreamProfileType::OpenaiCompatible,
+        UpstreamProfileType::GeminiOpenai,
+    ] {
+        let case_name = format!("embeddings-profile-{profile_type:?}");
+        let fixture = fixture.clone();
+        run_case(&case_name, move |context| async move {
+            let upstream_response =
+                br#"{ "object":"list", "data":[], "usage":{"prompt_tokens":6,"total_tokens":6} }"#
+                    .to_vec();
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json; charset=utf-8".to_string()),
+                content_encoding: None,
+                body: upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new_with_model_kind(
+                context,
+                &fixture,
+                &upstream.base_url,
+                ModelKind::Embedding,
+            )
+            .await;
+            if profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_openai_profile_in_place(&upstream.base_url, profile_type)
+                    .await;
+            }
+            let (catalog_id, catalog_version_id) =
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+            let request = match profile_type {
+                UpstreamProfileType::Openai => json!({
+                    "model": router.requested_model(),
+                    "input": [[1, 2], [3, 4]],
+                    "encoding_format": "base64",
+                    "dimensions": 256,
+                    "user": "direct-regression",
+                    "future_extension": {"preserve": true}
+                }),
+                UpstreamProfileType::OpenaiCompatible => json!({
+                    "model": router.requested_model(),
+                    "input": ["hello", "world"],
+                    "encoding_format": {"vendor": "private"},
+                    "dimensions": "provider-default",
+                    "vendor_extension": [1, 2, 3]
+                }),
+                UpstreamProfileType::GeminiOpenai => json!({
+                    "model": router.requested_model(),
+                    "input": "hello"
+                }),
+                _ => unreachable!("the test enumerates OpenAI-wire Profiles"),
+            };
+
+            let response = router
+                .send_raw_post(
+                    "/openai/v1/embeddings".to_string(),
+                    request.clone(),
+                    DownstreamAuth::Bearer,
+                )
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{profile_type:?}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("application/json; charset=utf-8")
+            );
+            let downstream_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("embeddings response should be readable");
+            assert_eq!(downstream_body.as_ref(), upstream_response.as_slice());
+
+            let requests = upstream.requests().await;
+            assert_eq!(requests.len(), 1, "{profile_type:?}");
+            assert_eq!(requests[0].method, Method::POST);
+            assert_eq!(requests[0].path, "/v1/embeddings");
+            let upstream_body: Value = serde_json::from_slice(&requests[0].body)
+                .expect("embeddings upstream request should be JSON");
+            assert_eq!(upstream_body["model"], UPSTREAM_MODEL);
+            for (field, value) in request
+                .as_object()
+                .expect("test request should be an object")
+            {
+                if field != "model" {
+                    assert_eq!(upstream_body.get(field), Some(value), "{field}");
+                }
+            }
+
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.model_kind_snapshot, Some(ModelKind::Embedding));
+            assert_eq!(log.source_profile_type_snapshot, Some(profile_type));
+            assert_eq!(log.total_input_tokens, Some(6));
+            assert_eq!(log.total_output_tokens, None);
+            assert_eq!(log.total_tokens, Some(6));
+            assert_eq!(log.estimated_cost_nanos, Some(112));
+            assert_eq!(log.cost_catalog_id, Some(catalog_id));
+            assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+            let snapshot: CostSnapshot = serde_json::from_str(
+                log.cost_snapshot_json
+                    .as_deref()
+                    .expect("embedding cost snapshot should persist"),
+            )
+            .expect("embedding cost snapshot should parse");
+            assert_eq!(snapshot.total_cost_nanos, 112);
+            assert_eq!(snapshot.unmatched_items, Vec::<String>::new());
+            assert_eq!(snapshot.detail_lines.len(), 2);
+            assert_eq!(
+                snapshot
+                    .detail_lines
+                    .iter()
+                    .map(|line| (line.meter_key, line.quantity, line.amount_nanos))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (MeterKey::LlmInputTextTokens, 6, 12),
+                    (MeterKey::InvokeRequestCalls, 1, 100),
+                ]
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn embeddings_without_usage_bill_only_the_successful_invocation_without_estimating_tokens() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case("embeddings-missing-usage-cost", move |context| async move {
+        let upstream = TestUpstream::spawn_json(
+            StatusCode::OK,
+            json!({"object": "list", "data": [], "model": UPSTREAM_MODEL}),
+        )
+        .await;
+        let router = RouterFixture::new_with_model_kind(
+            context,
+            &fixture,
+            &upstream.base_url,
+            ModelKind::Embedding,
+        )
+        .await;
+        let (catalog_id, catalog_version_id) = router.attach_cost_catalog(Some(100), Some(2)).await;
+
+        let response = router
+            .send_raw_post(
+                "/openai/v1/embeddings".to_string(),
+                json!({
+                    "model": router.requested_model(),
+                    "input": "a deliberately non-empty request body that must never be estimated"
+                }),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("embedding response should be readable");
+        assert_eq!(upstream.requests().await.len(), 1);
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.total_input_tokens, None);
+        assert_eq!(log.total_output_tokens, None);
+        assert_eq!(log.total_tokens, None);
+        assert_eq!(log.estimated_cost_nanos, Some(100));
+        assert_eq!(log.cost_catalog_id, Some(catalog_id));
+        assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+        let snapshot: CostSnapshot = serde_json::from_str(
+            log.cost_snapshot_json
+                .as_deref()
+                .expect("request-fee-only snapshot should persist"),
+        )
+        .expect("request-fee-only snapshot should parse");
+        assert_eq!(snapshot.total_cost_nanos, 100);
+        assert_eq!(snapshot.detail_lines.len(), 1);
+        assert_eq!(
+            snapshot.detail_lines[0].meter_key,
+            MeterKey::InvokeRequestCalls
+        );
+        assert_eq!(snapshot.detail_lines[0].quantity, 1);
+        assert_eq!(snapshot.unmatched_items, Vec::<String>::new());
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn chat_without_usage_records_an_unmatched_invocation_when_the_catalog_has_no_component() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case(
+        "chat-missing-usage-unmatched-invocation",
+        move |context| async move {
+            let mut upstream_response = fixture.non_stream.upstream_response.clone();
+            upstream_response
+                .as_object_mut()
+                .expect("OpenAI response fixture should be an object")
+                .remove("usage");
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let (catalog_id, catalog_version_id) = router.attach_cost_catalog(None, None).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("chat response should be readable");
+            assert_eq!(upstream.requests().await.len(), 1);
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_input_tokens, None);
+            assert_eq!(log.total_output_tokens, None);
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, Some(0));
+            assert_eq!(log.cost_catalog_id, Some(catalog_id));
+            assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+            let snapshot: CostSnapshot = serde_json::from_str(
+                log.cost_snapshot_json
+                    .as_deref()
+                    .expect("unmatched invocation snapshot should persist"),
+            )
+            .expect("unmatched invocation snapshot should parse");
+            assert!(snapshot.detail_lines.is_empty());
+            assert_eq!(
+                snapshot.unmatched_items,
+                vec![MeterKey::InvokeRequestCalls.to_string()]
+            );
+            assert!(snapshot.warnings.is_empty());
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn invalid_embeddings_requests_are_rejected_before_credentials_and_network() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    for (profile_type, invalid_request) in [
+        (
+            UpstreamProfileType::Openai,
+            json!({
+                "input": "hello",
+                "encoding_format": "private-payload-marker"
+            }),
+        ),
+        (
+            UpstreamProfileType::OpenaiCompatible,
+            json!({"input": [1, "private-payload-marker"]}),
+        ),
+        (
+            UpstreamProfileType::GeminiOpenai,
+            json!({
+                "input": "hello",
+                "private-payload-marker": {"secret": true}
+            }),
+        ),
+    ] {
+        let case_name = format!("invalid-embeddings-{profile_type:?}");
+        let fixture = fixture.clone();
+        run_case(&case_name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"unexpected": true})).await;
+            let router = RouterFixture::new_with_model_kind(
+                context,
+                &fixture,
+                &upstream.base_url,
+                ModelKind::Embedding,
+            )
+            .await;
+            if profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_openai_profile_in_place(&upstream.base_url, profile_type)
+                    .await;
+            }
+            let mut invalid_request = invalid_request;
+            invalid_request["model"] = json!(router.requested_model());
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send_raw_post(
+                    "/openai/v1/embeddings".to_string(),
+                    invalid_request,
+                    DownstreamAuth::Bearer,
+                )
+                .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{profile_type:?}"
+            );
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("embeddings rejection should be readable");
+            assert!(!String::from_utf8_lossy(&response_body).contains("private-payload-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error")
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn embeddings_upstream_errors_are_single_call_and_release_the_lease() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case("embeddings-upstream-error", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: br#"{"error":{"message":"embedding rate limit"}}"#.to_vec(),
+        })
+        .await;
+        let router = RouterFixture::new_with_model_kind(
+            context,
+            &fixture,
+            &upstream.base_url,
+            ModelKind::Embedding,
+        )
+        .await;
+
+        let response = router
+            .send_raw_post(
+                "/openai/v1/embeddings".to_string(),
+                json!({"model": router.requested_model(), "input": "hello"}),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("embeddings error response should be readable");
+        assert_eq!(upstream.requests().await.len(), 1);
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.upstream_http_status, Some(429));
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn embeddings_cancellation_closes_the_upstream_and_logs_one_terminal_request() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case("embeddings-cancellation", move |context| async move {
+        let dropped = Arc::new(DropSignal::default());
+        let upstream = TestUpstream::spawn(ScriptedReply::HangingBody {
+            content_type: "application/json".to_string(),
+            first_chunk: br#"{"object":"list","data":["#.to_vec(),
+            dropped: Arc::clone(&dropped),
+        })
+        .await;
+        let router = RouterFixture::new_with_model_kind(
+            context,
+            &fixture,
+            &upstream.base_url,
+            ModelKind::Embedding,
+        )
+        .await;
+        let cancellation = ProxyCancellationContext::new();
+        let cancellation_trigger = cancellation.clone();
+        let captured = Arc::clone(&upstream.captured);
+        let cancel_task = tokio::spawn(async move {
+            let deadline = Instant::now() + WAIT_TIMEOUT;
+            loop {
+                if !captured.lock().await.is_empty() {
+                    cancellation_trigger.cancel_now("embedding client disconnected");
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "embeddings request should reach upstream before cancellation"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let response = timeout(
+            WAIT_TIMEOUT,
+            router.send_raw_post_with_cancellation(
+                "/openai/v1/embeddings".to_string(),
+                json!({"model": router.requested_model(), "input": "hello"}),
+                DownstreamAuth::Bearer,
+                cancellation,
+            ),
+        )
+        .await
+        .expect("cancelled embeddings request should finish");
+        cancel_task
+            .await
+            .expect("embeddings cancellation trigger should join");
+
+        assert_eq!(response.status().as_u16(), 499);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("cancellation response should be readable");
+        dropped.wait().await;
+        assert_eq!(upstream.requests().await.len(), 1);
+        let log = router.wait_for_log(RequestStatus::Cancelled).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("client_cancelled_error")
+        );
+        assert_eq!(log.upstream_http_status, Some(200));
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn compatible_rerank_is_a_single_call_transparent_transport_without_private_usage_parsing() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case("compatible-rerank-success", move |context| async move {
+        let upstream_response = br#"{ "results":[{"index":0,"score":0.98}], "meta":{"tokens":{"input_tokens":777}}, "vendor":"opaque" }"#.to_vec();
+        let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+            status: StatusCode::CREATED,
+            content_type: Some("application/vnd.rerank+json; version=2".to_string()),
+            content_encoding: None,
+            body: upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new_with_model_kind(
+            context,
+            &fixture,
+            &upstream.base_url,
+            ModelKind::Rerank,
+        )
+        .await;
+        router
+            .replace_default_openai_profile_in_place(
+                &upstream.base_url,
+                UpstreamProfileType::OpenaiCompatible,
+            )
+            .await;
+        router
+            .update_source_operation(UpdateUpstreamSourceData {
+                rerank_enabled: Some(true),
+                rerank_path_override: Some(Some("vendor/v2/rank".to_string())),
+                updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
+            })
+            .await;
+        let (catalog_id, catalog_version_id) = router.attach_cost_catalog(Some(37), Some(2)).await;
+        let request = json!({
+            "model": router.requested_model(),
+            "query": {"vendor_query": ["hello"]},
+            "documents": "provider-defined-document-envelope",
+            "top_n": "provider-default",
+            "return_documents": {"opaque": true},
+            "vendor_extension": [1, false, null]
+        });
+
+        let response = router
+            .send_raw_post(
+                "/openai/v1/rerank".to_string(),
+                request.clone(),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/vnd.rerank+json")
+        );
+        let downstream_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("rerank response should be readable");
+        assert_eq!(downstream_body.as_ref(), upstream_response.as_slice());
+
+        let requests = upstream.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[0].path, "/v1/vendor/v2/rank");
+        let upstream_body: Value = serde_json::from_slice(&requests[0].body)
+            .expect("rerank upstream request should be JSON");
+        assert_eq!(upstream_body["model"], UPSTREAM_MODEL);
+        for (field, value) in request
+            .as_object()
+            .expect("rerank test request should be an object")
+        {
+            if field != "model" {
+                assert_eq!(upstream_body.get(field), Some(value), "{field}");
+            }
+        }
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.model_kind_snapshot, Some(ModelKind::Rerank));
+        assert_eq!(
+            log.source_profile_type_snapshot,
+            Some(UpstreamProfileType::OpenaiCompatible)
+        );
+        assert_eq!(log.total_input_tokens, None);
+        assert_eq!(log.total_output_tokens, None);
+        assert_eq!(log.total_tokens, None);
+        assert_eq!(log.estimated_cost_nanos, Some(37));
+        assert_eq!(log.cost_catalog_id, Some(catalog_id));
+        assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+        let snapshot: CostSnapshot = serde_json::from_str(
+            log.cost_snapshot_json
+                .as_deref()
+                .expect("rerank invocation snapshot should persist"),
+        )
+        .expect("rerank invocation snapshot should parse");
+        assert_eq!(snapshot.total_cost_nanos, 37);
+        assert_eq!(snapshot.detail_lines.len(), 1);
+        assert_eq!(
+            snapshot.detail_lines[0].meter_key,
+            MeterKey::InvokeRequestCalls
+        );
+        assert_eq!(snapshot.detail_lines[0].quantity, 1);
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn rerank_requires_an_enabled_compatible_source_before_credential_decryption() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    for profile_type in [
+        UpstreamProfileType::Openai,
+        UpstreamProfileType::GeminiOpenai,
+        UpstreamProfileType::OpenaiCompatible,
+    ] {
+        let case_name = format!("rerank-profile-guard-{profile_type:?}");
+        let fixture = fixture.clone();
+        run_case(&case_name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"unexpected": true})).await;
+            let router = RouterFixture::new_with_model_kind(
+                context,
+                &fixture,
+                &upstream.base_url,
+                ModelKind::Rerank,
+            )
+            .await;
+            if profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_openai_profile_in_place(&upstream.base_url, profile_type)
+                    .await;
+            }
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send_raw_post(
+                    "/openai/v1/rerank".to_string(),
+                    json!({
+                        "model": router.requested_model(),
+                        "query": "hello",
+                        "documents": ["world"]
+                    }),
+                    DownstreamAuth::Bearer,
+                )
+                .await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{profile_type:?}"
+            );
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("unsupported_capability_error")
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn compatible_rerank_errors_and_success_body_limits_are_bounded_single_calls() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    for (case_name, upstream_status, upstream_body, expected_status, expected_code) in [
+        (
+            "rerank-upstream-error",
+            StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"error":{"message":"rerank unavailable"}}"#.to_vec(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_service_error",
+        ),
+        (
+            "rerank-success-body-limit",
+            StatusCode::OK,
+            vec![b'x'; 1_048_577],
+            StatusCode::BAD_GATEWAY,
+            "upstream_response_error",
+        ),
+    ] {
+        let fixture = fixture.clone();
+        run_case(case_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: upstream_status,
+                content_type: Some("application/vnd.rerank+json".to_string()),
+                content_encoding: None,
+                body: upstream_body,
+            })
+            .await;
+            let mut router = RouterFixture::new_with_model_kind(
+                context.clone(),
+                &fixture,
+                &upstream.base_url,
+                ModelKind::Rerank,
+            )
+            .await;
+            router
+                .replace_default_openai_profile_in_place(
+                    &upstream.base_url,
+                    UpstreamProfileType::OpenaiCompatible,
+                )
+                .await;
+            router
+                .update_source_operation(UpdateUpstreamSourceData {
+                    rerank_enabled: Some(true),
+                    updated_at: chrono::Utc::now().timestamp_millis(),
+                    ..UpdateUpstreamSourceData::test_defaults()
+                })
+                .await;
+            let (catalog_id, _catalog_version_id) =
+                router.attach_cost_catalog(Some(37), Some(2)).await;
+            if upstream_status.is_success() {
+                router
+                    .replace_proxy_request_config(context, one_mib_non_stream_proxy_config(65_536))
+                    .await;
+            }
+
+            let response = router
+                .send_raw_post(
+                    "/openai/v1/rerank".to_string(),
+                    json!({
+                        "model": router.requested_model(),
+                        "query": "hello",
+                        "documents": ["world"]
+                    }),
+                    DownstreamAuth::Bearer,
+                )
+                .await;
+
+            assert_eq!(response.status(), expected_status, "{case_name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("rerank failure response should be readable");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.final_error_code.as_deref(), Some(expected_code));
+            assert_eq!(
+                log.upstream_http_status,
+                Some(i32::from(upstream_status.as_u16()))
+            );
+            assert_eq!(log.cost_catalog_id, Some(catalog_id));
+            assert_eq!(log.estimated_cost_nanos, None);
+            assert_eq!(log.cost_catalog_version_id, None);
+            assert_eq!(log.cost_snapshot_json, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn compatible_rerank_cancellation_closes_the_upstream_and_releases_resources() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case("rerank-cancellation", move |context| async move {
+        let dropped = Arc::new(DropSignal::default());
+        let upstream = TestUpstream::spawn(ScriptedReply::HangingBody {
+            content_type: "application/vnd.rerank+json".to_string(),
+            first_chunk: br#"{"results":["#.to_vec(),
+            dropped: Arc::clone(&dropped),
+        })
+        .await;
+        let router = RouterFixture::new_with_model_kind(
+            context,
+            &fixture,
+            &upstream.base_url,
+            ModelKind::Rerank,
+        )
+        .await;
+        router
+            .replace_default_openai_profile_in_place(
+                &upstream.base_url,
+                UpstreamProfileType::OpenaiCompatible,
+            )
+            .await;
+        router
+            .update_source_operation(UpdateUpstreamSourceData {
+                rerank_enabled: Some(true),
+                updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
+            })
+            .await;
+        let (catalog_id, _catalog_version_id) = router.attach_cost_catalog(Some(37), Some(2)).await;
+        let cancellation = ProxyCancellationContext::new();
+        let cancellation_trigger = cancellation.clone();
+        let captured = Arc::clone(&upstream.captured);
+        let cancel_task = tokio::spawn(async move {
+            let deadline = Instant::now() + WAIT_TIMEOUT;
+            loop {
+                if !captured.lock().await.is_empty() {
+                    cancellation_trigger.cancel_now("rerank client disconnected");
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "rerank request should reach upstream before cancellation"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let response = timeout(
+            WAIT_TIMEOUT,
+            router.send_raw_post_with_cancellation(
+                "/openai/v1/rerank".to_string(),
+                json!({
+                    "model": router.requested_model(),
+                    "query": "hello",
+                    "documents": ["world"]
+                }),
+                DownstreamAuth::Bearer,
+                cancellation,
+            ),
+        )
+        .await
+        .expect("cancelled rerank request should finish");
+        cancel_task
+            .await
+            .expect("rerank cancellation trigger should join");
+
+        assert_eq!(response.status().as_u16(), 499);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("rerank cancellation response should be readable");
+        dropped.wait().await;
+        assert_eq!(upstream.requests().await.len(), 1);
+        let log = router.wait_for_log(RequestStatus::Cancelled).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("client_cancelled_error")
+        );
+        assert_eq!(log.cost_catalog_id, Some(catalog_id));
+        assert_eq!(log.estimated_cost_nanos, None);
+        assert_eq!(log.cost_catalog_version_id, None);
+        assert_eq!(log.cost_snapshot_json, None);
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
         upstream.shutdown().await;
     });
 }
@@ -3131,7 +4695,7 @@ fn direct_execution_client_identity_http_persists_normalized_forwarded_ip() {
 
 #[test]
 fn direct_execution_regression_stream_events_usage_and_single_call_golden() {
-    for (name, fixture) in fixtures() {
+    for (name, fixture) in generation_evidence_fixtures() {
         run_case(name, move |context| async move {
             let upstream = TestUpstream::spawn(ScriptedReply::Sse {
                 events: fixture.stream.upstream_events.clone(),
@@ -3183,6 +4747,822 @@ fn direct_execution_regression_stream_events_usage_and_single_call_golden() {
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn all_public_downstream_reasoning_controls_reach_the_openai_target() {
+    let openai_response = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture.non_stream.upstream_response)
+        .expect("openai response fixture");
+
+    for (name, fixture) in fixtures() {
+        let upstream_response = openai_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: upstream_response,
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await;
+            }
+
+            let mut request = fixture.request.downstream.clone();
+            let expected_effort = match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["reasoning_effort"] = json!("medium");
+                    "medium"
+                }
+                DownstreamProtocol::Responses => {
+                    request["reasoning"] = json!({
+                        "effort": "medium",
+                        "summary": "detailed"
+                    });
+                    "medium"
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["thinking"] = json!({
+                        "type": "enabled",
+                        "budget_tokens": 1024
+                    });
+                    "high"
+                }
+                DownstreamProtocol::Gemini => {
+                    request["generationConfig"]["thinkingConfig"] = json!({
+                        "thinkingLevel": "medium",
+                        "includeThoughts": true
+                    });
+                    "medium"
+                }
+            };
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("reasoning response should complete");
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("OpenAI target request should be JSON");
+            assert_eq!(
+                body.get("reasoning_effort"),
+                Some(&json!(expected_effort)),
+                "{name}"
+            );
+            let serialized = serde_json::to_string(&body).expect("JSON should serialize");
+            assert!(!serialized.contains("summary"), "{name}");
+            assert!(!serialized.contains("display"), "{name}");
+            assert!(!serialized.contains("includeThoughts"), "{name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn gemini_stream_preserves_openai_reasoning_as_native_thought_parts() {
+    let mut upstream_events = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture.stream.upstream_events)
+        .expect("OpenAI stream fixture");
+    upstream_events.insert(
+        0,
+        GoldenEvent {
+            event: None,
+            data: json!({
+                "id": "chatcmpl-reasoning",
+                "object": "chat.completion.chunk",
+                "created": 1700000000,
+                "model": "baseline-upstream-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning_content": "considering the answer"
+                    },
+                    "finish_reason": null
+                }]
+            }),
+        },
+    );
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .expect("Gemini fixture");
+
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: upstream_events,
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let source_id = router
+            .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+            .await;
+
+        let response = router
+            .send(&fixture, true, &fixture.stream.downstream_request)
+            .await;
+
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Gemini reasoning stream should complete");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Gemini reasoning stream body={}",
+            String::from_utf8_lossy(&body)
+        );
+        let events = parse_downstream_events(DownstreamProtocol::Gemini, &body);
+        assert!(events.iter().any(|event| {
+            event.data.pointer("/candidates/0/content/parts/0/text")
+                == Some(&json!("considering the answer"))
+                && event.data.pointer("/candidates/0/content/parts/0/thought") == Some(&json!(true))
+        }));
+        assert!(events.iter().any(|event| {
+            event.data.pointer("/candidates/0/content/parts/0/text") == Some(&json!("baseline "))
+        }));
+        router
+            .wait_for_log_for_source(source_id, RequestStatus::Success)
+            .await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn all_public_downstream_multimodal_inputs_reach_the_openai_target() {
+    let openai_response = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture.non_stream.upstream_response)
+        .expect("openai response fixture");
+
+    for (name, fixture) in fixtures() {
+        let upstream_response = openai_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: upstream_response,
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await;
+            }
+
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["messages"] = json!([{
+                        "role": "user",
+                        "content": [
+                            {"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ==","detail":"high"}},
+                            {"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}},
+                            {"type":"file","file":{"filename":"report.pdf","file_data":"JVBERi0="}}
+                        ]
+                    }]);
+                }
+                DownstreamProtocol::Responses => {
+                    request["input"] = json!([{
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type":"input_image","image_url":"https://example.com/image.png","detail":"high"},
+                            {"type":"input_audio","input_audio":{"data":"SUQz","format":"mp3"}},
+                            {"type":"input_file","filename":"report.pdf","file_data":"JVBERi0="},
+                            {"type":"input_image","file_id":"file_same_target"}
+                        ]
+                    }]);
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["messages"] = json!([{
+                        "role": "user",
+                        "content": [
+                            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"ZmFrZQ=="}},
+                            {"type":"image","source":{"type":"url","url":"https://example.com/image.webp"}},
+                            {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="},"title":"report.pdf"}
+                        ]
+                    }]);
+                }
+                DownstreamProtocol::Gemini => {
+                    request["contents"] = json!([{
+                        "role": "user",
+                        "parts": [
+                            {"inlineData":{"mimeType":"image/png","data":"ZmFrZQ=="}},
+                            {"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},
+                            {"inlineData":{"mimeType":"application/pdf","data":"JVBERi0=","displayName":"report.pdf"}}
+                        ]
+                    }]);
+                }
+            }
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("multimodal response should complete");
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}: no retry or upload call");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("OpenAI target request should be JSON");
+            let parts = body["messages"][0]["content"]
+                .as_array()
+                .expect("OpenAI target should receive typed content parts");
+            assert!(
+                parts.iter().any(|part| part["type"] == "image_url"),
+                "{name}: image input"
+            );
+            if name != "anthropic" {
+                assert!(
+                    parts.iter().any(|part| part["type"] == "input_audio"),
+                    "{name}: audio input"
+                );
+            }
+            assert!(
+                parts.iter().any(|part| part["type"] == "file"),
+                "{name}: file input"
+            );
+            let serialized = serde_json::to_string(&body).expect("JSON should serialize");
+            assert!(!serialized.contains("file_data: "), "{name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn all_public_downstreams_reject_unportable_media_before_credentials() {
+    const PRIVATE_MARKER: &str = "multimodal-private-marker";
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"})).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await;
+            }
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["messages"] = json!([{
+                        "role":"user",
+                        "content":[{"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PRIVATE_MARKER}")}}]
+                    }]);
+                }
+                DownstreamProtocol::Responses => {
+                    request["input"] = json!([{
+                        "type":"message",
+                        "role":"user",
+                        "content":[{"type":"input_file","filename":"remote.pdf","file_url":format!("https://files.example.com/{PRIVATE_MARKER}.pdf")}]
+                    }]);
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["messages"] = json!([{
+                        "role":"user",
+                        "content":[{"type":"document","source":{"type":"file","file_id":PRIVATE_MARKER}}]
+                    }]);
+                }
+                DownstreamProtocol::Gemini => {
+                    request["contents"] = json!([{
+                        "role":"user",
+                        "parts":[{"fileData":{"mimeType":"application/pdf","fileUri":format!("https://generativelanguage.googleapis.com/v1beta/files/{PRIVATE_MARKER}")}}]
+                    }]);
+                }
+            }
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("multimodal rejection should be readable");
+            assert!(
+                !String::from_utf8_lossy(&response_body).contains(PRIVATE_MARKER),
+                "{name}: payload must not be disclosed"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}: reject before credentials"
+            );
+            assert!(
+                upstream.requests().await.is_empty(),
+                "{name}: reject before network"
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn all_public_downstream_structured_outputs_reach_the_openai_target() {
+    let openai_response = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture.non_stream.upstream_response)
+        .expect("openai response fixture");
+
+    for (name, fixture) in fixtures() {
+        let upstream_response = openai_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await;
+            }
+
+            let schema = json!({
+                "type":"object",
+                "properties":{"answer":{"type":"string","minLength":2}},
+                "required":["answer"],
+                "additionalProperties":false
+            });
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["response_format"] = json!({
+                        "type":"json_schema",
+                        "json_schema":{
+                            "name":"answer_contract",
+                            "description":"An answer",
+                            "schema":schema,
+                            "strict":true
+                        }
+                    });
+                }
+                DownstreamProtocol::Responses => {
+                    request["text"] = json!({"format":{
+                        "type":"json_schema",
+                        "name":"answer_contract",
+                        "description":"An answer",
+                        "schema":schema,
+                        "strict":true
+                    }});
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["output_config"] = json!({"format":{
+                        "type":"json_schema",
+                        "schema":schema
+                    }});
+                }
+                DownstreamProtocol::Gemini => {
+                    request["generationConfig"] = json!({
+                        "responseMimeType":"application/json",
+                        "responseJsonSchema":schema
+                    });
+                }
+            }
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("structured response should complete");
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}: exactly one generation call");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("OpenAI target request should be JSON");
+            let definition = &body["response_format"]["json_schema"];
+            assert_eq!(
+                body["response_format"]["type"],
+                json!("json_schema"),
+                "{name}"
+            );
+            assert!(
+                definition["name"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                "{name}: explicit or stable synthesized name"
+            );
+            assert_eq!(
+                definition["schema"]["properties"]["answer"]["minLength"],
+                json!(2),
+                "{name}"
+            );
+            assert_eq!(
+                definition["schema"]["additionalProperties"],
+                json!(false),
+                "{name}"
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn all_public_downstream_portable_tool_lifecycles_reach_the_openai_target() {
+    let openai_response = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture.non_stream.upstream_response)
+        .expect("openai response fixture");
+
+    for (name, fixture) in fixtures() {
+        let upstream_response = openai_response.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await;
+            }
+
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["messages"] = json!([
+                        {"role":"assistant","content":null,"tool_calls":[{
+                            "id":"call_lookup","type":"function",
+                            "function":{"name":"lookup","arguments":"{\"city\":\"Paris\"}"}
+                        }]},
+                        {"role":"tool","tool_call_id":"call_lookup","content":"{\"ok\":true}"}
+                    ]);
+                    request["tools"] = json!([{"type":"function","function":{
+                        "name":"lookup","parameters":{"type":"object"},"strict":true
+                    }}]);
+                    request["tool_choice"] =
+                        json!({"type":"function","function":{"name":"lookup"}});
+                    request["parallel_tool_calls"] = json!(false);
+                }
+                DownstreamProtocol::Responses => {
+                    request["input"] = json!([
+                        {"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"city\":\"Paris\"}"},
+                        {"type":"function_call_output","call_id":"call_lookup","output":{"ok":true}}
+                    ]);
+                    request["tools"] = json!([{
+                        "type":"function","name":"lookup","parameters":{"type":"object"},"strict":true
+                    }]);
+                    request["tool_choice"] = json!({"type":"function","name":"lookup"});
+                    request["parallel_tool_calls"] = json!(false);
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["messages"] = json!([
+                        {"role":"assistant","content":[{"type":"tool_use","id":"call_lookup","name":"lookup","input":{"city":"Paris"}}]},
+                        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_lookup","content":{"ok":true}}]}
+                    ]);
+                    request["tools"] = json!([{
+                        "name":"lookup","input_schema":{"type":"object"},"strict":true
+                    }]);
+                    request["tool_choice"] = json!({
+                        "type":"tool","name":"lookup","disable_parallel_tool_use":true
+                    });
+                }
+                DownstreamProtocol::Gemini => {
+                    request["contents"] = json!([
+                        {"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"city":"Paris"}}}]},
+                        {"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"ok":true}}}]}
+                    ]);
+                    request["tools"] = json!([{"functionDeclarations":[{
+                        "name":"lookup","parameters":{"type":"object"}
+                    }]}]);
+                    request["toolConfig"] = json!({"functionCallingConfig":{
+                        "mode":"ANY","allowedFunctionNames":["lookup"]
+                    }});
+                }
+            }
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("tool lifecycle response should complete");
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}: exactly one generation call");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("OpenAI target request should be JSON");
+            assert_eq!(body["tools"][0]["function"]["strict"], true, "{name}");
+            let assistant = body["messages"]
+                .as_array()
+                .and_then(|messages| {
+                    messages
+                        .iter()
+                        .find(|message| message["role"] == "assistant")
+                })
+                .expect("assistant tool call message");
+            let tool = body["messages"]
+                .as_array()
+                .and_then(|messages| messages.iter().find(|message| message["role"] == "tool"))
+                .expect("tool result message");
+            assert_eq!(
+                assistant["tool_calls"][0]["id"], tool["tool_call_id"],
+                "{name}: call/result correlation"
+            );
+            assert_eq!(
+                assistant["tool_calls"][0]["function"]["name"], "lookup",
+                "{name}"
+            );
+            if fixture.protocol != DownstreamProtocol::Gemini {
+                assert_eq!(body["parallel_tool_calls"], false, "{name}");
+            }
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn forced_nonportable_cross_wire_tools_reject_before_credentials() {
+    const PRIVATE_MARKER: &str = "tool-private-marker";
+    for (name, fixture) in fixtures()
+        .into_iter()
+        .filter(|(_, fixture)| fixture.protocol != DownstreamProtocol::Openai)
+    {
+        run_case(name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"})).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await;
+            }
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Responses => {
+                    request["tools"] =
+                        json!([{"type":"web_search_preview","marker":PRIVATE_MARKER}]);
+                    request["tool_choice"] = json!("required");
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["tools"] = json!([{
+                        "type":"web_search_20250305","name":"search","marker":PRIVATE_MARKER
+                    }]);
+                    request["tool_choice"] = json!({"type":"any"});
+                }
+                DownstreamProtocol::Gemini => {
+                    request["tools"] = json!([{"googleSearch":{"marker":PRIVATE_MARKER}}]);
+                    request["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
+                }
+                DownstreamProtocol::Openai => unreachable!(),
+            }
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("tool rejection should be readable");
+            assert!(
+                !String::from_utf8_lossy(&body).contains(PRIVATE_MARKER),
+                "{name}"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}"
+            );
+            assert!(upstream.requests().await.is_empty(), "{name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn all_public_downstreams_reject_unrepresentable_structured_outputs_before_credentials() {
+    const PRIVATE_MARKER: &str = "structured-private-marker";
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"should_not":"be called"})).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await;
+            }
+            let mut request = fixture.request.downstream.clone();
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    request["response_format"] = json!({"type":"grammar","grammar":PRIVATE_MARKER});
+                }
+                DownstreamProtocol::Responses => {
+                    request["text"] = json!({"format":{
+                        "type":"grammar",
+                        "grammar":PRIVATE_MARKER
+                    }});
+                }
+                DownstreamProtocol::Anthropic => {
+                    request["output_config"] = json!({"format":{
+                        "type":"grammar",
+                        "grammar":PRIVATE_MARKER
+                    }});
+                }
+                DownstreamProtocol::Gemini => {
+                    request["generationConfig"] = json!({
+                        "responseMimeType":"text/x.enum",
+                        "responseSchema":{"description":PRIVATE_MARKER}
+                    });
+                }
+            }
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("structured rejection should be readable");
+            assert!(
+                !String::from_utf8_lossy(&response_body).contains(PRIVATE_MARKER),
+                "{name}: structured payload must not be disclosed"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{name}: reject before credentials"
+            );
+            assert!(
+                upstream.requests().await.is_empty(),
+                "{name}: reject before network"
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn all_public_downstreams_insert_openai_stream_usage_on_the_final_target() {
+    let openai_events = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture.stream.upstream_events)
+        .expect("openai stream fixture");
+
+    for (name, fixture) in fixtures() {
+        let upstream_events = openai_events.clone();
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: upstream_events,
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let source_id = if fixture.profile_type != UpstreamProfileType::Openai {
+                router
+                    .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Openai)
+                    .await
+            } else {
+                router.source_id
+            };
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            let status = response.status();
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("stream response should complete");
+            if status != StatusCode::OK {
+                let log = router
+                    .wait_for_log_for_source(source_id, RequestStatus::Error)
+                    .await;
+                panic!(
+                    "{name}: status={status}, response={}, operator={:?}",
+                    String::from_utf8_lossy(&response_body),
+                    log.final_error_message
+                );
+            }
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{name}: {}",
+                String::from_utf8_lossy(&response_body)
+            );
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1, "{name}");
+            let body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("OpenAI target request should be JSON");
+            assert_eq!(
+                body.pointer("/stream_options/include_usage"),
+                Some(&Value::Bool(true)),
+                "{name}: final OpenAI target must request usage"
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn explicit_false_openai_stream_usage_is_overridden_before_send() {
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case("openai-usage-override", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: fixture.stream.upstream_events.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let mut request = fixture.stream.downstream_request.clone();
+        request["stream_options"] = json!({"include_usage": false});
+
+        let response = router.send(&fixture, true, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("stream response should complete");
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1);
+        let body: Value = serde_json::from_slice(&captured[0].body)
+            .expect("OpenAI target request should be JSON");
+        assert_eq!(
+            body.pointer("/stream_options/include_usage"),
+            Some(&Value::Bool(true))
+        );
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn malformed_openai_stream_usage_is_rejected_before_credentials() {
+    const INVALID_USAGE_VALUE: &str = "payload-secret-marker";
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case("openai-usage-type", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: fixture.stream.upstream_events.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let mut request = fixture.stream.downstream_request.clone();
+        request["stream_options"] = json!({"include_usage": INVALID_USAGE_VALUE});
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router.send(&fixture, true, &request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("usage rejection response should read");
+        assert!(!String::from_utf8_lossy(&response_body).contains(INVALID_USAGE_VALUE));
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn successful_stream_without_upstream_usage_keeps_tokens_unknown() {
+    let (_, mut fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    fixture.stream.upstream_events.retain(|event| {
+        event.data == Value::String("[DONE]".to_string()) || event.data.get("usage").is_none()
+    });
+    run_case("openai-missing-usage", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: fixture.stream.upstream_events.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        let response = router
+            .send(&fixture, true, &fixture.stream.downstream_request)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("stream response should complete");
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.total_input_tokens, None);
+        assert_eq!(log.total_output_tokens, None);
+        assert_eq!(log.total_tokens, None);
+        upstream.shutdown().await;
+    });
 }
 
 #[test]
@@ -3736,7 +6116,7 @@ fn direct_execution_stream_emits_one_event_per_downstream_body_chunk() {
 
 #[test]
 fn direct_execution_regression_upstream_429_is_authentic_logged_and_never_retried() {
-    for (name, fixture) in fixtures() {
+    for (name, fixture) in generation_evidence_fixtures() {
         run_case(name, move |context| async move {
             let upstream = TestUpstream::spawn(ScriptedReply::Json {
                 status: StatusCode::from_u16(fixture.error.upstream_status).unwrap(),
@@ -4730,7 +7110,382 @@ fn incompatible_utility_targets_are_rejected_before_any_upstream_call() {
 }
 
 #[test]
-fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
+fn openai_wire_chat_uses_the_frozen_source_operation_path_and_bearer_auth() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, fixture.non_stream.upstream_response.clone())
+                .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router
+            .update_source_operation(UpdateUpstreamSourceData {
+                chat_completions_path_override: Some(Some("custom/chat/".to_string())),
+                updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
+            })
+            .await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = upstream.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/custom/chat");
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer provider-baseline-secret")
+        );
+        assert!(!requests[0].headers.contains_key("x-api-key"));
+        assert!(!requests[0].headers.contains_key("x-goog-api-key"));
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn disabled_or_invalid_source_operation_fails_before_decryption_and_upstream_access() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, fixture.non_stream.upstream_response.clone())
+                .await;
+
+        let disabled = RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
+        disabled
+            .update_source_operation(UpdateUpstreamSourceData {
+                chat_completions_enabled: Some(false),
+                updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
+            })
+            .await;
+        disabled
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+        let response = disabled
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(disabled.app_state.secret_encryption.decrypt_call_count(), 0);
+
+        let invalid = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        invalid
+            .update_source_operation(UpdateUpstreamSourceData {
+                chat_completions_path_override: Some(Some("../chat".to_string())),
+                updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
+            })
+            .await;
+        invalid
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+        let response = invalid
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(invalid.app_state.secret_encryption.decrypt_call_count(), 0);
+
+        assert!(
+            upstream.requests().await.is_empty(),
+            "invalid Source operation state must fail before HTTP send"
+        );
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn generation_model_kind_mismatch_is_rejected_for_all_downstream_protocols_before_decryption() {
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new_with_model_kind(
+                context,
+                &fixture,
+                &upstream.base_url,
+                ModelKind::Embedding,
+            )
+            .await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.model_kind_snapshot, Some(ModelKind::Embedding));
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("unsupported_capability_error")
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn utility_model_kind_mismatch_is_rejected_before_decryption_and_upstream_access() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case("utility-model-kind", move |context| async move {
+        let upstream = TestUpstream::spawn_json(StatusCode::OK, json!({"unexpected": true})).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        for (path, body) in [
+            (
+                "/openai/v1/embeddings",
+                json!({"model": router.requested_model(), "input": "hello"}),
+            ),
+            (
+                "/openai/v1/rerank",
+                json!({
+                    "model": router.requested_model(),
+                    "query": "hello",
+                    "documents": ["world"]
+                }),
+            ),
+        ] {
+            let response = router
+                .send_raw_post(path.to_string(), body, DownstreamAuth::Bearer)
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn utility_operation_and_profile_guards_run_after_kind_but_before_decryption() {
+    let openai_fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    let gemini_fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .map(|(_, fixture)| fixture)
+        .expect("gemini fixture");
+    run_case("utility-static-guards", move |context| async move {
+        let upstream = TestUpstream::spawn_json(StatusCode::OK, json!({"unexpected": true})).await;
+
+        let disabled_embedding = RouterFixture::new_with_model_kind(
+            context.clone(),
+            &openai_fixture,
+            &upstream.base_url,
+            ModelKind::Embedding,
+        )
+        .await;
+        disabled_embedding
+            .update_source_operation(UpdateUpstreamSourceData {
+                embeddings_enabled: Some(false),
+                updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
+            })
+            .await;
+        disabled_embedding
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+        let response = disabled_embedding
+            .send_raw_post(
+                "/openai/v1/embeddings".to_string(),
+                json!({"model": disabled_embedding.requested_model(), "input": "hello"}),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            disabled_embedding
+                .app_state
+                .secret_encryption
+                .decrypt_call_count(),
+            0
+        );
+
+        let unsupported_rerank = RouterFixture::new_with_model_kind(
+            context.clone(),
+            &openai_fixture,
+            &upstream.base_url,
+            ModelKind::Rerank,
+        )
+        .await;
+        unsupported_rerank
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+        let response = unsupported_rerank
+            .send_raw_post(
+                "/openai/v1/rerank".to_string(),
+                json!({
+                    "model": unsupported_rerank.requested_model(),
+                    "query": "hello",
+                    "documents": ["world"]
+                }),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            unsupported_rerank
+                .app_state
+                .secret_encryption
+                .decrypt_call_count(),
+            0
+        );
+
+        let wrong_profile = RouterFixture::new_with_model_kind(
+            context,
+            &gemini_fixture,
+            &upstream.base_url,
+            ModelKind::Embedding,
+        )
+        .await;
+        wrong_profile
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+        let response = wrong_profile
+            .send_raw_post(
+                "/openai/v1/embeddings".to_string(),
+                json!({"model": wrong_profile.requested_model(), "input": "hello"}),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            wrong_profile
+                .app_state
+                .secret_encryption
+                .decrypt_call_count(),
+            0
+        );
+
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn models_routes_apply_static_kind_and_source_operation_filters_without_exposing_kind() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    run_case("models-kind-filter", move |context| async move {
+        let upstream = TestUpstream::spawn_json(StatusCode::OK, json!({"unexpected": true})).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        Model::create(
+            router.provider_id,
+            "embedding-model",
+            None,
+            ModelKind::Embedding,
+            true,
+        )
+        .expect("embedding model should create");
+        Model::create(
+            router.provider_id,
+            "rerank-model",
+            None,
+            ModelKind::Rerank,
+            true,
+        )
+        .expect("rerank model should create");
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_source_variant(
+                router.source_id,
+                RequestPatchVariantInput {
+                    source_id: router.source_id,
+                    model_id: None,
+                    suffix: Some("fast".to_string()),
+                    enabled: true,
+                    expose_in_models: true,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/temperature".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!(0.2))),
+                        description: Some("models kind filter".to_string()),
+                    }],
+                },
+            )
+            .await
+            .expect("chat suffix should create");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("model catalog should invalidate");
+
+        for (path, auth, allowed_embedding) in [
+            ("/openai/v1/models", DownstreamAuth::Bearer, true),
+            ("/responses/v1/models", DownstreamAuth::Bearer, false),
+            ("/anthropic/v1/models", DownstreamAuth::XApiKey, false),
+            ("/gemini/v1/models", DownstreamAuth::GeminiQuery, false),
+        ] {
+            let response = router.send_models(path, auth).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("models response should read");
+            let body: Value = serde_json::from_slice(&bytes).expect("models response should parse");
+            let serialized = serde_json::to_string(&body).unwrap();
+            assert!(serialized.contains(&router.model_name), "{path}");
+            assert!(
+                serialized.contains(&format!("{}-fast", router.model_name)),
+                "{path}"
+            );
+            assert!(!serialized.contains("kind-guard"));
+            assert_eq!(
+                serialized.contains("embedding-model"),
+                allowed_embedding,
+                "{path}"
+            );
+            assert!(!serialized.contains("rerank-model"), "{path}");
+            assert!(!serialized.contains("embedding-model-fast"), "{path}");
+            assert!(!serialized.contains("model_kind"), "{path}");
+        }
+
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn direct_execution_legacy_invalid_base_url_fails_before_upstream_access() {
     let (name, fixture) = fixtures()
         .into_iter()
         .find(|(name, _)| *name == "openai")
@@ -4746,14 +7501,15 @@ fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
+                base_url: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
                 use_proxy: None,
                 is_enabled: None,
                 is_default: None,
                 updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
-        .expect("legacy invalid endpoint should be seeded directly");
+        .expect("legacy invalid base URL should be seeded directly");
         router
             .app_state
             .catalog
@@ -4863,11 +7619,12 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: Some(legacy_endpoint.clone()),
+                base_url: Some(legacy_endpoint.clone()),
                 use_proxy: None,
                 is_enabled: None,
                 is_default: None,
                 updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("legacy noncanonical endpoint should be seeded directly");
@@ -4887,7 +7644,7 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
             Provider::get_by_id(router.provider_id)
                 .expect("provider should remain persisted")
                 .upstream_sources[0]
-                .endpoint,
+                .base_url,
             legacy_endpoint
         );
         axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -4927,11 +7684,12 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
-                endpoint: None,
+                base_url: None,
                 use_proxy: Some(true),
                 is_enabled: None,
                 is_default: None,
                 updated_at: chrono::Utc::now().timestamp_millis(),
+                ..UpdateUpstreamSourceData::test_defaults()
             },
         )
         .expect("proxy requirement should be seeded directly");
@@ -4981,7 +7739,7 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
 
 #[test]
 fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_cancelled() {
-    for (name, fixture) in fixtures() {
+    for (name, fixture) in generation_evidence_fixtures() {
         run_case(name, move |context| async move {
             let dropped = Arc::new(DropSignal::default());
             let upstream = TestUpstream::spawn(ScriptedReply::HangingSse {
@@ -5060,58 +7818,70 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
 
 #[test]
 fn direct_execution_regression_interrupted_stream_logs_same_request_id() {
-    let (name, fixture) = fixtures()
-        .into_iter()
-        .find(|(name, _)| *name == "openai")
-        .expect("openai fixture");
-    run_case(name, move |context| async move {
-        let upstream = TestUpstream::spawn(ScriptedReply::InterruptedSse {
-            first_event: fixture.cancellation.first_upstream_event.clone(),
-        })
-        .await;
-        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
-        let persisted_sink = router.install_recording_persisted_sink();
-        let response = router
-            .send(&fixture, true, &fixture.cancellation.downstream_request)
+    for (name, fixture) in openai_target_fixtures() {
+        let case_name = format!("interrupted-stream-{name}");
+        run_case(&case_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::InterruptedSse {
+                first_event: fixture.cancellation.first_upstream_event.clone(),
+            })
             .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let request_id = assert_downstream_request_identity(&response);
-        let mut body = response.into_body().into_data_stream();
-        let first = timeout(WAIT_TIMEOUT, body.next())
-            .await
-            .expect("first downstream frame deadline")
-            .expect("first downstream frame")
-            .expect("first downstream frame should be readable");
-        assert!(!first.is_empty());
-        let interrupted = timeout(WAIT_TIMEOUT, body.next())
-            .await
-            .expect("stream interruption deadline")
-            .expect("stream should yield an interruption");
-        assert!(
-            interrupted.is_err(),
-            "downstream body should surface interruption"
-        );
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let persisted_sink = router.install_recording_persisted_sink();
+            let response = router
+                .send(&fixture, true, &fixture.cancellation.downstream_request)
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let mut body = response.into_body().into_data_stream();
+            let first = timeout(WAIT_TIMEOUT, body.next())
+                .await
+                .expect("first downstream frame deadline")
+                .expect("first downstream frame")
+                .expect("first downstream frame should be readable");
+            assert!(!first.is_empty(), "{name}");
+            loop {
+                match timeout(WAIT_TIMEOUT, body.next())
+                    .await
+                    .expect("stream interruption deadline")
+                {
+                    Some(Ok(chunk)) => {
+                        assert!(
+                            !chunk.is_empty(),
+                            "{name}: native terminal frames must not be empty"
+                        );
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
 
-        let log = router.wait_for_log(RequestStatus::Error).await;
-        assert_eq!(
-            log.request_id, request_id,
-            "interrupted stream response and persisted canonical request id"
-        );
-        assert_log_common(&router, &fixture, &log);
-        assert_eq!(log.overall_status, RequestStatus::Error);
-        assert_eq!(
-            log.final_error_code.as_deref(),
-            Some("upstream_response_error")
-        );
-        assert_single_persisted_terminal_fact(
-            &persisted_sink,
-            ExecutionStage::UpstreamResponse,
-            ResponseVisibility::BodyStarted,
-        )
-        .await;
-        assert_eq!(upstream.requests().await.len(), 1);
-        upstream.shutdown().await;
-    });
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.request_id, request_id,
+                "{name}: interrupted stream response and persisted canonical request id"
+            );
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(log.overall_status, RequestStatus::Error, "{name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{name}"
+            );
+            assert_single_persisted_terminal_fact(
+                &persisted_sink,
+                ExecutionStage::UpstreamResponse,
+                ResponseVisibility::BodyStarted,
+            )
+            .await;
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{name}");
+            assert_eq!(
+                upstream.requests().await.len(),
+                1,
+                "{name}: partial stream must not retry or select another Source"
+            );
+            upstream.shutdown().await;
+        });
+    }
 }
 
 #[test]

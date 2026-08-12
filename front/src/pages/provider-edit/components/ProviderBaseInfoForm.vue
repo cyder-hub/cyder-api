@@ -96,6 +96,21 @@
           <Input v-model="quickStart.model_name" class="font-mono text-sm" />
         </div>
 
+        <div v-if="!editingData.id" class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("modelEditPage.labelModelKind") }}
+            <span class="ml-0.5 text-red-500">*</span>
+          </Label>
+          <Select v-model="quickStart.model_kind">
+            <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="kind in ['CHAT', 'EMBEDDING', 'RERANK']" :key="kind" :value="kind">
+                {{ $t(`modelKinds.${kind}`) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
         <div v-if="!editingData.id" class="space-y-1.5 sm:col-span-2">
           <Label class="text-gray-700">
             {{ $t("providerEditPage.quickStart.labelApiKeyDescription") }}
@@ -132,7 +147,7 @@
               <SelectValue :placeholder="$t('providerEditPage.placeholderProfileType')" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem v-for="profile in profileTypes" :key="profile" :value="profile">
+              <SelectItem v-for="profile in providerProfileTypes" :key="profile" :value="profile">
                 {{ profile }}
               </SelectItem>
             </SelectContent>
@@ -141,10 +156,40 @@
 
         <div class="space-y-1.5 sm:col-span-2">
           <Label class="text-gray-700">
-            {{ $t("providerEditPage.labelEndpoint") }}
-            <span class="ml-0.5 text-red-500">*</span>
+            {{ $t("providerEditPage.labelBaseUrl") }}
+            <span v-if="!sourceBaseUrlMayBeEmpty(quickStart.profile_type)" class="ml-0.5 text-red-500">*</span>
           </Label>
-          <Input v-model="quickStart.endpoint" class="font-mono text-sm" />
+          <Input
+            v-model="quickStart.base_url"
+            class="font-mono text-sm"
+            :placeholder="sourceBaseUrlMayBeEmpty(quickStart.profile_type) ? $t('providerEditPage.sources.officialDefaultPlaceholder') : ''"
+          />
+          <p v-if="sourceBaseUrlMayBeEmpty(quickStart.profile_type)" class="text-xs leading-5 text-gray-500">
+            {{ $t("providerEditPage.sources.officialDefaultHelp") }}
+          </p>
+        </div>
+
+        <div
+          v-for="operation in operationRows"
+          :key="operation.key"
+          class="space-y-3 rounded-lg border border-gray-200 bg-gray-50/40 p-3.5 sm:col-span-2"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <Label :for="`quick-source-${operation.key}`" class="cursor-pointer text-gray-700">
+                {{ $t(`providerEditPage.sources.operations.${operation.key}.label`) }}
+              </Label>
+              <p class="mt-1 text-xs leading-5 text-gray-500">
+                {{ $t(`providerEditPage.sources.operations.${operation.key}.help`) }}
+              </p>
+            </div>
+            <Checkbox :id="`quick-source-${operation.key}`" v-model="quickStart[operation.enabledKey]" />
+          </div>
+          <Input
+            v-model="quickStart[operation.pathKey]"
+            class="font-mono text-sm"
+            :placeholder="$t('providerEditPage.sources.operationPathPlaceholder')"
+          />
         </div>
       </div>
 
@@ -259,17 +304,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Loader2 } from "lucide-vue-next";
+import {
+  applySourceProfileDefaults,
+  providerProfileTypes,
+  sourceBaseUrlMayBeEmpty,
+  sourceSupportsOperation,
+} from "../composables/sourceProfileContract";
 
-const profileTypes = [
-  "OPENAI",
-  "GEMINI",
-  "GEMINI_OPENAI",
-  "VERTEX",
-  "VERTEX_OPENAI",
-  "ANTHROPIC",
-  "RESPONSES",
-  "OLLAMA",
-];
 const providerApiKeyModes = ["QUEUE", "RANDOM"];
 
 const { t: $t } = useI18n();
@@ -285,6 +326,29 @@ const quickStart = reactive<ProviderBootstrapFormState>(
 
 const isSubmitting = ref(false);
 const pendingAction = ref<"save" | "test" | null>(null);
+const operationRows = computed(() =>
+  [
+    { key: "chatCompletions", operation: "chat_completions", enabledKey: "chat_completions_enabled", pathKey: "chat_completions_path_override" },
+    { key: "embeddings", operation: "embeddings", enabledKey: "embeddings_enabled", pathKey: "embeddings_path_override" },
+    { key: "rerank", operation: "rerank", enabledKey: "rerank_enabled", pathKey: "rerank_path_override" },
+  ].filter((item) => sourceSupportsOperation(
+    quickStart.profile_type,
+    item.operation as "chat_completions" | "embeddings" | "rerank",
+  )) as Array<{
+    key: string;
+    enabledKey: "chat_completions_enabled" | "embeddings_enabled" | "rerank_enabled";
+    pathKey: "chat_completions_path_override" | "embeddings_path_override" | "rerank_path_override";
+  }>,
+);
+
+watch(
+  () => quickStart.profile_type,
+  (profile, previous) => {
+    if (!editingData.value.id && profile !== previous) {
+      applySourceProfileDefaults(quickStart, profile);
+    }
+  },
+);
 
 watch(
   editingData,
@@ -320,8 +384,8 @@ const handleBootstrap = async (saveAndTest: boolean) => {
     toastController.warn($t("providerEditPage.alert.profileTypeRequired"));
     return;
   }
-  if (!quickStart.endpoint.trim()) {
-    toastController.warn($t("providerEditPage.alert.endpointRequired"));
+  if (!sourceBaseUrlMayBeEmpty(quickStart.profile_type) && !quickStart.base_url.trim()) {
+    toastController.warn($t("providerEditPage.alert.baseUrlRequired"));
     return;
   }
   if (!quickStart.provider_key.trim()) {
@@ -349,6 +413,15 @@ const handleBootstrap = async (saveAndTest: boolean) => {
 
     const checkResult = normalizeBootstrapCheckResult(response.check_result);
     void providerStore.fetchProviders().catch(() => undefined);
+
+    if (saveAndTest && response.check_result?.status === "check_skipped") {
+      toastController.warn(
+        $t("providerEditPage.alert.bootstrapSaveAndTestSkipped", {
+          reason: response.check_result.message,
+        }),
+      );
+      return;
+    }
 
     if (saveAndTest && checkResult && !checkResult.ok) {
       toastController.error(
@@ -400,18 +473,7 @@ const handleUpdateProvider = async () => {
     data.provider_key = updated.provider_key;
     data.is_enabled = updated.is_enabled;
     data.provider_api_key_mode = updated.provider_api_key_mode;
-    data.upstream_sources = updated.upstream_sources.map((source) => ({
-      id: source.id,
-      provider_id: source.provider_id,
-      profile_type: source.profile_type,
-      endpoint: source.endpoint,
-      use_proxy: source.use_proxy,
-      is_enabled: source.is_enabled,
-      is_default: source.is_default,
-      deleted_at: source.deleted_at,
-      created_at: source.created_at,
-      updated_at: source.updated_at,
-    }));
+    data.upstream_sources = updated.upstream_sources.map((source) => ({ ...source }));
     syncProviderBootstrapFormState(quickStart, data);
 
     void providerStore.fetchProviders().catch(() => undefined);

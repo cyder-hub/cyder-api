@@ -15,10 +15,10 @@ use crate::database::request_patch::RequestPatchVariantRepository;
 use crate::database::upstream_source::{
     NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource,
 };
-use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+use crate::schema::enum_def::{ModelKind, ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::admin::model::load_cache_model_snapshots;
 use crate::service::cache::types::{CacheModel, CacheProvider};
-use crate::service::provider_http::normalize_provider_endpoint;
+use crate::service::provider_http::{normalize_operation_path, normalize_source_base_url};
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
 use crate::service::source_selector::{select_source, select_source_with_sources};
 use crate::service::vertex::invalidate_vertex_token;
@@ -46,16 +46,28 @@ pub struct ProviderUpdateInput {
 #[derive(Debug, Clone)]
 pub struct UpstreamSourceCreateInput {
     pub profile_type: UpstreamProfileType,
-    pub endpoint: String,
+    pub base_url: Option<String>,
     pub use_proxy: bool,
+    pub chat_completions_enabled: Option<bool>,
+    pub chat_completions_path_override: Option<String>,
+    pub embeddings_enabled: Option<bool>,
+    pub embeddings_path_override: Option<String>,
+    pub rerank_enabled: Option<bool>,
+    pub rerank_path_override: Option<String>,
     pub is_enabled: bool,
     pub is_default: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct UpstreamSourceUpdateInput {
-    pub endpoint: Option<String>,
+    pub base_url: Option<Option<String>>,
     pub use_proxy: Option<bool>,
+    pub chat_completions_enabled: Option<bool>,
+    pub chat_completions_path_override: Option<Option<String>>,
+    pub embeddings_enabled: Option<bool>,
+    pub embeddings_path_override: Option<Option<String>>,
+    pub rerank_enabled: Option<bool>,
+    pub rerank_path_override: Option<Option<String>>,
     pub is_enabled: Option<bool>,
     pub is_default: Option<bool>,
 }
@@ -127,14 +139,250 @@ pub struct BootstrapProviderCommand {
     pub provider_id: i64,
     pub provider_key: String,
     pub name: String,
-    pub endpoint: String,
-    pub use_proxy: bool,
-    pub profile_type: UpstreamProfileType,
+    pub source: UpstreamSourceCreateInput,
     pub provider_api_key_mode: ProviderApiKeyMode,
     pub api_key: String,
     pub api_key_description: Option<String>,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub model_kind: ModelKind,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedSourceOperations {
+    chat_completions_enabled: Option<bool>,
+    chat_completions_path_override: Option<String>,
+    embeddings_enabled: Option<bool>,
+    embeddings_path_override: Option<String>,
+    rerank_enabled: Option<bool>,
+    rerank_path_override: Option<String>,
+}
+
+fn normalize_path_override(value: Option<String>) -> Result<Option<String>, BaseError> {
+    value
+        .map(|value| {
+            normalize_operation_path(&value).map_err(|error| {
+                BaseError::ParamInvalid(Some(format!("upstream operation path {error}")))
+            })
+        })
+        .transpose()
+}
+
+fn reject_native_operation_fields(
+    chat_completions_enabled: Option<bool>,
+    chat_completions_path_override: &Option<String>,
+    embeddings_enabled: Option<bool>,
+    embeddings_path_override: &Option<String>,
+    rerank_enabled: Option<bool>,
+    rerank_path_override: &Option<String>,
+) -> Result<(), BaseError> {
+    if chat_completions_enabled.is_some()
+        || chat_completions_path_override.is_some()
+        || embeddings_enabled.is_some()
+        || embeddings_path_override.is_some()
+        || rerank_enabled.is_some()
+        || rerank_path_override.is_some()
+    {
+        return Err(BaseError::ParamInvalid(Some(
+            "native upstream Profiles must not define OpenAI operation fields".to_string(),
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_source_operations(
+    input: &UpstreamSourceCreateInput,
+) -> Result<NormalizedSourceOperations, BaseError> {
+    let chat_path = normalize_path_override(input.chat_completions_path_override.clone())?;
+    let embeddings_path = normalize_path_override(input.embeddings_path_override.clone())?;
+    let rerank_path = normalize_path_override(input.rerank_path_override.clone())?;
+
+    match input.profile_type {
+        UpstreamProfileType::Openai => {
+            if input.rerank_enabled.is_some() || rerank_path.is_some() {
+                return Err(BaseError::ParamInvalid(Some(
+                    "OPENAI does not support the Rerank operation".to_string(),
+                )));
+            }
+            Ok(NormalizedSourceOperations {
+                chat_completions_enabled: Some(input.chat_completions_enabled.unwrap_or(true)),
+                chat_completions_path_override: chat_path,
+                embeddings_enabled: Some(input.embeddings_enabled.unwrap_or(true)),
+                embeddings_path_override: embeddings_path,
+                rerank_enabled: Some(false),
+                rerank_path_override: None,
+            })
+        }
+        UpstreamProfileType::OpenaiCompatible => Ok(NormalizedSourceOperations {
+            chat_completions_enabled: Some(input.chat_completions_enabled.unwrap_or(true)),
+            chat_completions_path_override: chat_path,
+            embeddings_enabled: Some(input.embeddings_enabled.unwrap_or(false)),
+            embeddings_path_override: embeddings_path,
+            rerank_enabled: Some(input.rerank_enabled.unwrap_or(false)),
+            rerank_path_override: rerank_path,
+        }),
+        UpstreamProfileType::GeminiOpenai => {
+            if input.rerank_enabled.is_some() || rerank_path.is_some() {
+                return Err(BaseError::ParamInvalid(Some(
+                    "GEMINI_OPENAI does not support the Rerank operation".to_string(),
+                )));
+            }
+            Ok(NormalizedSourceOperations {
+                chat_completions_enabled: Some(input.chat_completions_enabled.unwrap_or(true)),
+                chat_completions_path_override: chat_path,
+                embeddings_enabled: Some(input.embeddings_enabled.unwrap_or(true)),
+                embeddings_path_override: embeddings_path,
+                rerank_enabled: Some(false),
+                rerank_path_override: None,
+            })
+        }
+        _ => {
+            reject_native_operation_fields(
+                input.chat_completions_enabled,
+                &chat_path,
+                input.embeddings_enabled,
+                &embeddings_path,
+                input.rerank_enabled,
+                &rerank_path,
+            )?;
+            Ok(NormalizedSourceOperations {
+                chat_completions_enabled: None,
+                chat_completions_path_override: None,
+                embeddings_enabled: None,
+                embeddings_path_override: None,
+                rerank_enabled: None,
+                rerank_path_override: None,
+            })
+        }
+    }
+}
+
+fn new_upstream_source(
+    provider_id: i64,
+    input: UpstreamSourceCreateInput,
+    now: i64,
+) -> Result<NewUpstreamSource, BaseError> {
+    let base_url = normalize_source_base_url(&input.profile_type, input.base_url.as_deref())
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(format!("upstream source base URL {error}")))
+        })?;
+    let operations = normalize_source_operations(&input)?;
+    if input.is_default && !input.is_enabled {
+        return Err(BaseError::ParamInvalid(Some(
+            "a default upstream source must be enabled".to_string(),
+        )));
+    }
+
+    Ok(NewUpstreamSource {
+        id: ID_GENERATOR.generate_id(),
+        provider_id,
+        profile_type: input.profile_type,
+        base_url,
+        use_proxy: input.use_proxy,
+        chat_completions_enabled: operations.chat_completions_enabled,
+        chat_completions_path_override: operations.chat_completions_path_override,
+        embeddings_enabled: operations.embeddings_enabled,
+        embeddings_path_override: operations.embeddings_path_override,
+        rerank_enabled: operations.rerank_enabled,
+        rerank_path_override: operations.rerank_path_override,
+        is_enabled: input.is_enabled,
+        is_default: input.is_default,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+fn normalize_source_update(
+    before: &UpstreamSource,
+    input: UpstreamSourceUpdateInput,
+) -> Result<UpdateUpstreamSourceData, BaseError> {
+    if matches!(
+        before.profile_type,
+        UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai
+    ) && (input.rerank_enabled.is_some() || input.rerank_path_override.is_some())
+    {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "{:?} does not support the Rerank operation",
+            before.profile_type
+        ))));
+    }
+
+    let merged = UpstreamSourceCreateInput {
+        profile_type: before.profile_type,
+        base_url: None,
+        use_proxy: input.use_proxy.unwrap_or(before.use_proxy),
+        chat_completions_enabled: input
+            .chat_completions_enabled
+            .or(before.chat_completions_enabled),
+        chat_completions_path_override: input
+            .chat_completions_path_override
+            .clone()
+            .unwrap_or_else(|| before.chat_completions_path_override.clone()),
+        embeddings_enabled: input.embeddings_enabled.or(before.embeddings_enabled),
+        embeddings_path_override: input
+            .embeddings_path_override
+            .clone()
+            .unwrap_or_else(|| before.embeddings_path_override.clone()),
+        rerank_enabled: if matches!(
+            before.profile_type,
+            UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai
+        ) {
+            None
+        } else {
+            input.rerank_enabled.or(before.rerank_enabled)
+        },
+        rerank_path_override: if matches!(
+            before.profile_type,
+            UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai
+        ) {
+            None
+        } else {
+            input
+                .rerank_path_override
+                .clone()
+                .unwrap_or_else(|| before.rerank_path_override.clone())
+        },
+        is_enabled: input.is_enabled.unwrap_or(before.is_enabled),
+        is_default: input.is_default.unwrap_or(before.is_default),
+    };
+    let operations = normalize_source_operations(&merged)?;
+    let base_url = input
+        .base_url
+        .map(|value| {
+            normalize_source_base_url(&before.profile_type, value.as_deref()).map_err(|error| {
+                BaseError::ParamInvalid(Some(format!("upstream source base URL {error}")))
+            })
+        })
+        .transpose()?;
+
+    Ok(UpdateUpstreamSourceData {
+        base_url,
+        use_proxy: input.use_proxy,
+        chat_completions_enabled: input
+            .chat_completions_enabled
+            .map(|_| operations.chat_completions_enabled)
+            .flatten(),
+        chat_completions_path_override: input
+            .chat_completions_path_override
+            .map(|_| operations.chat_completions_path_override),
+        embeddings_enabled: input
+            .embeddings_enabled
+            .map(|_| operations.embeddings_enabled)
+            .flatten(),
+        embeddings_path_override: input
+            .embeddings_path_override
+            .map(|_| operations.embeddings_path_override),
+        rerank_enabled: input
+            .rerank_enabled
+            .map(|_| operations.rerank_enabled)
+            .flatten(),
+        rerank_path_override: input
+            .rerank_path_override
+            .map(|_| operations.rerank_path_override),
+        is_enabled: input.is_enabled,
+        is_default: input.is_default,
+        updated_at: Utc::now().timestamp_millis(),
+    })
 }
 
 pub struct ProviderAdminService {
@@ -177,27 +425,7 @@ impl ProviderAdminService {
         };
         let new_source_data = input
             .initial_source
-            .map(|source| -> Result<NewUpstreamSource, BaseError> {
-                let endpoint = normalize_provider_endpoint(&source.endpoint).map_err(|error| {
-                    BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
-                })?;
-                if source.is_default && !source.is_enabled {
-                    return Err(BaseError::ParamInvalid(Some(
-                        "a default upstream source must be enabled".to_string(),
-                    )));
-                }
-                Ok(NewUpstreamSource {
-                    id: ID_GENERATOR.generate_id(),
-                    provider_id,
-                    profile_type: source.profile_type,
-                    endpoint,
-                    use_proxy: source.use_proxy,
-                    is_enabled: source.is_enabled,
-                    is_default: source.is_default,
-                    created_at: current_time,
-                    updated_at: current_time,
-                })
-            })
+            .map(|source| new_upstream_source(provider_id, source, current_time))
             .transpose()?;
         let created_provider =
             Provider::create_optional(&new_provider_data, new_source_data.as_ref())?;
@@ -244,21 +472,9 @@ impl ProviderAdminService {
         provider_id: i64,
         input: UpstreamSourceCreateInput,
     ) -> Result<UpstreamSource, BaseError> {
-        let endpoint = normalize_provider_endpoint(&input.endpoint).map_err(|error| {
-            BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
-        })?;
         let now = Utc::now().timestamp_millis();
-        let source = UpstreamSource::create(&NewUpstreamSource {
-            id: ID_GENERATOR.generate_id(),
-            provider_id,
-            profile_type: input.profile_type,
-            endpoint,
-            use_proxy: input.use_proxy,
-            is_enabled: input.is_enabled,
-            is_default: input.is_default,
-            created_at: now,
-            updated_at: now,
-        })?;
+        let new_source = new_upstream_source(provider_id, input, now)?;
+        let source = UpstreamSource::create(&new_source)?;
         self.run_runtime_refresh_post_commit(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
                 id: provider_id,
@@ -277,29 +493,11 @@ impl ProviderAdminService {
         input: UpstreamSourceUpdateInput,
     ) -> Result<UpstreamSource, BaseError> {
         let before = UpstreamSource::get_active_by_id_for_provider(source_id, provider_id)?;
-        let endpoint = input
-            .endpoint
-            .map(|value| {
-                normalize_provider_endpoint(&value).map_err(|error| {
-                    BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
-                })
-            })
-            .transpose()?;
         if input.is_enabled == Some(true) && !before.is_enabled {
             RequestPatchVariantRepository::validate_source_reactivation(source_id)?;
         }
-        let now = Utc::now().timestamp_millis();
-        let source = UpstreamSource::update(
-            source_id,
-            provider_id,
-            &UpdateUpstreamSourceData {
-                endpoint,
-                use_proxy: input.use_proxy,
-                is_enabled: input.is_enabled,
-                is_default: input.is_default,
-                updated_at: now,
-            },
-        )?;
+        let update = normalize_source_update(&before, input)?;
+        let source = UpstreamSource::update(source_id, provider_id, &update)?;
         let effects = vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
                 id: provider_id,
@@ -672,8 +870,11 @@ impl ProviderAdminService {
         &self,
         input: BootstrapProviderCommand,
     ) -> Result<BootstrapProviderResult, BaseError> {
-        let endpoint = normalize_provider_endpoint(&input.endpoint)
-            .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
+        let source = new_upstream_source(
+            input.provider_id,
+            input.source,
+            Utc::now().timestamp_millis(),
+        )?;
         let key_id = ID_GENERATOR.generate_id();
         let secret = validate_provider_secret(input.api_key)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
@@ -689,10 +890,7 @@ impl ProviderAdminService {
             provider_id: input.provider_id,
             provider_key: input.provider_key,
             name: input.name,
-            source_id: ID_GENERATOR.generate_id(),
-            endpoint,
-            use_proxy: input.use_proxy,
-            profile_type: input.profile_type,
+            source,
             provider_api_key_mode: input.provider_api_key_mode,
             provider_api_key_id: key_id,
             api_key_description: input.api_key_description,
@@ -702,6 +900,7 @@ impl ProviderAdminService {
             secret_hmac,
             model_name: input.model_name,
             real_model_name: input.real_model_name,
+            model_kind: input.model_kind,
         })?;
 
         self.run_provider_key_post_commit(vec![
@@ -971,12 +1170,13 @@ mod tests {
                         id: 9202,
                         provider_id: 9201,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: "https://source-reactivation.example/v1".to_string(),
+                        base_url: "https://source-reactivation.example/v1".to_string(),
                         use_proxy: false,
                         is_enabled: false,
                         is_default: false,
                         created_at: 1,
                         updated_at: 1,
+                        ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
                     },
                 )
                 .expect("provider should be seeded");
@@ -992,7 +1192,6 @@ mod tests {
                         operation: RequestPatchOperation::Set,
                         value_json: Some(Some(json!(0.2))),
                         description: None,
-                        confirm_dangerous_target: false,
                     }],
                 })
                 .expect("disabled source should accept preconfigured Variant");
@@ -1010,8 +1209,14 @@ mod tests {
                         9201,
                         9202,
                         UpstreamSourceUpdateInput {
-                            endpoint: None,
+                            base_url: None,
                             use_proxy: None,
+                            chat_completions_enabled: None,
+                            chat_completions_path_override: None,
+                            embeddings_enabled: None,
+                            embeddings_path_override: None,
+                            rerank_enabled: None,
+                            rerank_path_override: None,
                             is_enabled: Some(true),
                             is_default: Some(true),
                         },
@@ -1047,6 +1252,7 @@ mod tests {
                 provider_id: 2,
                 model_name: "model".to_string(),
                 real_model_name: None,
+                model_kind: crate::schema::enum_def::ModelKind::Chat,
                 cost_catalog_id: None,
                 source_selection_mode: "EXPLICIT".to_string(),
                 source_bindings: vec![

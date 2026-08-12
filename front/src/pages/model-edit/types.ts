@@ -1,4 +1,4 @@
-import type { ModelSourceConfigSummary } from "@/services/types";
+import type { ModelKind, ModelSourceConfigSummary } from "@/services/types";
 
 export interface EditingModelData {
   id: number;
@@ -6,6 +6,7 @@ export interface EditingModelData {
   cost_catalog_id: number | null;
   model_name: string;
   real_model_name: string;
+  model_kind: ModelKind;
   is_enabled: boolean;
   source_config?: ModelSourceConfigSummary;
 }

@@ -24,6 +24,14 @@ pub fn transform_request_data(
     request::transform_request_data(data, downstream_protocol, upstream_protocol, is_stream)
 }
 
+pub(crate) fn validate_final_generation_request(
+    data: &Value,
+    upstream_protocol: UpstreamProtocol,
+    profile_type: &UpstreamProfileType,
+) -> Result<(), request::FinalRequestValidationError> {
+    request::validate_final_generation_request(data, upstream_protocol, profile_type)
+}
+
 pub fn transform_result(
     data: Value,
     upstream_protocol: UpstreamProtocol,

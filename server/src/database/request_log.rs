@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::{DbResult, ListResult, get_connection};
 use crate::controller::BaseError;
 use crate::schema::enum_def::{
-    DownstreamProtocol, RequestStatus, UpstreamProfileType, UpstreamProtocol,
+    DownstreamProtocol, ModelKind, RequestStatus, UpstreamProfileType, UpstreamProtocol,
 };
 use crate::{db_execute, db_object};
 
@@ -43,8 +43,9 @@ db_object! {
         pub provider_name_snapshot: Option<String>,
         pub model_name_snapshot: Option<String>,
         pub real_model_name_snapshot: Option<String>,
+        pub model_kind_snapshot: Option<ModelKind>,
         pub source_profile_type_snapshot: Option<UpstreamProfileType>,
-        pub source_endpoint_snapshot: Option<String>,
+        pub source_base_url_snapshot: Option<String>,
         pub upstream_protocol: Option<UpstreamProtocol>,
         pub upstream_http_status: Option<i32>,
         pub estimated_cost_nanos: Option<i64>,
@@ -89,6 +90,7 @@ db_object! {
         pub model_id: Option<i64>,
         pub model_name_snapshot: Option<String>,
         pub real_model_name_snapshot: Option<String>,
+        pub model_kind_snapshot: Option<ModelKind>,
         pub source_id: Option<i64>,
         pub source_selection_reason: Option<String>,
         pub source_profile_type_snapshot: Option<UpstreamProfileType>,
@@ -614,8 +616,9 @@ mod tests {
             provider_name_snapshot: None,
             model_name_snapshot: None,
             real_model_name_snapshot: None,
+            model_kind_snapshot: None,
             source_profile_type_snapshot: None,
-            source_endpoint_snapshot: None,
+            source_base_url_snapshot: None,
             upstream_protocol,
             upstream_http_status: None,
             estimated_cost_nanos: None,

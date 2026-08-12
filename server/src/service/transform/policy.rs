@@ -186,11 +186,26 @@ impl PolicyEngine {
             {
                 PolicyDecision::major_reject(TransformReasonCode::UnknownSemanticUnit)
             }
-            (_, target, TransformValueKind::ImageData)
-            | (_, target, TransformValueKind::FileUrl)
-            | (_, target, TransformValueKind::FileData)
+            (_, target, TransformValueKind::FileUrl)
             | (_, target, TransformValueKind::ExecutableCode)
                 if target.is_openai() =>
+            {
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
+            }
+            (
+                _,
+                TransformProtocol::Downstream(DownstreamProtocol::Openai),
+                TransformValueKind::AudioData
+                | TransformValueKind::FileData
+                | TransformValueKind::FileId,
+            ) => PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent),
+            (_, target, TransformValueKind::FileId)
+                if !target.is_openai() && !target.is_responses() =>
+            {
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
+            }
+            (_, target, TransformValueKind::AudioData)
+                if target.is_anthropic() || target.is_ollama() =>
             {
                 PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
@@ -259,5 +274,69 @@ mod tests {
         );
         assert_eq!(rejected.outcome, TransformOutcomeKind::ExplicitReject);
         assert_eq!(rejected.action, TransformAction::Reject);
+    }
+
+    #[test]
+    fn ollama_rejects_media_that_its_encoder_cannot_represent() {
+        for kind in [TransformValueKind::AudioData, TransformValueKind::FileId] {
+            let decision = PolicyEngine::evaluate(
+                TransformProtocol::Unified,
+                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
+                kind,
+            );
+            assert_eq!(decision.outcome, TransformOutcomeKind::ExplicitReject);
+            assert_eq!(decision.action, TransformAction::Reject);
+            assert_eq!(
+                decision.reason_code,
+                TransformReasonCode::UnsupportedContent
+            );
+        }
+
+        let recoverable_file_data = PolicyEngine::evaluate(
+            TransformProtocol::Unified,
+            TransformProtocol::Upstream(UpstreamProtocol::Ollama),
+            TransformValueKind::FileData,
+        );
+        assert_eq!(
+            recoverable_file_data.outcome,
+            TransformOutcomeKind::ControlledLossMajor
+        );
+        assert_eq!(recoverable_file_data.action, TransformAction::Send);
+        assert_eq!(
+            recoverable_file_data.reason_code,
+            TransformReasonCode::DeterministicTextDowngrade
+        );
+    }
+
+    #[test]
+    fn openai_response_target_rejects_unencodable_media() {
+        for kind in [
+            TransformValueKind::AudioData,
+            TransformValueKind::FileData,
+            TransformValueKind::FileId,
+        ] {
+            let response_decision = PolicyEngine::evaluate(
+                TransformProtocol::Unified,
+                TransformProtocol::Downstream(DownstreamProtocol::Openai),
+                kind,
+            );
+            assert_eq!(
+                response_decision.outcome,
+                TransformOutcomeKind::ExplicitReject
+            );
+            assert_eq!(response_decision.action, TransformAction::Reject);
+            assert_eq!(
+                response_decision.reason_code,
+                TransformReasonCode::UnsupportedContent
+            );
+
+            let request_decision = PolicyEngine::evaluate(
+                TransformProtocol::Unified,
+                TransformProtocol::Upstream(UpstreamProtocol::Openai),
+                kind,
+            );
+            assert_eq!(request_decision.outcome, TransformOutcomeKind::Lossless);
+            assert_eq!(request_decision.action, TransformAction::Send);
+        }
     }
 }

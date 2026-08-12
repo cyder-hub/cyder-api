@@ -207,12 +207,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::ModelKindMapping;
+    use diesel::sql_types::{Bool, Int8, Nullable, Text};
+
     model (id) {
         id -> Int8,
         provider_id -> Int8,
         cost_catalog_id -> Nullable<Int8>,
         model_name -> Text,
         real_model_name -> Nullable<Text>,
+        model_kind -> ModelKindMapping,
         source_selection_mode -> Text,
         is_enabled -> Bool,
         deleted_at -> Nullable<Int8>,
@@ -257,8 +261,14 @@ diesel::table! {
         id -> Int8,
         provider_id -> Int8,
         profile_type -> UpstreamProfileTypeMapping,
-        endpoint -> Text,
+        base_url -> Text,
         use_proxy -> Bool,
+        chat_completions_enabled -> Nullable<Bool>,
+        chat_completions_path_override -> Nullable<Text>,
+        embeddings_enabled -> Nullable<Bool>,
+        embeddings_path_override -> Nullable<Text>,
+        rerank_enabled -> Nullable<Bool>,
+        rerank_path_override -> Nullable<Text>,
         is_enabled -> Bool,
         is_default -> Bool,
         deleted_at -> Nullable<Int8>,
@@ -290,6 +300,7 @@ diesel::table! {
 
 diesel::table! {
     use crate::schema::enum_def::DownstreamProtocolMapping;
+    use crate::schema::enum_def::ModelKindMapping;
     use crate::schema::enum_def::RequestStatusMapping;
     use crate::schema::enum_def::UpstreamProfileTypeMapping;
     use crate::schema::enum_def::UpstreamProtocolMapping;
@@ -322,8 +333,9 @@ diesel::table! {
         provider_name_snapshot -> Nullable<Text>,
         model_name_snapshot -> Nullable<Text>,
         real_model_name_snapshot -> Nullable<Text>,
+        model_kind_snapshot -> Nullable<ModelKindMapping>,
         source_profile_type_snapshot -> Nullable<UpstreamProfileTypeMapping>,
-        source_endpoint_snapshot -> Nullable<Text>,
+        source_base_url_snapshot -> Nullable<Text>,
         upstream_protocol -> Nullable<UpstreamProtocolMapping>,
         upstream_http_status -> Nullable<Int4>,
         #[sql_name = "overall_status"]

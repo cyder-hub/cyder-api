@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     ingress::client_identity::ClientIdentity,
-    schema::enum_def::DownstreamProtocol,
+    schema::enum_def::{DownstreamProtocol, ModelKind},
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
@@ -189,6 +189,13 @@ impl OperationAdapter {
             client_ip_addr: Some(client_ip_addr),
             request_context,
         };
+        #[cfg(test)]
+        let cancellation = request
+            .extensions()
+            .get::<ProxyCancellationContext>()
+            .cloned()
+            .unwrap_or_else(ProxyCancellationContext::new);
+        #[cfg(not(test))]
         let cancellation = ProxyCancellationContext::new();
 
         match self.operation {
@@ -254,8 +261,11 @@ async fn execute_generation_operation(
     let is_stream = resolve_stream_mode(operation.stream_mode, &parsed_request.data);
     let execution_plan = build_execution_plan(
         &context.app_state,
+        &context.api_key,
         &requested_model,
         operation.downstream_protocol,
+        ModelKind::Chat,
+        true,
     )
     .await
     .map_err(|error| {
@@ -295,10 +305,14 @@ async fn execute_utility_operation(
     let max_body_size = context.app_state.max_body_size;
     let parsed_request = parse_json_request(request, max_body_size).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
+    let required_model_kind = operation.operation.required_model_kind();
     let execution_plan = build_execution_plan(
         &context.app_state,
+        &context.api_key,
         &requested_model,
         operation.operation.downstream_protocol,
+        required_model_kind,
+        false,
     )
     .await
     .map_err(|error| {
@@ -363,6 +377,16 @@ fn execution_plan_build_error(error: ExecutionPlanBuildError) -> ProxyError {
             Some(message.clone()),
         ),
         ExecutionPlanBuildError::TargetNotFound(_) => (
+            ProxyErrorCode::UnsupportedCapabilityError,
+            ExecutionStage::Capability,
+            Some(message.clone()),
+        ),
+        ExecutionPlanBuildError::AccessDenied(_) => (
+            ProxyErrorCode::PermissionError,
+            ExecutionStage::Governance,
+            Some(message.clone()),
+        ),
+        ExecutionPlanBuildError::ModelKindMismatch(_) => (
             ProxyErrorCode::UnsupportedCapabilityError,
             ExecutionStage::Capability,
             Some(message.clone()),

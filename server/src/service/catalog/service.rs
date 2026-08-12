@@ -1137,20 +1137,27 @@ mod tests {
                 id: id + 10_000,
                 provider_id: id,
                 profile_type: UpstreamProfileType::Openai,
-                endpoint: "https://api.example.com/v1".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
                 use_proxy: false,
                 is_enabled: true,
                 is_default: true,
                 created_at: 1,
                 updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
         .expect("provider seed should succeed")
     }
 
     fn seed_model(provider_id: i64, model_name: &str) -> CacheModel {
-        let model =
-            Model::create(provider_id, model_name, None, true).expect("model seed should succeed");
+        let model = Model::create(
+            provider_id,
+            model_name,
+            None,
+            crate::schema::enum_def::ModelKind::Chat,
+            true,
+        )
+        .expect("model seed should succeed");
         CacheModel::from_db(model).expect("model source snapshot should load")
     }
 
@@ -1232,7 +1239,6 @@ mod tests {
                         operation: RequestPatchOperation::Set,
                         value_json: Some(Some(serde_json::json!(0.2))),
                         description: Some("catalog test".to_string()),
-                        confirm_dangerous_target: false,
                     }],
                 })
                 .expect("request patch Variant should be persisted");
@@ -1249,7 +1255,6 @@ mod tests {
                             operation: RequestPatchOperation::Set,
                             value_json: Some(Some(serde_json::json!(0.8))),
                             description: Some("model catalog test".to_string()),
-                            confirm_dangerous_target: false,
                         }],
                     })
                     .expect("model request patch Variant should be persisted");

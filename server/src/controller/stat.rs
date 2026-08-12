@@ -963,7 +963,7 @@ mod tests {
             provider_is_enabled: true,
             source_id: provider_id * 10 + 1,
             source_profile_type: UpstreamProfileType::Openai,
-            source_endpoint: "https://api.example.com/v1".to_string(),
+            source_base_url: "https://api.example.com/v1".to_string(),
             source_use_proxy: false,
             source_is_enabled: true,
             source_is_default: true,

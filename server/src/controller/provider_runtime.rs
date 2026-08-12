@@ -130,12 +130,19 @@ mod tests {
                 id: id * 10 + 1,
                 provider_id: id,
                 profile_type: UpstreamProfileType::Openai,
-                endpoint: "https://example.com/v1".to_string(),
+                base_url: "https://example.com/v1".to_string(),
                 use_proxy: false,
+                chat_completions_enabled: Some(true),
+                chat_completions_path_override: None,
+                embeddings_enabled: Some(true),
+                embeddings_path_override: None,
+                rerank_enabled: Some(false),
+                rerank_path_override: None,
                 is_enabled: true,
                 is_default: true,
                 created_at: 1,
                 updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
         .expect("provider should insert");
@@ -278,7 +285,7 @@ mod tests {
                     Some("OPENAI")
                 );
                 assert_eq!(
-                    body.pointer("/data/items/0/source_endpoint")
+                    body.pointer("/data/items/0/source_base_url")
                         .and_then(Value::as_str),
                     Some("https://example.com/v1")
                 );

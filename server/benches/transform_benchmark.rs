@@ -670,7 +670,11 @@ fn build_openai_request_large_text() -> Value {
         "temperature": 0.4,
         "top_p": 0.92,
         "max_tokens": 2048,
-        "stop": ["<END_BLOCK>", "<END_TOOL>"]
+        "stop": ["<END_BLOCK>", "<END_TOOL>"],
+        "vendor_benchmark_extension": {
+            "opaque": true,
+            "nested": {"revision": 3}
+        }
     })
 }
 

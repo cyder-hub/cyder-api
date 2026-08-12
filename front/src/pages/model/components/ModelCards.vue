@@ -7,6 +7,9 @@
       :description="model.real_model_name || t('modelPage.noMappedModel')"
     >
       <template #header>
+        <Badge variant="outline" class="font-mono text-[11px]">
+          {{ t(`modelKinds.${model.model_kind}`) }}
+        </Badge>
         <Badge :variant="model.is_enabled ? 'secondary' : 'outline'" class="font-mono text-[11px]">
           {{ model.is_enabled ? t("common.yes") : t("common.no") }}
         </Badge>

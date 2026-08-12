@@ -16,7 +16,7 @@ const sources = [
   {
     id: 20,
     profile_type: "OLLAMA",
-    endpoint: "http://ollama",
+    base_url: "http://ollama",
     use_proxy: false,
     is_enabled: false,
     is_default: false,
@@ -25,7 +25,7 @@ const sources = [
   {
     id: 10,
     profile_type: "OPENAI",
-    endpoint: "http://openai",
+    base_url: "http://openai",
     use_proxy: false,
     is_enabled: true,
     is_default: true,
@@ -34,7 +34,7 @@ const sources = [
   {
     id: 30,
     profile_type: "GEMINI",
-    endpoint: "http://deleted",
+    base_url: "http://deleted",
     use_proxy: false,
     is_enabled: true,
     is_default: false,

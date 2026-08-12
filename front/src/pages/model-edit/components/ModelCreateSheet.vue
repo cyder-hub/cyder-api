@@ -5,12 +5,19 @@ import { Loader2 } from "lucide-vue-next";
 
 import * as modelService from "@/services/models";
 import { toastController } from "@/services/uiFeedback";
-import type { UpstreamSource } from "@/services/types";
+import type { ModelKind, UpstreamSource } from "@/services/types";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Drawer, DrawerContent, DrawerDescription, DrawerFooter, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import ModelSourceConfigEditor from "@/components/model-source-config/ModelSourceConfigEditor.vue";
 import {
   createSourceConfigDraft,
@@ -37,6 +44,7 @@ const isOpen = computed({
 });
 const modelName = ref("");
 const realModelName = ref("");
+const modelKind = ref<ModelKind>("CHAT");
 const isEnabled = ref(true);
 const sourceConfigDraft = ref<SourceConfigDraft>(createSourceConfigDraft());
 const isSaving = ref(false);
@@ -45,6 +53,7 @@ const error = ref<string | null>(null);
 const resetDraft = () => {
   modelName.value = "";
   realModelName.value = "";
+  modelKind.value = "CHAT";
   isEnabled.value = true;
   sourceConfigDraft.value = createSourceConfigDraft(null, props.sources);
   error.value = null;
@@ -76,6 +85,7 @@ const handleSave = async () => {
       provider_id: props.providerId,
       model_name: normalizedName,
       real_model_name: realModelName.value.trim() || null,
+      model_kind: modelKind.value,
       is_enabled: isEnabled.value,
       source_config: toSourceConfigPayload(sourceConfigDraft.value),
     });
@@ -86,6 +96,7 @@ const handleSave = async () => {
       cost_catalog_id: null,
       model_name: saved.model_name,
       real_model_name: saved.real_model_name ?? "",
+      model_kind: saved.model_kind,
       is_enabled: saved.is_enabled,
       source_config: saved.source_config,
     });
@@ -127,6 +138,25 @@ const handleSave = async () => {
                 {{ t("modelEditPage.labelRealModelName") }}
               </Label>
               <Input id="create-real-model-name" v-model="realModelName" />
+            </div>
+            <div class="grid gap-1.5 sm:col-span-2">
+              <Label class="text-gray-700">
+                {{ t("modelEditPage.labelModelKind") }}
+                <span class="ml-0.5 text-red-500">*</span>
+              </Label>
+              <Select v-model="modelKind">
+                <SelectTrigger class="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="kind in ['CHAT', 'EMBEDDING', 'RERANK']" :key="kind" :value="kind">
+                    {{ t(`modelKinds.${kind}`) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p class="text-xs leading-5 text-gray-500">
+                {{ t("modelEditPage.modelKindCreateHelp") }}
+              </p>
             </div>
           </div>
 

@@ -578,6 +578,34 @@ fn semantic_stream_failure_rolls_back_partially_inferred_tool_state() {
 }
 
 #[test]
+fn tool_argument_delta_accumulation_is_bounded() {
+    let oversized_arguments = "x".repeat(super::session::MAX_STREAM_TOOL_ARGUMENT_BYTES + 1);
+    let raw = json!({
+        "id": "c",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "m",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": oversized_arguments}
+            }]}
+        }]
+    });
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
+    let failure = transformer
+        .transform_event(sse(raw.to_string()))
+        .expect_err("oversized cumulative tool arguments must reject");
+
+    assert_eq!(failure.semantic_unit, TransformSemanticUnit::ToolCallDelta);
+    assert!(transformer.session.openai_source_tool_calls().is_empty());
+}
+
+#[test]
 fn same_wire_observation_failure_rolls_back_inference_but_preserves_frame() {
     let mut transformer =
         StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Openai);
@@ -655,8 +683,9 @@ fn test_parse_usage_info_fallback_and_cache_miss_diagnostics() {
     );
     assert_eq!(
         diagnostic.reason_code,
-        TransformReasonCode::ObservationParseFailed
+        TransformReasonCode::UpstreamUsageMissing
     );
+    assert_eq!(diagnostic.action, TransformAction::PassThrough);
 }
 
 #[test]

@@ -50,7 +50,6 @@ export interface RequestPatchRuleInput {
   operation: RequestPatchOperation;
   value_json: JsonValue | null;
   description: string | null;
-  confirm_dangerous_target?: boolean;
 }
 
 export interface RequestPatchVariantInput {
@@ -77,13 +76,6 @@ export interface ModelRequestPatchOverviewResponse {
   rule_count: number;
 }
 
-export interface RequestPatchDangerousTargetConfirmation {
-  placement: RequestPatchPlacement;
-  target: string;
-  reason: string;
-  confirm_field: string;
-}
-
 export interface RequestPatchPreviewConflict {
   existing_variant_id: number;
   existing_model_id: number | null;
@@ -97,7 +89,6 @@ export interface RequestPatchPreviewConflict {
 export interface RequestPatchVariantPreview {
   suffix: string | null;
   rule_count: number;
-  dangerous_targets: RequestPatchDangerousTargetConfirmation[];
   conflicts: RequestPatchPreviewConflict[];
   affected_model_count: number;
   valid: boolean;

@@ -97,6 +97,8 @@ pub(crate) enum OpenAiContent {
 pub(crate) enum OpenAiContentPart {
     Text { text: String },
     ImageUrl { image_url: OpenAiImageUrl },
+    InputAudio { input_audio: OpenAiInputAudio },
+    File { file: OpenAiFile },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -104,6 +106,22 @@ pub(crate) struct OpenAiImageUrl {
     pub(crate) url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct OpenAiInputAudio {
+    pub(crate) data: String,
+    pub(crate) format: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct OpenAiFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) filename: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

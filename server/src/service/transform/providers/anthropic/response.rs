@@ -145,7 +145,9 @@ impl From<UnifiedResponse> for AnthropicResponse {
                     UnifiedContentPart::ExecutableCode { language, code } => Some(AnthropicContentBlock::Text {
                         text: render_anthropic_executable_code_text(&language, &code),
                     }),
-                    UnifiedContentPart::ImageData { .. } => {
+                    UnifiedContentPart::ImageData { .. }
+                    | UnifiedContentPart::AudioData { .. }
+                    | UnifiedContentPart::FileId { .. } => {
                         apply_transform_policy(
                             TransformProtocol::Unified,
                             TransformProtocol::Downstream(DownstreamProtocol::Anthropic),

@@ -107,8 +107,10 @@ pub enum TransformSemanticUnit {
     Refusal,
     ImageUrl,
     ImageData,
+    AudioData,
     FileUrl,
     FileData,
+    FileId,
     ExecutableCode,
     ToolCall,
     ToolResult,
@@ -140,8 +142,10 @@ impl TransformSemanticUnit {
             Self::Refusal => "refusal",
             Self::ImageUrl => "image_url",
             Self::ImageData => "image_data",
+            Self::AudioData => "audio_data",
             Self::FileUrl => "file_url",
             Self::FileData => "file_data",
+            Self::FileId => "file_id",
             Self::ExecutableCode => "executable_code",
             Self::ToolCall => "tool_call",
             Self::ToolResult => "tool_result",
@@ -172,8 +176,10 @@ impl From<TransformValueKind> for TransformSemanticUnit {
             TransformValueKind::Refusal => Self::Refusal,
             TransformValueKind::ImageUrl => Self::ImageUrl,
             TransformValueKind::ImageData => Self::ImageData,
+            TransformValueKind::AudioData => Self::AudioData,
             TransformValueKind::FileUrl => Self::FileUrl,
             TransformValueKind::FileData => Self::FileData,
+            TransformValueKind::FileId => Self::FileId,
             TransformValueKind::ExecutableCode => Self::ExecutableCode,
             TransformValueKind::ToolCall => Self::ToolCall,
             TransformValueKind::ToolResult => Self::ToolResult,
@@ -190,6 +196,7 @@ impl From<TransformValueKind> for TransformSemanticUnit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TransformReasonCode {
     SameWirePassthrough,
+    PolicyOverride,
     LosslessConversion,
     UnsupportedTopK,
     UnsupportedToolDefinitions,
@@ -213,12 +220,14 @@ pub enum TransformReasonCode {
     SyntheticCorrelationId,
     SyntheticIndex,
     NoSemanticOutput,
+    UpstreamUsageMissing,
 }
 
 impl TransformReasonCode {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::SameWirePassthrough => "same_wire_passthrough",
+            Self::PolicyOverride => "policy_override",
             Self::LosslessConversion => "lossless_conversion",
             Self::UnsupportedTopK => "unsupported_top_k",
             Self::UnsupportedToolDefinitions => "unsupported_tool_definitions",
@@ -242,8 +251,23 @@ impl TransformReasonCode {
             Self::SyntheticCorrelationId => "synthetic_correlation_id",
             Self::SyntheticIndex => "synthetic_index",
             Self::NoSemanticOutput => "no_semantic_output",
+            Self::UpstreamUsageMissing => "upstream_usage_missing",
         }
     }
+}
+
+pub(crate) fn upstream_usage_missing_summary(phase: TransformPhase) -> TransformOutcomeSummary {
+    let mut collector = TransformDiagnosticCollector::default();
+    collector.record(TransformDiagnosticFact {
+        sequence: 0,
+        phase,
+        semantic_unit: TransformSemanticUnit::Usage,
+        outcome: TransformOutcomeKind::ObservationDegraded,
+        action: TransformAction::PassThrough,
+        reason_code: TransformReasonCode::UpstreamUsageMissing,
+        safe_summary: None,
+    });
+    collector.into_summary()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -2,6 +2,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::service::transform::stream::StreamTransformContext;
+use crate::service::transform::stream::session::try_append_tool_arguments;
 use crate::service::transform::unified::*;
 
 use super::payload::*;
@@ -638,7 +639,7 @@ pub(super) fn encode_formal_responses_stream_event(
                     active_call.id = explicit_item_id.clone();
                     response_item_id = Some(explicit_item_id);
                 }
-                active_call.arguments.push_str(&arguments);
+                try_append_tool_arguments(&mut active_call.arguments, &arguments);
                 if let Some(name) = name.clone() {
                     active_call.name = name;
                 }

@@ -1,17 +1,10 @@
 use crate::service::cache::types::CacheModelsCatalog;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequestedModelParseStatus {
-    Exact,
-    PatchSuffix,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedRequestedModelName {
     pub original_requested_name: String,
     pub base_requested_name: String,
     pub requested_suffix: Option<String>,
-    pub parse_status: RequestedModelParseStatus,
 }
 
 pub(crate) fn enabled_patch_suffixes(catalog: &CacheModelsCatalog) -> Vec<String> {
@@ -52,7 +45,6 @@ pub(crate) fn parse_patch_suffix(
             original_requested_name: requested_name.to_string(),
             base_requested_name,
             requested_suffix: Some(suffix.clone()),
-            parse_status: RequestedModelParseStatus::PatchSuffix,
         });
     }
     None
@@ -71,7 +63,6 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.base_requested_name, "openai/gpt-4o-mini");
         assert_eq!(parsed.requested_suffix.as_deref(), Some("fast"));
-        assert_eq!(parsed.parse_status, RequestedModelParseStatus::PatchSuffix);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import type { RequestPatchVariantAggregate } from "./requestPatch";
 
 export type ModelSourceSelectionMode = "INHERIT_ALL" | "EXPLICIT";
+export type ModelKind = "CHAT" | "EMBEDDING" | "RERANK";
 
 export interface ModelSourceBindingPayload {
   source_id: number;
@@ -62,6 +63,7 @@ export interface ModelItem {
   id: number;
   model_name: string;
   real_model_name: string | null;
+  model_kind: ModelKind;
   source_selection_mode: ModelSourceSelectionMode | string;
   source_config: ModelSourceConfigSummary;
   is_enabled: boolean;
@@ -80,6 +82,7 @@ export interface ModelSummaryItem {
   provider_name: string;
   model_name: string;
   real_model_name: string | null;
+  model_kind: ModelKind;
   source_selection_mode: ModelSourceSelectionMode | string;
   source_config: ModelSourceConfigSummary;
   is_enabled: boolean;
@@ -91,6 +94,7 @@ export interface ModelDetailModel {
   provider_id: number;
   model_name: string;
   real_model_name: string | null;
+  model_kind: ModelKind;
   cost_catalog_id: number | null;
   source_selection_mode: ModelSourceSelectionMode | string;
   deleted_at: number | null;
@@ -111,6 +115,7 @@ export interface ModelPayload {
   provider_id?: number;
   model_name: string;
   real_model_name?: string | null;
+  model_kind?: ModelKind;
   is_enabled: boolean;
   cost_catalog_id?: number | null;
   source_config?: ModelSourceConfigPayload;

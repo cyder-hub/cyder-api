@@ -5,6 +5,7 @@ use super::payload::*;
 use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::stream::StreamTransformContext;
+use crate::service::transform::stream::session::try_append_tool_arguments;
 use crate::service::transform::{
     AnthropicActiveBlockKind, AnthropicActiveBlockState, TransformProtocol,
     record_stream_diagnostic, unified::*,
@@ -245,7 +246,7 @@ pub(crate) fn try_transform_unified_stream_events_to_anthropic_events(
                         },
                     )?);
                 }
-                block.text.push_str(&arguments);
+                try_append_tool_arguments(&mut block.text, &arguments);
                 events.push(anthropic_block_delta_event(
                     index,
                     AnthropicContentDelta::InputJsonDelta {

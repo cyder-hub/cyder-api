@@ -12,7 +12,9 @@ use crate::{
             RequestLogRecord,
         },
     },
-    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProfileType, UpstreamProtocol},
+    schema::enum_def::{
+        DownstreamProtocol, ModelKind, RequestStatus, UpstreamProfileType, UpstreamProtocol,
+    },
     service::app_state::StateRouter,
     utils::HttpResult,
 };
@@ -170,8 +172,9 @@ struct RequestLogResponse {
     provider_name: Option<String>,
     model_name: Option<String>,
     real_model_name: Option<String>,
+    model_kind: Option<ModelKind>,
     source_profile_type: Option<UpstreamProfileType>,
-    source_endpoint: Option<String>,
+    source_base_url: Option<String>,
     upstream_protocol: Option<UpstreamProtocol>,
     upstream_http_status: Option<i32>,
     estimated_cost_nanos: Option<i64>,
@@ -226,8 +229,9 @@ impl From<RequestLogRecord> for RequestLogResponse {
             provider_name: value.provider_name_snapshot,
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
+            model_kind: value.model_kind_snapshot,
             source_profile_type: value.source_profile_type_snapshot,
-            source_endpoint: value.source_endpoint_snapshot,
+            source_base_url: value.source_base_url_snapshot,
             upstream_protocol: value.upstream_protocol,
             upstream_http_status: value.upstream_http_status,
             estimated_cost_nanos: value.estimated_cost_nanos,
@@ -283,7 +287,7 @@ mod tests {
     use super::{DbRequestLogQueryPayload, RequestLogQueryParams, RequestLogResponse};
     use crate::{
         database::request_log::RequestLogRecord,
-        schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProfileType},
+        schema::enum_def::{DownstreamProtocol, ModelKind, RequestStatus, UpstreamProfileType},
     };
 
     fn request_log_record() -> RequestLogRecord {
@@ -318,8 +322,9 @@ mod tests {
             provider_name_snapshot: None,
             model_name_snapshot: None,
             real_model_name_snapshot: None,
+            model_kind_snapshot: Some(ModelKind::Chat),
             source_profile_type_snapshot: Some(UpstreamProfileType::Openai),
-            source_endpoint_snapshot: Some("https://api.example.com/v1".to_string()),
+            source_base_url_snapshot: Some("https://api.example.com/v1".to_string()),
             upstream_protocol: None,
             upstream_http_status: None,
             estimated_cost_nanos: None,
@@ -386,7 +391,7 @@ mod tests {
         assert_eq!(value["source_id"], 3);
         assert!(value.get("source_key").is_none());
         assert_eq!(value["source_profile_type"], "OPENAI");
-        assert_eq!(value["source_endpoint"], "https://api.example.com/v1");
+        assert_eq!(value["source_base_url"], "https://api.example.com/v1");
         assert!(value.get("first_response_body_at").is_some());
         assert!(value.get("first_token_at").is_some());
         assert!(value.get("upstream_response_headers_at").is_some());

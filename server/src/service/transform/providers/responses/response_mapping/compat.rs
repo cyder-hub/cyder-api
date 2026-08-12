@@ -55,19 +55,6 @@ pub(in crate::service::transform::providers::responses) fn convert_openai_respon
     }
 }
 
-pub(in crate::service::transform::providers::responses) fn convert_openai_passthrough_to_responses_reasoning(
-    value: &Value,
-) -> Option<Reasoning> {
-    let effort = value.get("reasoning_effort")?;
-    Some(Reasoning {
-        effort: Some(
-            serde_json::from_value(effort.clone())
-                .expect("OpenAI reasoning_effort is adapter-validated"),
-        ),
-        summary: None,
-    })
-}
-
 pub(in crate::service::transform::providers::responses) fn parse_function_arguments(
     arguments: &str,
 ) -> Value {
@@ -165,6 +152,9 @@ pub(in crate::service::transform::providers::responses) fn unified_tool_result_t
             file_url,
         }]),
         UnifiedToolResultOutput::Json { value } => FunctionCallOutputPayload::Unknown(value),
+        UnifiedToolResultOutput::Error { error } => {
+            FunctionCallOutputPayload::Unknown(serde_json::json!({ "error": error }))
+        }
     }
 }
 
@@ -228,9 +218,14 @@ pub(in crate::service::transform::providers::responses) fn parse_responses_input
         }
     }
 
+    let mime_type = filename
+        .as_deref()
+        .and_then(crate::service::transform::media::mime_type_from_filename)
+        .unwrap_or("application/octet-stream")
+        .to_string();
     UnifiedContentPart::FileData {
         data: file_data.to_string(),
-        mime_type: "application/octet-stream".to_string(),
+        mime_type,
         filename,
     }
 }
@@ -249,6 +244,7 @@ pub(in crate::service::transform::providers::responses) fn render_responses_inst
         UnifiedContentPart::ImageData { mime_type, data } => {
             Some(build_data_url(&mime_type, &data))
         }
+        UnifiedContentPart::AudioData { .. } | UnifiedContentPart::FileId { .. } => None,
         UnifiedContentPart::FileUrl {
             url,
             mime_type,

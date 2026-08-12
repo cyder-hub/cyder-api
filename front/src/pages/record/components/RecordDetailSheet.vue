@@ -141,7 +141,7 @@ import { toastController } from "@/services/uiFeedback";
 import type { RecordRequest } from "@/services/types";
 import { copyText } from "@/utils/clipboard";
 import {
-  formatSafeSourceEndpoint,
+  formatSafeSourceBaseUrl,
   formatSourceIdentity,
 } from "@/utils/sourceEvidence";
 import type { RecordDetailTab } from "../composables/useRecordDetail";
@@ -234,7 +234,7 @@ const overviewItems = computed(() => {
           },
           {
             label: $t("recordPage.detailDialog.summary.sourceEndpoint"),
-            value: formatSafeSourceEndpoint(record.source_endpoint, emptyValue),
+            value: formatSafeSourceBaseUrl(record.source_base_url, emptyValue),
             mono: true,
           },
         ]),

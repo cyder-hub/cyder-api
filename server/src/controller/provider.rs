@@ -41,15 +41,21 @@ use std::sync::Arc; // Added Arc
 use crate::utils::{HttpResult, ID_GENERATOR, auth::ManagerAuthContext};
 
 use super::{BaseError, auth::authorize_secret_governance_command};
-use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+use crate::schema::enum_def::{
+    ModelKind, ProviderApiKeyMode, UpstreamProfileType, UpstreamProtocol,
+};
 use crate::service::cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch};
 use crate::service::provider_credential::{
     ProviderCredential, ProviderCredentialError, apply_provider_request_auth_header,
     resolve_draft_provider_credential, resolve_saved_provider_credential,
     upstream_protocol_for_profile,
 };
-use crate::service::provider_http::normalize_provider_endpoint;
+use crate::service::provider_http::{
+    base_url_is_default, normalize_provider_base_url, normalize_source_base_url,
+};
 use crate::service::secret_encryption::SensitiveSecret;
+use crate::service::transform::validate_final_generation_request;
+use crate::service::upstream_profile::{UpstreamOperation, resolve_source_operation_url};
 use crate::service::upstream_response::apply_upstream_accept_encoding;
 
 #[derive(Serialize)]
@@ -60,8 +66,148 @@ struct ProviderModelDetailResponse {
 }
 
 #[derive(Serialize)]
+struct SourceCommonResponse {
+    id: i64,
+    provider_id: i64,
+    base_url: String,
+    base_url_is_default: bool,
+    use_proxy: bool,
+    is_enabled: bool,
+    is_default: bool,
+    deleted_at: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "profile_type")]
+enum UpstreamSourceResponse {
+    #[serde(rename = "OPENAI")]
+    Openai {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+        chat_completions_enabled: bool,
+        chat_completions_path_override: Option<String>,
+        embeddings_enabled: bool,
+        embeddings_path_override: Option<String>,
+    },
+    #[serde(rename = "OPENAI_COMPATIBLE")]
+    OpenaiCompatible {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+        chat_completions_enabled: bool,
+        chat_completions_path_override: Option<String>,
+        embeddings_enabled: bool,
+        embeddings_path_override: Option<String>,
+        rerank_enabled: bool,
+        rerank_path_override: Option<String>,
+    },
+    #[serde(rename = "GEMINI_OPENAI")]
+    GeminiOpenai {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+        chat_completions_enabled: bool,
+        chat_completions_path_override: Option<String>,
+        embeddings_enabled: bool,
+        embeddings_path_override: Option<String>,
+    },
+    #[serde(rename = "GEMINI")]
+    Gemini {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+    },
+    #[serde(rename = "VERTEX")]
+    Vertex {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+    },
+    #[serde(rename = "OLLAMA")]
+    Ollama {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+    },
+    #[serde(rename = "ANTHROPIC")]
+    Anthropic {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+    },
+    #[serde(rename = "RESPONSES")]
+    Responses {
+        #[serde(flatten)]
+        common: SourceCommonResponse,
+    },
+}
+
+impl From<UpstreamSource> for UpstreamSourceResponse {
+    fn from(source: UpstreamSource) -> Self {
+        let common = SourceCommonResponse {
+            id: source.id,
+            provider_id: source.provider_id,
+            base_url: source.base_url.clone(),
+            base_url_is_default: base_url_is_default(&source.profile_type, &source.base_url),
+            use_proxy: source.use_proxy,
+            is_enabled: source.is_enabled,
+            is_default: source.is_default,
+            deleted_at: source.deleted_at,
+            created_at: source.created_at,
+            updated_at: source.updated_at,
+        };
+        match source.profile_type {
+            UpstreamProfileType::Openai => Self::Openai {
+                common,
+                chat_completions_enabled: source.chat_completions_enabled.unwrap_or(false),
+                chat_completions_path_override: source.chat_completions_path_override,
+                embeddings_enabled: source.embeddings_enabled.unwrap_or(false),
+                embeddings_path_override: source.embeddings_path_override,
+            },
+            UpstreamProfileType::OpenaiCompatible => Self::OpenaiCompatible {
+                common,
+                chat_completions_enabled: source.chat_completions_enabled.unwrap_or(false),
+                chat_completions_path_override: source.chat_completions_path_override,
+                embeddings_enabled: source.embeddings_enabled.unwrap_or(false),
+                embeddings_path_override: source.embeddings_path_override,
+                rerank_enabled: source.rerank_enabled.unwrap_or(false),
+                rerank_path_override: source.rerank_path_override,
+            },
+            UpstreamProfileType::GeminiOpenai => Self::GeminiOpenai {
+                common,
+                chat_completions_enabled: source.chat_completions_enabled.unwrap_or(false),
+                chat_completions_path_override: source.chat_completions_path_override,
+                embeddings_enabled: source.embeddings_enabled.unwrap_or(false),
+                embeddings_path_override: source.embeddings_path_override,
+            },
+            UpstreamProfileType::Gemini => Self::Gemini { common },
+            UpstreamProfileType::Vertex => Self::Vertex { common },
+            UpstreamProfileType::Ollama => Self::Ollama { common },
+            UpstreamProfileType::Anthropic => Self::Anthropic { common },
+            UpstreamProfileType::Responses => Self::Responses { common },
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ProviderAggregateResponse {
+    #[serde(flatten)]
+    provider: crate::database::provider::Provider,
+    upstream_sources: Vec<UpstreamSourceResponse>,
+}
+
+impl From<ProviderAggregate> for ProviderAggregateResponse {
+    fn from(aggregate: ProviderAggregate) -> Self {
+        Self {
+            provider: aggregate.provider,
+            upstream_sources: aggregate
+                .upstream_sources
+                .into_iter()
+                .map(UpstreamSourceResponse::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct ProviderDetailResponse {
-    provider: ProviderAggregate,
+    provider: ProviderAggregateResponse,
     models: Vec<ProviderModelDetailResponse>,
     provider_keys: Vec<ProviderApiKeySummary>,
     request_patch_variants: Vec<RequestPatchVariantAggregate>,
@@ -77,6 +223,7 @@ fn provider_model_details(provider_id: i64) -> DbResult<Vec<ProviderModelDetailR
         .map(|detail| ModelSourceSnapshotOwner {
             model_id: detail.model.id,
             provider_id,
+            model_kind: detail.model.model_kind,
             source_selection_mode: detail.model.source_selection_mode.clone(),
         })
         .collect::<Vec<_>>();
@@ -98,11 +245,9 @@ fn provider_model_details(provider_id: i64) -> DbResult<Vec<ProviderModelDetailR
         .collect()
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UpstreamSourcePayload {
-    endpoint: String,
-    profile_type: UpstreamProfileType,
+struct SourceLifecyclePayload {
     #[serde(default)]
     use_proxy: bool,
     #[serde(default = "default_enabled")]
@@ -115,6 +260,132 @@ fn default_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiSourcePayload {
+    base_url: Option<String>,
+    #[serde(flatten)]
+    lifecycle: SourceLifecyclePayload,
+    chat_completions_enabled: Option<bool>,
+    chat_completions_path_override: Option<String>,
+    embeddings_enabled: Option<bool>,
+    embeddings_path_override: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiCompatibleSourcePayload {
+    base_url: String,
+    #[serde(flatten)]
+    lifecycle: SourceLifecyclePayload,
+    chat_completions_enabled: Option<bool>,
+    chat_completions_path_override: Option<String>,
+    embeddings_enabled: Option<bool>,
+    embeddings_path_override: Option<String>,
+    rerank_enabled: Option<bool>,
+    rerank_path_override: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSourcePayload {
+    base_url: String,
+    #[serde(flatten)]
+    lifecycle: SourceLifecyclePayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "profile_type")]
+enum UpstreamSourcePayload {
+    #[serde(rename = "OPENAI")]
+    Openai(OpenAiSourcePayload),
+    #[serde(rename = "OPENAI_COMPATIBLE")]
+    OpenaiCompatible(OpenAiCompatibleSourcePayload),
+    #[serde(rename = "GEMINI_OPENAI")]
+    GeminiOpenai(OpenAiSourcePayload),
+    #[serde(rename = "GEMINI")]
+    Gemini(NativeSourcePayload),
+    #[serde(rename = "VERTEX")]
+    Vertex(NativeSourcePayload),
+    #[serde(rename = "OLLAMA")]
+    Ollama(NativeSourcePayload),
+    #[serde(rename = "ANTHROPIC")]
+    Anthropic(NativeSourcePayload),
+    #[serde(rename = "RESPONSES")]
+    Responses(NativeSourcePayload),
+}
+
+impl UpstreamSourcePayload {
+    fn into_input(self) -> UpstreamSourceCreateInput {
+        match self {
+            Self::Openai(payload) => openai_source_input(UpstreamProfileType::Openai, payload),
+            Self::GeminiOpenai(payload) => {
+                openai_source_input(UpstreamProfileType::GeminiOpenai, payload)
+            }
+            Self::OpenaiCompatible(payload) => UpstreamSourceCreateInput {
+                profile_type: UpstreamProfileType::OpenaiCompatible,
+                base_url: Some(payload.base_url),
+                use_proxy: payload.lifecycle.use_proxy,
+                chat_completions_enabled: payload.chat_completions_enabled,
+                chat_completions_path_override: payload.chat_completions_path_override,
+                embeddings_enabled: payload.embeddings_enabled,
+                embeddings_path_override: payload.embeddings_path_override,
+                rerank_enabled: payload.rerank_enabled,
+                rerank_path_override: payload.rerank_path_override,
+                is_enabled: payload.lifecycle.is_enabled,
+                is_default: payload.lifecycle.is_default,
+            },
+            Self::Gemini(payload) => native_source_input(UpstreamProfileType::Gemini, payload),
+            Self::Vertex(payload) => native_source_input(UpstreamProfileType::Vertex, payload),
+            Self::Ollama(payload) => native_source_input(UpstreamProfileType::Ollama, payload),
+            Self::Anthropic(payload) => {
+                native_source_input(UpstreamProfileType::Anthropic, payload)
+            }
+            Self::Responses(payload) => {
+                native_source_input(UpstreamProfileType::Responses, payload)
+            }
+        }
+    }
+}
+
+fn openai_source_input(
+    profile_type: UpstreamProfileType,
+    payload: OpenAiSourcePayload,
+) -> UpstreamSourceCreateInput {
+    UpstreamSourceCreateInput {
+        profile_type,
+        base_url: payload.base_url,
+        use_proxy: payload.lifecycle.use_proxy,
+        chat_completions_enabled: payload.chat_completions_enabled,
+        chat_completions_path_override: payload.chat_completions_path_override,
+        embeddings_enabled: payload.embeddings_enabled,
+        embeddings_path_override: payload.embeddings_path_override,
+        rerank_enabled: None,
+        rerank_path_override: None,
+        is_enabled: payload.lifecycle.is_enabled,
+        is_default: payload.lifecycle.is_default,
+    }
+}
+
+fn native_source_input(
+    profile_type: UpstreamProfileType,
+    payload: NativeSourcePayload,
+) -> UpstreamSourceCreateInput {
+    UpstreamSourceCreateInput {
+        profile_type,
+        base_url: Some(payload.base_url),
+        use_proxy: payload.lifecycle.use_proxy,
+        chat_completions_enabled: None,
+        chat_completions_path_override: None,
+        embeddings_enabled: None,
+        embeddings_path_override: None,
+        rerank_enabled: None,
+        rerank_path_override: None,
+        is_enabled: payload.lifecycle.is_enabled,
+        is_default: payload.lifecycle.is_default,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BootstrapProviderPayload {
@@ -124,20 +395,60 @@ struct BootstrapProviderPayload {
     name: Option<String>,
     key: Option<String>,
     real_model_name: Option<String>,
+    model_kind: ModelKind,
     #[serde(default)]
     save_and_test: bool,
     api_key_description: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BootstrapCheckStatus {
+    Success,
+    Failed,
+    CheckSkipped,
+}
+
 #[derive(Serialize)]
 struct BootstrapCheckResult {
-    success: bool,
+    status: BootstrapCheckStatus,
     message: String,
+}
+
+impl BootstrapCheckResult {
+    fn success(message: impl Into<String>) -> Self {
+        Self {
+            status: BootstrapCheckStatus::Success,
+            message: message.into(),
+        }
+    }
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            status: BootstrapCheckStatus::Failed,
+            message: message.into(),
+        }
+    }
+
+    fn skipped(message: impl Into<String>) -> Self {
+        Self {
+            status: BootstrapCheckStatus::CheckSkipped,
+            message: message.into(),
+        }
+    }
+
+    fn audit_success(&self) -> Option<bool> {
+        match self.status {
+            BootstrapCheckStatus::Success => Some(true),
+            BootstrapCheckStatus::Failed => Some(false),
+            BootstrapCheckStatus::CheckSkipped => None,
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct BootstrapProviderResponse {
-    provider: ProviderAggregate,
+    provider: ProviderAggregateResponse,
     created_key: ProviderApiKeySummary,
     created_model: Model,
     provider_name: String,
@@ -145,9 +456,14 @@ struct BootstrapProviderResponse {
     check_result: Option<BootstrapCheckResult>,
 }
 
-async fn list() -> DbResult<HttpResult<Vec<ProviderAggregate>>> {
+async fn list() -> DbResult<HttpResult<Vec<ProviderAggregateResponse>>> {
     let result = Provider::list_all()?;
-    Ok(HttpResult::new(result))
+    Ok(HttpResult::new(
+        result
+            .into_iter()
+            .map(ProviderAggregateResponse::from)
+            .collect(),
+    ))
 }
 
 async fn list_summary() -> DbResult<HttpResult<Vec<ProviderSummaryItem>>> {
@@ -176,8 +492,19 @@ struct UpdateProviderPayload {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateSourcePayload {
-    endpoint: Option<String>,
+    profile_type: Option<UpstreamProfileType>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    base_url: Option<Option<String>>,
     use_proxy: Option<bool>,
+    chat_completions_enabled: Option<bool>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    chat_completions_path_override: Option<Option<String>>,
+    embeddings_enabled: Option<bool>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    embeddings_path_override: Option<Option<String>>,
+    rerank_enabled: Option<bool>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    rerank_path_override: Option<Option<String>>,
     is_enabled: Option<bool>,
     is_default: Option<bool>,
 }
@@ -189,19 +516,13 @@ struct SourceImpactPayload {
 }
 
 fn source_create_input(payload: UpstreamSourcePayload) -> UpstreamSourceCreateInput {
-    UpstreamSourceCreateInput {
-        endpoint: payload.endpoint,
-        use_proxy: payload.use_proxy,
-        profile_type: payload.profile_type,
-        is_enabled: payload.is_enabled,
-        is_default: payload.is_default,
-    }
+    payload.into_input()
 }
 
 async fn insert(
     State(app_state): State<Arc<AppState>>,
     Json(payload): Json<InserPayload>,
-) -> DbResult<HttpResult<ProviderAggregate>> {
+) -> DbResult<HttpResult<ProviderAggregateResponse>> {
     let created_provider = app_state
         .admin
         .provider
@@ -214,20 +535,22 @@ async fn insert(
         })
         .await?;
 
-    Ok(HttpResult::new(created_provider))
+    Ok(HttpResult::new(created_provider.into()))
 }
 
-async fn get_provider(Path(id): Path<i64>) -> Result<HttpResult<ProviderAggregate>, BaseError> {
+async fn get_provider(
+    Path(id): Path<i64>,
+) -> Result<HttpResult<ProviderAggregateResponse>, BaseError> {
     let provider = Provider::get_by_id(id)?;
 
-    Ok(HttpResult::new(provider))
+    Ok(HttpResult::new(provider.into()))
 }
 
 async fn update_provider(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateProviderPayload>,
-) -> Result<HttpResult<ProviderAggregate>, BaseError> {
+) -> Result<HttpResult<ProviderAggregateResponse>, BaseError> {
     let updated_provider = app_state
         .admin
         .provider
@@ -241,7 +564,7 @@ async fn update_provider(
         )
         .await?;
 
-    Ok(HttpResult::new(updated_provider))
+    Ok(HttpResult::new(updated_provider.into()))
 }
 
 async fn delete_provider(
@@ -256,20 +579,25 @@ async fn create_source(
     State(app_state): State<Arc<AppState>>,
     Path(provider_id): Path<i64>,
     Json(payload): Json<UpstreamSourcePayload>,
-) -> Result<HttpResult<UpstreamSource>, BaseError> {
+) -> Result<HttpResult<UpstreamSourceResponse>, BaseError> {
     let source = app_state
         .admin
         .provider
         .create_source(provider_id, source_create_input(payload))
         .await?;
-    Ok(HttpResult::new(source))
+    Ok(HttpResult::new(source.into()))
 }
 
 async fn update_source(
     State(app_state): State<Arc<AppState>>,
     Path((provider_id, source_id)): Path<(i64, i64)>,
     Json(payload): Json<UpdateSourcePayload>,
-) -> Result<HttpResult<UpstreamSource>, BaseError> {
+) -> Result<HttpResult<UpstreamSourceResponse>, BaseError> {
+    if payload.profile_type.is_some() {
+        return Err(BaseError::ParamInvalid(Some(
+            "upstream source profile_type is immutable after creation".to_string(),
+        )));
+    }
     let source = app_state
         .admin
         .provider
@@ -277,14 +605,20 @@ async fn update_source(
             provider_id,
             source_id,
             UpstreamSourceUpdateInput {
-                endpoint: payload.endpoint,
+                base_url: payload.base_url,
                 use_proxy: payload.use_proxy,
+                chat_completions_enabled: payload.chat_completions_enabled,
+                chat_completions_path_override: payload.chat_completions_path_override,
+                embeddings_enabled: payload.embeddings_enabled,
+                embeddings_path_override: payload.embeddings_path_override,
+                rerank_enabled: payload.rerank_enabled,
+                rerank_path_override: payload.rerank_path_override,
                 is_enabled: payload.is_enabled,
                 is_default: payload.is_default,
             },
         )
         .await?;
-    Ok(HttpResult::new(source))
+    Ok(HttpResult::new(source.into()))
 }
 
 async fn delete_source(
@@ -320,7 +654,7 @@ async fn get_provider_detail(
     let models = provider_model_details(id)?;
 
     Ok(HttpResult::new(ProviderDetailResponse {
-        provider: detail.provider,
+        provider: detail.provider.into(),
         models,
         provider_keys: detail.api_keys,
         request_patch_variants: detail.request_patch_variants,
@@ -329,9 +663,106 @@ async fn get_provider_detail(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DraftCheckModel {
+    model_kind: ModelKind,
+    upstream_model_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckProviderPayload {
     model_id: Option<i64>,
-    model_name: Option<String>,
+    draft_model: Option<DraftCheckModel>,
+    provider_api_key_id: Option<i64>,
+    provider_api_key: Option<String>,
+}
+
+enum ProviderCheckModel {
+    Saved(Model),
+    Draft { upstream_model_name: String },
+}
+
+impl ProviderCheckModel {
+    fn resolve(
+        payload: CheckProviderPayload,
+        provider_id: i64,
+    ) -> Result<(Self, CheckProviderCredentialInput), BaseError> {
+        let selected = match (payload.model_id, payload.draft_model) {
+            (Some(model_id), None) => {
+                let model = Model::get_by_id(model_id)?;
+                if model.provider_id != provider_id {
+                    return Err(BaseError::ParamInvalid(Some(format!(
+                        "Model {} does not belong to provider {}",
+                        model_id, provider_id
+                    ))));
+                }
+                if model.model_kind != ModelKind::Chat {
+                    return Err(BaseError::ParamInvalid(Some(
+                        "Source Check only supports CHAT models".to_string(),
+                    )));
+                }
+                if !model.is_enabled {
+                    return Err(BaseError::ParamInvalid(Some(format!(
+                        "Model {} is disabled",
+                        model_id
+                    ))));
+                }
+                Self::Saved(model)
+            }
+            (None, Some(draft)) => {
+                if draft.model_kind != ModelKind::Chat {
+                    return Err(BaseError::ParamInvalid(Some(
+                        "Source Check only supports CHAT draft models".to_string(),
+                    )));
+                }
+                let upstream_model_name = draft.upstream_model_name.trim().to_string();
+                if upstream_model_name.is_empty() {
+                    return Err(BaseError::ParamInvalid(Some(
+                        "draft_model.upstream_model_name must not be empty".to_string(),
+                    )));
+                }
+                Self::Draft {
+                    upstream_model_name,
+                }
+            }
+            _ => {
+                return Err(BaseError::ParamInvalid(Some(
+                    "Exactly one of model_id or draft_model must be provided".to_string(),
+                )));
+            }
+        };
+
+        Ok((
+            selected,
+            CheckProviderCredentialInput {
+                provider_api_key_id: payload.provider_api_key_id,
+                provider_api_key: payload.provider_api_key,
+            },
+        ))
+    }
+
+    fn upstream_model_name(&self) -> String {
+        match self {
+            Self::Saved(model) => model
+                .real_model_name
+                .clone()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| model.model_name.clone()),
+            Self::Draft {
+                upstream_model_name,
+            } => upstream_model_name.clone(),
+        }
+    }
+
+    fn saved_model(&self) -> Option<&Model> {
+        match self {
+            Self::Saved(model) => Some(model),
+            Self::Draft { .. } => None,
+        }
+    }
+}
+
+struct CheckProviderCredentialInput {
     provider_api_key_id: Option<i64>,
     provider_api_key: Option<String>,
 }
@@ -431,8 +862,14 @@ async fn build_provider_check_request(
     let cache_source = crate::service::cache::types::CacheUpstreamSource {
         id: source.id,
         profile_type: source.profile_type,
-        endpoint: source.endpoint.clone(),
+        base_url: source.base_url.clone(),
         use_proxy: source.use_proxy,
+        chat_completions_enabled: source.chat_completions_enabled,
+        chat_completions_path_override: source.chat_completions_path_override.clone(),
+        embeddings_enabled: source.embeddings_enabled,
+        embeddings_path_override: source.embeddings_path_override.clone(),
+        rerank_enabled: source.rerank_enabled,
+        rerank_path_override: source.rerank_path_override.clone(),
         is_enabled: source.is_enabled,
         is_default: source.is_default,
     };
@@ -463,8 +900,9 @@ async fn build_provider_check_request(
                 ]
             }),
         },
-        UpstreamProfileType::VertexOpenai => ProviderCheckRequest {
-            url: format_openai_check_url(source),
+        UpstreamProfileType::OpenaiCompatible => ProviderCheckRequest {
+            url: resolve_source_operation_url(&cache_source, UpstreamOperation::ChatCompletions)
+                .map_err(source_chat_check_error)?,
             headers,
             body: json!({
                 "model": model_name,
@@ -479,7 +917,7 @@ async fn build_provider_check_request(
         UpstreamProfileType::Anthropic => {
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             ProviderCheckRequest {
-                url: format!("{}/messages", source.endpoint.trim_end_matches('/')),
+                url: format!("{}/messages", source.base_url.trim_end_matches('/')),
                 headers,
                 body: json!({
                     "model": model_name,
@@ -494,7 +932,7 @@ async fn build_provider_check_request(
             }
         }
         UpstreamProfileType::Ollama => ProviderCheckRequest {
-            url: format!("{}/api/chat", source.endpoint.trim_end_matches('/')),
+            url: format!("{}/api/chat", source.base_url.trim_end_matches('/')),
             headers,
             body: json!({
                 "model": model_name,
@@ -507,9 +945,21 @@ async fn build_provider_check_request(
                 ]
             }),
         },
-        UpstreamProfileType::Openai
-        | UpstreamProfileType::Responses
-        | UpstreamProfileType::GeminiOpenai => ProviderCheckRequest {
+        UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai => ProviderCheckRequest {
+            url: resolve_source_operation_url(&cache_source, UpstreamOperation::ChatCompletions)
+                .map_err(source_chat_check_error)?,
+            headers,
+            body: json!({
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "hi"
+                    }
+                ]
+            }),
+        },
+        UpstreamProfileType::Responses => ProviderCheckRequest {
             url: format_openai_check_url(source),
             headers,
             body: json!({
@@ -534,10 +984,23 @@ async fn build_provider_check_request(
         request_patches,
     )
     .map_err(provider_check_patch_error)?;
+    let upstream_protocol = upstream_protocol_for_profile(&cache_source.profile_type);
+    if upstream_protocol == UpstreamProtocol::Openai {
+        validate_final_generation_request(
+            &request.body,
+            upstream_protocol,
+            &cache_source.profile_type,
+        )
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(format!(
+                "final target Profile validation failed at {error}"
+            )))
+        })?;
+    }
     apply_provider_request_auth_header(
         &mut request.headers,
         &cache_source,
-        upstream_protocol_for_profile(&cache_source.profile_type),
+        upstream_protocol,
         credential,
     )
     .map_err(provider_credential_error)?;
@@ -547,15 +1010,39 @@ async fn build_provider_check_request(
 }
 
 fn format_openai_check_url(source: &UpstreamSource) -> String {
-    format!("{}/chat/completions", source.endpoint.trim_end_matches('/'))
+    let path = source
+        .chat_completions_path_override
+        .as_deref()
+        .unwrap_or("chat/completions");
+    crate::service::provider_http::join_base_url_and_operation_path(&source.base_url, path)
+        .expect("persisted Source URL and operation path must be valid")
 }
 
 fn format_gemini_generate_content_url(source: &UpstreamSource, model_name: &str) -> String {
     format!(
         "{}/{}:generateContent",
-        source.endpoint.trim_end_matches('/'),
+        source.base_url.trim_end_matches('/'),
         model_name
     )
+}
+
+fn source_chat_check_error(error: impl std::fmt::Display) -> BaseError {
+    BaseError::ParamInvalid(Some(format!("Source does not support Chat check: {error}")))
+}
+
+fn validate_source_for_chat_check(
+    source: &crate::service::cache::types::CacheUpstreamSource,
+) -> Result<(), BaseError> {
+    if matches!(
+        source.profile_type,
+        UpstreamProfileType::Openai
+            | UpstreamProfileType::OpenaiCompatible
+            | UpstreamProfileType::GeminiOpenai
+    ) {
+        resolve_source_operation_url(source, UpstreamOperation::ChatCompletions)
+            .map_err(source_chat_check_error)?;
+    }
+    Ok(())
 }
 
 fn provider_credential_error(error: ProviderCredentialError) -> BaseError {
@@ -575,9 +1062,9 @@ fn provider_credential_error(error: ProviderCredentialError) -> BaseError {
 }
 
 fn normalize_source_for_outbound(mut source: UpstreamSource) -> Result<UpstreamSource, BaseError> {
-    source.endpoint = normalize_provider_endpoint(&source.endpoint).map_err(|error| {
+    source.base_url = normalize_provider_base_url(&source.base_url).map_err(|error| {
         BaseError::ParamInvalid(Some(format!(
-            "upstream source endpoint is invalid and must be repaired before use: {error}"
+            "upstream source base URL is invalid and must be repaired before use: {error}"
         )))
     })?;
     Ok(source)
@@ -588,7 +1075,7 @@ fn profile_type_label(profile_type: &UpstreamProfileType) -> &'static str {
         UpstreamProfileType::Openai => "OpenAI",
         UpstreamProfileType::Gemini => "Gemini",
         UpstreamProfileType::Vertex => "Vertex",
-        UpstreamProfileType::VertexOpenai => "Vertex OpenAI",
+        UpstreamProfileType::OpenaiCompatible => "OpenAI Compatible",
         UpstreamProfileType::Ollama => "Ollama",
         UpstreamProfileType::Anthropic => "Anthropic",
         UpstreamProfileType::Responses => "Responses",
@@ -596,8 +1083,8 @@ fn profile_type_label(profile_type: &UpstreamProfileType) -> &'static str {
     }
 }
 
-fn endpoint_host(endpoint: &str) -> String {
-    let trimmed = endpoint.trim();
+fn base_url_host(base_url: &str) -> String {
+    let trimmed = base_url.trim();
     if let Ok(url) = Url::parse(trimmed) {
         if let Some(host) = url.host_str() {
             return match url.port() {
@@ -617,8 +1104,8 @@ fn endpoint_host(endpoint: &str) -> String {
         .to_string()
 }
 
-fn generated_provider_name(profile_type: &UpstreamProfileType, endpoint: &str) -> String {
-    let host = endpoint_host(endpoint);
+fn generated_provider_name(profile_type: &UpstreamProfileType, base_url: &str) -> String {
+    let host = base_url_host(base_url);
     if host.is_empty() {
         profile_type_label(profile_type).to_string()
     } else {
@@ -663,12 +1150,12 @@ fn base_error_message(error: &BaseError) -> String {
 
 fn resolve_bootstrap_identity(
     profile_type: &UpstreamProfileType,
-    endpoint: &str,
+    base_url: &str,
     name: Option<String>,
     key: Option<String>,
 ) -> Result<(String, String), BaseError> {
     let provider_name = normalize_optional_text(name)
-        .unwrap_or_else(|| generated_provider_name(profile_type, endpoint));
+        .unwrap_or_else(|| generated_provider_name(profile_type, base_url));
 
     let provider_key = normalize_optional_text(key).ok_or_else(|| {
         BaseError::ParamInvalid(Some("provider_key must be provided".to_string()))
@@ -724,7 +1211,7 @@ fn build_bootstrap_response(
     check_result: Option<BootstrapCheckResult>,
 ) -> BootstrapProviderResponse {
     BootstrapProviderResponse {
-        provider: created.provider,
+        provider: created.provider.into(),
         created_key: created.created_key,
         created_model: created.created_model,
         provider_name,
@@ -738,62 +1225,33 @@ async fn check_provider(
     Path((id, source_id)): Path<(i64, i64)>,
     Json(payload): Json<CheckProviderPayload>,
 ) -> Result<HttpResult<SourceEvidence>, BaseError> {
-    let mut selected_model: Option<Model> = None;
-    let model_name = match (payload.model_id, payload.model_name) {
-        (Some(model_id), _) => {
-            let model = Model::get_by_id(model_id)?;
-            if model.provider_id != id {
-                return Err(BaseError::ParamInvalid(Some(format!(
-                    "Model {} does not belong to provider {}",
-                    model_id, id
-                ))));
-            }
-            let resolved_name = model
-                .real_model_name
-                .clone()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| model.model_name.clone());
-            selected_model = Some(model);
-            resolved_name
-        }
-        (_, Some(model_name)) => model_name,
-        (None, None) => {
-            return Err(BaseError::ParamInvalid(Some(
-                "Either model_id or model_name must be provided.".to_string(),
-            )));
-        }
-    };
+    let (selected_model, credential_input) = ProviderCheckModel::resolve(payload, id)?;
+    let model_name = selected_model.upstream_model_name();
 
     let provider = Provider::get_by_id(id)?;
     let source = normalize_source_for_outbound(UpstreamSource::get_active_by_id_for_provider(
         source_id, id,
     )?)?;
-    if let Some(model) = selected_model.as_ref() {
+    if let Some(model) = selected_model.saved_model() {
         validate_saved_model_source_for_check(model, source.id)?;
     }
-    let cache_source = crate::service::cache::types::CacheUpstreamSource {
-        id: source.id,
-        profile_type: source.profile_type,
-        endpoint: source.endpoint.clone(),
-        use_proxy: source.use_proxy,
-        is_enabled: source.is_enabled,
-        is_default: source.is_default,
-    };
+    let cache_source = crate::service::cache::types::CacheUpstreamSource::from(source.clone());
+    validate_source_for_chat_check(&cache_source)?;
     let request_patches = resolve_provider_check_request_patches(
         &app_state,
         &provider,
-        selected_model.as_ref(),
+        selected_model.saved_model(),
         &cache_source,
     )
     .await?;
     // Capture the durable identity before resolving the request credential. Draft
     // credentials use an internal key_id of 0 for provider-specific materialization,
     // but that implementation detail must never cross the manager API boundary.
-    let provider_api_key_id = payload.provider_api_key_id;
+    let provider_api_key_id = credential_input.provider_api_key_id;
     let provider_api_key_identity = provider_api_key_id
         .map(|key_id| format!("saved:{key_id}"))
         .unwrap_or_else(|| "draft".to_string());
-    let credential = match (provider_api_key_id, payload.provider_api_key) {
+    let credential = match (provider_api_key_id, credential_input.provider_api_key) {
         (Some(key_id), _) => {
             resolve_saved_provider_credential(&provider, &cache_source, key_id, &app_state)
                 .await
@@ -847,9 +1305,15 @@ async fn bootstrap_provider(
     State(app_state): State<Arc<AppState>>,
     Json(payload): Json<BootstrapProviderPayload>,
 ) -> Result<HttpResult<BootstrapProviderResponse>, BaseError> {
+    let initial_source = payload.initial_source.into_input();
+    let effective_base_url = normalize_source_base_url(
+        &initial_source.profile_type,
+        initial_source.base_url.as_deref(),
+    )
+    .map_err(|error| BaseError::ParamInvalid(Some(format!("upstream source base URL {error}"))))?;
     let (provider_name, provider_key) = resolve_bootstrap_identity(
-        &payload.initial_source.profile_type,
-        &payload.initial_source.endpoint,
+        &initial_source.profile_type,
+        &effective_base_url,
         payload.name.clone(),
         payload.key.clone(),
     )?;
@@ -858,14 +1322,13 @@ async fn bootstrap_provider(
         provider_id: ID_GENERATOR.generate_id(),
         provider_key: provider_key.clone(),
         name: provider_name.clone(),
-        endpoint: payload.initial_source.endpoint.clone(),
-        use_proxy: payload.initial_source.use_proxy,
-        profile_type: payload.initial_source.profile_type,
+        source: initial_source,
         provider_api_key_mode: ProviderApiKeyMode::Queue,
         api_key: payload.api_key.clone(),
         api_key_description: normalize_optional_text(payload.api_key_description.clone()),
         model_name: payload.model_name.clone(),
         real_model_name: normalize_optional_text(payload.real_model_name.clone()),
+        model_kind: payload.model_kind,
     };
 
     let created = app_state
@@ -874,7 +1337,11 @@ async fn bootstrap_provider(
         .bootstrap_provider_persist(provider_input)
         .await?;
 
-    let check_result = if payload.save_and_test {
+    let check_result = if payload.save_and_test && payload.model_kind != ModelKind::Chat {
+        Some(BootstrapCheckResult::skipped(
+            "Source Check only supports CHAT models; the Provider, Source, credential, and model were saved without a check",
+        ))
+    } else if payload.save_and_test {
         let source = created
             .provider
             .upstream_sources
@@ -883,15 +1350,9 @@ async fn bootstrap_provider(
             .ok_or_else(|| {
                 BaseError::DatabaseFatal(Some("bootstrap source missing".to_string()))
             })?;
-        let cache_source = crate::service::cache::types::CacheUpstreamSource {
-            id: source.id,
-            profile_type: source.profile_type,
-            endpoint: source.endpoint.clone(),
-            use_proxy: source.use_proxy,
-            is_enabled: source.is_enabled,
-            is_default: source.is_default,
-        };
+        let cache_source = crate::service::cache::types::CacheUpstreamSource::from(source.clone());
         let client = app_state.infra.provider_client(source.use_proxy).await;
+        let chat_operation = validate_source_for_chat_check(&cache_source);
         let model_name_to_check = created
             .created_model
             .real_model_name
@@ -907,8 +1368,8 @@ async fn bootstrap_provider(
         )
         .await;
 
-        let credential_and_patches = match (client, request_patches) {
-            (Ok(client), Ok(request_patches)) => resolve_draft_provider_credential(
+        let credential_and_patches = match (chat_operation, client, request_patches) {
+            (Ok(()), Ok(client), Ok(request_patches)) => resolve_draft_provider_credential(
                 &created.provider,
                 &cache_source,
                 created.created_key.id,
@@ -918,14 +1379,12 @@ async fn bootstrap_provider(
             .await
             .map(|credential| (client, credential, request_patches))
             .map_err(provider_credential_error),
-            (Err(error), _) => Err(BaseError::ParamInvalid(Some(error.to_string()))),
-            (_, Err(error)) => Err(error),
+            (Err(error), _, _) => Err(error),
+            (_, Err(error), _) => Err(BaseError::ParamInvalid(Some(error.to_string()))),
+            (_, _, Err(error)) => Err(error),
         };
         match credential_and_patches {
-            Err(error) => Some(BootstrapCheckResult {
-                success: false,
-                message: base_error_message(&error),
-            }),
+            Err(error) => Some(BootstrapCheckResult::failed(base_error_message(&error))),
             Ok((client, credential, request_patches)) => {
                 let proxy_timeouts = app_state.infra.proxy_request_config().timeouts.clone();
                 match perform_provider_check(
@@ -939,14 +1398,8 @@ async fn bootstrap_provider(
                 )
                 .await
                 {
-                    Ok(()) => Some(BootstrapCheckResult {
-                        success: true,
-                        message: "Provider check succeeded".to_string(),
-                    }),
-                    Err(e) => Some(BootstrapCheckResult {
-                        success: false,
-                        message: base_error_message(&e),
-                    }),
+                    Ok(()) => Some(BootstrapCheckResult::success("Provider check succeeded")),
+                    Err(e) => Some(BootstrapCheckResult::failed(base_error_message(&e))),
                 }
             }
         }
@@ -957,7 +1410,12 @@ async fn bootstrap_provider(
     app_state
         .admin
         .provider
-        .record_bootstrap_audit(&created, check_result.as_ref().map(|result| result.success))
+        .record_bootstrap_audit(
+            &created,
+            check_result
+                .as_ref()
+                .and_then(BootstrapCheckResult::audit_success),
+        )
         .await;
 
     Ok(HttpResult::new(build_bootstrap_response(
@@ -981,7 +1439,7 @@ async fn list_provider_details(
         let models = provider_model_details(provider.id)?;
 
         provider_details.push(ProviderDetailResponse {
-            provider: detail.provider,
+            provider: detail.provider.into(),
             models,
             provider_keys: detail.api_keys,
             request_patch_variants: detail.request_patch_variants,
@@ -1196,10 +1654,14 @@ mod tests {
     use crate::database::provider::{
         Provider, ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
     };
+    use crate::database::request_patch::{
+        RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
+    };
     use crate::database::upstream_source::UpstreamSource;
     use crate::ingress::client_identity::{ClientIdentity, ClientIdentitySource};
     use crate::schema::enum_def::{
-        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
+        ModelKind, ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement,
+        UpstreamProfileType,
     };
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::cache::types::{
@@ -1458,6 +1920,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_check_rejects_patched_bodies_outside_the_final_openai_profile() {
+        let cases = [
+            (
+                UpstreamProfileType::Openai,
+                request_patch(
+                    1,
+                    RequestPatchPlacement::Body,
+                    "/messages",
+                    RequestPatchOperation::Set,
+                    Some(json!("invalid-messages-private-marker")),
+                ),
+                "/messages",
+            ),
+            (
+                UpstreamProfileType::GeminiOpenai,
+                request_patch(
+                    2,
+                    RequestPatchPlacement::Body,
+                    "/unregistered_field",
+                    RequestPatchOperation::Set,
+                    Some(json!("gemini-private-marker")),
+                ),
+                "$",
+            ),
+        ];
+
+        for (profile_type, patch, expected_path) in cases {
+            let provider = sample_provider(profile_type, "https://api.example.com/v1");
+            let error = match super::build_provider_check_request(
+                &provider,
+                &provider.upstream_sources[0],
+                &credential("source-check-private-key"),
+                "model",
+                &[patch],
+            )
+            .await
+            {
+                Ok(_) => panic!("invalid patched body must fail before Source Check transport"),
+                Err(error) => error,
+            };
+
+            let message = super::base_error_message(&error);
+            assert!(message.contains("final target Profile validation failed"));
+            assert!(message.contains(expected_path));
+            assert!(!message.contains("private-marker"));
+            assert!(!message.contains("source-check-private-key"));
+        }
+    }
+
+    #[tokio::test]
     async fn provider_check_drops_unbounded_success_body_without_reading_it() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1541,16 +2053,30 @@ mod tests {
                         id: source_id,
                         provider_id,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: format!("http://{address}/v1"),
+                        base_url: format!("http://{address}/v1"),
                         use_proxy: false,
                         is_enabled: true,
                         is_default: true,
                         created_at: 1,
                         updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Openai,
+                        )
                     },
                 )
                 .expect("provider seed should succeed")
                 .provider;
+                let saved_model = Model::create(
+                    provider.id,
+                    "saved-check-model",
+                    Some("saved-check-upstream-model"),
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("saved check model should seed");
+                let model_count_before_draft = Model::list_by_provider_id(provider.id)
+                    .expect("provider models should list")
+                    .len();
                 let app_state = create_test_app_state(test_db_context.clone()).await;
 
                 let created = send(
@@ -1579,7 +2105,7 @@ mod tests {
                         Method::POST,
                         &format!("/provider/{provider_id}/sources/{source_id}/check"),
                         json!({
-                            "model_name": "saved-check-model",
+                            "model_id": saved_model.id,
                             "provider_api_key_id": key_id
                         }),
                     ),
@@ -1608,7 +2134,7 @@ mod tests {
                         Method::POST,
                         &format!("/provider/{provider_id}/sources/{source_id}/check"),
                         json!({
-                            "model_name": "disabled-saved-check-model",
+                            "model_id": saved_model.id,
                             "provider_api_key_id": key_id
                         }),
                     ),
@@ -1636,7 +2162,10 @@ mod tests {
                         Method::POST,
                         &format!("/provider/{provider_id}/sources/{source_id}/check"),
                         json!({
-                            "model_name": "draft-check-model",
+                            "draft_model": {
+                                "model_kind": "CHAT",
+                                "upstream_model_name": "draft-check-model"
+                            },
                             "provider_api_key": "draft-check-secret"
                         }),
                     ),
@@ -1647,6 +2176,12 @@ mod tests {
                 assert_eq!(draft_body["data"]["provider_api_key_id"], Value::Null);
                 assert!(!draft_body.to_string().contains("draft-check-secret"));
                 assert_ne!(draft_body["data"]["provider_api_key_id"], 0);
+                assert_eq!(
+                    Model::list_by_provider_id(provider.id)
+                        .expect("draft check must not affect persisted models")
+                        .len(),
+                    model_count_before_draft
+                );
 
                 timeout(Duration::from_secs(2), upstream)
                     .await
@@ -1697,12 +2232,15 @@ mod tests {
                         id: checked_source_id,
                         provider_id,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: format!("http://{address}/v1"),
+                        base_url: format!("http://{address}/v1"),
                         use_proxy: false,
                         is_enabled: true,
                         is_default: true,
                         created_at: 1,
                         updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Openai,
+                        )
                     },
                 )
                 .expect("provider seed should succeed")
@@ -1711,12 +2249,15 @@ mod tests {
                     id: unbound_source_id,
                     provider_id,
                     profile_type: UpstreamProfileType::Responses,
-                    endpoint: "http://127.0.0.1:9/v1".to_string(),
+                    base_url: "http://127.0.0.1:9/v1".to_string(),
                     use_proxy: false,
                     is_enabled: true,
                     is_default: false,
                     created_at: 1,
                     updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Responses,
+                    )
                 })
                 .expect("unbound source seed should succeed");
 
@@ -1728,6 +2269,7 @@ mod tests {
                     provider.id,
                     "checkable-model",
                     Some("checkable-real-model"),
+                    crate::schema::enum_def::ModelKind::Chat,
                     true,
                     Some(&source_config),
                 )
@@ -1788,18 +2330,27 @@ mod tests {
                         id: 26005,
                         provider_id: 26004,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: "http://127.0.0.1:9/v1".to_string(),
+                        base_url: "http://127.0.0.1:9/v1".to_string(),
                         use_proxy: false,
                         is_enabled: true,
                         is_default: true,
                         created_at: 1,
                         updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Openai,
+                        )
                     },
                 )
                 .expect("other provider seed should succeed")
                 .provider;
-                let other_model = Model::create(other_provider.id, "other-model", None, true)
-                    .expect("other model should seed");
+                let other_model = Model::create(
+                    other_provider.id,
+                    "other-model",
+                    None,
+                    crate::schema::enum_def::ModelKind::Chat,
+                    true,
+                )
+                .expect("other model should seed");
                 let wrong_owner = send(
                     &app_state,
                     json_request(
@@ -1829,6 +2380,296 @@ mod tests {
                 )
                 .await;
                 assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn source_check_rejects_non_chat_saved_and_draft_models_without_upstream_call() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-check-chat-only-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let provider_id = 26020;
+                let source_id = 26021;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "chat-only-check-provider".to_string(),
+                        name: "Chat-only Check Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Openai,
+                        base_url: format!("http://{address}/v1"),
+                        use_proxy: false,
+                        chat_completions_enabled: Some(false),
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Openai,
+                        )
+                    },
+                )
+                .expect("provider seed should succeed")
+                .provider;
+                let embedding_model = Model::create(
+                    provider.id,
+                    "embedding-check-model",
+                    None,
+                    ModelKind::Embedding,
+                    true,
+                )
+                .expect("embedding model should seed");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let saved = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "model_id": embedding_model.id,
+                            "provider_api_key": "must-not-leak-saved-kind"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(saved.status(), StatusCode::BAD_REQUEST);
+                let saved_body = response_json(saved).await;
+                assert!(saved_body.to_string().contains("CHAT"));
+                assert!(!saved_body.to_string().contains("must-not-leak-saved-kind"));
+
+                let draft = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "draft_model": {
+                                "model_kind": "RERANK",
+                                "upstream_model_name": "rerank-check-model"
+                            },
+                            "provider_api_key": "must-not-leak-draft-kind"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(draft.status(), StatusCode::BAD_REQUEST);
+                let draft_body = response_json(draft).await;
+                assert!(draft_body.to_string().contains("CHAT"));
+                assert!(!draft_body.to_string().contains("must-not-leak-draft-kind"));
+
+                for invalid_payload in [
+                    json!({ "provider_api_key": "must-not-leak-empty-model" }),
+                    json!({
+                        "model_id": embedding_model.id,
+                        "draft_model": {
+                            "model_kind": "CHAT",
+                            "upstream_model_name": "ambiguous-model"
+                        },
+                        "provider_api_key": "must-not-leak-ambiguous-model"
+                    }),
+                ] {
+                    let invalid = send(
+                        &app_state,
+                        json_request(
+                            Method::POST,
+                            &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                            invalid_payload,
+                        ),
+                    )
+                    .await;
+                    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+                    let invalid_body = response_json(invalid).await;
+                    assert!(invalid_body.to_string().contains("Exactly one"));
+                    assert!(!invalid_body.to_string().contains("must-not-leak"));
+                }
+
+                let disabled_operation = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "draft_model": {
+                                "model_kind": "CHAT",
+                                "upstream_model_name": "chat-model"
+                            },
+                            "provider_api_key": "must-not-leak-disabled-operation"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(disabled_operation.status(), StatusCode::BAD_REQUEST);
+                let disabled_operation_body = response_json(disabled_operation).await;
+                assert!(
+                    disabled_operation_body
+                        .to_string()
+                        .contains("operation is disabled")
+                );
+                assert!(
+                    !disabled_operation_body
+                        .to_string()
+                        .contains("must-not-leak-disabled-operation")
+                );
+
+                assert!(
+                    timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err(),
+                    "non-CHAT Source Checks must not contact the upstream"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn saved_check_applies_model_patch_while_draft_check_uses_source_patch_only() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-check-patch-scope-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (requests_tx, requests_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let mut requests = Vec::new();
+                    for _ in 0..2 {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        let mut request = vec![0u8; 8192];
+                        let read = socket.read(&mut request).await.unwrap();
+                        requests.push(String::from_utf8_lossy(&request[..read]).to_string());
+                        socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    let _ = requests_tx.send(requests);
+                });
+
+                let provider_id = 26030;
+                let source_id = 26031;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "check-patch-scope-provider".to_string(),
+                        name: "Check Patch Scope Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Openai,
+                        base_url: format!("http://{address}/v1"),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Openai,
+                        )
+                    },
+                )
+                .expect("provider seed should succeed")
+                .provider;
+                let saved_model = Model::create(
+                    provider.id,
+                    "saved-patch-check-model",
+                    None,
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("saved model should seed");
+
+                let patch_input = |model_id, target: &str, value: &str| {
+                    RequestPatchVariantInput {
+                        source_id,
+                        model_id,
+                        suffix: None,
+                        enabled: true,
+                        expose_in_models: false,
+                        rules: vec![RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Header,
+                            target: target.to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!(value))),
+                            description: None,
+                        }],
+                    }
+                };
+                RequestPatchVariantRepository::create(&patch_input(
+                    None,
+                    "x-source-check-patch",
+                    "source",
+                ))
+                .expect("source patch should seed");
+                RequestPatchVariantRepository::create(&patch_input(
+                    Some(saved_model.id),
+                    "x-model-check-patch",
+                    "model",
+                ))
+                .expect("model patch should seed");
+
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                let saved = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "model_id": saved_model.id,
+                            "provider_api_key": "saved-patch-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(saved.status(), StatusCode::OK);
+
+                let draft = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "draft_model": {
+                                "model_kind": "CHAT",
+                                "upstream_model_name": "draft-patch-check-model"
+                            },
+                            "provider_api_key": "draft-patch-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(draft.status(), StatusCode::OK);
+
+                let requests = timeout(Duration::from_secs(2), requests_rx)
+                    .await
+                    .expect("both checks should reach upstream")
+                    .expect("request evidence should be returned");
+                let saved_request = requests[0].to_ascii_lowercase();
+                let draft_request = requests[1].to_ascii_lowercase();
+                assert!(saved_request.contains("x-source-check-patch: source"));
+                assert!(saved_request.contains("x-model-check-patch: model"));
+                assert!(draft_request.contains("x-source-check-patch: source"));
+                assert!(!draft_request.contains("x-model-check-patch"));
             })
             .await;
     }
@@ -1960,15 +2801,115 @@ mod tests {
             sample_bootstrap_result(),
             "OpenAI api.example.com".to_string(),
             "openai-api-example-com".to_string(),
-            Some(super::BootstrapCheckResult {
-                success: false,
-                message: "boom".to_string(),
-            }),
+            Some(super::BootstrapCheckResult::failed("boom")),
         );
 
         let check_result = response.check_result.expect("check result should exist");
-        assert!(!check_result.success);
+        assert_eq!(check_result.status, super::BootstrapCheckStatus::Failed);
         assert_eq!(check_result.message, "boom");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_save_and_test_checks_chat_and_skips_non_chat_after_persisting() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-bootstrap-chat-only-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let upstream = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = vec![0u8; 8192];
+                    let read = socket.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..read]).to_string();
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    request
+                });
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let chat_secret = "bootstrap-chat-secret-must-not-return";
+                let chat = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider/bootstrap",
+                        json!({
+                            "initial_source": {
+                                "profile_type": "OPENAI",
+                                "base_url": format!("http://{address}/v1"),
+                                "use_proxy": false,
+                                "is_enabled": true,
+                                "is_default": true
+                            },
+                            "api_key": chat_secret,
+                            "model_name": "bootstrap-chat-model",
+                            "model_kind": "CHAT",
+                            "key": "bootstrap-chat-provider",
+                            "save_and_test": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(chat.status(), StatusCode::OK);
+                let chat_body = response_json(chat).await;
+                assert_eq!(chat_body["data"]["check_result"]["status"], "success");
+                assert!(!chat_body.to_string().contains(chat_secret));
+                assert_eq!(chat_body["data"]["created_model"]["model_kind"], "CHAT");
+
+                let upstream_request = timeout(Duration::from_secs(2), upstream)
+                    .await
+                    .expect("CHAT bootstrap should reach upstream")
+                    .expect("upstream fixture should finish");
+                assert!(upstream_request.contains("bootstrap-chat-model"));
+
+                let embedding_secret = "bootstrap-embedding-secret-must-not-return";
+                let embedding = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider/bootstrap",
+                        json!({
+                            "initial_source": {
+                                "profile_type": "OPENAI",
+                                "base_url": format!("http://{address}/v1"),
+                                "use_proxy": false,
+                                "is_enabled": true,
+                                "is_default": true
+                            },
+                            "api_key": embedding_secret,
+                            "model_name": "bootstrap-embedding-model",
+                            "model_kind": "EMBEDDING",
+                            "key": "bootstrap-embedding-provider",
+                            "save_and_test": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(embedding.status(), StatusCode::OK);
+                let embedding_body = response_json(embedding).await;
+                assert_eq!(
+                    embedding_body["data"]["check_result"]["status"],
+                    "check_skipped"
+                );
+                assert_eq!(
+                    embedding_body["data"]["created_model"]["model_kind"],
+                    "EMBEDDING"
+                );
+                assert!(!embedding_body.to_string().contains(embedding_secret));
+                assert_eq!(
+                    Provider::list_all()
+                        .expect("both bootstrap providers should persist")
+                        .len(),
+                    2
+                );
+            })
+            .await;
     }
 
     #[test]
@@ -2067,7 +3008,7 @@ mod tests {
                             "name": "HTTP Provider",
                             "key": "http-provider",
                             "initial_source": {
-                                "endpoint": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
+                                "base_url": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
                                 "use_proxy": false,
                                 "profile_type": "OPENAI"
                             },
@@ -2081,7 +3022,7 @@ mod tests {
                 assert_eq!(create_body["code"], 0);
                 assert_eq!(create_body["data"]["provider_key"], "http-provider");
                 assert_eq!(
-                    create_body["data"]["upstream_sources"][0]["endpoint"],
+                    create_body["data"]["upstream_sources"][0]["base_url"],
                     "https://api.example.com/v1"
                 );
                 assert!(create_body["data"].get("endpoint").is_none());
@@ -2093,7 +3034,7 @@ mod tests {
                 let provider = Provider::get_by_id(provider_id).expect("provider should persist");
                 assert_eq!(provider.name, "HTTP Provider");
                 assert_eq!(
-                    provider.upstream_sources[0].endpoint,
+                    provider.upstream_sources[0].base_url,
                     "https://api.example.com/v1"
                 );
 
@@ -2105,7 +3046,7 @@ mod tests {
                     .expect("provider should exist in cache");
                 assert_eq!(provider_cached.provider_key, "http-provider");
                 assert_eq!(
-                    provider_cached.upstream_sources[0].endpoint,
+                    provider_cached.upstream_sources[0].base_url,
                     "https://api.example.com/v1"
                 );
 
@@ -2299,7 +3240,7 @@ mod tests {
                             "name": "Invalid Provider",
                             "key": "invalid-provider",
                             "initial_source": {
-                                "endpoint": "https://api.example.com/v1?tenant=one",
+                                "base_url": "https://api.example.com/v1?tenant=one",
                                 "use_proxy": false,
                                 "profile_type": "OPENAI"
                             },
@@ -2314,7 +3255,7 @@ mod tests {
                 assert_eq!(body["code"], 1001);
                 assert_eq!(
                     body["msg"],
-                    "upstream source endpoint must not contain a query string"
+                    "upstream source base URL must not contain a query string"
                 );
                 assert!(
                     Provider::list_all()
@@ -2359,7 +3300,6 @@ mod tests {
                         &format!("/provider/{provider_id}/sources"),
                         json!({
                             "profile_type": "OPENAI",
-                            "endpoint": "https://api.example.com/v1",
                             "use_proxy": false,
                             "is_enabled": true,
                             "is_default": true
@@ -2370,9 +3310,31 @@ mod tests {
                 assert_eq!(source_response.status(), StatusCode::OK);
                 let source_body = response_json(source_response).await;
                 assert_eq!(source_body["data"]["profile_type"], "OPENAI");
+                assert_eq!(source_body["data"]["base_url"], "https://api.openai.com/v1");
+                assert_eq!(source_body["data"]["base_url_is_default"], true);
+                assert_eq!(source_body["data"]["chat_completions_enabled"], true);
+                assert_eq!(source_body["data"]["embeddings_enabled"], true);
+                assert!(source_body["data"].get("rerank_enabled").is_none());
                 let source_id = source_body["data"]["id"]
                     .as_i64()
                     .expect("source id should be returned");
+
+                let immutable_profile_response = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/provider/{provider_id}/sources/{source_id}"),
+                        json!({"profile_type": "OPENAI_COMPATIBLE"}),
+                    ),
+                )
+                .await;
+                assert_eq!(immutable_profile_response.status(), StatusCode::BAD_REQUEST);
+                let immutable_profile_body = response_json(immutable_profile_response).await;
+                assert_eq!(immutable_profile_body["code"], 1001);
+                assert_eq!(
+                    immutable_profile_body["msg"],
+                    "upstream source profile_type is immutable after creation"
+                );
 
                 let default_only_response = send(
                     &app_state,
@@ -2380,7 +3342,7 @@ mod tests {
                         Method::PUT,
                         &format!("/provider/{provider_id}/sources/{source_id}"),
                         json!({
-                            "endpoint": "https://api.example.com/v1",
+                            "base_url": "https://api.example.com/v1",
                             "use_proxy": false,
                             "is_enabled": true,
                             "is_default": true
@@ -2396,7 +3358,7 @@ mod tests {
                         Method::PUT,
                         &format!("/provider/{provider_id}/sources/{source_id}"),
                         json!({
-                            "endpoint": "https://api.example.com/v1/updated",
+                            "base_url": "https://api.example.com/v1/updated",
                             "use_proxy": true,
                             "is_enabled": true,
                             "is_default": true
@@ -2407,7 +3369,7 @@ mod tests {
                 assert_eq!(update_response.status(), StatusCode::OK);
                 let update_body = response_json(update_response).await;
                 assert_eq!(
-                    update_body["data"]["endpoint"],
+                    update_body["data"]["base_url"],
                     "https://api.example.com/v1/updated"
                 );
                 assert_eq!(update_body["data"]["is_default"], true);
@@ -2459,6 +3421,69 @@ mod tests {
                     response_json(second_provider_response).await["data"]["id"]
                         .as_i64()
                         .expect("second provider id should be returned");
+
+                let missing_compatible_base_url = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{second_provider_id}/sources"),
+                        json!({
+                            "profile_type": "OPENAI_COMPATIBLE",
+                            "rerank_enabled": true,
+                            "is_enabled": true,
+                            "is_default": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    missing_compatible_base_url.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
+                );
+
+                let compatible_source = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{second_provider_id}/sources"),
+                        json!({
+                            "profile_type": "OPENAI_COMPATIBLE",
+                            "base_url": "https://compat.example.test/api/",
+                            "rerank_enabled": true,
+                            "rerank_path_override": "rerank/v2/",
+                            "is_enabled": true,
+                            "is_default": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(compatible_source.status(), StatusCode::OK);
+                let compatible_body = response_json(compatible_source).await;
+                assert_eq!(
+                    compatible_body["data"]["base_url"],
+                    "https://compat.example.test/api"
+                );
+                assert_eq!(compatible_body["data"]["base_url_is_default"], false);
+                assert_eq!(compatible_body["data"]["rerank_enabled"], true);
+                assert_eq!(compatible_body["data"]["rerank_path_override"], "rerank/v2");
+
+                let native_operation_field = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{second_provider_id}/sources"),
+                        json!({
+                            "profile_type": "RESPONSES",
+                            "base_url": "https://responses.example.test/v1",
+                            "embeddings_enabled": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    native_operation_field.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
+                );
 
                 let wrong_owner_response = send(
                     &app_state,
@@ -2554,6 +3579,7 @@ mod tests {
                 provider_id: 1,
                 model_name: "gpt-4o-mini".to_string(),
                 real_model_name: None,
+                model_kind: crate::schema::enum_def::ModelKind::Chat,
                 cost_catalog_id: None,
                 source_selection_mode: "INHERIT_ALL".to_string(),
                 deleted_at: None,
@@ -2712,10 +3738,98 @@ mod tests {
         for forbidden in ["endpoint", "provider_type", "profile_type", "use_proxy"] {
             assert!(!upsert_properties.contains_key(serde_yaml::Value::from(forbidden)));
         }
-        assert!(
-            document["components"]["schemas"]["UpstreamSource"]["properties"]["source_key"]
-                .is_null()
+        let profile_values = document["components"]["schemas"]["UpstreamProfileType"]["enum"]
+            .as_sequence()
+            .expect("upstream Profile enum should exist");
+        assert_eq!(profile_values.len(), 8);
+        assert!(profile_values.contains(&serde_yaml::Value::from("OPENAI_COMPATIBLE")));
+        assert!(!profile_values.contains(&serde_yaml::Value::from("VERTEX_OPENAI")));
+
+        let provider_check = &document["components"]["schemas"]["ProviderCheck"];
+        assert_eq!(
+            provider_check["oneOf"]
+                .as_sequence()
+                .expect("Provider Check must distinguish saved and draft models")
+                .len(),
+            2
         );
+        let draft_check = &document["components"]["schemas"]["ProviderCheckDraftModelValue"];
+        assert_eq!(
+            draft_check["properties"]["model_kind"]["const"].as_str(),
+            Some("CHAT")
+        );
+        assert!(
+            draft_check["required"]
+                .as_sequence()
+                .expect("draft check required fields should exist")
+                .contains(&serde_yaml::Value::from("upstream_model_name"))
+        );
+        let bootstrap_check = &document["components"]["schemas"]["BootstrapCheckResult"];
+        assert!(
+            bootstrap_check["properties"]["status"]["enum"]
+                .as_sequence()
+                .expect("bootstrap check statuses should exist")
+                .contains(&serde_yaml::Value::from("check_skipped"))
+        );
+
+        for schema in ["UpstreamSourceInput", "UpstreamSource"] {
+            assert_eq!(
+                document["components"]["schemas"][schema]["oneOf"]
+                    .as_sequence()
+                    .expect("Source contract must be a tagged oneOf")
+                    .len(),
+                4
+            );
+            assert_eq!(
+                document["components"]["schemas"][schema]["discriminator"]["propertyName"].as_str(),
+                Some("profile_type")
+            );
+        }
+        let openai_input = &document["components"]["schemas"]["OpenAiSourceInput"]["allOf"][1];
+        assert!(openai_input["properties"]["base_url"].is_mapping());
+        assert!(
+            !openai_input["required"]
+                .as_sequence()
+                .expect("OPENAI required fields should exist")
+                .contains(&serde_yaml::Value::from("base_url"))
+        );
+        for schema in ["OpenAiCompatibleSourceInput", "NativeSourceInput"] {
+            assert!(
+                document["components"]["schemas"][schema]["allOf"][1]["required"]
+                    .as_sequence()
+                    .expect("required fields should exist")
+                    .contains(&serde_yaml::Value::from("base_url"))
+            );
+        }
+        let source_common = document["components"]["schemas"]["SourceCommon"]["properties"]
+            .as_mapping()
+            .expect("Source common properties should exist");
+        for field in [
+            "base_url",
+            "base_url_is_default",
+            "use_proxy",
+            "is_enabled",
+            "is_default",
+        ] {
+            assert!(source_common.contains_key(serde_yaml::Value::from(field)));
+        }
+        for forbidden in ["endpoint", "source_key"] {
+            assert!(!source_common.contains_key(serde_yaml::Value::from(forbidden)));
+        }
+        let compatible_properties =
+            document["components"]["schemas"]["OpenAiCompatibleSource"]["allOf"][1]["properties"]
+                .as_mapping()
+                .expect("compatible Source properties should exist");
+        for field in [
+            "chat_completions_enabled",
+            "chat_completions_path_override",
+            "embeddings_enabled",
+            "embeddings_path_override",
+            "rerank_enabled",
+            "rerank_path_override",
+        ] {
+            assert!(compatible_properties.contains_key(serde_yaml::Value::from(field)));
+        }
         assert!(document["components"]["schemas"]["ProviderAggregate"]["properties"]
             ["upstream_sources"]
             .is_mapping());
@@ -2763,12 +3877,25 @@ mod tests {
         assert!(document["components"]["schemas"]["ModelSourceProtocolExplain"]
             ["properties"]["decision_trace"]
             .is_mapping());
-        for field in ["is_enabled", "is_default"] {
+        assert_eq!(
+            document["components"]["schemas"]["ModelKind"]["enum"]
+                .as_sequence()
+                .expect("Model kind enum should exist"),
+            &vec![
+                serde_yaml::Value::from("CHAT"),
+                serde_yaml::Value::from("EMBEDDING"),
+                serde_yaml::Value::from("RERANK"),
+            ]
+        );
+        for schema in ["ModelCreate", "ProviderBootstrap"] {
             assert!(
-                document["components"]["schemas"]["UpstreamSource"]["properties"][field]
-                    .is_mapping()
+                document["components"]["schemas"][schema]["required"]
+                    .as_sequence()
+                    .expect("create required fields should exist")
+                    .contains(&serde_yaml::Value::from("model_kind"))
             );
         }
+        assert!(model_properties.contains_key(serde_yaml::Value::from("model_kind")));
         for schema in ["SourceEvidence"] {
             let properties = document["components"]["schemas"][schema]["properties"]
                 .as_mapping()
@@ -2900,12 +4027,15 @@ mod tests {
                         id: default_source_id,
                         provider_id,
                         profile_type: UpstreamProfileType::Openai,
-                        endpoint: "https://impact-openai.example.com/v1".to_string(),
+                        base_url: "https://impact-openai.example.com/v1".to_string(),
                         use_proxy: false,
                         is_enabled: true,
                         is_default: true,
                         created_at: 1,
                         updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Openai,
+                        )
                     },
                 )
                 .expect("provider seed should succeed")
@@ -2914,24 +4044,39 @@ mod tests {
                     id: responses_source_id,
                     provider_id,
                     profile_type: UpstreamProfileType::Responses,
-                    endpoint: "https://impact-responses.example.com/v1".to_string(),
+                    base_url: "https://impact-responses.example.com/v1".to_string(),
                     use_proxy: false,
                     is_enabled: true,
                     is_default: false,
                     created_at: 1,
                     updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Responses,
+                    )
                 })
                 .expect("secondary source seed should succeed");
 
-                let inherit_model = Model::create(provider.id, "impact-inherit", None, true)
-                    .expect("inherit model should seed");
-                let disabled_inherit_model =
-                    Model::create(provider.id, "impact-disabled-inherit", None, false)
-                        .expect("disabled inherit model should seed");
+                let inherit_model = Model::create(
+                    provider.id,
+                    "impact-inherit",
+                    None,
+                    crate::schema::enum_def::ModelKind::Chat,
+                    true,
+                )
+                .expect("inherit model should seed");
+                let disabled_inherit_model = Model::create(
+                    provider.id,
+                    "impact-disabled-inherit",
+                    None,
+                    crate::schema::enum_def::ModelKind::Chat,
+                    false,
+                )
+                .expect("disabled inherit model should seed");
                 let explicit_default_model = Model::create_with_source_config(
                     provider.id,
                     "impact-explicit-default",
                     None,
+                    crate::schema::enum_def::ModelKind::Chat,
                     true,
                     Some(&ModelSourceConfig::explicit(vec![
                         ModelSourceBindingInput {
@@ -2945,6 +4090,7 @@ mod tests {
                     provider.id,
                     "impact-explicit-other",
                     None,
+                    crate::schema::enum_def::ModelKind::Chat,
                     true,
                     Some(&ModelSourceConfig::explicit(vec![
                         ModelSourceBindingInput {
@@ -2958,6 +4104,7 @@ mod tests {
                     provider.id,
                     "impact-explicit-empty",
                     None,
+                    crate::schema::enum_def::ModelKind::Chat,
                     true,
                     Some(&ModelSourceConfig::explicit(Vec::new())),
                 )
@@ -3087,14 +4234,15 @@ mod tests {
             upstream_sources: vec![UpstreamSource {
                 id: 2,
                 provider_id: 1,
-                profile_type,
-                endpoint: endpoint.to_string(),
+                profile_type: profile_type.clone(),
+                base_url: endpoint.to_string(),
                 use_proxy: false,
                 is_enabled: true,
                 is_default: true,
                 deleted_at: None,
                 created_at: 0,
                 updated_at: 0,
+                ..UpstreamSource::test_defaults(profile_type)
             }],
         }
     }

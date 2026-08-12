@@ -42,7 +42,7 @@
               <Badge v-if="!state.source.is_enabled" variant="outline" class="font-mono text-[10px] text-gray-500">{{ t("requestPatchVariant.states.sourceDisabled") }}</Badge>
               <Badge v-if="!isSourceBound(state.source.id)" variant="outline" class="font-mono text-[10px] text-gray-500">{{ t("requestPatchVariant.states.unboundDormant") }}</Badge>
             </div>
-            <p class="mt-1 break-all font-mono text-xs text-gray-500">{{ state.source.endpoint }}</p>
+            <p class="mt-1 break-all font-mono text-xs text-gray-500">{{ state.source.base_url }}</p>
           </div>
           <div class="flex w-full flex-col gap-2 sm:w-auto sm:items-end">
             <p class="text-xs leading-5 text-gray-500">{{ t("requestPatchVariant.model.sourceSummary", { variants: variantCount(state) }) }}</p>

@@ -120,6 +120,7 @@ export function useModelEdit(
           cost_catalog_id: detail.model.cost_catalog_id ?? null,
           model_name: detail.model.model_name,
           real_model_name: detail.model.real_model_name ?? "",
+          model_kind: detail.model.model_kind,
           is_enabled: detail.model.is_enabled,
         };
       }

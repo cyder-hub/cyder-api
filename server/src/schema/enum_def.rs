@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 pub enum UpstreamProfileType {
     #[default]
     Openai,
+    OpenaiCompatible,
     Gemini,
     Vertex,
-    VertexOpenai,
     Ollama,
     Anthropic,
     Responses,
@@ -23,14 +23,30 @@ pub enum UpstreamProfileType {
 impl UpstreamProfileType {
     pub const ALL: [Self; 8] = [
         Self::Openai,
+        Self::OpenaiCompatible,
         Self::Gemini,
         Self::Vertex,
-        Self::VertexOpenai,
         Self::Ollama,
         Self::Anthropic,
         Self::Responses,
         Self::GeminiOpenai,
     ];
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Encode, Decode,
+)]
+#[db_enum(pg_type = "model_kind_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ModelKind {
+    Chat,
+    Embedding,
+    Rerank,
+}
+
+impl ModelKind {
+    pub const ALL: [Self; 3] = [Self::Chat, Self::Embedding, Self::Rerank];
 }
 
 /// Public wire protocol accepted by the gateway.

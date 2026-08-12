@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::service::transform::unified::{UnifiedFunctionDefinition, UnifiedSyntheticMetadata};
+use crate::service::transform::unified::UnifiedSyntheticMetadata;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GeminiRequestPayload {
@@ -10,6 +10,9 @@ pub(crate) struct GeminiRequestPayload {
     pub(crate) system_instruction: Option<GeminiSystemInstruction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tools: Option<Vec<GeminiTools>>,
+    #[serde(rename = "toolConfig")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_config: Option<GeminiToolConfig>,
     #[serde(rename = "generationConfig")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) generation_config: Option<GeminiGenerationConfig>,
@@ -41,6 +44,13 @@ pub(crate) struct GeminiResponseContent {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum GeminiPart {
+    Thought {
+        text: String,
+        thought: bool,
+        #[serde(rename = "thoughtSignature")]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+    },
     Text {
         text: String,
     },
@@ -89,6 +99,8 @@ pub(crate) struct GeminiFunctionResponse {
 pub(crate) struct GeminiInlineData {
     pub(crate) mime_type: String,
     pub(crate) data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,12 +108,45 @@ pub(crate) struct GeminiInlineData {
 pub(crate) struct GeminiFileData {
     pub(crate) mime_type: String,
     pub(crate) file_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GeminiTools {
     #[serde(rename = "functionDeclarations")]
-    pub(crate) function_declarations: Vec<UnifiedFunctionDefinition>,
+    pub(crate) function_declarations: Vec<GeminiFunctionDefinition>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct GeminiFunctionDefinition {
+    pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    pub(crate) parameters: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GeminiToolConfig {
+    pub(crate) function_calling_config: GeminiFunctionCallingConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GeminiFunctionCallingConfig {
+    pub(crate) mode: GeminiFunctionCallingMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) allowed_function_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum GeminiFunctionCallingMode {
+    Auto,
+    Any,
+    None,
+    Validated,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,6 +163,50 @@ pub(crate) struct GeminiGenerationConfig {
     #[serde(rename = "stopSequences")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stop_sequences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking_config: Option<GeminiThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_schema: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_json_schema: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_format: Option<GeminiResponseFormat>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct GeminiResponseFormat {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text: Option<GeminiTextResponseFormat>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GeminiTextResponseFormat {
+    pub(crate) mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) schema: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GeminiThinkingConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking_level: Option<GeminiThinkingLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking_budget: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) include_thoughts: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GeminiThinkingLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

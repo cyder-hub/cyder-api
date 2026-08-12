@@ -36,8 +36,11 @@ mod tests {
                     name: "lookup".to_string(),
                     description: Some("Finds weather".to_string()),
                     parameters: json!({"type": "object"}),
+                    strict: None,
                 },
             }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
             stream: true,
             temperature: Some(0.2),
             max_tokens: Some(128),
@@ -46,6 +49,8 @@ mod tests {
             seed: Some(7),
             presence_penalty: Some(0.1),
             frequency_penalty: Some(0.2),
+            reasoning_effort: Some(UnifiedReasoningEffort::High),
+            structured_output: Some(UnifiedStructuredOutput::JsonObject),
             extensions: Some(UnifiedRequestExtensions {
                 openai: Some(UnifiedOpenAiRequestExtension {
                     tool_choice: Some(json!("auto")),
@@ -63,6 +68,11 @@ mod tests {
         assert_eq!(core.messages[0].role, owned_core.messages[0].role);
         assert_eq!(core.messages[0].content, owned_core.messages[0].content);
         assert_eq!(core.items, owned_core.items);
+        assert_eq!(core.reasoning_effort, Some(UnifiedReasoningEffort::High));
+        assert_eq!(
+            core.structured_output,
+            Some(UnifiedStructuredOutput::JsonObject)
+        );
         assert_eq!(core.stream, owned_core.stream);
         assert!(
             extensions
@@ -77,6 +87,7 @@ mod tests {
         assert_eq!(rebuilt.messages[0].role, request.messages[0].role);
         assert_eq!(rebuilt.messages[0].content, request.messages[0].content);
         assert_eq!(rebuilt.items, request.items);
+        assert_eq!(rebuilt.structured_output, request.structured_output);
         assert_eq!(rebuilt.extensions.is_some(), request.extensions.is_some());
     }
 

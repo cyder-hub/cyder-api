@@ -16,14 +16,14 @@ export function formatSourceIdentity(
   return profile ? `${identity} · ${profile}` : identity;
 }
 
-export function formatSafeSourceEndpoint(
-  endpoint: string | null | undefined,
+export function formatSafeSourceBaseUrl(
+  baseUrl: string | null | undefined,
   emptyLabel: string,
 ): string {
-  if (!endpoint) return emptyLabel;
+  if (!baseUrl) return emptyLabel;
 
   try {
-    const parsed = new URL(endpoint);
+    const parsed = new URL(baseUrl);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return emptyLabel;
     }

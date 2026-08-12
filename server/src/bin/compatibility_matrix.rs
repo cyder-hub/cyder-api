@@ -13,7 +13,7 @@ use cyder_api::{
 };
 use serde::Deserialize;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const SOURCE_RELATIVE_PATH: &str = "docs/protocol-compatibility.yaml";
 const GENERATED_RELATIVE_PATH: &str = "docs/protocol-compatibility.md";
 
@@ -28,6 +28,7 @@ struct CompatibilityMatrix {
     transform_runtime_contract: TransformRuntimeContract,
     upstream_source_contract: UpstreamSourceContract,
     upstream_source_profiles: Vec<UpstreamSourceProfileContract>,
+    openai_wire_profiles: Vec<OpenAiWireProfileContract>,
     routes: Vec<RouteContract>,
     generation_cells: Vec<GenerationCell>,
     utilities: Vec<UtilityContract>,
@@ -107,7 +108,7 @@ struct TransformRuntimeContract {
     same_wire_observation_failure: String,
     cross_wire_pipeline: Vec<String>,
     cross_wire_failure_behavior: String,
-    unknown_semantic_behavior: String,
+    unknown_field_policy: UnknownFieldPolicy,
     loss_policy: TransformLossPolicy,
     header_boundary: TransformHeaderBoundary,
     diagnostics: TransformDiagnosticsContract,
@@ -123,6 +124,16 @@ struct TransformLossPolicy {
     minor: String,
     major: String,
     deterministic_text_downgrade: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UnknownFieldPolicy {
+    ordinary_object_fields: String,
+    unknown_tagged_semantics: String,
+    registered_conflicts: String,
+    full_second_schema_audit: bool,
+    strict_target_profile_exception: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -197,6 +208,60 @@ struct UpstreamSourceProfileContract {
     dialect: String,
     auth: String,
     endpoint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct OpenAiWireProfileContract {
+    profile_type: UpstreamProfileType,
+    base_url_requirement: BaseUrlRequirement,
+    default_base_url: Option<String>,
+    base_url_customizable: bool,
+    auth: String,
+    chat: OpenAiWireOperationContract,
+    embeddings: OpenAiWireOperationContract,
+    rerank: OpenAiWireOperationContract,
+    evidence: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BaseUrlRequirement {
+    OptionalWithDefault,
+    Required,
+}
+
+impl BaseUrlRequirement {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::OptionalWithDefault => "optional_with_default",
+            Self::Required => "required",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct OpenAiWireOperationContract {
+    availability: OperationAvailability,
+    default_enabled: bool,
+    field_policy: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OperationAvailability {
+    Configurable,
+    Unsupported,
+}
+
+impl OperationAvailability {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Configurable => "configurable",
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -478,10 +543,12 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
     }
 
     let evidence = validate_evidence(&matrix.evidence)?;
+    validate_r316_executable_evidence(&evidence)?;
     validate_downstream_error_contracts(&matrix.downstream_error_contracts, &evidence)?;
     validate_transform_runtime_contract(&matrix.transform_runtime_contract, &evidence)?;
     validate_upstream_source_contract(&matrix.upstream_source_contract, &evidence)?;
     validate_upstream_source_profiles(&matrix.upstream_source_profiles)?;
+    validate_openai_wire_profiles(&matrix.openai_wire_profiles, &evidence)?;
     validate_routes(&matrix.routes)?;
     validate_generation_cells(&matrix.generation_cells, &evidence)?;
     validate_utilities(&matrix.utilities, &evidence)?;
@@ -514,6 +581,131 @@ const REQUIRED_TRANSFORM_RUNTIME_EVIDENCE: [(&str, &str); 6] = [
         "proxy::direct_execution_regression::cross_wire_target_stream_rejection_emits_one_native_terminal_and_releases_resources",
     ),
 ];
+
+const REQUIRED_R316_EXECUTABLE_EVIDENCE: [(&str, &str); 27] = [
+    (
+        "r3-16-reasoning-direct",
+        "proxy::direct_execution_regression::all_public_downstream_reasoning_controls_reach_the_openai_target",
+    ),
+    (
+        "r3-16-reasoning-responses-diagnostic",
+        "service::transform::facade::tests::responses_reasoning_effort_maps_to_openai_and_summary_is_safely_ignored",
+    ),
+    (
+        "r3-16-reasoning-anthropic-diagnostic",
+        "service::transform::facade::tests::anthropic_qualitative_reasoning_maps_to_openai_without_injecting_cot",
+    ),
+    (
+        "r3-16-reasoning-gemini-diagnostic",
+        "service::transform::facade::tests::gemini_reasoning_controls_map_to_openai_with_budget_sentinels",
+    ),
+    (
+        "r3-16-reasoning-conflict-reject",
+        "proxy::direct_execution_regression::registered_request_conflicts_are_rejected_before_credential_or_upstream_use",
+    ),
+    (
+        "r3-16-reasoning-responses-reject",
+        "proxy::direct_execution_regression::malformed_responses_reasoning_is_rejected_before_credential_or_upstream_use",
+    ),
+    (
+        "r3-16-multimodal-direct",
+        "proxy::direct_execution_regression::all_public_downstream_multimodal_inputs_reach_the_openai_target",
+    ),
+    (
+        "r3-16-multimodal-responses-diagnostic",
+        "service::transform::facade::tests::responses_multimodal_input_maps_to_openai_image_audio_and_file_parts",
+    ),
+    (
+        "r3-16-multimodal-anthropic-diagnostic",
+        "service::transform::facade::tests::anthropic_multimodal_input_maps_to_openai_without_textualizing_payloads",
+    ),
+    (
+        "r3-16-multimodal-gemini-diagnostic",
+        "service::transform::facade::tests::gemini_multimodal_input_classifies_inline_media_for_openai",
+    ),
+    (
+        "r3-16-multimodal-reject",
+        "proxy::direct_execution_regression::all_public_downstreams_reject_unportable_media_before_credentials",
+    ),
+    (
+        "r3-16-structured-direct",
+        "proxy::direct_execution_regression::all_public_downstream_structured_outputs_reach_the_openai_target",
+    ),
+    (
+        "r3-16-structured-responses-transform",
+        "service::transform::facade::tests::responses_structured_outputs_preserve_json_object_and_schema_contracts",
+    ),
+    (
+        "r3-16-structured-anthropic-diagnostic",
+        "service::transform::facade::tests::anthropic_structured_output_synthesizes_a_stable_openai_name",
+    ),
+    (
+        "r3-16-structured-gemini-diagnostic",
+        "service::transform::facade::tests::gemini_structured_output_preserves_constraints_and_drops_only_property_ordering",
+    ),
+    (
+        "r3-16-structured-reject",
+        "proxy::direct_execution_regression::all_public_downstreams_reject_unrepresentable_structured_outputs_before_credentials",
+    ),
+    (
+        "r3-16-tools-direct",
+        "proxy::direct_execution_regression::all_public_downstream_portable_tool_lifecycles_reach_the_openai_target",
+    ),
+    (
+        "r3-16-tools-cross-wire-transform",
+        "service::transform::facade::tests::portable_tool_controls_from_each_cross_wire_protocol_reach_openai",
+    ),
+    (
+        "r3-16-tools-stable-results",
+        "service::transform::facade::tests::missing_tool_call_ids_are_stable_and_structured_results_are_canonical_text",
+    ),
+    (
+        "r3-16-tools-reject",
+        "proxy::direct_execution_regression::forced_nonportable_cross_wire_tools_reject_before_credentials",
+    ),
+    (
+        "r3-16-profile-field-policy",
+        "service::transform::providers::openai::target::tests::profiles_apply_distinct_unknown_field_policies",
+    ),
+    (
+        "r3-16-profile-source-contract",
+        "database::migration_smoke_tests::sqlite_r316_destructive_upgrade_enforces_openai_upstream_contract",
+    ),
+    (
+        "r3-16-gemini-openai-closed-policy",
+        "proxy::direct_execution_regression::gemini_openai_profile_rejects_unknown_and_conflicting_chat_fields_before_credentials",
+    ),
+    (
+        "r3-16-embeddings-direct",
+        "proxy::direct_execution_regression::embeddings_execute_once_for_each_openai_wire_profile_and_preserve_the_response",
+    ),
+    (
+        "r3-16-embeddings-reject",
+        "proxy::direct_execution_regression::invalid_embeddings_requests_are_rejected_before_credentials_and_network",
+    ),
+    (
+        "r3-16-rerank-direct",
+        "proxy::direct_execution_regression::compatible_rerank_is_a_single_call_transparent_transport_without_private_usage_parsing",
+    ),
+    (
+        "r3-16-rerank-profile-guard",
+        "proxy::direct_execution_regression::rerank_requires_an_enabled_compatible_source_before_credential_decryption",
+    ),
+];
+
+fn validate_r316_executable_evidence(evidence: &HashMap<&str, &Evidence>) -> Result<(), String> {
+    for (id, reference) in REQUIRED_R316_EXECUTABLE_EVIDENCE {
+        let item = evidence
+            .get(id)
+            .ok_or_else(|| format!("R3.16 requires executable evidence '{id}'"))?;
+        if item.kind != EvidenceKind::Test || item.reference != reference {
+            return Err(format!(
+                "R3.16 evidence '{id}' must reference stable automated test '{reference}'"
+            ));
+        }
+    }
+    Ok(())
+}
 
 fn validate_transform_runtime_contract(
     contract: &TransformRuntimeContract,
@@ -549,7 +741,13 @@ fn expected_transform_runtime_contract() -> TransformRuntimeContract {
             "target_encode".to_string(),
         ],
         cross_wire_failure_behavior: "fail_closed".to_string(),
-        unknown_semantic_behavior: "explicit_reject".to_string(),
+        unknown_field_policy: UnknownFieldPolicy {
+            ordinary_object_fields: "serde_default_silent_ignore".to_string(),
+            unknown_tagged_semantics: "pre_send_explicit_reject".to_string(),
+            registered_conflicts: "targeted_borrowed_value_check".to_string(),
+            full_second_schema_audit: false,
+            strict_target_profile_exception: "gemini_openai_recursive_closed_allowlist".to_string(),
+        },
         loss_policy: TransformLossPolicy {
             minor: "controlled_loss_with_internal_fact".to_string(),
             major: "explicit_reject".to_string(),
@@ -573,6 +771,7 @@ fn expected_transform_runtime_contract() -> TransformRuntimeContract {
         },
         advanced_cell_owners: UpstreamProtocol::ALL
             .into_iter()
+            .filter(|upstream_protocol| *upstream_protocol != UpstreamProtocol::Openai)
             .map(|upstream_protocol| TransformAdvancedCellOwner {
                 upstream_protocol,
                 owner: generation_owner(upstream_protocol).to_string(),
@@ -871,6 +1070,132 @@ fn validate_upstream_source_profiles(
     Ok(())
 }
 
+fn validate_openai_wire_profiles(
+    profiles: &[OpenAiWireProfileContract],
+    evidence: &HashMap<&str, &Evidence>,
+) -> Result<(), String> {
+    let expected = expected_openai_wire_profiles();
+    if profiles != expected {
+        return Err(
+            "openai_wire_profiles must exactly pin OPENAI, OPENAI_COMPATIBLE, and GEMINI_OPENAI Base URL, auth, operation availability/defaults, and field policies"
+                .to_string(),
+        );
+    }
+    for profile in profiles {
+        for id in &profile.evidence {
+            let item = evidence.get(id.as_str()).ok_or_else(|| {
+                format!(
+                    "OpenAI-wire Profile {:?} references unknown evidence '{id}'",
+                    profile.profile_type
+                )
+            })?;
+            if item.kind != EvidenceKind::Test {
+                return Err(format!(
+                    "OpenAI-wire Profile {:?} evidence '{id}' must be an executable test",
+                    profile.profile_type
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expected_openai_wire_profiles() -> Vec<OpenAiWireProfileContract> {
+    vec![
+        OpenAiWireProfileContract {
+            profile_type: UpstreamProfileType::Openai,
+            base_url_requirement: BaseUrlRequirement::OptionalWithDefault,
+            default_base_url: Some("https://api.openai.com/v1".to_string()),
+            base_url_customizable: true,
+            auth: "bearer_api_key".to_string(),
+            chat: openai_wire_operation(
+                OperationAvailability::Configurable,
+                true,
+                "official_fields_validated_unknown_extensions_passthrough",
+            ),
+            embeddings: openai_wire_operation(
+                OperationAvailability::Configurable,
+                true,
+                "official_fields_validated_unknown_extensions_passthrough",
+            ),
+            rerank: openai_wire_operation(OperationAvailability::Unsupported, false, "unsupported"),
+            evidence: vec![
+                "r3-16-profile-field-policy".to_string(),
+                "r3-16-profile-source-contract".to_string(),
+                "r3-16-embeddings-direct".to_string(),
+                "r3-16-rerank-profile-guard".to_string(),
+            ],
+        },
+        OpenAiWireProfileContract {
+            profile_type: UpstreamProfileType::OpenaiCompatible,
+            base_url_requirement: BaseUrlRequirement::Required,
+            default_base_url: None,
+            base_url_customizable: true,
+            auth: "bearer_api_key".to_string(),
+            chat: openai_wire_operation(
+                OperationAvailability::Configurable,
+                true,
+                "core_fields_validated_vendor_extensions_passthrough",
+            ),
+            embeddings: openai_wire_operation(
+                OperationAvailability::Configurable,
+                false,
+                "core_fields_validated_vendor_extensions_passthrough",
+            ),
+            rerank: openai_wire_operation(
+                OperationAvailability::Configurable,
+                false,
+                "opaque_envelope_passthrough",
+            ),
+            evidence: vec![
+                "r3-16-profile-field-policy".to_string(),
+                "r3-16-profile-source-contract".to_string(),
+                "r3-16-embeddings-direct".to_string(),
+                "r3-16-rerank-direct".to_string(),
+            ],
+        },
+        OpenAiWireProfileContract {
+            profile_type: UpstreamProfileType::GeminiOpenai,
+            base_url_requirement: BaseUrlRequirement::OptionalWithDefault,
+            default_base_url: Some(
+                "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            ),
+            base_url_customizable: true,
+            auth: "bearer_api_key".to_string(),
+            chat: openai_wire_operation(
+                OperationAvailability::Configurable,
+                true,
+                "recursive_closed_allowlist",
+            ),
+            embeddings: openai_wire_operation(
+                OperationAvailability::Configurable,
+                true,
+                "model_input_closed_contract",
+            ),
+            rerank: openai_wire_operation(OperationAvailability::Unsupported, false, "unsupported"),
+            evidence: vec![
+                "r3-16-profile-field-policy".to_string(),
+                "r3-16-profile-source-contract".to_string(),
+                "r3-16-gemini-openai-closed-policy".to_string(),
+                "r3-16-embeddings-direct".to_string(),
+                "r3-16-rerank-profile-guard".to_string(),
+            ],
+        },
+    ]
+}
+
+fn openai_wire_operation(
+    availability: OperationAvailability,
+    default_enabled: bool,
+    field_policy: &str,
+) -> OpenAiWireOperationContract {
+    OpenAiWireOperationContract {
+        availability,
+        default_enabled,
+        field_policy: field_policy.to_string(),
+    }
+}
+
 fn validate_routes(routes: &[RouteContract]) -> Result<(), String> {
     if routes != expected_routes() {
         return Err(
@@ -1025,6 +1350,7 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
         (DownstreamProtocol::Openai, UpstreamProtocol::Openai)
             | (DownstreamProtocol::Responses, UpstreamProtocol::Openai)
             | (DownstreamProtocol::Anthropic, UpstreamProtocol::Openai)
+            | (DownstreamProtocol::Gemini, UpstreamProtocol::Openai)
             | (DownstreamProtocol::Gemini, UpstreamProtocol::Gemini)
     );
     let base_statuses = cell.base.entries().map(|(_, assessment)| assessment.status);
@@ -1062,18 +1388,113 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
             cell.upstream
         ));
     }
-    if !cell
+    if cell.upstream == UpstreamProtocol::Openai {
+        for (dimension, assessment) in cell.advanced.entries() {
+            let expected_status = expected_openai_advanced_status(cell.downstream, dimension);
+            let expected_evidence = expected_openai_advanced_evidence(cell.downstream, dimension);
+            if assessment.status != expected_status
+                || assessment
+                    .evidence
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    != expected_evidence
+            {
+                return Err(format!(
+                    "R3.16 advanced cell {:?}->OpenAI {dimension} must be {:?} with its exact executable main/diagnostic/rejection evidence",
+                    cell.downstream, expected_status
+                ));
+            }
+        }
+    } else if !cell
         .advanced
         .entries()
         .into_iter()
         .all(|(_, assessment)| assessment.status == AdvancedStatus::NotVerified)
     {
         return Err(format!(
-            "initial advanced dimensions for {:?}->{:?} must remain not_verified",
+            "advanced dimensions outside the completed OpenAI upstream column for {:?}->{:?} must remain not_verified",
             cell.downstream, cell.upstream
         ));
     }
     Ok(())
+}
+
+fn expected_openai_advanced_status(
+    downstream: DownstreamProtocol,
+    dimension: &str,
+) -> AdvancedStatus {
+    match (downstream, dimension) {
+        (DownstreamProtocol::Openai, _) => AdvancedStatus::Full,
+        (DownstreamProtocol::Responses, "structured_output") => AdvancedStatus::Full,
+        _ => AdvancedStatus::ControlledLoss,
+    }
+}
+
+fn expected_openai_advanced_evidence(
+    downstream: DownstreamProtocol,
+    dimension: &str,
+) -> Vec<&'static str> {
+    match (downstream, dimension) {
+        (DownstreamProtocol::Openai, "tools") => vec!["r3-16-tools-direct"],
+        (DownstreamProtocol::Openai, "reasoning") => vec!["r3-16-reasoning-direct"],
+        (DownstreamProtocol::Openai, "multimodal") => vec!["r3-16-multimodal-direct"],
+        (DownstreamProtocol::Openai, "structured_output") => {
+            vec!["r3-16-structured-direct"]
+        }
+        (DownstreamProtocol::Responses, "tools")
+        | (DownstreamProtocol::Anthropic, "tools")
+        | (DownstreamProtocol::Gemini, "tools") => vec![
+            "r3-16-tools-direct",
+            "r3-16-tools-cross-wire-transform",
+            "r3-16-tools-stable-results",
+            "r3-16-tools-reject",
+        ],
+        (DownstreamProtocol::Responses, "reasoning") => vec![
+            "r3-16-reasoning-direct",
+            "r3-16-reasoning-responses-diagnostic",
+            "r3-16-reasoning-responses-reject",
+        ],
+        (DownstreamProtocol::Anthropic, "reasoning") => vec![
+            "r3-16-reasoning-direct",
+            "r3-16-reasoning-anthropic-diagnostic",
+        ],
+        (DownstreamProtocol::Gemini, "reasoning") => vec![
+            "r3-16-reasoning-direct",
+            "r3-16-reasoning-gemini-diagnostic",
+            "r3-16-reasoning-conflict-reject",
+        ],
+        (DownstreamProtocol::Responses, "multimodal") => vec![
+            "r3-16-multimodal-direct",
+            "r3-16-multimodal-responses-diagnostic",
+            "r3-16-multimodal-reject",
+        ],
+        (DownstreamProtocol::Anthropic, "multimodal") => vec![
+            "r3-16-multimodal-direct",
+            "r3-16-multimodal-anthropic-diagnostic",
+            "r3-16-multimodal-reject",
+        ],
+        (DownstreamProtocol::Gemini, "multimodal") => vec![
+            "r3-16-multimodal-direct",
+            "r3-16-multimodal-gemini-diagnostic",
+            "r3-16-multimodal-reject",
+        ],
+        (DownstreamProtocol::Responses, "structured_output") => vec![
+            "r3-16-structured-direct",
+            "r3-16-structured-responses-transform",
+        ],
+        (DownstreamProtocol::Anthropic, "structured_output") => vec![
+            "r3-16-structured-direct",
+            "r3-16-structured-anthropic-diagnostic",
+            "r3-16-structured-reject",
+        ],
+        (DownstreamProtocol::Gemini, "structured_output") => vec![
+            "r3-16-structured-direct",
+            "r3-16-structured-gemini-diagnostic",
+            "r3-16-structured-reject",
+        ],
+        _ => unreachable!("advanced dimensions are a closed four-by-four matrix"),
+    }
 }
 
 fn generation_owner(upstream: UpstreamProtocol) -> &'static str {
@@ -1247,7 +1668,7 @@ fn expected_utility_shapes() -> Vec<UtilityShape> {
             execution: UtilityExecution::Upstream,
             allowed_upstreams: vec![UpstreamProtocol::Openai],
             incompatible_upstream_behavior: IncompatibleUpstreamBehavior::PreSendReject,
-            verification_status: UtilityVerificationStatus::Partial,
+            verification_status: UtilityVerificationStatus::Verified,
         },
         UtilityShape {
             name: "rerank".to_string(),
@@ -1262,7 +1683,7 @@ fn expected_utility_shapes() -> Vec<UtilityShape> {
             execution: UtilityExecution::Upstream,
             allowed_upstreams: vec![UpstreamProtocol::Openai],
             incompatible_upstream_behavior: IncompatibleUpstreamBehavior::PreSendReject,
-            verification_status: UtilityVerificationStatus::Partial,
+            verification_status: UtilityVerificationStatus::Verified,
         },
         UtilityShape {
             name: "countTokens".to_string(),
@@ -1409,10 +1830,27 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
     .unwrap();
     writeln!(
         output,
-        "- Cross-wire pipeline: `{}`; any pipeline failure is `{}`; unknown semantics are `{}`.",
+        "- Cross-wire pipeline: `{}`; any pipeline failure is `{}`.",
         transform_contract.cross_wire_pipeline.join(" -> "),
-        transform_contract.cross_wire_failure_behavior,
-        transform_contract.unknown_semantic_behavior
+        transform_contract.cross_wire_failure_behavior
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Unknown-field policy: ordinary object fields `{}`; unknown tagged semantics `{}`; registered conflicts `{}`; full second schema audit `{}`; strict target exception `{}`.",
+        transform_contract
+            .unknown_field_policy
+            .ordinary_object_fields,
+        transform_contract
+            .unknown_field_policy
+            .unknown_tagged_semantics,
+        transform_contract.unknown_field_policy.registered_conflicts,
+        transform_contract
+            .unknown_field_policy
+            .full_second_schema_audit,
+        transform_contract
+            .unknown_field_policy
+            .strict_target_profile_exception
     )
     .unwrap();
     writeln!(
@@ -1534,6 +1972,37 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
             profile.dialect,
             profile.auth,
             profile.endpoint
+        )
+        .unwrap();
+    }
+
+    writeln!(output, "\n## OpenAI-wire Profile contracts\n").unwrap();
+    writeln!(
+        output,
+        "| Profile | Base URL requirement | Default Base URL | Customizable | Auth | Chat | Chat field policy | Embeddings | Embeddings field policy | Rerank | Rerank field policy | Evidence |"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )
+    .unwrap();
+    for profile in &matrix.openai_wire_profiles {
+        writeln!(
+            output,
+            "| {} | `{}` | {} | `{}` | `{}` | {} | `{}` | {} | `{}` | {} | `{}` | {} |",
+            profile_label(profile.profile_type),
+            profile.base_url_requirement.label(),
+            profile.default_base_url.as_deref().unwrap_or("—"),
+            profile.base_url_customizable,
+            profile.auth,
+            operation_contract_label(&profile.chat),
+            profile.chat.field_policy,
+            operation_contract_label(&profile.embeddings),
+            profile.embeddings.field_policy,
+            operation_contract_label(&profile.rerank),
+            profile.rerank.field_policy,
+            profile.evidence.join(", ")
         )
         .unwrap();
     }
@@ -1756,7 +2225,7 @@ const fn profile_label(value: UpstreamProfileType) -> &'static str {
         UpstreamProfileType::Openai => "OpenAI",
         UpstreamProfileType::Gemini => "Gemini",
         UpstreamProfileType::Vertex => "Vertex",
-        UpstreamProfileType::VertexOpenai => "VertexOpenAI",
+        UpstreamProfileType::OpenaiCompatible => "OpenAICompatible",
         UpstreamProfileType::Ollama => "Ollama",
         UpstreamProfileType::Anthropic => "Anthropic",
         UpstreamProfileType::Responses => "Responses",
@@ -1784,6 +2253,18 @@ const fn incompatible_behavior_label(value: IncompatibleUpstreamBehavior) -> &'s
         IncompatibleUpstreamBehavior::NotApplicable => "not_applicable",
         IncompatibleUpstreamBehavior::PreSendReject => "pre_send_reject",
     }
+}
+
+fn operation_contract_label(operation: &OpenAiWireOperationContract) -> String {
+    format!(
+        "{} (default {})",
+        operation.availability.label(),
+        if operation.default_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    )
 }
 
 const fn evidence_kind_label(value: EvidenceKind) -> &'static str {
@@ -2002,11 +2483,11 @@ mod tests {
     #[test]
     fn missing_owner_is_rejected() {
         let mut matrix = canonical_matrix();
-        matrix.generation_cells[0].advanced.tools.owner = None;
+        matrix.generation_cells[1].advanced.tools.owner = None;
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.16")
+                .contains("must be owned by R3.17")
         );
     }
 
@@ -2093,6 +2574,49 @@ mod tests {
     }
 
     #[test]
+    fn openai_wire_profile_contract_and_count_drift_are_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.openai_wire_profiles[0].base_url_customizable = false;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("openai_wire_profiles must exactly pin")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.openai_wire_profiles.pop();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("openai_wire_profiles must exactly pin")
+        );
+    }
+
+    #[test]
+    fn r316_advanced_status_and_executable_reference_drift_are_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[0].advanced.tools.status = AdvancedStatus::ControlledLoss;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("R3.16 advanced cell")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix
+            .evidence
+            .iter_mut()
+            .find(|item| item.id == "r3-16-tools-direct")
+            .expect("R3.16 tools evidence")
+            .reference = "wrong-test".to_string();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("must reference stable automated test")
+        );
+    }
+
+    #[test]
     fn r3_10_source_contract_drift_is_rejected() {
         let mut matrix = canonical_matrix();
         matrix.upstream_source_contract.source_cardinality = "exactly_one".to_string();
@@ -2138,20 +2662,20 @@ mod tests {
         );
 
         let mut matrix = canonical_matrix();
-        matrix.utilities[1].verification.owner = Some("R3.17".to_string());
+        matrix.utilities[3].verification.owner = Some("R3.17".to_string());
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("utility embeddings verification must be owned by R3.16")
+                .contains("utility countTokens verification must be owned by R3.19")
         );
     }
 
     #[test]
-    fn schema_v3_and_provider_profile_fields_are_not_accepted() {
-        let v3 = CANONICAL_SOURCE.replacen("schema_version: 4", "schema_version: 3", 1);
-        let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v3)
+    fn schema_v4_and_provider_profile_fields_are_not_accepted() {
+        let v4 = CANONICAL_SOURCE.replacen("schema_version: 5", "schema_version: 4", 1);
+        let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v4)
             .expect("schema number should parse before validation");
-        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 4"));
+        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 5"));
 
         let legacy = CANONICAL_SOURCE
             .replacen("upstream_source_profiles:", "provider_profiles:", 1)

@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::stream::StreamTransformContext;
+use crate::service::transform::stream::session::try_append_tool_arguments;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 use crate::utils::ID_GENERATOR;
@@ -172,7 +173,7 @@ pub(crate) fn try_transform_unified_stream_events_to_gemini_events(
                 if state.name.is_none() {
                     state.name = name;
                 }
-                state.arguments.push_str(&arguments);
+                try_append_tool_arguments(&mut state.arguments, &arguments);
                 None
             }
             UnifiedStreamEvent::ToolCallStop { index, .. } => context
@@ -241,11 +242,27 @@ pub(crate) fn try_transform_unified_stream_events_to_gemini_events(
                 synthetic_metadata: None,
             }),
             UnifiedStreamEvent::ReasoningStart { .. }
-            | UnifiedStreamEvent::ReasoningDelta { .. }
-            | UnifiedStreamEvent::ReasoningStop { .. } => {
-                build_gemini_stream_diagnostic(context, TransformValueKind::ReasoningDelta);
-                None
-            }
+            | UnifiedStreamEvent::ReasoningStop { .. } => None,
+            UnifiedStreamEvent::ReasoningDelta { text, .. } => Some(GeminiChunkResponse {
+                candidates: vec![GeminiCandidate {
+                    index: Some(0),
+                    content: Some(GeminiResponseContent {
+                        role: "model".to_string(),
+                        parts: vec![GeminiPart::Thought {
+                            text,
+                            thought: true,
+                            thought_signature: None,
+                        }],
+                    }),
+                    finish_reason: None,
+                    safety_ratings: None,
+                    token_count: None,
+                    citation_metadata: None,
+                }],
+                prompt_feedback: None,
+                usage_metadata: None,
+                synthetic_metadata: None,
+            }),
             UnifiedStreamEvent::BlobDelta { index, data } => {
                 if let Some(inline_data) = gemini_inline_data_from_blob(&data) {
                     Some(GeminiChunkResponse {
@@ -390,6 +407,13 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
 
                     for part in content.parts {
                         match part {
+                            GeminiPart::Thought { text, .. } => {
+                                delta.content.push(UnifiedContentPartDelta::TextDelta {
+                                    index: text_index,
+                                    text,
+                                });
+                                text_index += 1;
+                            }
                             GeminiPart::Text { text } => {
                                 delta.content.push(UnifiedContentPartDelta::TextDelta {
                                     index: text_index,

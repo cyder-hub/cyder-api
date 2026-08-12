@@ -4,6 +4,32 @@ use super::payload::*;
 
 use crate::service::transform::unified::*;
 
+impl From<ReasoningEffort> for UnifiedReasoningEffort {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::_None => Self::None,
+            ReasoningEffort::Minimal => Self::Minimal,
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+            ReasoningEffort::Xhigh => Self::Xhigh,
+        }
+    }
+}
+
+impl From<UnifiedReasoningEffort> for ReasoningEffort {
+    fn from(value: UnifiedReasoningEffort) -> Self {
+        match value {
+            UnifiedReasoningEffort::None => Self::_None,
+            UnifiedReasoningEffort::Minimal => Self::Minimal,
+            UnifiedReasoningEffort::Low => Self::Low,
+            UnifiedReasoningEffort::Medium => Self::Medium,
+            UnifiedReasoningEffort::High => Self::High,
+            UnifiedReasoningEffort::Xhigh => Self::Xhigh,
+        }
+    }
+}
+
 fn register_passthrough_field(
     passthrough_fields: &mut Vec<(String, Value)>,
     key: &str,
@@ -19,6 +45,113 @@ fn register_passthrough_field(
             context,
             REGISTERED_PASSTHROUGH_KEYS
         );
+    }
+}
+
+fn split_openai_response_format(
+    value: Option<Value>,
+) -> (Option<UnifiedStructuredOutput>, Option<Value>) {
+    let Some(value) = value else {
+        return (None, None);
+    };
+    match value.get("type").and_then(Value::as_str) {
+        Some("json_object") => (Some(UnifiedStructuredOutput::JsonObject), None),
+        Some("json_schema") => {
+            let definition = value
+                .get("json_schema")
+                .expect("OpenAI json_schema response format is adapter-validated");
+            (
+                Some(UnifiedStructuredOutput::JsonSchema {
+                    name: definition
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .expect("OpenAI schema name is adapter-validated")
+                        .to_string(),
+                    description: definition
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    schema: definition
+                        .get("schema")
+                        .expect("OpenAI response schema is adapter-validated")
+                        .clone(),
+                    strict: definition
+                        .get("strict")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                }),
+                None,
+            )
+        }
+        _ => (None, Some(value)),
+    }
+}
+
+fn unified_tool_choice_from_openai(value: Value) -> UnifiedToolChoice {
+    match value {
+        Value::String(value) => match value.as_str() {
+            "none" => UnifiedToolChoice::None,
+            "required" => UnifiedToolChoice::Required,
+            _ => UnifiedToolChoice::Auto,
+        },
+        Value::Object(value)
+            if value.get("type").and_then(Value::as_str) == Some("allowed_tools") =>
+        {
+            let allowed = value
+                .get("allowed_tools")
+                .expect("OpenAI allowed tool choice is adapter-validated");
+            let names = allowed
+                .get("tools")
+                .and_then(Value::as_array)
+                .expect("OpenAI allowed tools are adapter-validated")
+                .iter()
+                .map(|tool| {
+                    tool.get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                        .expect("OpenAI allowed function name is adapter-validated")
+                        .to_string()
+                })
+                .collect();
+            let mode = if allowed.get("mode").and_then(Value::as_str) == Some("required") {
+                UnifiedAllowedToolMode::Required
+            } else {
+                UnifiedAllowedToolMode::Auto
+            };
+            UnifiedToolChoice::Allowed { names, mode }
+        }
+        Value::Object(value) => UnifiedToolChoice::Named {
+            name: value
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .expect("OpenAI named function choice is adapter-validated")
+                .to_string(),
+        },
+        _ => unreachable!("OpenAI tool_choice is adapter-validated"),
+    }
+}
+
+fn openai_tool_choice(choice: UnifiedToolChoice) -> Value {
+    match choice {
+        UnifiedToolChoice::None => json!("none"),
+        UnifiedToolChoice::Auto => json!("auto"),
+        UnifiedToolChoice::Required => json!("required"),
+        UnifiedToolChoice::Named { name } => {
+            json!({ "type": "function", "function": { "name": name } })
+        }
+        UnifiedToolChoice::Allowed { names, mode } => json!({
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": match mode {
+                    UnifiedAllowedToolMode::Auto => "auto",
+                    UnifiedAllowedToolMode::Required => "required",
+                },
+                "tools": names.into_iter().map(|name| {
+                    json!({ "type": "function", "function": { "name": name } })
+                }).collect::<Vec<_>>()
+            }
+        }),
     }
 }
 
@@ -54,6 +187,32 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
                                             url: image_url.url,
                                             detail: image_url.detail,
                                         });
+                                    }
+                                    OpenAiContentPart::InputAudio { input_audio } => {
+                                        content.push(UnifiedContentPart::AudioData {
+                                            data: input_audio.data,
+                                            format: input_audio.format,
+                                        });
+                                    }
+                                    OpenAiContentPart::File { file } => {
+                                        if let Some(file_data) = file.file_data {
+                                            let mime_type = file
+                                                .filename
+                                                .as_deref()
+                                                .and_then(crate::service::transform::media::mime_type_from_filename)
+                                                .unwrap_or("application/octet-stream")
+                                                .to_string();
+                                            content.push(UnifiedContentPart::FileData {
+                                                data: file_data,
+                                                mime_type,
+                                                filename: file.filename,
+                                            });
+                                        } else if let Some(file_id) = file.file_id {
+                                            content.push(UnifiedContentPart::FileId {
+                                                file_id,
+                                                filename: file.filename,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -130,30 +289,19 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
                 "openai_request_to_unified",
             );
         }
-        if let Some(parallel_tool_calls) = openai_req.parallel_tool_calls {
-            register_passthrough_field(
-                &mut passthrough_fields,
-                "parallel_tool_calls",
-                json!(parallel_tool_calls),
-                "openai_request_to_unified",
-            );
-        }
-        if let Some(reasoning_effort) = openai_req.reasoning_effort {
-            register_passthrough_field(
-                &mut passthrough_fields,
-                "reasoning_effort",
-                json!(reasoning_effort),
-                "openai_request_to_unified",
-            );
-        }
+        let parallel_tool_calls = openai_req.parallel_tool_calls;
+        let tool_choice = openai_req.tool_choice.map(unified_tool_choice_from_openai);
+        let reasoning_effort = openai_req.reasoning_effort.map(Into::into);
 
         let passthrough =
             build_registered_passthrough(passthrough_fields, "openai_request_to_unified");
 
+        let (structured_output, response_format) =
+            split_openai_response_format(openai_req.response_format);
         let openai_extension = UnifiedOpenAiRequestExtension {
-            tool_choice: openai_req.tool_choice,
+            tool_choice: None,
             n: openai_req.n,
-            response_format: openai_req.response_format,
+            response_format,
             logit_bias: openai_req.logit_bias,
             user: openai_req.user,
             passthrough,
@@ -163,6 +311,8 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
             model: Some(openai_req.model),
             messages,
             tools: openai_req.tools,
+            tool_choice,
+            parallel_tool_calls,
             stream: openai_req.stream.unwrap_or(false),
             temperature: openai_req.temperature,
             max_tokens: openai_req.max_tokens,
@@ -171,6 +321,8 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
             seed: openai_req.seed,
             presence_penalty: openai_req.presence_penalty,
             frequency_penalty: openai_req.frequency_penalty,
+            reasoning_effort,
+            structured_output,
             extensions: (!openai_extension.is_empty()).then_some(UnifiedRequestExtensions {
                 openai: Some(openai_extension),
                 ..Default::default()
@@ -232,6 +384,12 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                                 },
                             });
                         }
+                        UnifiedContentPart::AudioData { data, format } => {
+                            has_multimodal = true;
+                            content_parts.push(OpenAiContentPart::InputAudio {
+                                input_audio: OpenAiInputAudio { data, format },
+                            });
+                        }
                         UnifiedContentPart::FileUrl {
                             url,
                             mime_type,
@@ -247,15 +405,26 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                         }
                         UnifiedContentPart::FileData {
                             data,
-                            mime_type,
+                            mime_type: _,
                             filename,
                         } => {
-                            content_parts.push(OpenAiContentPart::Text {
-                                text: render_inline_file_data_text(
-                                    &data,
-                                    &mime_type,
-                                    filename.as_deref(),
-                                ),
+                            has_multimodal = true;
+                            content_parts.push(OpenAiContentPart::File {
+                                file: OpenAiFile {
+                                    file_data: Some(data),
+                                    file_id: None,
+                                    filename,
+                                },
+                            });
+                        }
+                        UnifiedContentPart::FileId { file_id, filename } => {
+                            has_multimodal = true;
+                            content_parts.push(OpenAiContentPart::File {
+                                file: OpenAiFile {
+                                    file_data: None,
+                                    file_id: Some(file_id),
+                                    filename,
+                                },
                             });
                         }
                         UnifiedContentPart::ExecutableCode { language, code } => {
@@ -344,7 +513,7 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
         });
 
         // Extract OpenAI-specific fields from passthrough if present
-        let (logprobs, top_logprobs, parallel_tool_calls, reasoning_effort) =
+        let (logprobs, top_logprobs, legacy_parallel_tool_calls) =
             if let Some(passthrough) = openai_extension.passthrough.as_ref() {
                 audit_passthrough_keys(passthrough, "unified_request_to_openai");
                 (
@@ -355,21 +524,25 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                         .map(|v| v as u32),
                     passthrough
                         .get("parallel_tool_calls")
-                        .and_then(|v| v.as_bool()),
-                    passthrough.get("reasoning_effort").map(|value| {
-                        serde_json::from_value(value.clone())
-                            .expect("registered OpenAI reasoning_effort is source-validated")
-                    }),
+                        .and_then(Value::as_bool),
                 )
             } else {
-                (None, None, None, None)
+                (None, None, None)
             };
+
+        let response_format = unified_req
+            .structured_output
+            .map(crate::service::transform::structured::openai_response_format)
+            .or(openai_extension.response_format);
 
         OpenAiRequestPayload {
             model: unified_req.model.unwrap_or_default(),
             messages,
             tools: unified_req.tools,
-            tool_choice: openai_extension.tool_choice,
+            tool_choice: unified_req
+                .tool_choice
+                .map(openai_tool_choice)
+                .or(openai_extension.tool_choice),
             stream: Some(unified_req.stream),
             temperature: unified_req.temperature,
             max_tokens: unified_req.max_tokens,
@@ -382,10 +555,12 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
             logit_bias: openai_extension.logit_bias,
             logprobs,
             top_logprobs,
-            response_format: openai_extension.response_format,
+            response_format,
             user: openai_extension.user,
-            parallel_tool_calls,
-            reasoning_effort,
+            parallel_tool_calls: unified_req
+                .parallel_tool_calls
+                .or(legacy_parallel_tool_calls),
+            reasoning_effort: unified_req.reasoning_effort.map(Into::into),
         }
     }
 }

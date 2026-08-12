@@ -192,12 +192,13 @@ fn create_test_provider(id: i64) -> Provider {
             id,
             provider_id: id,
             profile_type: UpstreamProfileType::Openai,
-            endpoint: "https://api.example.com/v1".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
             use_proxy: false,
             is_enabled: true,
             is_default: true,
             created_at: 1,
             updated_at: 1,
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
         },
     )
     .expect("test provider should create")

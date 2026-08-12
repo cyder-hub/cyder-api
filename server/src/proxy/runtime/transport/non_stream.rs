@@ -16,6 +16,7 @@ use crate::{
         classify_transform_failure, classify_upstream_status_captured,
         logging::{
             RequestLogContext, TransformLogStage, log_transform_failure, log_transform_summary,
+            log_upstream_usage_missing,
         },
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
@@ -26,6 +27,8 @@ use crate::{
         },
     },
     schema::enum_def::RequestStatus,
+    service::transform::{TransformPhase, diagnostics::upstream_usage_missing_summary},
+    service::upstream_profile::UpstreamOperation,
     service::{cache::types::CacheCostCatalogVersion, upstream_response::parse_content_encoding},
 };
 use tokio::sync::Mutex as TokioMutex;
@@ -128,11 +131,14 @@ pub(super) async fn handle_non_streaming_response(
                 downstream_protocol,
                 upstream_protocol,
             ),
-            ProxyResponseMode::Utility { .. } => {
-                let usage_normalization =
+            ProxyResponseMode::Utility { operation, .. } => {
+                let usage_normalization = if operation == Some(UpstreamOperation::Rerank) {
+                    None
+                } else {
                     serde_json::from_slice::<serde_json::Value>(&decompressed_body)
                         .ok()
-                        .and_then(|val| parse_utility_usage_normalization(&val));
+                        .and_then(|val| parse_utility_usage_normalization(&val))
+                };
                 Ok((
                     decompressed_body.clone(),
                     None,
@@ -141,7 +147,7 @@ pub(super) async fn handle_non_streaming_response(
                 ))
             }
         };
-        let (final_body, parsed_usage_info, parsed_usage_normalization, transform_summary) =
+        let (final_body, parsed_usage_info, parsed_usage_normalization, mut transform_summary) =
             match transformed {
                 Ok(output) => output,
                 Err(failure) => {
@@ -164,6 +170,11 @@ pub(super) async fn handle_non_streaming_response(
                 }
             };
 
+        let usage_missing = response_mode.expects_usage() && parsed_usage_normalization.is_none();
+        if usage_missing && !is_generation_response {
+            transform_summary = upstream_usage_missing_summary(TransformPhase::ResponseObserve);
+        }
+
         let mut context = log_context.lock().await;
         finalize_non_streaming_log_context(
             &mut context,
@@ -175,8 +186,11 @@ pub(super) async fn handle_non_streaming_response(
             parsed_usage_info,
             parsed_usage_normalization,
         );
-        if is_generation_response {
+        if is_generation_response || usage_missing {
             log_transform_summary(TransformLogStage::Response, &context, &transform_summary);
+        }
+        if usage_missing {
+            log_upstream_usage_missing(&context, &model_str, status_code);
         }
         crate::debug_event!(
             "proxy.request_succeeded_debug",

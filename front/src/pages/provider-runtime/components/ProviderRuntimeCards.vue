@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { ProviderRuntimeItem, ProviderRuntimeLevel } from "@/services/types";
 import type { ProviderRuntimeMetric } from "../types";
-import { formatSafeSourceEndpoint } from "@/utils/sourceEvidence";
+import { formatSafeSourceBaseUrl } from "@/utils/sourceEvidence";
 
 const props = defineProps<{
   items: ProviderRuntimeItem[];
@@ -91,8 +91,8 @@ const { t: $t } = useI18n();
               {{ item.source_profile_type }}
             </Badge>
           </div>
-          <p class="mt-2 truncate font-mono text-xs text-gray-600" :title="formatSafeSourceEndpoint(item.source_endpoint, '-')">
-            {{ formatSafeSourceEndpoint(item.source_endpoint, "-") }}
+          <p class="mt-2 truncate font-mono text-xs text-gray-600" :title="formatSafeSourceBaseUrl(item.source_base_url, '-')">
+            {{ formatSafeSourceBaseUrl(item.source_base_url, "-") }}
           </p>
           <p class="mt-1 font-mono text-[11px] text-gray-400">
             source #{{ item.source_id }}

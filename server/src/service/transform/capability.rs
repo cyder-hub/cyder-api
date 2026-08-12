@@ -11,8 +11,10 @@ pub(crate) enum TransformValueKind {
     Refusal,
     ImageUrl,
     ImageData,
+    AudioData,
     FileUrl,
     FileData,
+    FileId,
     ExecutableCode,
     ToolCall,
     ToolResult,
@@ -121,9 +123,9 @@ impl ProtocolCapabilityMatrix {
                     tool_role_messages: true,
                     top_k_parameter: false,
                     image_url_input: true,
-                    image_inline_input: false,
+                    image_inline_input: true,
                     file_url_input: false,
-                    file_inline_input: false,
+                    file_inline_input: true,
                     executable_code_input: false,
                 },
                 response: ResponseCapabilityMatrix {
@@ -161,14 +163,14 @@ impl ProtocolCapabilityMatrix {
                     executable_code_input: false,
                 },
                 response: ResponseCapabilityMatrix {
-                    reasoning_content: false,
+                    reasoning_content: true,
                     refusal: false,
                     citations: true,
                     file_output: false,
                 },
                 stream: StreamCapabilityMatrix {
                     tool_call_deltas: true,
-                    reasoning_deltas: false,
+                    reasoning_deltas: true,
                     reasoning_summary_parts: false,
                     image_deltas: false,
                     blob_deltas: false,
@@ -297,8 +299,10 @@ impl From<&UnifiedContentPart> for TransformValueKind {
             UnifiedContentPart::Reasoning { .. } => Self::ReasoningContent,
             UnifiedContentPart::ImageUrl { .. } => Self::ImageUrl,
             UnifiedContentPart::ImageData { .. } => Self::ImageData,
+            UnifiedContentPart::AudioData { .. } => Self::AudioData,
             UnifiedContentPart::FileUrl { .. } => Self::FileUrl,
             UnifiedContentPart::FileData { .. } => Self::FileData,
+            UnifiedContentPart::FileId { .. } => Self::FileId,
             UnifiedContentPart::ExecutableCode { .. } => Self::ExecutableCode,
             UnifiedContentPart::ToolCall(_) => Self::ToolCall,
             UnifiedContentPart::ToolResult(_) => Self::ToolResult,
@@ -352,8 +356,10 @@ mod tests {
         assert!(gemini.request.image_url_input);
         assert!(gemini.request.image_inline_input);
         assert!(!gemini.request.file_inline_input);
+        assert!(gemini.response.reasoning_content);
         assert!(!gemini.response.refusal);
         assert!(gemini.response.citations);
+        assert!(gemini.stream.reasoning_deltas);
         assert!(!gemini.stream.reasoning_summary_parts);
         assert!(gemini.structured_content.citations);
 

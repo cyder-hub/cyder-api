@@ -15,12 +15,69 @@ import {
   syncProviderBootstrapFormState,
 } from "../src/pages/provider-edit/composables/providerEditState.ts";
 import { useProviderCredentialSecretState } from "../src/pages/provider-edit/composables/useProviderCredentialSecretState.ts";
+import {
+  applySourceProfileDefaults,
+  buildSourceCreatePayload,
+  buildSourceUpdatePayload,
+  createProviderSourceDraft,
+  providerProfileTypes,
+  sourceBaseUrlMayBeEmpty,
+  sourceSupportsOperation,
+} from "../src/pages/provider-edit/composables/sourceProfileContract.ts";
+
+test("Source profile contract exposes the eight supported profiles and profile-specific fields", () => {
+  assert.deepEqual(providerProfileTypes, [
+    "OPENAI",
+    "OPENAI_COMPATIBLE",
+    "GEMINI_OPENAI",
+    "GEMINI",
+    "VERTEX",
+    "ANTHROPIC",
+    "RESPONSES",
+    "OLLAMA",
+  ]);
+  assert.equal(sourceBaseUrlMayBeEmpty("OPENAI"), true);
+  assert.equal(sourceBaseUrlMayBeEmpty("GEMINI_OPENAI"), true);
+  assert.equal(sourceBaseUrlMayBeEmpty("OPENAI_COMPATIBLE"), false);
+  assert.equal(sourceSupportsOperation("OPENAI", "rerank"), false);
+  assert.equal(sourceSupportsOperation("OPENAI_COMPATIBLE", "rerank"), true);
+  assert.equal(sourceSupportsOperation("ANTHROPIC", "chat_completions"), false);
+});
+
+test("Source payloads preserve official defaults and operation overrides", () => {
+  const official = createProviderSourceDraft();
+  assert.deepEqual(buildSourceCreatePayload(official), {
+    profile_type: "OPENAI",
+    use_proxy: false,
+    is_enabled: true,
+    is_default: false,
+    chat_completions_enabled: true,
+    embeddings_enabled: true,
+  });
+
+  applySourceProfileDefaults(official, "OPENAI_COMPATIBLE");
+  official.base_url = " https://relay.example.com/v1/ ";
+  official.rerank_enabled = true;
+  official.rerank_path_override = " /rerank ";
+  assert.deepEqual(buildSourceUpdatePayload(official), {
+    base_url: "https://relay.example.com/v1/",
+    use_proxy: false,
+    is_enabled: true,
+    is_default: false,
+    chat_completions_enabled: true,
+    chat_completions_path_override: null,
+    embeddings_enabled: false,
+    embeddings_path_override: null,
+    rerank_enabled: true,
+    rerank_path_override: "/rerank",
+  });
+});
 
 test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () => {
   const payload = buildProviderBootstrapPayload(
     {
       profile_type: "  VERTEX  ",
-      endpoint: "  https://api.example.com/v1  ",
+      base_url: "  https://api.example.com/v1  ",
       api_key: "  secret-key  ",
       model_name: "  gemini-1.5-pro  ",
       api_key_description: "  first key  ",
@@ -28,6 +85,7 @@ test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () 
       provider_name: "  Example Cloud  ",
       provider_key: "  example-cloud  ",
       real_model_name: "  gemini-1.5-pro-latest  ",
+      model_kind: "CHAT",
     },
     true,
   );
@@ -35,13 +93,14 @@ test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () 
   assert.deepEqual(payload, {
     initial_source: {
       profile_type: "VERTEX",
-      endpoint: "https://api.example.com/v1",
+      base_url: "https://api.example.com/v1",
       use_proxy: true,
       is_enabled: true,
       is_default: true,
     },
     api_key: "secret-key",
     model_name: "gemini-1.5-pro",
+    model_kind: "CHAT",
     name: "Example Cloud",
     key: "example-cloud",
     real_model_name: "gemini-1.5-pro-latest",
@@ -53,7 +112,7 @@ test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () 
 test("buildProviderBootstrapPreview requires explicit provider key", () => {
   const preview = buildProviderBootstrapPreview({
     profile_type: "openai",
-    endpoint: "https://api.example.com/v1",
+    base_url: "https://api.example.com/v1",
     api_key: "",
     model_name: "gpt-4o",
     api_key_description: "",
@@ -76,8 +135,15 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
     id: 98,
     provider_id: 99,
     profile_type: "OPENAI",
-    endpoint: "https://old.example.com",
+    base_url: "https://old.example.com",
+    base_url_is_default: false,
     use_proxy: false,
+    chat_completions_enabled: true,
+    chat_completions_path_override: null,
+    embeddings_enabled: true,
+    embeddings_path_override: null,
+    rerank_enabled: null,
+    rerank_path_override: null,
     is_enabled: true,
     is_default: true,
     deleted_at: null,
@@ -119,8 +185,15 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
         id: 100,
         provider_id: 99,
         profile_type: "VERTEX",
-        endpoint: "https://bootstrap.example.com",
+        base_url: "https://bootstrap.example.com",
+        base_url_is_default: false,
         use_proxy: true,
+        chat_completions_enabled: null,
+        chat_completions_path_override: null,
+        embeddings_enabled: null,
+        embeddings_path_override: null,
+        rerank_enabled: null,
+        rerank_path_override: null,
         is_enabled: true,
         is_default: true,
         deleted_at: null,
@@ -143,6 +216,7 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
       id: 13,
       model_name: "gemini-1.5-pro",
       real_model_name: "gemini-1.5-pro-latest",
+      model_kind: "CHAT",
       is_enabled: false,
     },
     provider_name: "Bootstrapped Provider",
@@ -158,8 +232,15 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
       id: 100,
       provider_id: 99,
       profile_type: "VERTEX",
-      endpoint: "https://bootstrap.example.com",
+      base_url: "https://bootstrap.example.com",
+      base_url_is_default: false,
       use_proxy: true,
+      chat_completions_enabled: null,
+      chat_completions_path_override: null,
+      embeddings_enabled: null,
+      embeddings_path_override: null,
+      rerank_enabled: null,
+      rerank_path_override: null,
       is_enabled: true,
       is_default: true,
       deleted_at: null,
@@ -184,6 +265,7 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
     id: 13,
     model_name: "gemini-1.5-pro",
     real_model_name: "gemini-1.5-pro-latest",
+    model_kind: "CHAT",
     source_config: {
       source_selection_mode: "INHERIT_ALL",
       bindings: [],
@@ -211,6 +293,17 @@ test("normalizeBootstrapCheckResult supports mixed bootstrap responses", () => {
     ok: false,
     message: "timeout, dns",
   });
+  assert.deepEqual(
+    normalizeBootstrapCheckResult({ status: "failed", message: "upstream 401" }),
+    { ok: false, message: "upstream 401" },
+  );
+  assert.deepEqual(
+    normalizeBootstrapCheckResult({
+      status: "check_skipped",
+      message: "CHAT only",
+    }),
+    { ok: true, message: "CHAT only" },
+  );
 });
 
 test("syncProviderBootstrapFormState copies saved provider identity into the edit form", () => {
@@ -223,8 +316,15 @@ test("syncProviderBootstrapFormState copies saved provider identity into the edi
     id: 7,
     provider_id: 7,
     profile_type: "ANTHROPIC",
-    endpoint: "https://anthropic.example.com/v1",
+    base_url: "https://anthropic.example.com/v1",
+    base_url_is_default: false,
     use_proxy: true,
+    chat_completions_enabled: null,
+    chat_completions_path_override: null,
+    embeddings_enabled: null,
+    embeddings_path_override: null,
+    rerank_enabled: null,
+    rerank_path_override: null,
     is_enabled: true,
     is_default: true,
     deleted_at: null,
@@ -236,9 +336,18 @@ test("syncProviderBootstrapFormState copies saved provider identity into the edi
 
   assert.deepEqual(form, {
     profile_type: "ANTHROPIC",
-    endpoint: "https://anthropic.example.com/v1",
+    base_url: "https://anthropic.example.com/v1",
+    chat_completions_enabled: false,
+    chat_completions_path_override: "",
+    embeddings_enabled: false,
+    embeddings_path_override: "",
+    rerank_enabled: false,
+    rerank_path_override: "",
+    is_enabled: true,
+    is_default: true,
     api_key: "",
     model_name: "",
+    model_kind: "CHAT",
     api_key_description: "",
     use_proxy: true,
     provider_name: "Saved Provider",
@@ -255,8 +364,15 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
     id: 11,
     provider_id: 11,
     profile_type: "OPENAI",
-    endpoint: "https://old.example.com/v1",
+    base_url: "https://old.example.com/v1",
+    base_url_is_default: false,
     use_proxy: false,
+    chat_completions_enabled: true,
+    chat_completions_path_override: null,
+    embeddings_enabled: true,
+    embeddings_path_override: null,
+    rerank_enabled: null,
+    rerank_path_override: null,
     is_enabled: true,
     is_default: true,
     deleted_at: null,
@@ -266,7 +382,7 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
 
   const payload = buildProviderUpdatePayload(editingData, {
     profile_type: "RESPONSES",
-    endpoint: " https://new.example.com/v1 ",
+    base_url: " https://new.example.com/v1 ",
     api_key: "",
     model_name: "",
     api_key_description: "",
@@ -431,6 +547,8 @@ test("provider Source management keeps the API explicit and refreshes server sta
   assert.match(types, /source_count: number/);
   assert.match(types, /default_source_id: number \| null/);
   assert.match(types, /initial_source: UpstreamSourcePayload/);
+  assert.match(types, /base_url: string/);
+  assert.match(types, /base_url_is_default: boolean/);
   assert.doesNotMatch(types, /source_key/);
   assert.match(service, /provider\/\$\{providerId\}\/sources`/);
   assert.match(service, /sources\/\$\{sourceId\}`/);
@@ -440,7 +558,8 @@ test("provider Source management keeps the API explicit and refreshes server sta
   assert.doesNotMatch(service, /provider\/\$\{id\}\/remote_models/);
   assert.doesNotMatch(service, /provider\/\$\{id\}\/check/);
   assert.match(sourceState, /await refreshSources\(\)/g);
-  assert.match(sourceState, /is_default: draft\.is_default/);
+  assert.match(sourceState, /buildSourceCreatePayload\(draft\)/);
+  assert.match(sourceState, /buildSourceUpdatePayload\(draft\)/);
   assert.match(sourceList, /hidden .*md:block/);
   assert.match(sourceList, /md:hidden/);
   assert.match(sourceList, /isDesktop \? 'right' : 'bottom'/);

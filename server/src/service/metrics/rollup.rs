@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn request_scopes_use_wire_names_for_compound_profiles() {
         for (profile, expected) in [
-            (UpstreamProfileType::VertexOpenai, "VERTEX_OPENAI"),
+            (UpstreamProfileType::OpenaiCompatible, "OPENAI_COMPATIBLE"),
             (UpstreamProfileType::GeminiOpenai, "GEMINI_OPENAI"),
         ] {
             let request_log = RequestLog {

@@ -187,9 +187,7 @@ fn fallback_meter_keys(meter_key: MeterKey) -> &'static [MeterKey] {
         MeterKey::LlmCacheReadTokens => {
             &[MeterKey::LlmCacheReadTokens, MeterKey::LlmInputTextTokens]
         }
-        MeterKey::LlmCacheWriteTokens => {
-            &[MeterKey::LlmCacheWriteTokens, MeterKey::LlmInputTextTokens]
-        }
+        MeterKey::LlmCacheWriteTokens => &[MeterKey::LlmCacheWriteTokens],
         MeterKey::LlmReasoningTokens => {
             &[MeterKey::LlmReasoningTokens, MeterKey::LlmOutputTextTokens]
         }
@@ -592,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_input_side_meters_to_input_text_price() {
+    fn falls_back_portable_input_meters_but_leaves_cache_write_unmatched() {
         let ledger = CostLedger {
             items: vec![
                 ledger_item(MeterKey::LlmInputImageTokens, 30),
@@ -613,9 +611,9 @@ mod tests {
 
         let result = rate_cost(&ledger, &CostRatingContext::default(), &version).unwrap();
 
-        assert_eq!(result.total_cost_nanos, 300);
-        assert!(result.unmatched_items.is_empty());
-        assert_eq!(result.detail_lines.len(), 3);
+        assert_eq!(result.total_cost_nanos, 250);
+        assert_eq!(result.unmatched_items, vec!["llm.cache_write_tokens"]);
+        assert_eq!(result.detail_lines.len(), 2);
         for detail in &result.detail_lines {
             assert_eq!(
                 detail.attributes.get("fallback_meter_key"),

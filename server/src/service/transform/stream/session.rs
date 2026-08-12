@@ -11,7 +11,8 @@ use crate::service::transform::unified::{
     UnifiedBlockKind, UnifiedRole, UnifiedStreamEvent, UnifiedUsage,
 };
 use crate::service::transform::{
-    TransformDiagnosticCollector, TransformDiagnosticFact, TransformOutcomeSummary,
+    TransformAction, TransformDiagnosticCollector, TransformDiagnosticFact, TransformOutcomeKind,
+    TransformOutcomeSummary, TransformPhase, TransformReasonCode, TransformSemanticUnit,
 };
 use crate::utils::sse::SseEvent;
 use crate::utils::usage::UsageInfo;
@@ -35,7 +36,11 @@ pub struct AnthropicSessionState {
     pub(in crate::service::transform) message_started: bool,
     pub(in crate::service::transform) source_message_started: bool,
     pub(in crate::service::transform) source_message_stopped: bool,
+    pub(in crate::service::transform) source_message_delta_seen: bool,
+    pub(in crate::service::transform) source_error_seen: bool,
+    pub(in crate::service::transform) source_next_block_index: u32,
     pub(in crate::service::transform) active_blocks: HashMap<u32, AnthropicActiveBlockState>,
+    pub(in crate::service::transform) source_usage: Option<UnifiedUsage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +56,7 @@ pub struct AnthropicActiveBlockState {
     pub(in crate::service::transform) text: String,
     pub(in crate::service::transform) tool_call_id: Option<String>,
     pub(in crate::service::transform) tool_name: Option<String>,
+    pub(in crate::service::transform) signature_seen: bool,
 }
 
 impl AnthropicActiveBlockState {
@@ -60,6 +66,7 @@ impl AnthropicActiveBlockState {
             text: String::new(),
             tool_call_id: None,
             tool_name: None,
+            signature_seen: false,
         }
     }
 }
@@ -125,6 +132,7 @@ pub struct SessionContext {
     current_reasoning_part_index: Option<u32>,
     usage_cache: Option<UsageInfo>,
     usage_normalization_cache: Option<UsageNormalization>,
+    unified_usage_cache: Option<UnifiedUsage>,
     finish_reason_cache: Option<String>,
     last_error: Option<Value>,
     diagnostics: TransformDiagnosticCollector,
@@ -258,6 +266,14 @@ impl SessionContext {
         self.responses.source_terminal_seen && self.last_error.is_some()
     }
 
+    pub(in crate::service::transform) fn anthropic_source_terminal_seen(&self) -> bool {
+        self.anthropic.source_message_stopped || self.anthropic.source_error_seen
+    }
+
+    pub(in crate::service::transform) fn anthropic_source_failed(&self) -> bool {
+        self.anthropic.source_error_seen
+    }
+
     pub(in crate::service::transform) fn responses_source_identity_matches(
         &self,
         response_id: &str,
@@ -387,12 +403,47 @@ impl SessionContext {
 
     pub(in crate::service::transform) fn merge_usage(
         &mut self,
-        usage: UnifiedUsage,
+        mut usage: UnifiedUsage,
         strategy: UsageMergeStrategy,
     ) {
-        let _ = strategy;
-        self.usage_normalization_cache = Some(UsageNormalization::from(&usage));
-        self.usage_cache = Some(usage.into());
+        if strategy == UsageMergeStrategy::AnthropicFields
+            && let Some(previous) = self.unified_usage_cache.as_ref()
+        {
+            if usage.input_tokens == 0 {
+                usage.input_tokens = previous.input_tokens;
+            }
+            if usage.cached_tokens.is_none() {
+                usage.cached_tokens = previous.cached_tokens;
+            }
+            if usage.cache_write_tokens.is_none() {
+                usage.cache_write_tokens = previous.cache_write_tokens;
+            }
+            usage.total_tokens = usage
+                .input_tokens
+                .checked_add(usage.output_tokens)
+                .expect("source-validated Anthropic stream usage must remain in range");
+        }
+        match UsageInfo::try_from(&usage) {
+            Ok(usage_info) => {
+                self.usage_normalization_cache = Some(UsageNormalization::from(&usage));
+                self.usage_cache = Some(usage_info);
+                self.unified_usage_cache = Some(usage);
+            }
+            Err(_) => {
+                self.usage_normalization_cache = None;
+                self.usage_cache = None;
+                self.unified_usage_cache = None;
+                self.record_diagnostic(TransformDiagnosticFact {
+                    sequence: 0,
+                    phase: TransformPhase::ResponseObserve,
+                    semantic_unit: TransformSemanticUnit::Usage,
+                    outcome: TransformOutcomeKind::ObservationDegraded,
+                    action: TransformAction::PassThrough,
+                    reason_code: TransformReasonCode::UsageOverflow,
+                    safe_summary: None,
+                });
+            }
+        }
     }
 
     pub(in crate::service::transform) fn remember_tool_call_id(&mut self, id: String) {
@@ -674,9 +725,8 @@ impl<'a> StreamTransformContext<'a> {
     pub(in crate::service::transform) fn usage_merge_strategy(&self) -> UsageMergeStrategy {
         match self.upstream_protocol {
             UpstreamProtocol::Gemini | UpstreamProtocol::Responses => UsageMergeStrategy::Replace,
-            UpstreamProtocol::Openai | UpstreamProtocol::Anthropic | UpstreamProtocol::Ollama => {
-                UsageMergeStrategy::FinalOnly
-            }
+            UpstreamProtocol::Anthropic => UsageMergeStrategy::AnthropicFields,
+            UpstreamProtocol::Openai | UpstreamProtocol::Ollama => UsageMergeStrategy::FinalOnly,
         }
     }
 

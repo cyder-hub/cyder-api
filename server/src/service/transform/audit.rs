@@ -4,13 +4,13 @@ use std::collections::VecDeque;
 use super::capability::TransformValueKind;
 use super::diagnostics::record_captured_transform_fact;
 use super::media::{
-    InlineMediaKind, classify_inline_mime, is_valid_base64, is_valid_http_url,
-    is_valid_image_reference, mime_type_from_filename, parse_base64_data_url,
+    InlineMediaKind, classify_inline_mime, decode_base64_utf8, is_valid_base64, is_valid_http_url,
+    is_valid_image_reference, mime_type_from_filename, mime_type_from_url, parse_base64_data_url,
 };
 use super::structured::{is_valid_schema_name, schema_contains_property_ordering};
 use super::unified::{
     UnifiedContentPart, UnifiedItem, UnifiedRequest, UnifiedResponse, UnifiedRole,
-    UnifiedToolChoice, UnifiedToolResultOutput,
+    UnifiedStructuredOutput, UnifiedToolChoice, UnifiedToolResultOutput,
 };
 use super::{
     TransformAction, TransformDiagnosticFact, TransformOutcomeKind, TransformPhase,
@@ -73,12 +73,24 @@ fn record_synthesis(
 }
 
 fn record_minor_drop(phase: TransformPhase, semantic_unit: TransformSemanticUnit) {
+    record_minor_drop_with_reason(
+        phase,
+        semantic_unit,
+        TransformReasonCode::UnsupportedContent,
+    );
+}
+
+fn record_minor_drop_with_reason(
+    phase: TransformPhase,
+    semantic_unit: TransformSemanticUnit,
+    reason_code: TransformReasonCode,
+) {
     record_fact(
         phase,
         semantic_unit,
         TransformOutcomeKind::ControlledLossMinor,
         TransformAction::Drop,
-        TransformReasonCode::UnsupportedContent,
+        reason_code,
     );
 }
 
@@ -852,10 +864,19 @@ fn validate_responses_items(
                             }
                             match present[0] {
                                 "file_url" => {
-                                    return Err(SourceSemanticError {
-                                        semantic_unit: TransformSemanticUnit::FileUrl,
-                                        reason_code: TransformReasonCode::UnsupportedContent,
-                                    });
+                                    let url = part.get("file_url").and_then(Value::as_str);
+                                    let filename = part.get("filename").and_then(Value::as_str);
+                                    if !url.is_some_and(is_valid_http_url)
+                                        || filename
+                                            .and_then(mime_type_from_filename)
+                                            .or_else(|| url.and_then(mime_type_from_url))
+                                            != Some("application/pdf")
+                                    {
+                                        return Err(SourceSemanticError {
+                                            semantic_unit: TransformSemanticUnit::FileUrl,
+                                            reason_code: TransformReasonCode::UnsupportedContent,
+                                        });
+                                    }
                                 }
                                 "file_id"
                                     if !part
@@ -1291,15 +1312,16 @@ fn validate_gemini_parts(
             };
             let mime_type = file_data.get("mimeType").and_then(Value::as_str);
             let file_uri = file_data.get("fileUri").and_then(Value::as_str);
-            let public_image_url = mime_type.is_some_and(|mime_type| {
+            let public_portable_url = mime_type.is_some_and(|mime_type| {
                 classify_inline_mime(mime_type) == Some(InlineMediaKind::Image)
+                    || mime_type == "application/pdf"
             }) && file_uri.is_some_and(|uri| {
                 is_valid_http_url(uri)
                     && reqwest::Url::parse(uri).is_ok_and(|url| {
                         url.host_str() != Some("generativelanguage.googleapis.com")
                     })
             });
-            if !public_image_url {
+            if !public_portable_url {
                 return Err(SourceSemanticError {
                     semantic_unit: TransformSemanticUnit::FileUrl,
                     reason_code: TransformReasonCode::UnsupportedContent,
@@ -1313,7 +1335,9 @@ fn validate_gemini_parts(
                     TransformSemanticUnit::Metadata,
                 ));
             }
-            if file_data
+            if mime_type.is_some_and(|mime_type| {
+                classify_inline_mime(mime_type) == Some(InlineMediaKind::Image)
+            }) && file_data
                 .get("displayName")
                 .and_then(Value::as_str)
                 .is_some_and(|name| !name.trim().is_empty())
@@ -1530,7 +1554,7 @@ pub(in crate::service::transform) fn validate_downstream_request(
                     ));
                 };
                 let choice_type = choice.get("type").and_then(Value::as_str);
-                if !matches!(choice_type, Some("auto" | "any" | "tool"))
+                if !matches!(choice_type, Some("none" | "auto" | "any" | "tool"))
                     || (choice_type == Some("tool")
                         && !choice
                             .get("name")
@@ -1798,9 +1822,10 @@ pub(in crate::service::transform) fn validate_downstream_request(
                 if let Some(schema) = schema {
                     record_structured_name_synthesis();
                     if schema_contains_property_ordering(schema) {
-                        record_minor_drop(
+                        record_minor_drop_with_reason(
                             TransformPhase::RequestDecode,
                             TransformSemanticUnit::StructuredOutput,
+                            TransformReasonCode::GeminiPropertyOrderingDropped,
                         );
                     }
                 }
@@ -1907,9 +1932,9 @@ pub(in crate::service::transform) fn validate_downstream_request(
                         })))
                     || (has_function_response
                         && (role != "user"
-                            || parts
-                                .iter()
-                                .any(|part| part.get("functionResponse").is_none())))
+                            || parts.iter().any(|part| {
+                                part.get("functionResponse").is_none() && part.get("text").is_none()
+                            })))
                 {
                     return Err(SourceSemanticError::invalid(
                         TransformSemanticUnit::ToolRoleMessage,
@@ -2042,15 +2067,20 @@ pub(in crate::service::transform) fn validate_upstream_response(
                     ));
                 }
             }
-            if let Some(reason) = data.get("stop_reason").and_then(Value::as_str)
-                && !matches!(
-                    reason,
-                    "end_turn" | "stop_sequence" | "tool_use" | "max_tokens"
-                )
-            {
-                return Err(SourceSemanticError::unknown(
-                    TransformSemanticUnit::Lifecycle,
-                ));
+            match data.get("stop_reason").and_then(Value::as_str) {
+                Some(
+                    "end_turn"
+                    | "stop_sequence"
+                    | "tool_use"
+                    | "max_tokens"
+                    | "model_context_window_exceeded"
+                    | "refusal",
+                ) => {}
+                _ => {
+                    return Err(SourceSemanticError::unknown(
+                        TransformSemanticUnit::Lifecycle,
+                    ));
+                }
             }
             Ok(())
         }
@@ -2289,6 +2319,81 @@ pub(in crate::service::transform) fn audit_target_request(
         }
     }
 
+    if target == UpstreamProtocol::Anthropic {
+        for message in &request.messages {
+            for part in &message.content {
+                match part {
+                    UnifiedContentPart::ImageUrl { url, detail } => {
+                        if !is_valid_image_reference(url) {
+                            record_rejection(
+                                TransformPhase::RequestEncode,
+                                TransformSemanticUnit::ImageUrl,
+                                TransformReasonCode::UnsupportedContent,
+                            );
+                        }
+                        if detail.as_deref().is_some_and(|detail| !detail.is_empty()) {
+                            record_minor_drop_with_reason(
+                                TransformPhase::RequestEncode,
+                                TransformSemanticUnit::Metadata,
+                                TransformReasonCode::UnsupportedImageDetail,
+                            );
+                        }
+                    }
+                    UnifiedContentPart::ImageData { mime_type, data } => {
+                        if classify_inline_mime(mime_type) != Some(InlineMediaKind::Image)
+                            || !is_valid_base64(data)
+                        {
+                            record_rejection(
+                                TransformPhase::RequestEncode,
+                                TransformSemanticUnit::ImageData,
+                                TransformReasonCode::UnsupportedContent,
+                            );
+                        }
+                    }
+                    UnifiedContentPart::FileUrl {
+                        url,
+                        mime_type,
+                        filename,
+                    } => {
+                        let resolved_mime = mime_type
+                            .as_deref()
+                            .or_else(|| filename.as_deref().and_then(mime_type_from_filename))
+                            .or_else(|| mime_type_from_url(url));
+                        if !is_valid_http_url(url) || resolved_mime != Some("application/pdf") {
+                            record_rejection(
+                                TransformPhase::RequestEncode,
+                                TransformSemanticUnit::FileUrl,
+                                TransformReasonCode::UnsupportedContent,
+                            );
+                        }
+                    }
+                    UnifiedContentPart::FileData {
+                        data, mime_type, ..
+                    } => match mime_type.as_str() {
+                        "application/pdf" if is_valid_base64(data) => {}
+                        "text/plain" | "text/markdown" | "text/csv" | "application/json"
+                            if decode_base64_utf8(data).is_some() =>
+                        {
+                            if mime_type != "text/plain" {
+                                record_minor_drop_with_reason(
+                                    TransformPhase::RequestEncode,
+                                    TransformSemanticUnit::Metadata,
+                                    TransformReasonCode::TextDocumentMimeNormalized,
+                                );
+                            }
+                        }
+                        _ => record_rejection(
+                            TransformPhase::RequestEncode,
+                            TransformSemanticUnit::FileData,
+                            TransformReasonCode::UnsupportedContent,
+                        ),
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+
     if target == UpstreamProtocol::Gemini
         && request
             .tools
@@ -2413,34 +2518,48 @@ pub(in crate::service::transform) fn audit_target_request(
         record_synthesis(
             TransformPhase::RequestEncode,
             TransformSemanticUnit::RequestEnvelope,
-            TransformReasonCode::SyntheticEnvelope,
+            TransformReasonCode::SyntheticAnthropicMaxTokens,
         );
     }
 
-    if request.reasoning_effort.is_some()
-        && !matches!(
+    if request.reasoning_effort.is_some() {
+        if target == UpstreamProtocol::Anthropic {
+            record_minor_reasoning_mapping(TransformPhase::RequestEncode);
+        } else if !matches!(
             target,
             UpstreamProtocol::Openai | UpstreamProtocol::Responses
-        )
-    {
-        record_rejection(
-            TransformPhase::RequestEncode,
-            TransformSemanticUnit::ReasoningContent,
-            TransformReasonCode::UnsupportedReasoning,
-        );
+        ) {
+            record_rejection(
+                TransformPhase::RequestEncode,
+                TransformSemanticUnit::ReasoningContent,
+                TransformReasonCode::UnsupportedReasoning,
+            );
+        }
     }
 
-    let has_structured_output = request.structured_output.is_some();
-    let structured_output_supported = matches!(
-        target,
-        UpstreamProtocol::Openai | UpstreamProtocol::Responses
-    );
-    if has_structured_output && !structured_output_supported {
-        record_rejection(
-            TransformPhase::RequestEncode,
-            TransformSemanticUnit::StructuredOutput,
-            TransformReasonCode::UnsupportedContent,
-        );
+    if let Some(structured_output) = request.structured_output.as_ref() {
+        match (target, structured_output) {
+            (UpstreamProtocol::Anthropic, UnifiedStructuredOutput::JsonSchema { schema, .. })
+                if schema.is_object() =>
+            {
+                record_minor_drop_with_reason(
+                    TransformPhase::RequestEncode,
+                    TransformSemanticUnit::StructuredOutput,
+                    TransformReasonCode::StructuredOutputMetadataDropped,
+                );
+            }
+            (UpstreamProtocol::Anthropic, _) => record_rejection(
+                TransformPhase::RequestEncode,
+                TransformSemanticUnit::StructuredOutput,
+                TransformReasonCode::UnsupportedContent,
+            ),
+            (UpstreamProtocol::Openai | UpstreamProtocol::Responses, _) => {}
+            _ => record_rejection(
+                TransformPhase::RequestEncode,
+                TransformSemanticUnit::StructuredOutput,
+                TransformReasonCode::UnsupportedContent,
+            ),
+        }
     }
 
     if request
@@ -2525,7 +2644,9 @@ pub(in crate::service::transform) fn audit_target_request(
         if responses.reasoning.is_some()
             && !matches!(
                 target,
-                UpstreamProtocol::Openai | UpstreamProtocol::Responses
+                UpstreamProtocol::Openai
+                    | UpstreamProtocol::Responses
+                    | UpstreamProtocol::Anthropic
             )
         {
             record_rejection(
@@ -2620,7 +2741,9 @@ pub(in crate::service::transform) fn audit_target_response(
                 DownstreamProtocol::Gemini | DownstreamProtocol::Anthropic => {
                     matches!(reason, "stop" | "length" | "tool_calls" | "content_filter")
                 }
-                DownstreamProtocol::Responses => reason == "stop",
+                DownstreamProtocol::Responses => {
+                    matches!(reason, "stop" | "length" | "tool_calls" | "content_filter")
+                }
             };
             if !supported {
                 record_rejection(
@@ -3055,7 +3178,11 @@ mod tests {
         )
         .expect("Anthropic max_tokens has a documented adapter default");
         assert_eq!(synthesis.value["max_tokens"], 4096);
-        assert!(has_action(&synthesis.summary, TransformAction::Synthesize));
+        assert!(synthesis.summary.facts.iter().any(|fact| {
+            fact.action == TransformAction::Synthesize
+                && fact.reason_code == TransformReasonCode::SyntheticAnthropicMaxTokens
+                && fact.safe_summary.is_none()
+        }));
     }
 
     #[test]

@@ -66,7 +66,7 @@ impl UsageNormalization {
         let input_image_tokens = i64::from(usage.input_image_tokens.unwrap_or(0));
         let output_image_tokens = i64::from(usage.output_image_tokens.unwrap_or(0));
         let cache_read_tokens = i64::from(usage.cached_tokens.unwrap_or(0));
-        let cache_write_tokens = 0;
+        let cache_write_tokens = i64::from(usage.cache_write_tokens.unwrap_or(0));
         let reasoning_tokens = i64::from(usage.reasoning_tokens.unwrap_or(0));
 
         let mut warnings = Vec::new();
@@ -205,6 +205,7 @@ mod tests {
             input_image_tokens: Some(30),
             output_image_tokens: Some(25),
             cached_tokens: Some(10),
+            cache_write_tokens: None,
             reasoning_tokens: Some(5),
         };
 
@@ -222,19 +223,23 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_anthropic_usage_as_text_only() {
+    fn normalizes_anthropic_cache_read_and_write_without_double_counting_input() {
         let usage = UnifiedUsage {
-            input_tokens: 21,
-            output_tokens: 13,
-            total_tokens: 34,
+            input_tokens: 16,
+            output_tokens: 7,
+            total_tokens: 23,
+            cached_tokens: Some(3),
+            cache_write_tokens: Some(2),
             ..Default::default()
         };
 
         let normalized = UsageNormalization::from(&usage);
 
-        assert_eq!(normalized.input_text_tokens, 21);
-        assert_eq!(normalized.output_text_tokens, 13);
-        assert_eq!(normalized.cache_read_tokens, 0);
+        assert_eq!(normalized.total_input_tokens, 16);
+        assert_eq!(normalized.input_text_tokens, 11);
+        assert_eq!(normalized.output_text_tokens, 7);
+        assert_eq!(normalized.cache_read_tokens, 3);
+        assert_eq!(normalized.cache_write_tokens, 2);
         assert_eq!(normalized.reasoning_tokens, 0);
         assert!(normalized.warnings.is_empty());
     }

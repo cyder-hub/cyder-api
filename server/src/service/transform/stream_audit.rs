@@ -44,6 +44,13 @@ impl SourceStreamSemanticError {
             reason_code: TransformReasonCode::SourceDecodeFailed,
         }
     }
+
+    const fn usage_overflow() -> Self {
+        Self {
+            semantic_unit: TransformSemanticUnit::Usage,
+            reason_code: TransformReasonCode::UsageOverflow,
+        }
+    }
 }
 
 fn record_fact(
@@ -860,7 +867,9 @@ fn validate_anthropic_stream_frame(
 ) -> Result<(), SourceStreamSemanticError> {
     require_object(value, TransformSemanticUnit::StreamFrame)?;
     let event_type = require_non_empty_string(value, "type", TransformSemanticUnit::Lifecycle)?;
-    if context.anthropic_session_mut().source_message_stopped {
+    if context.anthropic_session_mut().source_message_stopped
+        || context.anthropic_session_mut().source_error_seen
+    {
         return Err(SourceStreamSemanticError::invalid(
             TransformSemanticUnit::Lifecycle,
         ));
@@ -1412,14 +1421,18 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
     event: &anthropic::AnthropicEvent,
     context: &mut StreamTransformContext<'_>,
 ) -> Result<(), SourceStreamSemanticError> {
-    if context.anthropic_session_mut().source_message_stopped {
+    if context.anthropic_session_mut().source_message_stopped
+        || context.anthropic_session_mut().source_error_seen
+    {
         return Err(SourceStreamSemanticError::invalid(
             TransformSemanticUnit::Lifecycle,
         ));
     }
     match event {
         anthropic::AnthropicEvent::MessageStart { message } => {
-            if context.anthropic_session_mut().source_message_started {
+            if context.anthropic_session_mut().source_message_started
+                || context.anthropic_session_mut().source_message_delta_seen
+            {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
@@ -1439,10 +1452,23 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
                     TransformSemanticUnit::Role,
                 ));
             }
-            if let Some(blocks) = &message.content {
-                for block in blocks {
-                    validate_typed_anthropic_content_block(block)?;
-                }
+            if message
+                .content
+                .as_ref()
+                .is_some_and(|blocks| !blocks.is_empty())
+                || message.stop_reason.is_some()
+                || message.stop_sequence.is_some()
+            {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
+            if message
+                .usage
+                .as_ref()
+                .is_some_and(|usage| anthropic::anthropic_usage_to_unified(usage).is_none())
+            {
+                return Err(SourceStreamSemanticError::usage_overflow());
             }
             context.anthropic_session_mut().source_message_started = true;
         }
@@ -1451,7 +1477,10 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
             content_block,
         } => {
             if !context.anthropic_session_mut().source_message_started
+                || context.anthropic_session_mut().source_message_delta_seen
+                || !context.anthropic_active_blocks().is_empty()
                 || context.anthropic_active_blocks().contains_key(index)
+                || *index != context.anthropic_session_mut().source_next_block_index
             {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
@@ -1469,8 +1498,20 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
+            context.anthropic_session_mut().source_next_block_index = context
+                .anthropic_session_mut()
+                .source_next_block_index
+                .checked_add(1)
+                .ok_or_else(|| {
+                    SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
+                })?;
         }
         anthropic::AnthropicEvent::ContentBlockDelta { index, delta } => {
+            if context.anthropic_session_mut().source_message_delta_seen {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
             let active_kind = context
                 .anthropic_active_blocks()
                 .get(index)
@@ -1478,29 +1519,53 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
                 .ok_or_else(|| {
                     SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
                 })?;
-            let valid = matches!(
-                (active_kind, delta),
+            let valid = match (active_kind, delta) {
                 (
                     AnthropicActiveBlockKind::Text,
-                    anthropic::AnthropicContentDelta::TextDelta { .. }
-                ) | (
-                    AnthropicActiveBlockKind::ToolUse,
-                    anthropic::AnthropicContentDelta::InputJsonDelta { .. }
-                ) | (
-                    AnthropicActiveBlockKind::Thinking,
-                    anthropic::AnthropicContentDelta::ThinkingDelta { .. }
-                ) | (
-                    AnthropicActiveBlockKind::Thinking,
-                    anthropic::AnthropicContentDelta::SignatureDelta { .. }
+                    anthropic::AnthropicContentDelta::TextDelta { .. },
                 )
-            );
+                | (
+                    AnthropicActiveBlockKind::ToolUse,
+                    anthropic::AnthropicContentDelta::InputJsonDelta { .. },
+                ) => true,
+                (
+                    AnthropicActiveBlockKind::Thinking,
+                    anthropic::AnthropicContentDelta::ThinkingDelta { .. },
+                ) => !context
+                    .anthropic_active_blocks()
+                    .get(index)
+                    .is_some_and(|block| block.signature_seen),
+                (
+                    AnthropicActiveBlockKind::Thinking,
+                    anthropic::AnthropicContentDelta::SignatureDelta { signature },
+                ) => {
+                    !signature.is_empty()
+                        && !context
+                            .anthropic_active_blocks()
+                            .get(index)
+                            .is_some_and(|block| block.signature_seen)
+                }
+                _ => false,
+            };
             if !valid {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
+            if matches!(
+                delta,
+                anthropic::AnthropicContentDelta::SignatureDelta { .. }
+            ) && let Some(block) = context.anthropic_active_blocks_mut().get_mut(index)
+            {
+                block.signature_seen = true;
+            }
         }
         anthropic::AnthropicEvent::ContentBlockStop { index } => {
+            if context.anthropic_session_mut().source_message_delta_seen {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
             let block = context
                 .anthropic_active_blocks()
                 .get(index)
@@ -1514,9 +1579,18 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
                     TransformSemanticUnit::ToolCallDelta,
                 ));
             }
+            if block.kind == AnthropicActiveBlockKind::Thinking && !block.signature_seen {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::ReasoningDelta,
+                ));
+            }
         }
-        anthropic::AnthropicEvent::MessageDelta { delta, .. } => {
-            if !context.anthropic_session_mut().source_message_started {
+        anthropic::AnthropicEvent::MessageDelta { delta, usage } => {
+            if !context.anthropic_session_mut().source_message_started
+                || context.anthropic_session_mut().source_message_delta_seen
+                || !context.anthropic_active_blocks().is_empty()
+                || delta.stop_reason.is_none()
+            {
                 return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
@@ -1524,16 +1598,30 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
             if delta.stop_reason.as_deref().is_some_and(|reason| {
                 !matches!(
                     reason,
-                    "end_turn" | "stop_sequence" | "tool_use" | "max_tokens"
+                    "end_turn"
+                        | "stop_sequence"
+                        | "tool_use"
+                        | "max_tokens"
+                        | "model_context_window_exceeded"
+                        | "refusal"
                 )
             }) {
                 return Err(SourceStreamSemanticError::unknown(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
+            if usage
+                .as_ref()
+                .or(delta.usage.as_ref())
+                .is_some_and(|usage| anthropic::anthropic_stream_usage_to_unified(usage).is_none())
+            {
+                return Err(SourceStreamSemanticError::usage_overflow());
+            }
+            context.anthropic_session_mut().source_message_delta_seen = true;
         }
         anthropic::AnthropicEvent::MessageStop => {
             if !context.anthropic_session_mut().source_message_started
+                || !context.anthropic_session_mut().source_message_delta_seen
                 || !context.anthropic_active_blocks().is_empty()
             {
                 return Err(SourceStreamSemanticError::invalid(
@@ -1544,6 +1632,11 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
             record_source_no_output(TransformSemanticUnit::Lifecycle);
         }
         anthropic::AnthropicEvent::Ping => {
+            if !context.anthropic_session_mut().source_message_started {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
             record_source_no_output(TransformSemanticUnit::Lifecycle)
         }
         anthropic::AnthropicEvent::Error { error } => {
@@ -1552,6 +1645,7 @@ pub(in crate::service::transform) fn validate_anthropic_stream_event(
                     TransformSemanticUnit::StreamError,
                 ));
             }
+            context.anthropic_session_mut().source_error_seen = true;
         }
         anthropic::AnthropicEvent::Unknown => {
             return Err(SourceStreamSemanticError::unknown(

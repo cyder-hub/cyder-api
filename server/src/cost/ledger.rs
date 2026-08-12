@@ -126,6 +126,7 @@ mod tests {
             input_image_tokens: 30,
             output_image_tokens: 25,
             cache_read_tokens: 10,
+            cache_write_tokens: 6,
             reasoning_tokens: 5,
             ..Default::default()
         };
@@ -145,6 +146,7 @@ mod tests {
                 (MeterKey::LlmInputImageTokens, 30),
                 (MeterKey::LlmOutputImageTokens, 25),
                 (MeterKey::LlmCacheReadTokens, 10),
+                (MeterKey::LlmCacheWriteTokens, 6),
                 (MeterKey::LlmReasoningTokens, 5),
             ]
         );

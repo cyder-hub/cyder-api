@@ -1,6 +1,9 @@
 use std::fmt;
 
-use reqwest::Url;
+use reqwest::{
+    Url,
+    header::{HeaderMap, HeaderValue},
+};
 
 use crate::schema::enum_def::UpstreamProfileType;
 
@@ -8,6 +11,10 @@ pub(crate) const VERTEX_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 pub(crate) const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const GEMINI_OPENAI_DEFAULT_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
+pub(crate) const ANTHROPIC_MESSAGES_OPERATION: &str = "messages";
+pub(crate) const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const ANTHROPIC_BETA_HEADER: &str = "anthropic-beta";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderHttpUrlError {
@@ -170,6 +177,18 @@ pub(crate) fn join_base_url_and_operation_path(
     Ok(format!("{base_url}/{operation_path}"))
 }
 
+pub(crate) fn anthropic_messages_url(base_url: &str) -> Result<String, ProviderHttpUrlError> {
+    join_base_url_and_operation_path(base_url, ANTHROPIC_MESSAGES_OPERATION)
+}
+
+pub(crate) fn enforce_anthropic_version_header(headers: &mut HeaderMap) {
+    headers.remove(ANTHROPIC_VERSION_HEADER);
+    headers.insert(
+        ANTHROPIC_VERSION_HEADER,
+        HeaderValue::from_static(ANTHROPIC_VERSION),
+    );
+}
+
 pub(crate) fn parse_proxy_url(value: &str) -> Result<Url, ProviderHttpUrlError> {
     let url = parse_http_url(value)?;
     if !matches!(url.path(), "" | "/") {
@@ -298,6 +317,37 @@ mod tests {
                 "operation path {value:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn anthropic_request_contract_normalizes_messages_url_and_fixed_version() {
+        for base_url in [
+            "https://api.anthropic.com/v1",
+            "https://api.anthropic.com/v1/",
+        ] {
+            assert_eq!(
+                anthropic_messages_url(base_url),
+                Ok("https://api.anthropic.com/v1/messages".to_string())
+            );
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            ANTHROPIC_VERSION_HEADER,
+            HeaderValue::from_static("2020-01-01"),
+        );
+        headers.append(
+            ANTHROPIC_VERSION_HEADER,
+            HeaderValue::from_static("2099-01-01"),
+        );
+        enforce_anthropic_version_header(&mut headers);
+        assert_eq!(
+            headers
+                .get(ANTHROPIC_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(ANTHROPIC_VERSION)
+        );
+        assert_eq!(headers.get_all(ANTHROPIC_VERSION_HEADER).iter().count(), 1);
     }
 
     #[test]

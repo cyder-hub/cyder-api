@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     io::Write as _,
     net::SocketAddr,
@@ -104,6 +104,8 @@ const FIXTURE_SOURCES: [(&str, &str); 4] = [
 
 const RESPONSES_TARGET_SOURCE: &str =
     include_str!("../service/transform/testdata/direct_execution/responses_target.json");
+const ANTHROPIC_TARGET_SOURCE: &str =
+    include_str!("../service/transform/testdata/direct_execution/anthropic_target.json");
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct GoldenEvent {
@@ -231,6 +233,33 @@ struct ResponsesTargetGolden {
     cancellation: ResponsesTargetCancellationGolden,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct AnthropicTargetRequestGolden {
+    downstream: String,
+    non_stream: Value,
+    stream: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AnthropicTargetErrorGolden {
+    http_429: ResponsesHttpErrorGolden,
+    stream_error_event: GoldenEvent,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AnthropicTargetGolden {
+    profile_type: UpstreamProfileType,
+    base_url: String,
+    upstream_headers: BTreeMap<String, String>,
+    upstream_path: String,
+    requests: Vec<AnthropicTargetRequestGolden>,
+    non_stream_response: Value,
+    stream_events: Vec<GoldenEvent>,
+    usage: UsageGolden,
+    error: AnthropicTargetErrorGolden,
+    cancellation: ResponsesTargetCancellationGolden,
+}
+
 pub(super) fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
     FIXTURE_SOURCES
         .iter()
@@ -354,6 +383,85 @@ fn responses_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
         .collect()
 }
 
+fn parse_anthropic_target_golden(source: &str) -> Result<AnthropicTargetGolden, String> {
+    let target: AnthropicTargetGolden =
+        serde_json::from_str(source).map_err(|error| error.to_string())?;
+    let mut requests = BTreeMap::new();
+    for request in &target.requests {
+        if requests
+            .insert(request.downstream.as_str(), request)
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate Anthropic target request case: {}",
+                request.downstream
+            ));
+        }
+    }
+    let actual = requests.keys().copied().collect::<Vec<_>>();
+    let expected = vec!["anthropic", "gemini", "openai", "responses"];
+    if actual != expected {
+        return Err(format!(
+            "Anthropic target request cases must be exactly {expected:?}, got {actual:?}"
+        ));
+    }
+    if target.upstream_path != "/v1/messages" {
+        return Err(format!(
+            "Anthropic target upstream path must be /v1/messages, got {}",
+            target.upstream_path
+        ));
+    }
+    Ok(target)
+}
+
+fn anthropic_target_golden() -> AnthropicTargetGolden {
+    parse_anthropic_target_golden(ANTHROPIC_TARGET_SOURCE)
+        .expect("Anthropic target direct execution fixture should parse")
+}
+
+fn anthropic_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
+    let target = anthropic_target_golden();
+    let requests = target
+        .requests
+        .iter()
+        .map(|request| (request.downstream.as_str(), request))
+        .collect::<BTreeMap<_, _>>();
+
+    fixtures()
+        .into_iter()
+        .map(|(name, mut fixture)| {
+            let request = requests
+                .get(name)
+                .unwrap_or_else(|| panic!("{name}: Anthropic target request fixture"));
+            fixture.profile_type = target.profile_type;
+            fixture.upstream_headers = target.upstream_headers.clone();
+            fixture.request.upstream = request.non_stream.clone();
+            fixture.request.upstream_path = target.upstream_path.clone();
+            fixture.request.upstream_query = None;
+            fixture.non_stream.upstream_response = target.non_stream_response.clone();
+            fixture.stream.upstream_request = request.stream.clone();
+            fixture.stream.upstream_path = target.upstream_path.clone();
+            fixture.stream.upstream_query = None;
+            fixture.stream.upstream_events = target.stream_events.clone();
+            fixture.usage = target.usage.clone();
+            fixture.error.upstream_status = target.error.http_429.status;
+            fixture.error.upstream_response = target.error.http_429.response.clone();
+            fixture.cancellation.upstream_request = request.stream.clone();
+            fixture.cancellation.upstream_path = target.upstream_path.clone();
+            fixture.cancellation.upstream_query = None;
+            fixture.cancellation.first_upstream_event =
+                target.cancellation.first_upstream_event.clone();
+
+            if fixture.protocol == DownstreamProtocol::Anthropic {
+                fixture.non_stream.downstream_response = target.non_stream_response.clone();
+                fixture.stream.downstream_events = target.stream_events.clone();
+            }
+
+            (name, fixture)
+        })
+        .collect()
+}
+
 fn generation_evidence_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
     let mut fixtures = openai_target_fixtures();
     let native_gemini = self::fixtures()
@@ -418,13 +526,22 @@ fn validate_fixture(name: &str, fixture: &DirectExecutionFixture) {
         fixture.stream.expected_text, "baseline pong",
         "{name}: stream text"
     );
+    let expected_usage = if fixture.profile_type == UpstreamProfileType::Anthropic
+        && fixture.non_stream.upstream_response["usage"]
+            .get("cache_creation_input_tokens")
+            .is_some()
+    {
+        (16, 7, 23)
+    } else {
+        (11, 7, 18)
+    };
     assert_eq!(
         (
             fixture.usage.input,
             fixture.usage.output,
             fixture.usage.total
         ),
-        (11, 7, 18)
+        expected_usage
     );
     assert_eq!(fixture.error.upstream_status, 429, "{name}: error sample");
     assert!(
@@ -2162,6 +2279,3001 @@ fn responses_target_fixtures_define_four_complete_protocols_and_native_evidence(
         target.cancellation.first_upstream_event.data["response"]["status"],
         "in_progress"
     );
+}
+
+#[test]
+fn anthropic_target_fixtures_define_four_complete_protocols_and_reject_bad_overlays() {
+    let target = anthropic_target_golden();
+    let fixtures = anthropic_target_fixtures();
+
+    assert_eq!(target.base_url, "/v1");
+    assert_eq!(target.profile_type, UpstreamProfileType::Anthropic);
+    assert_eq!(target.upstream_path, "/v1/messages");
+    assert_eq!(
+        fixtures.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        vec!["openai", "responses", "anthropic", "gemini"]
+    );
+    assert_eq!(target.requests.len(), 4);
+
+    for (name, fixture) in fixtures {
+        validate_fixture(name, &fixture);
+        assert_eq!(
+            fixture.profile_type,
+            UpstreamProfileType::Anthropic,
+            "{name}"
+        );
+        assert_eq!(fixture.request.upstream_path, "/v1/messages", "{name}");
+        assert_eq!(fixture.stream.upstream_path, "/v1/messages", "{name}");
+        assert_eq!(fixture.cancellation.upstream_path, "/v1/messages", "{name}");
+        assert_eq!(
+            fixture
+                .upstream_headers
+                .get("anthropic-version")
+                .map(String::as_str),
+            Some("2023-06-01"),
+            "{name}"
+        );
+        assert_eq!(
+            fixture
+                .upstream_headers
+                .get("x-api-key")
+                .map(String::as_str),
+            Some(PROVIDER_SECRET),
+            "{name}"
+        );
+        for request in [&fixture.request.upstream, &fixture.stream.upstream_request] {
+            assert_eq!(request["model"], "$UPSTREAM_MODEL", "{name}");
+            assert_eq!(
+                request["max_tokens"],
+                if name == "anthropic" { 64 } else { 4096 },
+                "{name}"
+            );
+        }
+        if name == "anthropic" {
+            assert!(fixture.request.upstream.get("stream").is_none(), "{name}");
+        } else {
+            assert_eq!(fixture.request.upstream["stream"], false, "{name}");
+        }
+        assert_eq!(fixture.stream.upstream_request["stream"], true, "{name}");
+        assert_eq!(
+            fixture.non_stream.upstream_response["stop_reason"],
+            "end_turn"
+        );
+    }
+
+    assert_eq!(
+        (target.usage.input, target.usage.output, target.usage.total),
+        (16, 7, 23)
+    );
+    assert_eq!(
+        target.error.stream_error_event.event.as_deref(),
+        Some("error")
+    );
+
+    let source: Value = serde_json::from_str(ANTHROPIC_TARGET_SOURCE).expect("valid source JSON");
+
+    let mut missing = source.clone();
+    missing["requests"]
+        .as_array_mut()
+        .expect("request cases")
+        .pop();
+    let error = parse_anthropic_target_golden(&missing.to_string()).expect_err("missing case");
+    assert!(error.contains("must be exactly"));
+
+    let mut duplicate = source.clone();
+    let duplicate_case = duplicate["requests"][0].clone();
+    duplicate["requests"]
+        .as_array_mut()
+        .expect("request cases")
+        .push(duplicate_case);
+    let error = parse_anthropic_target_golden(&duplicate.to_string()).expect_err("duplicate case");
+    assert!(error.contains("duplicate Anthropic target request case"));
+
+    let mut bad_path = source;
+    bad_path["upstream_path"] = json!("/messages");
+    let error = parse_anthropic_target_golden(&bad_path.to_string()).expect_err("bad path");
+    assert!(error.contains("must be /v1/messages"));
+}
+
+#[test]
+fn anthropic_target_evidence_registry_covers_24_base_dimensions_and_16_advanced_cells() {
+    const BASE_DIMENSIONS: [&str; 6] = [
+        "non_stream_text",
+        "stream_text",
+        "usage",
+        "normal_termination",
+        "upstream_error",
+        "cancellation",
+    ];
+    const DOWNSTREAMS: [&str; 4] = ["openai", "responses", "anthropic", "gemini"];
+    const BASE_EVIDENCE: [(&str, &str); 9] = [
+        (
+            "r3-18-openai-base",
+            "proxy::direct_execution_regression::openai_to_anthropic_base_cell_success_is_verified",
+        ),
+        (
+            "r3-18-responses-base",
+            "proxy::direct_execution_regression::responses_to_anthropic_base_cell_success_is_verified",
+        ),
+        (
+            "r3-18-anthropic-base",
+            "proxy::direct_execution_regression::anthropic_to_anthropic_base_cell_success_is_verified",
+        ),
+        (
+            "r3-18-gemini-base",
+            "proxy::direct_execution_regression::gemini_to_anthropic_base_cell_success_is_verified",
+        ),
+        (
+            "r3-18-openai-upstream-error",
+            "proxy::direct_execution_regression::openai_to_anthropic_base_request_is_verified",
+        ),
+        (
+            "r3-18-responses-upstream-error",
+            "proxy::direct_execution_regression::responses_to_anthropic_base_request_is_verified",
+        ),
+        (
+            "r3-18-anthropic-upstream-error",
+            "proxy::direct_execution_regression::anthropic_to_anthropic_base_request_is_verified",
+        ),
+        (
+            "r3-18-gemini-upstream-error",
+            "proxy::direct_execution_regression::gemini_to_anthropic_base_request_is_verified",
+        ),
+        (
+            "r3-18-cancellation",
+            "proxy::direct_execution_regression::anthropic_target_precommit_client_cancellation_returns_499_and_releases_once",
+        ),
+    ];
+    const ADVANCED_EVIDENCE: [(&str, &str, &str, &str, &str); 16] = [
+        (
+            "openai",
+            "tools",
+            "full",
+            "r3-18-openai-tools-cell",
+            "proxy::direct_execution_regression::openai_to_anthropic_tools_cell_is_full",
+        ),
+        (
+            "responses",
+            "tools",
+            "full",
+            "r3-18-responses-tools-cell",
+            "proxy::direct_execution_regression::responses_to_anthropic_tools_cell_is_full",
+        ),
+        (
+            "anthropic",
+            "tools",
+            "full",
+            "r3-18-anthropic-tools-cell",
+            "proxy::direct_execution_regression::anthropic_to_anthropic_tools_cell_is_full",
+        ),
+        (
+            "gemini",
+            "tools",
+            "controlled_loss",
+            "r3-18-gemini-tools-cell",
+            "proxy::direct_execution_regression::gemini_to_anthropic_tools_cell_has_typed_controlled_loss",
+        ),
+        (
+            "openai",
+            "reasoning",
+            "controlled_loss",
+            "r3-18-openai-reasoning-cell",
+            "proxy::direct_execution_regression::openai_to_anthropic_reasoning_cell_has_typed_controlled_loss",
+        ),
+        (
+            "responses",
+            "reasoning",
+            "controlled_loss",
+            "r3-18-responses-reasoning-cell",
+            "proxy::direct_execution_regression::responses_to_anthropic_reasoning_cell_has_typed_controlled_loss",
+        ),
+        (
+            "anthropic",
+            "reasoning",
+            "full",
+            "r3-18-anthropic-reasoning-cell",
+            "proxy::direct_execution_regression::anthropic_to_anthropic_reasoning_cell_is_full",
+        ),
+        (
+            "gemini",
+            "reasoning",
+            "controlled_loss",
+            "r3-18-gemini-reasoning-cell",
+            "proxy::direct_execution_regression::gemini_to_anthropic_reasoning_cell_has_typed_controlled_loss",
+        ),
+        (
+            "openai",
+            "multimodal",
+            "controlled_loss",
+            "r3-18-openai-multimodal-cell",
+            "proxy::direct_execution_regression::openai_to_anthropic_multimodal_cell_has_typed_controlled_loss",
+        ),
+        (
+            "responses",
+            "multimodal",
+            "controlled_loss",
+            "r3-18-responses-multimodal-cell",
+            "proxy::direct_execution_regression::responses_to_anthropic_multimodal_cell_has_typed_controlled_loss",
+        ),
+        (
+            "anthropic",
+            "multimodal",
+            "full",
+            "r3-18-anthropic-multimodal-cell",
+            "proxy::direct_execution_regression::anthropic_to_anthropic_multimodal_cell_is_full",
+        ),
+        (
+            "gemini",
+            "multimodal",
+            "controlled_loss",
+            "r3-18-gemini-multimodal-cell",
+            "proxy::direct_execution_regression::gemini_to_anthropic_multimodal_cell_has_typed_controlled_loss",
+        ),
+        (
+            "openai",
+            "structured_output",
+            "controlled_loss",
+            "r3-18-openai-structured-cell",
+            "proxy::direct_execution_regression::openai_to_anthropic_structured_output_cell_has_typed_controlled_loss",
+        ),
+        (
+            "responses",
+            "structured_output",
+            "controlled_loss",
+            "r3-18-responses-structured-cell",
+            "proxy::direct_execution_regression::responses_to_anthropic_structured_output_cell_has_typed_controlled_loss",
+        ),
+        (
+            "anthropic",
+            "structured_output",
+            "full",
+            "r3-18-anthropic-structured-cell",
+            "proxy::direct_execution_regression::anthropic_to_anthropic_structured_output_cell_is_full",
+        ),
+        (
+            "gemini",
+            "structured_output",
+            "controlled_loss",
+            "r3-18-gemini-structured-cell",
+            "proxy::direct_execution_regression::gemini_to_anthropic_structured_output_cell_has_typed_controlled_loss",
+        ),
+    ];
+
+    let base_catalog = BASE_EVIDENCE.into_iter().collect::<BTreeMap<_, _>>();
+    assert_eq!(base_catalog.len(), BASE_EVIDENCE.len());
+    assert!(
+        base_catalog
+            .values()
+            .all(|reference| reference.starts_with("proxy::direct_execution_regression::"))
+    );
+
+    let mut base_cells = BTreeSet::new();
+    let mut used_base_evidence = BTreeSet::new();
+    for downstream in DOWNSTREAMS {
+        let success = format!("r3-18-{downstream}-base");
+        let upstream_error = format!("r3-18-{downstream}-upstream-error");
+        for (dimension, evidence_id) in [
+            ("non_stream_text", success.as_str()),
+            ("stream_text", success.as_str()),
+            ("usage", success.as_str()),
+            ("normal_termination", success.as_str()),
+            ("upstream_error", upstream_error.as_str()),
+            ("cancellation", "r3-18-cancellation"),
+        ] {
+            assert!(BASE_DIMENSIONS.contains(&dimension));
+            assert!(base_catalog.contains_key(evidence_id));
+            assert!(base_cells.insert((downstream, dimension)));
+            used_base_evidence.insert(evidence_id.to_string());
+        }
+    }
+    assert_eq!(base_cells.len(), DOWNSTREAMS.len() * BASE_DIMENSIONS.len());
+    assert_eq!(used_base_evidence.len(), BASE_EVIDENCE.len());
+
+    let mut advanced_cells = BTreeSet::new();
+    let mut advanced_ids = BTreeSet::new();
+    let mut advanced_references = BTreeSet::new();
+    let mut full = 0;
+    let mut controlled_loss = 0;
+    for (downstream, capability, status, evidence_id, reference) in ADVANCED_EVIDENCE {
+        assert!(DOWNSTREAMS.contains(&downstream));
+        assert!(["tools", "reasoning", "multimodal", "structured_output"].contains(&capability));
+        assert!(advanced_cells.insert((downstream, capability)));
+        assert!(advanced_ids.insert(evidence_id));
+        assert!(advanced_references.insert(reference));
+        assert!(reference.starts_with("proxy::direct_execution_regression::"));
+        match status {
+            "full" => full += 1,
+            "controlled_loss" => controlled_loss += 1,
+            unexpected => panic!("unexpected Anthropic advanced status: {unexpected}"),
+        }
+    }
+    assert_eq!(advanced_cells.len(), DOWNSTREAMS.len() * 4);
+    assert_eq!((full, controlled_loss), (6, 10));
+}
+
+#[test]
+fn anthropic_target_materializes_native_requests_for_all_public_downstreams_and_modes() {
+    for (name, fixture) in anthropic_target_fixtures() {
+        for is_stream in [false, true] {
+            let fixture = fixture.clone();
+            let case_name = format!(
+                "anthropic-materialize-{name}-{}",
+                if is_stream { "stream" } else { "non-stream" }
+            );
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    body: fixture.error.upstream_response.clone(),
+                })
+                .await;
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                router
+                    .app_state
+                    .secret_encryption
+                    .reset_decrypt_call_count();
+                let downstream_request = if is_stream {
+                    &fixture.stream.downstream_request
+                } else {
+                    &fixture.request.downstream
+                };
+
+                let response = router.send(&fixture, is_stream, downstream_request).await;
+
+                assert_eq!(
+                    response.status(),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "{case_name}"
+                );
+                let request_id = assert_downstream_request_identity(&response);
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("upstream error response should be consumed");
+                let captured = upstream.requests().await;
+                let (expected_body, expected_path) = if is_stream {
+                    (
+                        &fixture.stream.upstream_request,
+                        &fixture.stream.upstream_path,
+                    )
+                } else {
+                    (&fixture.request.upstream, &fixture.request.upstream_path)
+                };
+                assert_upstream(
+                    name,
+                    &fixture,
+                    &captured,
+                    expected_path,
+                    None,
+                    expected_body,
+                    &router.requested_model(),
+                    &request_id,
+                );
+                assert_eq!(
+                    captured[0]
+                        .headers
+                        .get("accept-encoding")
+                        .and_then(|value| value.to_str().ok()),
+                    Some(if is_stream {
+                        "identity"
+                    } else {
+                        "gzip, identity"
+                    }),
+                    "{case_name}"
+                );
+                assert_eq!(
+                    captured[0]
+                        .headers
+                        .get("anthropic-version")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("2023-06-01"),
+                    "{case_name}"
+                );
+                assert_eq!(
+                    captured[0]
+                        .headers
+                        .get("x-api-key")
+                        .and_then(|value| value.to_str().ok()),
+                    Some(PROVIDER_SECRET),
+                    "{case_name}"
+                );
+                assert!(
+                    !captured[0].headers.contains_key("authorization"),
+                    "{case_name}"
+                );
+                assert!(
+                    !captured[0].headers.contains_key("x-goog-api-key"),
+                    "{case_name}"
+                );
+                assert!(
+                    !captured[0].headers.contains_key("anthropic-beta"),
+                    "{case_name}"
+                );
+                assert_eq!(
+                    router.app_state.secret_encryption.decrypt_call_count(),
+                    1,
+                    "{case_name}: one request resolves one Provider Key"
+                );
+                let log = router.wait_for_log(RequestStatus::Error).await;
+                assert_log_common(&router, &fixture, &log);
+                assert_eq!(log.upstream_http_status, Some(429), "{case_name}");
+                assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+fn assert_anthropic_base_request_cell(fixture_name: &'static str) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == fixture_name)
+        .unwrap_or_else(|| panic!("{fixture_name}: Anthropic target fixture"));
+
+    for is_stream in [false, true] {
+        let fixture = fixture.clone();
+        let case_name = format!(
+            "{fixture_name}-to-anthropic-base-request-{}",
+            if is_stream { "stream" } else { "non-stream" }
+        );
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: fixture.error.upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .admin
+                .request_patch
+                .create_source_variant(
+                    router.source_id,
+                    RequestPatchVariantInput {
+                        source_id: router.source_id,
+                        model_id: None,
+                        suffix: None,
+                        enabled: true,
+                        expose_in_models: false,
+                        rules: vec![RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Header,
+                            target: "anthropic-beta".to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!("direct-execution-evidence"))),
+                            description: Some(
+                                "Anthropic request evidence Source Patch".to_string(),
+                            ),
+                        }],
+                    },
+                )
+                .await
+                .expect("Anthropic evidence Patch should save");
+            router
+                .app_state
+                .catalog
+                .invalidate_models_catalog()
+                .await
+                .expect("Anthropic evidence Patch should invalidate catalog");
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let mut downstream_request = if is_stream {
+                fixture.stream.downstream_request.clone()
+            } else {
+                fixture.request.downstream.clone()
+            };
+            let mut expected_body = if is_stream {
+                fixture.stream.upstream_request.clone()
+            } else {
+                fixture.request.upstream.clone()
+            };
+            if fixture.protocol == DownstreamProtocol::Anthropic {
+                let extension = json!({"preserved": true});
+                downstream_request["vendor_extension"] = extension.clone();
+                expected_body["vendor_extension"] = extension;
+            }
+
+            let response = router.send(&fixture, is_stream, &downstream_request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "{case_name}"
+            );
+            let request_id = assert_downstream_request_identity(&response);
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Anthropic upstream error response should be consumed");
+            let response_body: Value = serde_json::from_slice(&response_body)
+                .expect("Anthropic downstream error should remain JSON");
+            assert_eq!(
+                downstream_error_code(&response_body, fixture.protocol),
+                Some("upstream_rate_limit_error"),
+                "{case_name}: external response"
+            );
+
+            let captured = upstream.requests().await;
+            let expected_path = if is_stream {
+                &fixture.stream.upstream_path
+            } else {
+                &fixture.request.upstream_path
+            };
+            assert_upstream(
+                fixture_name,
+                &fixture,
+                &captured,
+                expected_path,
+                None,
+                &expected_body,
+                &router.requested_model(),
+                &request_id,
+            );
+            let request = &captured[0];
+            assert_eq!(
+                request
+                    .headers
+                    .get("anthropic-version")
+                    .and_then(|value| value.to_str().ok()),
+                Some("2023-06-01"),
+                "{case_name}: fixed version"
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("anthropic-beta")
+                    .and_then(|value| value.to_str().ok()),
+                Some("direct-execution-evidence"),
+                "{case_name}: Source Patch"
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some(PROVIDER_SECRET),
+                "{case_name}: Anthropic credential"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                1,
+                "{case_name}: exactly one Provider Key resolution"
+            );
+
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(log.upstream_http_status, Some(429), "{case_name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_rate_limit_error")
+            );
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn openai_to_anthropic_base_request_is_verified() {
+    assert_anthropic_base_request_cell("openai");
+}
+
+#[test]
+fn responses_to_anthropic_base_request_is_verified() {
+    assert_anthropic_base_request_cell("responses");
+}
+
+#[test]
+fn anthropic_to_anthropic_base_request_is_verified() {
+    assert_anthropic_base_request_cell("anthropic");
+}
+
+#[test]
+fn gemini_to_anthropic_base_request_is_verified() {
+    assert_anthropic_base_request_cell("gemini");
+}
+
+fn portable_tools_downstream_request(protocol: DownstreamProtocol, requested_model: &str) -> Value {
+    match protocol {
+        DownstreamProtocol::Openai => json!({
+            "model":requested_model,
+            "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"call-weather","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}},
+                    {"id":"call-time","type":"function","function":{"name":"time","arguments":"{\"zone\":\"UTC\"}"}}
+                ]},
+                {"role":"tool","tool_call_id":"call-weather","content":"21"},
+                {"role":"tool","tool_call_id":"call-time","content":"12:00"}
+            ],
+            "tools":[
+                {"type":"function","function":{"name":"weather","description":"weather lookup","parameters":{"type":"object"},"strict":true}},
+                {"type":"function","function":{"name":"time","description":"time lookup","parameters":{"type":"object"},"strict":false}}
+            ],
+            "tool_choice":{"type":"function","function":{"name":"weather"}},
+            "parallel_tool_calls":false
+        }),
+        DownstreamProtocol::Responses => json!({
+            "model":requested_model,
+            "input":[
+                {"type":"function_call","id":"fc-weather","call_id":"response-weather","name":"weather","arguments":"{\"city\":\"Paris\"}"},
+                {"type":"function_call","id":"fc-time","call_id":"response-time","name":"time","arguments":"{\"zone\":\"UTC\"}"},
+                {"type":"function_call_output","id":"fco-weather","call_id":"response-weather","output":{"temp":21}},
+                {"type":"function_call_output","id":"fco-time","call_id":"response-time","output":"12:00"}
+            ],
+            "tools":[
+                {"type":"function","name":"weather","description":"weather lookup","parameters":{"type":"object"},"strict":true},
+                {"type":"function","name":"time","description":"time lookup","parameters":{"type":"object"},"strict":false}
+            ],
+            "tool_choice":{"type":"allowed_tools","mode":"required","tools":[
+                {"type":"function","name":"weather"},{"type":"function","name":"time"}
+            ]},
+            "parallel_tool_calls":false
+        }),
+        DownstreamProtocol::Anthropic => json!({
+            "model":requested_model,"max_tokens":64,
+            "messages":[
+                {"role":"assistant","content":[
+                    {"type":"tool_use","id":"anthropic-weather","name":"weather","input":{"city":"Paris"}},
+                    {"type":"tool_use","id":"anthropic-time","name":"time","input":{"zone":"UTC"}}
+                ]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"anthropic-weather","content":"{\"temp\":21}"},
+                    {"type":"tool_result","tool_use_id":"anthropic-time","content":"12:00"},
+                    {"type":"text","text":"summarize"}
+                ]}
+            ],
+            "tools":[
+                {"name":"weather","description":"weather lookup","input_schema":{"type":"object"},"strict":true},
+                {"name":"time","description":"time lookup","input_schema":{"type":"object"},"strict":false}
+            ],
+            "tool_choice":{"type":"any","disable_parallel_tool_use":true}
+        }),
+        DownstreamProtocol::Gemini => json!({
+            "contents":[
+                {"role":"model","parts":[
+                    {"functionCall":{"name":"weather","args":{"city":"Paris"}}},
+                    {"functionCall":{"name":"time","args":{"zone":"UTC"}}}
+                ]},
+                {"role":"user","parts":[
+                    {"text":"summarize"},
+                    {"functionResponse":{"name":"weather","response":{"temp":21}}},
+                    {"functionResponse":{"name":"time","response":{"result":"12:00"}}}
+                ]}
+            ],
+            "tools":[{"functionDeclarations":[
+                {"name":"weather","description":"weather lookup","parameters":{"type":"object"}},
+                {"name":"time","description":"time lookup","parameters":{"type":"object"}}
+            ]}],
+            "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["weather","time"]}}
+        }),
+    }
+}
+
+fn anthropic_portable_tools_response() -> Value {
+    json!({
+        "id":"msg_portable_tools",
+        "type":"message",
+        "role":"assistant",
+        "content":[
+            {"type":"text","text":"calling tools"},
+            {"type":"tool_use","id":"up-call-weather","name":"weather","input":{"city":"Berlin"}},
+            {"type":"tool_use","id":"up-call-time","name":"time","input":{"zone":"UTC"}}
+        ],
+        "model":UPSTREAM_MODEL,
+        "stop_reason":"tool_use",
+        "stop_sequence":null,
+        "usage":{"input_tokens":11,"output_tokens":7}
+    })
+}
+
+fn assert_portable_tool_response(protocol: DownstreamProtocol, body: &Value, case_name: &str) {
+    match protocol {
+        DownstreamProtocol::Openai => {
+            assert_eq!(
+                body["choices"][0]["finish_reason"], "tool_calls",
+                "{case_name}"
+            );
+            assert_eq!(
+                body["choices"][0]["message"]["tool_calls"][0]["id"],
+                "up-call-weather"
+            );
+            assert_eq!(
+                body["choices"][0]["message"]["tool_calls"][1]["id"],
+                "up-call-time"
+            );
+        }
+        DownstreamProtocol::Responses => {
+            let output = body["output"].as_array().expect("Responses tool output");
+            let call_ids = output
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .filter_map(|item| item["call_id"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                call_ids,
+                vec!["up-call-weather", "up-call-time"],
+                "{case_name}"
+            );
+        }
+        DownstreamProtocol::Anthropic => {
+            assert_eq!(body["stop_reason"], "tool_use", "{case_name}");
+            assert_eq!(body["content"][1]["id"], "up-call-weather");
+            assert_eq!(body["content"][2]["id"], "up-call-time");
+        }
+        DownstreamProtocol::Gemini => {
+            assert_eq!(
+                body["candidates"][0]["finishReason"], "TOOL_USE",
+                "{case_name}"
+            );
+            assert_eq!(
+                body["candidates"][0]["content"]["parts"][1]["functionCall"]["name"],
+                "weather"
+            );
+            assert_eq!(
+                body["candidates"][0]["content"]["parts"][2]["functionCall"]["name"],
+                "time"
+            );
+        }
+    }
+}
+
+fn assert_anthropic_portable_tools_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for portable tools");
+    run_case(test_name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, anthropic_portable_tools_response()).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let request = portable_tools_downstream_request(protocol, &router.requested_model());
+
+        let response = router.send(&fixture, false, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{test_name}");
+        let request_id = assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("portable tools response should read");
+        let body: Value = serde_json::from_slice(&body).expect("portable tools response JSON");
+        assert_portable_tool_response(protocol, &body, test_name);
+
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "{test_name}: exactly one upstream call");
+        assert_eq!(captured[0].method, Method::POST);
+        assert_eq!(captured[0].path, "/v1/messages");
+        assert_eq!(captured[0].query, None);
+        assert_eq!(
+            captured[0]
+                .headers
+                .get("anthropic-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2023-06-01")
+        );
+        assert_eq!(
+            captured[0]
+                .headers
+                .get(&X_REQUEST_ID)
+                .and_then(|value| value.to_str().ok()),
+            Some(request_id.as_str())
+        );
+        let target: Value =
+            serde_json::from_slice(&captured[0].body).expect("portable Anthropic target body");
+        assert_eq!(target["model"], UPSTREAM_MODEL);
+        assert_eq!(
+            target["max_tokens"],
+            if protocol == DownstreamProtocol::Anthropic {
+                64
+            } else {
+                4096
+            }
+        );
+        assert!(target.get("stream").is_none_or(|stream| stream == false));
+        assert_eq!(target["tools"].as_array().map(Vec::len), Some(2));
+        assert_eq!(target["tools"][0]["name"], "weather");
+        assert_eq!(target["tools"][0]["description"], "weather lookup");
+        assert_eq!(target["tools"][0]["input_schema"], json!({"type":"object"}));
+        assert_eq!(target["tools"][0]["strict"], true);
+        assert_eq!(target["tools"][1]["name"], "time");
+        assert_eq!(
+            target["tool_choice"]["type"],
+            if protocol == DownstreamProtocol::Openai {
+                "tool"
+            } else {
+                "any"
+            }
+        );
+        if protocol == DownstreamProtocol::Openai {
+            assert_eq!(target["tool_choice"]["name"], "weather");
+        }
+        if protocol == DownstreamProtocol::Gemini {
+            assert!(
+                target["tool_choice"]
+                    .get("disable_parallel_tool_use")
+                    .is_none()
+            );
+        } else {
+            assert_eq!(target["tool_choice"]["disable_parallel_tool_use"], true);
+        }
+
+        let messages = target["messages"]
+            .as_array()
+            .expect("portable target messages");
+        let call_ids = messages
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .filter(|block| block["type"] == "tool_use")
+            .filter_map(|block| block["id"].as_str())
+            .collect::<Vec<_>>();
+        let result_ids = messages
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .filter(|block| block["type"] == "tool_result")
+            .filter_map(|block| block["tool_use_id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            call_ids, result_ids,
+            "{test_name}: stable call/result correlation"
+        );
+        for message in messages {
+            if let Some(blocks) = message["content"].as_array() {
+                let first_text = blocks.iter().position(|block| block["type"] == "text");
+                let last_result = blocks
+                    .iter()
+                    .rposition(|block| block["type"] == "tool_result");
+                assert!(
+                    first_text
+                        .zip(last_result)
+                        .is_none_or(|(text, result)| result < text)
+                );
+            }
+        }
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_log_common(&router, &fixture, &log);
+        assert!(!log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(
+            (
+                log.total_input_tokens,
+                log.total_output_tokens,
+                log.total_tokens
+            ),
+            (Some(11), Some(7), Some(18))
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! anthropic_portable_tools_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_anthropic_portable_tools_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+anthropic_portable_tools_cell_test!(
+    openai_to_anthropic_tools_cell_is_full,
+    DownstreamProtocol::Openai
+);
+anthropic_portable_tools_cell_test!(
+    responses_to_anthropic_tools_cell_is_full,
+    DownstreamProtocol::Responses
+);
+anthropic_portable_tools_cell_test!(
+    anthropic_to_anthropic_tools_cell_is_full,
+    DownstreamProtocol::Anthropic
+);
+anthropic_portable_tools_cell_test!(
+    gemini_to_anthropic_tools_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini
+);
+
+fn anthropic_multimodal_downstream_request(
+    protocol: DownstreamProtocol,
+    requested_model: &str,
+) -> Value {
+    match protocol {
+        DownstreamProtocol::Openai => json!({
+            "model":requested_model,
+            "messages":[{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":"https://images.example.com/photo.webp","detail":"high"}},
+                {"type":"image_url","image_url":{"url":"data:image/gif;base64,ZmFrZQ=="}},
+                {"type":"file","file":{"filename":"report.pdf","file_data":"JVBERi0="}},
+                {"type":"file","file":{"filename":"notes.md","file_data":"IyBub3Rlcw=="}}
+            ]}]
+        }),
+        DownstreamProtocol::Responses => json!({
+            "model":requested_model,
+            "input":[{"type":"message","role":"user","content":[
+                {"type":"input_image","image_url":"data:image/webp;base64,ZmFrZQ==","detail":"low"},
+                {"type":"input_file","filename":"remote.pdf","file_url":"https://files.example.com/remote.pdf"},
+                {"type":"input_file","filename":"data.json","file_data":"eyJvayI6dHJ1ZX0="}
+            ]}]
+        }),
+        DownstreamProtocol::Anthropic => json!({
+            "model":requested_model,
+            "max_tokens":64,
+            "messages":[{"role":"user","content":[
+                {"type":"image","source":{"type":"url","url":"https://images.example.com/photo.png"}},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"ZmFrZQ=="}},
+                {"type":"document","title":"report.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}},
+                {"type":"document","title":"notes.txt","source":{"type":"text","media_type":"text/plain","data":"native text"}}
+            ]}]
+        }),
+        DownstreamProtocol::Gemini => json!({
+            "contents":[{"role":"user","parts":[
+                {"inlineData":{"mimeType":"image/jpeg","data":"ZmFrZQ=="}},
+                {"inlineData":{"mimeType":"application/pdf","data":"JVBERi0=","displayName":"inline.pdf"}},
+                {"inlineData":{"mimeType":"text/markdown","data":"IyBub3Rlcw==","displayName":"notes.md"}},
+                {"fileData":{"mimeType":"application/pdf","fileUri":"https://files.example.com/remote.pdf","displayName":"remote.pdf"}}
+            ]}]
+        }),
+    }
+}
+
+fn anthropic_multimodal_response() -> Value {
+    json!({
+        "id":"msg_multimodal",
+        "type":"message",
+        "role":"assistant",
+        "content":[{"type":"text","text":"media received"}],
+        "model":UPSTREAM_MODEL,
+        "stop_reason":"end_turn",
+        "stop_sequence":null,
+        "usage":{"input_tokens":11,"output_tokens":7}
+    })
+}
+
+fn assert_anthropic_multimodal_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for multimodal input");
+    run_case(test_name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, anthropic_multimodal_response()).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let request = anthropic_multimodal_downstream_request(protocol, &router.requested_model());
+
+        let response = router.send(&fixture, false, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{test_name}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let _body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("multimodal response should read");
+
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "{test_name}: exactly one upstream call");
+        assert_eq!(captured[0].path, "/v1/messages");
+        assert_eq!(
+            captured[0]
+                .headers
+                .get(&X_REQUEST_ID)
+                .and_then(|value| value.to_str().ok()),
+            Some(request_id.as_str())
+        );
+        let target: Value =
+            serde_json::from_slice(&captured[0].body).expect("multimodal Anthropic target body");
+        assert_eq!(target["model"], UPSTREAM_MODEL, "{test_name}");
+        assert_eq!(
+            target["max_tokens"],
+            if protocol == DownstreamProtocol::Anthropic {
+                json!(64)
+            } else {
+                json!(4096)
+            },
+            "{test_name}"
+        );
+        let blocks = target["messages"]
+            .as_array()
+            .expect("Anthropic messages")
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .collect::<Vec<_>>();
+        assert!(
+            blocks.iter().any(|block| block["type"] == "image"),
+            "{test_name}"
+        );
+        assert!(
+            blocks.iter().any(|block| block["type"] == "document"),
+            "{test_name}"
+        );
+        assert!(blocks.iter().all(|block| {
+            block["type"] != "image"
+                || matches!(block["source"]["type"].as_str(), Some("url" | "base64"))
+        }));
+        assert!(blocks.iter().all(|block| {
+            block["type"] != "document"
+                || matches!(
+                    block["source"]["type"].as_str(),
+                    Some("url" | "base64" | "text")
+                )
+        }));
+        let serialized = target.to_string();
+        assert!(!serialized.contains("image_url:"), "{test_name}");
+        assert!(!serialized.contains("file_url:"), "{test_name}");
+        assert!(!serialized.contains("file_data:"), "{test_name}");
+        assert!(!serialized.contains("detail"), "{test_name}");
+
+        match protocol {
+            DownstreamProtocol::Openai => {
+                assert!(blocks.iter().any(|block| {
+                    block["type"] == "image" && block["source"]["media_type"] == "image/gif"
+                }));
+                assert!(blocks.iter().any(|block| {
+                    block["type"] == "document"
+                        && block["title"] == "notes.md"
+                        && block["source"]["type"] == "text"
+                        && block["source"]["media_type"] == "text/plain"
+                        && block["source"]["data"] == "# notes"
+                }));
+            }
+            DownstreamProtocol::Responses => {
+                assert!(blocks.iter().any(|block| {
+                    block["type"] == "document"
+                        && block["title"] == "remote.pdf"
+                        && block["source"]
+                            == json!({"type":"url","url":"https://files.example.com/remote.pdf"})
+                }));
+                assert!(blocks.iter().any(|block| {
+                    block["type"] == "document"
+                        && block["title"] == "data.json"
+                        && block["source"]["data"] == "{\"ok\":true}"
+                }));
+            }
+            DownstreamProtocol::Anthropic => {
+                assert!(blocks.iter().any(|block| {
+                    block["type"] == "document"
+                        && block["source"]["type"] == "text"
+                        && block["source"]["data"] == "native text"
+                }));
+            }
+            DownstreamProtocol::Gemini => {
+                assert!(blocks.iter().any(|block| {
+                    block["type"] == "document"
+                        && block["title"] == "notes.md"
+                        && block["source"]["data"] == "# notes"
+                }));
+                assert!(blocks.iter().any(|block| {
+                    block["type"] == "document"
+                        && block["title"] == "remote.pdf"
+                        && block["source"]["type"] == "url"
+                }));
+            }
+        }
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_log_common(&router, &fixture, &log);
+        assert!(!log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(
+            (
+                log.total_input_tokens,
+                log.total_output_tokens,
+                log.total_tokens
+            ),
+            (Some(11), Some(7), Some(18))
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! anthropic_multimodal_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_anthropic_multimodal_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+anthropic_multimodal_cell_test!(
+    openai_to_anthropic_multimodal_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai
+);
+anthropic_multimodal_cell_test!(
+    responses_to_anthropic_multimodal_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Responses
+);
+anthropic_multimodal_cell_test!(
+    anthropic_to_anthropic_multimodal_cell_is_full,
+    DownstreamProtocol::Anthropic
+);
+anthropic_multimodal_cell_test!(
+    gemini_to_anthropic_multimodal_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini
+);
+
+#[test]
+fn unportable_multimodal_inputs_to_anthropic_are_zero_call() {
+    for (case_name, protocol) in [
+        (
+            "openai-anthropic-audio-zero-call",
+            DownstreamProtocol::Openai,
+        ),
+        (
+            "responses-anthropic-invalid-text-zero-call",
+            DownstreamProtocol::Responses,
+        ),
+        (
+            "gemini-anthropic-executable-zero-call",
+            DownstreamProtocol::Gemini,
+        ),
+    ] {
+        let (_, fixture) = anthropic_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .expect("Anthropic target fixture for rejected multimodal input");
+        run_case(case_name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, anthropic_multimodal_response()).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let model = router.requested_model();
+            let request = match protocol {
+                DownstreamProtocol::Openai => json!({
+                    "model":model,"messages":[{"role":"user","content":[
+                        {"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}
+                    ]}]
+                }),
+                DownstreamProtocol::Responses => json!({
+                    "model":model,"input":[{"type":"message","role":"user","content":[
+                        {"type":"input_file","filename":"invalid.txt","file_data":"/w=="}
+                    ]}]
+                }),
+                DownstreamProtocol::Gemini => json!({
+                    "contents":[{"role":"user","parts":[
+                        {"executableCode":{"language":"python","code":"private-media-marker"}}
+                    ]}]
+                }),
+                DownstreamProtocol::Anthropic => unreachable!(),
+            };
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("multimodal rejection response should read");
+            assert!(!String::from_utf8_lossy(&body).contains("private-media-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert!(
+                matches!(
+                    log.final_error_code.as_deref(),
+                    Some("invalid_request_error" | "unsupported_capability_error")
+                ),
+                "{case_name}: {:?}",
+                log.final_error_code
+            );
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            upstream.shutdown().await;
+        });
+    }
+}
+
+fn anthropic_portable_tool_stream_events() -> Vec<GoldenEvent> {
+    vec![
+        GoldenEvent {
+            event: Some("message_start".to_string()),
+            data: json!({
+                "type":"message_start",
+                "message":{
+                    "id":"msg_portable_tool_stream","type":"message","role":"assistant",
+                    "content":[],"model":UPSTREAM_MODEL,"stop_reason":null,"stop_sequence":null,
+                    "usage":{"input_tokens":11,"output_tokens":0}
+                }
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_start".to_string()),
+            data: json!({
+                "type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"up-stream-weather","name":"weather","input":{}}
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_delta".to_string()),
+            data: json!({
+                "type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Berlin\"}"}
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_stop".to_string()),
+            data: json!({"type":"content_block_stop","index":0}),
+        },
+        GoldenEvent {
+            event: Some("message_delta".to_string()),
+            data: json!({
+                "type":"message_delta",
+                "delta":{"stop_reason":"tool_use","stop_sequence":null},
+                "usage":{"output_tokens":7}
+            }),
+        },
+        GoldenEvent {
+            event: Some("message_stop".to_string()),
+            data: json!({"type":"message_stop"}),
+        },
+    ]
+}
+
+fn assert_anthropic_portable_tools_stream_cell(
+    test_name: &'static str,
+    protocol: DownstreamProtocol,
+) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for portable tool stream");
+    run_case(test_name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: anthropic_portable_tool_stream_events(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let mut request = portable_tools_downstream_request(protocol, &router.requested_model());
+        if protocol != DownstreamProtocol::Gemini {
+            request["stream"] = Value::Bool(true);
+        }
+
+        let response = router.send(&fixture, true, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{test_name}");
+        let request_id = assert_downstream_request_identity(&response);
+        let body = timeout(
+            WAIT_TIMEOUT,
+            axum::body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("portable tool stream should terminate")
+        .expect("portable tool stream should read");
+        let stream_body = String::from_utf8_lossy(&body);
+        assert!(stream_body.contains("weather"), "{test_name}: tool name");
+        if protocol != DownstreamProtocol::Gemini {
+            assert!(
+                stream_body.contains("up-stream-weather"),
+                "{test_name}: stable upstream tool ID"
+            );
+        }
+        if protocol == DownstreamProtocol::Gemini {
+            assert_eq!(stream_body.matches("up-stream-weather").count(), 0);
+        } else {
+            assert!(
+                stream_body.matches("up-stream-weather").count() >= 1,
+                "{test_name}: tool stream keeps the source correlation ID"
+            );
+        }
+
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "{test_name}: exactly one upstream call");
+        assert_eq!(captured[0].path, "/v1/messages");
+        assert_eq!(
+            captured[0]
+                .headers
+                .get(&X_REQUEST_ID)
+                .and_then(|value| value.to_str().ok()),
+            Some(request_id.as_str())
+        );
+        let target: Value =
+            serde_json::from_slice(&captured[0].body).expect("portable tool stream target body");
+        assert_eq!(target["model"], UPSTREAM_MODEL);
+        assert_eq!(target["stream"], true);
+        assert_eq!(target["tools"].as_array().map(Vec::len), Some(2));
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_log_common(&router, &fixture, &log);
+        assert!(log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(
+            (
+                log.total_input_tokens,
+                log.total_output_tokens,
+                log.total_tokens
+            ),
+            (Some(11), Some(7), Some(18))
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! anthropic_portable_tools_stream_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_anthropic_portable_tools_stream_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+anthropic_portable_tools_stream_cell_test!(
+    openai_to_anthropic_portable_tools_stream_is_verified,
+    DownstreamProtocol::Openai
+);
+anthropic_portable_tools_stream_cell_test!(
+    responses_to_anthropic_portable_tools_stream_is_verified,
+    DownstreamProtocol::Responses
+);
+anthropic_portable_tools_stream_cell_test!(
+    anthropic_to_anthropic_portable_tools_stream_is_verified,
+    DownstreamProtocol::Anthropic
+);
+anthropic_portable_tools_stream_cell_test!(
+    gemini_to_anthropic_portable_tools_stream_is_verified,
+    DownstreamProtocol::Gemini
+);
+
+#[test]
+fn anthropic_tool_invalid_references_and_forced_nonportable_are_zero_call() {
+    for (case_name, protocol) in [
+        ("anthropic-tool-dangling", DownstreamProtocol::Openai),
+        ("anthropic-tool-duplicate", DownstreamProtocol::Openai),
+        (
+            "anthropic-tool-missing-reference",
+            DownstreamProtocol::Openai,
+        ),
+        ("anthropic-tool-missing-id", DownstreamProtocol::Anthropic),
+        ("anthropic-tool-bad-order", DownstreamProtocol::Anthropic),
+        (
+            "anthropic-tool-forced-nonportable",
+            DownstreamProtocol::Responses,
+        ),
+    ] {
+        let (_, fixture) = anthropic_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .expect("Anthropic target fixture for invalid tools");
+        run_case(case_name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, anthropic_portable_tools_response()).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let model = router.requested_model();
+            let request = match case_name {
+                "anthropic-tool-dangling" => json!({
+                    "model":model,
+                    "messages":[{"role":"assistant","tool_calls":[
+                        {"id":"dangling","type":"function","function":{"name":"lookup","arguments":"{}"}}
+                    ]}]
+                }),
+                "anthropic-tool-duplicate" => json!({
+                    "model":model,
+                    "messages":[
+                        {"role":"assistant","tool_calls":[
+                            {"id":"duplicate","type":"function","function":{"name":"lookup","arguments":"{}"}},
+                            {"id":"duplicate","type":"function","function":{"name":"lookup","arguments":"{}"}}
+                        ]},
+                        {"role":"tool","tool_call_id":"duplicate","content":"ok"}
+                    ]
+                }),
+                "anthropic-tool-missing-reference" => json!({
+                    "model":model,
+                    "messages":[{"role":"tool","tool_call_id":"missing","content":"ok"}]
+                }),
+                "anthropic-tool-missing-id" => json!({
+                    "model":model,"max_tokens":64,
+                    "messages":[
+                        {"role":"assistant","content":[{"type":"tool_use","name":"lookup","input":{}}]},
+                        {"role":"user","content":[{"type":"tool_result","tool_use_id":"missing","content":"ok"}]}
+                    ]
+                }),
+                "anthropic-tool-bad-order" => json!({
+                    "model":model,"max_tokens":64,
+                    "messages":[
+                        {"role":"assistant","content":[{"type":"tool_use","id":"ordered","name":"lookup","input":{}}]},
+                        {"role":"user","content":[
+                            {"type":"text","text":"too early"},
+                            {"type":"tool_result","tool_use_id":"ordered","content":"ok"}
+                        ]}
+                    ]
+                }),
+                "anthropic-tool-forced-nonportable" => json!({
+                    "model":model,"input":"search",
+                    "tools":[{"type":"web_search_preview"}],
+                    "tool_choice":"required"
+                }),
+                _ => unreachable!("registered invalid portable tool case"),
+            };
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST | StatusCode::INTERNAL_SERVER_ERROR
+                ),
+                "{case_name}: deterministic pre-transport rejection"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("invalid portable tool rejection should read");
+            let body: Value = serde_json::from_slice(&body)
+                .expect("invalid portable tool rejection should be JSON");
+            assert!(
+                downstream_error_code(&body, protocol).is_some(),
+                "{case_name}"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{case_name}: reject before Provider Key resolution"
+            );
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert!(log.final_error_code.is_some(), "{case_name}");
+            assert_eq!(log.total_tokens, None, "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+fn reasoning_downstream_request(
+    protocol: DownstreamProtocol,
+    requested_model: &str,
+    is_stream: bool,
+) -> Value {
+    match protocol {
+        DownstreamProtocol::Openai => json!({
+            "model":requested_model,"messages":[{"role":"user","content":"reason"}],
+            "reasoning_effort":"minimal","stream":is_stream
+        }),
+        DownstreamProtocol::Responses => json!({
+            "model":requested_model,"input":"reason",
+            "reasoning":{"effort":"high","summary":"detailed"},"stream":is_stream
+        }),
+        DownstreamProtocol::Anthropic => json!({
+            "model":requested_model,"max_tokens":2048,
+            "messages":[{"role":"user","content":"reason"}],
+            "thinking":{"type":"enabled","budget_tokens":1024},
+            "output_config":{"effort":"max"},"stream":is_stream
+        }),
+        DownstreamProtocol::Gemini => json!({
+            "contents":[{"role":"user","parts":[{"text":"reason"}]}],
+            "generationConfig":{"thinkingConfig":{
+                "thinkingLevel":"medium","includeThoughts":true
+            }}
+        }),
+    }
+}
+
+fn anthropic_reasoning_response() -> Value {
+    json!({
+        "id":"msg_reasoning","type":"message","role":"assistant",
+        "content":[
+            {"type":"thinking","thinking":"private direct reasoning","signature":"direct-signature-secret"},
+            {"type":"text","text":"public answer"}
+        ],
+        "model":UPSTREAM_MODEL,"stop_reason":"end_turn","stop_sequence":null,
+        "usage":{"input_tokens":11,"output_tokens":7}
+    })
+}
+
+fn assert_reasoning_target(
+    protocol: DownstreamProtocol,
+    target: &Value,
+    is_stream: bool,
+    case_name: &str,
+) {
+    assert_eq!(target["model"], UPSTREAM_MODEL, "{case_name}");
+    assert_eq!(target["stream"], is_stream, "{case_name}");
+    match protocol {
+        DownstreamProtocol::Openai => {
+            assert_eq!(target["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(target["output_config"], json!({"effort":"low"}));
+        }
+        DownstreamProtocol::Responses => {
+            assert_eq!(target["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(target["output_config"], json!({"effort":"high"}));
+        }
+        DownstreamProtocol::Anthropic => {
+            assert_eq!(
+                target["thinking"],
+                json!({"type":"enabled","budget_tokens":1024})
+            );
+            assert_eq!(target["output_config"], json!({"effort":"max"}));
+        }
+        DownstreamProtocol::Gemini => {
+            assert_eq!(target["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(target["output_config"], json!({"effort":"medium"}));
+        }
+    }
+}
+
+fn assert_anthropic_reasoning_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for reasoning");
+    run_case(test_name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, anthropic_reasoning_response()).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let request = reasoning_downstream_request(protocol, &router.requested_model(), false);
+
+        let response = router.send(&fixture, false, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{test_name}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("reasoning response should read");
+        let body: Value = serde_json::from_slice(&body).expect("reasoning response JSON");
+        let encoded = body.to_string();
+        assert!(encoded.contains("public answer"), "{test_name}");
+        if protocol == DownstreamProtocol::Anthropic {
+            assert!(encoded.contains("private direct reasoning"), "{test_name}");
+            assert!(encoded.contains("direct-signature-secret"), "{test_name}");
+        } else if protocol == DownstreamProtocol::Openai {
+            assert!(!encoded.contains("private direct reasoning"), "{test_name}");
+            assert!(!encoded.contains("direct-signature-secret"), "{test_name}");
+        } else {
+            assert!(encoded.contains("private direct reasoning"), "{test_name}");
+            assert!(!encoded.contains("direct-signature-secret"), "{test_name}");
+        }
+
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "{test_name}: exactly one upstream call");
+        assert_eq!(captured[0].path, "/v1/messages");
+        assert_eq!(
+            captured[0]
+                .headers
+                .get(&X_REQUEST_ID)
+                .and_then(|value| value.to_str().ok()),
+            Some(request_id.as_str())
+        );
+        let target: Value =
+            serde_json::from_slice(&captured[0].body).expect("reasoning Anthropic target body");
+        assert_reasoning_target(protocol, &target, false, test_name);
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert!(!format!("{log:?}").contains("direct-signature-secret"));
+        assert_log_common(&router, &fixture, &log);
+        assert!(!log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(
+            (
+                log.total_input_tokens,
+                log.total_output_tokens,
+                log.total_tokens
+            ),
+            (Some(11), Some(7), Some(18))
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! anthropic_reasoning_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_anthropic_reasoning_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+anthropic_reasoning_cell_test!(
+    openai_to_anthropic_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai
+);
+anthropic_reasoning_cell_test!(
+    responses_to_anthropic_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Responses
+);
+anthropic_reasoning_cell_test!(
+    anthropic_to_anthropic_reasoning_cell_is_full,
+    DownstreamProtocol::Anthropic
+);
+anthropic_reasoning_cell_test!(
+    gemini_to_anthropic_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini
+);
+
+fn anthropic_reasoning_stream_events() -> Vec<GoldenEvent> {
+    vec![
+        GoldenEvent {
+            event: Some("message_start".to_string()),
+            data: json!({
+                "type":"message_start","message":{
+                    "id":"msg_reasoning_stream","type":"message","role":"assistant",
+                    "content":[],"model":UPSTREAM_MODEL,"stop_reason":null,"stop_sequence":null,
+                    "usage":{"input_tokens":11,"output_tokens":0}
+                }
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_start".to_string()),
+            data: json!({
+                "type":"content_block_start","index":0,
+                "content_block":{"type":"thinking","thinking":"","signature":null}
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_delta".to_string()),
+            data: json!({
+                "type":"content_block_delta","index":0,
+                "delta":{"type":"thinking_delta","thinking":"private direct stream reasoning"}
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_delta".to_string()),
+            data: json!({
+                "type":"content_block_delta","index":0,
+                "delta":{"type":"signature_delta","signature":"direct-stream-signature-secret"}
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_stop".to_string()),
+            data: json!({"type":"content_block_stop","index":0}),
+        },
+        GoldenEvent {
+            event: Some("content_block_start".to_string()),
+            data: json!({
+                "type":"content_block_start","index":1,
+                "content_block":{"type":"text","text":""}
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_delta".to_string()),
+            data: json!({
+                "type":"content_block_delta","index":1,
+                "delta":{"type":"text_delta","text":"public answer"}
+            }),
+        },
+        GoldenEvent {
+            event: Some("content_block_stop".to_string()),
+            data: json!({"type":"content_block_stop","index":1}),
+        },
+        GoldenEvent {
+            event: Some("message_delta".to_string()),
+            data: json!({
+                "type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},
+                "usage":{"output_tokens":7}
+            }),
+        },
+        GoldenEvent {
+            event: Some("message_stop".to_string()),
+            data: json!({"type":"message_stop"}),
+        },
+    ]
+}
+
+fn assert_anthropic_reasoning_stream_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for reasoning stream");
+    run_case(test_name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: anthropic_reasoning_stream_events(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let request = reasoning_downstream_request(protocol, &router.requested_model(), true);
+
+        let response = router.send(&fixture, true, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{test_name}");
+        let request_id = assert_downstream_request_identity(&response);
+        let body = timeout(
+            WAIT_TIMEOUT,
+            axum::body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("reasoning stream should terminate")
+        .expect("reasoning stream should read");
+        let encoded = String::from_utf8_lossy(&body);
+        assert!(encoded.contains("public answer"), "{test_name}");
+        if protocol == DownstreamProtocol::Anthropic {
+            assert!(
+                encoded.contains("private direct stream reasoning"),
+                "{test_name}"
+            );
+            assert!(
+                encoded.contains("direct-stream-signature-secret"),
+                "{test_name}"
+            );
+        } else if protocol == DownstreamProtocol::Openai {
+            assert!(
+                !encoded.contains("private direct stream reasoning"),
+                "{test_name}"
+            );
+            assert!(
+                !encoded.contains("direct-stream-signature-secret"),
+                "{test_name}"
+            );
+        } else {
+            assert!(
+                encoded.contains("private direct stream reasoning"),
+                "{test_name}"
+            );
+            assert!(
+                !encoded.contains("direct-stream-signature-secret"),
+                "{test_name}"
+            );
+        }
+
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "{test_name}: exactly one upstream call");
+        assert_eq!(captured[0].path, "/v1/messages");
+        assert_eq!(
+            captured[0]
+                .headers
+                .get(&X_REQUEST_ID)
+                .and_then(|value| value.to_str().ok()),
+            Some(request_id.as_str())
+        );
+        let target: Value = serde_json::from_slice(&captured[0].body)
+            .expect("reasoning stream Anthropic target body");
+        assert_reasoning_target(protocol, &target, true, test_name);
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert!(!format!("{log:?}").contains("direct-stream-signature-secret"));
+        assert_log_common(&router, &fixture, &log);
+        assert!(log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(
+            (
+                log.total_input_tokens,
+                log.total_output_tokens,
+                log.total_tokens
+            ),
+            (Some(11), Some(7), Some(18))
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! anthropic_reasoning_stream_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_anthropic_reasoning_stream_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+anthropic_reasoning_stream_cell_test!(
+    openai_to_anthropic_reasoning_stream_is_verified,
+    DownstreamProtocol::Openai
+);
+anthropic_reasoning_stream_cell_test!(
+    responses_to_anthropic_reasoning_stream_is_verified,
+    DownstreamProtocol::Responses
+);
+anthropic_reasoning_stream_cell_test!(
+    anthropic_to_anthropic_reasoning_stream_is_verified,
+    DownstreamProtocol::Anthropic
+);
+anthropic_reasoning_stream_cell_test!(
+    gemini_to_anthropic_reasoning_stream_is_verified,
+    DownstreamProtocol::Gemini
+);
+
+#[test]
+fn gemini_positive_thinking_budget_to_anthropic_is_zero_call() {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Gemini)
+        .expect("Gemini to Anthropic target fixture");
+    run_case(
+        "gemini-positive-thinking-budget-anthropic",
+        move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, anthropic_reasoning_response()).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let request = json!({
+                "contents":[{"role":"user","parts":[{"text":"reason"}]}],
+                "generationConfig":{"thinkingConfig":{"thinkingBudget":1024}}
+            });
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("positive thinking budget rejection should read");
+            let body: Value =
+                serde_json::from_slice(&body).expect("positive thinking budget rejection JSON");
+            assert!(downstream_error_code(&body, DownstreamProtocol::Gemini).is_some());
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error")
+            );
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+fn anthropic_structured_downstream_request(
+    protocol: DownstreamProtocol,
+    requested_model: &str,
+) -> Value {
+    let schema = json!({
+        "type":"object",
+        "properties":{"answer":{"type":"string","minLength":2,"x-opaque":{"keep":true}}},
+        "required":["answer"],
+        "additionalProperties":false
+    });
+    match protocol {
+        DownstreamProtocol::Openai => json!({
+            "model":requested_model,"messages":[{"role":"user","content":"answer as JSON"}],
+            "max_tokens":128,"reasoning_effort":"low",
+            "tools":[{"type":"function","function":{
+                "name":"lookup","parameters":{"type":"object"},"strict":true
+            }}],
+            "response_format":{"type":"json_schema","json_schema":{
+                "name":"answer_contract","description":"A stable answer",
+                "schema":schema,"strict":true
+            }}
+        }),
+        DownstreamProtocol::Responses => json!({
+            "model":requested_model,"input":"answer as JSON","max_output_tokens":128,
+            "reasoning":{"effort":"high"},
+            "tools":[{"type":"function","name":"lookup",
+                "parameters":{"type":"object"},"strict":true}],
+            "text":{"format":{"type":"json_schema","name":"answer_contract",
+                "description":"A stable answer","schema":schema,"strict":true}}
+        }),
+        DownstreamProtocol::Anthropic => json!({
+            "model":requested_model,"max_tokens":128,
+            "messages":[{"role":"user","content":"answer as JSON"}],
+            "thinking":{"type":"adaptive"},
+            "tools":[{"name":"lookup","input_schema":{"type":"object"},"strict":true}],
+            "output_config":{"effort":"max","format":{
+                "type":"json_schema","schema":schema
+            }}
+        }),
+        DownstreamProtocol::Gemini => json!({
+            "contents":[{"role":"user","parts":[{"text":"answer as JSON"}]}],
+            "tools":[{"functionDeclarations":[{
+                "name":"lookup","parameters":{"type":"object"}
+            }]}],
+            "generationConfig":{
+                "maxOutputTokens":128,
+                "thinkingConfig":{"thinkingLevel":"medium"},
+                "responseMimeType":"application/json",
+                "responseJsonSchema":{
+                    "type":"object","propertyOrdering":["answer"],
+                    "properties":{"answer":{"type":"string","minLength":2,
+                        "propertyOrdering":[],"x-opaque":{"keep":true}}},
+                    "required":["answer"],"additionalProperties":false
+                }
+            }
+        }),
+    }
+}
+
+fn assert_anthropic_structured_output_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for structured output");
+    run_case(test_name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, anthropic_multimodal_response()).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let request = anthropic_structured_downstream_request(protocol, &router.requested_model());
+
+        let transformed = crate::service::transform::transform_request_data(
+            request.clone(),
+            protocol,
+            UpstreamProtocol::Anthropic,
+            false,
+        )
+        .expect("structured direct cell must transform");
+        let has_controlled_loss = transformed.summary.facts.iter().any(|fact| {
+            matches!(
+                fact.outcome,
+                TransformOutcomeKind::ControlledLossMinor
+                    | TransformOutcomeKind::ControlledLossMajor
+            )
+        });
+        assert_eq!(
+            has_controlled_loss,
+            protocol != DownstreamProtocol::Anthropic,
+            "{test_name}"
+        );
+        assert!(
+            transformed
+                .summary
+                .facts
+                .iter()
+                .all(|fact| fact.safe_summary.is_none())
+        );
+
+        let response = router.send(&fixture, false, &request).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{test_name}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("structured response should complete");
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1, "{test_name}: exactly one upstream call");
+        assert_eq!(captured[0].path, "/v1/messages");
+        assert!(captured[0].headers.get("anthropic-beta").is_none());
+        assert_eq!(
+            captured[0]
+                .headers
+                .get(&X_REQUEST_ID)
+                .and_then(|value| value.to_str().ok()),
+            Some(request_id.as_str())
+        );
+        let target: Value =
+            serde_json::from_slice(&captured[0].body).expect("structured Anthropic target body");
+        assert_eq!(target["model"], UPSTREAM_MODEL, "{test_name}");
+        if protocol == DownstreamProtocol::Anthropic {
+            assert!(target.get("stream").is_none(), "{test_name}");
+        } else {
+            assert_eq!(target["stream"], false, "{test_name}");
+        }
+        assert_eq!(target["tools"][0]["name"], "lookup", "{test_name}");
+        assert_eq!(target["thinking"]["type"], "adaptive", "{test_name}");
+        let format = &target["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema", "{test_name}");
+        assert_eq!(
+            format["schema"]["properties"]["answer"]["minLength"], 2,
+            "{test_name}"
+        );
+        assert_eq!(
+            format["schema"]["properties"]["answer"]["x-opaque"]["keep"], true,
+            "{test_name}"
+        );
+        assert!(!format["schema"].to_string().contains("propertyOrdering"));
+        assert!(format.get("name").is_none());
+        assert!(format.get("description").is_none());
+        assert!(format.get("strict").is_none());
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_log_common(&router, &fixture, &log);
+        assert!(!log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_eq!(
+            (
+                log.total_input_tokens,
+                log.total_output_tokens,
+                log.total_tokens
+            ),
+            (Some(11), Some(7), Some(18))
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! anthropic_structured_output_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_anthropic_structured_output_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+anthropic_structured_output_cell_test!(
+    openai_to_anthropic_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai
+);
+anthropic_structured_output_cell_test!(
+    responses_to_anthropic_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Responses
+);
+anthropic_structured_output_cell_test!(
+    anthropic_to_anthropic_structured_output_cell_is_full,
+    DownstreamProtocol::Anthropic
+);
+anthropic_structured_output_cell_test!(
+    gemini_to_anthropic_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Gemini
+);
+
+#[test]
+fn openai_to_anthropic_structured_tools_thinking_stream_is_verified() {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Anthropic target fixture");
+    run_case(
+        "openai-anthropic-structured-stream-combination",
+        move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: anthropic_reasoning_stream_events(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let mut request = anthropic_structured_downstream_request(
+                DownstreamProtocol::Openai,
+                &router.requested_model(),
+            );
+            request["stream"] = json!(true);
+
+            let response = router.send(&fixture, true, &request).await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = timeout(
+                WAIT_TIMEOUT,
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("structured stream should terminate")
+            .expect("structured stream should read");
+            assert!(String::from_utf8_lossy(&body).contains("public answer"));
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1);
+            let target: Value =
+                serde_json::from_slice(&captured[0].body).expect("structured stream target JSON");
+            assert_eq!(target["stream"], true);
+            assert_eq!(target["tools"][0]["name"], "lookup");
+            assert_eq!(target["thinking"], json!({"type":"adaptive"}));
+            assert_eq!(target["output_config"]["effort"], "low");
+            assert_eq!(target["output_config"]["format"]["type"], "json_schema");
+            assert!(captured[0].headers.get("anthropic-beta").is_none());
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert!(log.is_stream);
+            assert_eq!(log.total_tokens, Some(18));
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn invalid_structured_outputs_to_anthropic_are_zero_call() {
+    for (case_name, protocol) in [
+        (
+            "openai-anthropic-json-object-zero-call",
+            DownstreamProtocol::Openai,
+        ),
+        (
+            "responses-anthropic-grammar-zero-call",
+            DownstreamProtocol::Responses,
+        ),
+        (
+            "anthropic-invalid-schema-zero-call",
+            DownstreamProtocol::Anthropic,
+        ),
+        (
+            "gemini-structured-conflict-zero-call",
+            DownstreamProtocol::Gemini,
+        ),
+    ] {
+        let (_, fixture) = anthropic_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .expect("Anthropic target fixture for invalid structured output");
+        run_case(case_name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, anthropic_multimodal_response()).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let model = router.requested_model();
+            let request = match protocol {
+                DownstreamProtocol::Openai => json!({
+                    "model":model,"messages":[{"role":"user","content":"json"}],
+                    "response_format":{"type":"json_object"}
+                }),
+                DownstreamProtocol::Responses => json!({
+                    "model":model,"input":"json","text":{"format":{
+                        "type":"grammar","grammar":"private-schema-marker"
+                    }}
+                }),
+                DownstreamProtocol::Anthropic => json!({
+                    "model":model,"max_tokens":64,
+                    "messages":[{"role":"user","content":"json"}],
+                    "output_config":{"format":{"type":"json_schema",
+                        "schema":["private-schema-marker"]}}
+                }),
+                DownstreamProtocol::Gemini => json!({
+                    "contents":[{"role":"user","parts":[{"text":"json"}]}],
+                    "generationConfig":{
+                        "responseFormat":{"text":{"mimeType":"application/json",
+                            "schema":{"type":"object"}}},
+                        "responseJsonSchema":{"private":"private-schema-marker"}
+                    }
+                }),
+            };
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("structured rejection should read");
+            assert!(!String::from_utf8_lossy(&body).contains("private-schema-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn cross_wire_unknown_anthropic_target_field_is_zero_call() {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("OpenAI to Anthropic target fixture");
+    run_case(
+        "openai-anthropic-unknown-field",
+        move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .admin
+                .request_patch
+                .create_source_variant(
+                    router.source_id,
+                    RequestPatchVariantInput {
+                        source_id: router.source_id,
+                        model_id: None,
+                        suffix: None,
+                        enabled: true,
+                        expose_in_models: false,
+                        rules: vec![RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Body,
+                            target: "/messages/0/content".to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!([{
+                                "type": "server_tool_use",
+                                "name": "payload-secret-marker"
+                            }]))),
+                            description: Some(
+                                "Cross-Wire unknown Anthropic field rejection".to_string(),
+                            ),
+                        }],
+                    },
+                )
+                .await
+                .expect("unknown Anthropic target Patch should save for runtime validation");
+            router
+                .app_state
+                .catalog
+                .invalidate_models_catalog()
+                .await
+                .expect("unknown Anthropic target Patch should invalidate catalog");
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("unknown target field rejection should read");
+            let body: Value = serde_json::from_slice(&body).expect("rejection should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("provider_configuration_error")
+            );
+            assert!(!body.to_string().contains("payload-secret-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("provider_configuration_error")
+            );
+            assert!(
+                !log.final_error_message
+                    .unwrap_or_default()
+                    .contains("payload-secret-marker")
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+fn assert_anthropic_non_stream_base_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for protocol");
+    run_case(test_name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, fixture.non_stream.upstream_response.clone())
+                .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let (catalog_id, catalog_version_id) = router.attach_cost_catalog(Some(100), Some(2)).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{protocol:?}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Anthropic non-stream response should complete");
+        let body: Value =
+            serde_json::from_slice(&body).expect("downstream response should be JSON");
+        assert!(body.to_string().contains("baseline pong"), "{protocol:?}");
+        let (pointer, expected) = match protocol {
+            DownstreamProtocol::Openai => ("/choices/0/finish_reason", "stop"),
+            DownstreamProtocol::Responses => ("/status", "completed"),
+            DownstreamProtocol::Anthropic => ("/stop_reason", "end_turn"),
+            DownstreamProtocol::Gemini => ("/candidates/0/finishReason", "STOP"),
+        };
+        assert_eq!(
+            body.pointer(pointer).and_then(Value::as_str),
+            Some(expected),
+            "{protocol:?}: terminal mapping"
+        );
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &fixture,
+            &captured,
+            &fixture.request.upstream_path,
+            None,
+            &fixture.request.upstream,
+            &router.requested_model(),
+            &request_id,
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_log_common(&router, &fixture, &log);
+        assert_log_timing_order(&log);
+        assert!(!log.is_stream);
+        assert_eq!(log.upstream_http_status, Some(200));
+        assert_usage(&log, &fixture.usage);
+        assert_eq!(log.input_text_tokens, Some(11));
+        assert_eq!(log.cache_read_tokens, Some(3));
+        assert_eq!(log.cache_write_tokens, Some(2));
+        assert_eq!(log.cost_catalog_id, Some(catalog_id));
+        assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+        assert_eq!(log.estimated_cost_nanos, Some(128));
+        let snapshot: CostSnapshot = serde_json::from_str(
+            log.cost_snapshot_json
+                .as_deref()
+                .expect("Anthropic usage cost snapshot should persist"),
+        )
+        .expect("Anthropic usage cost snapshot should parse");
+        assert_eq!(
+            snapshot.unmatched_items,
+            vec![
+                MeterKey::LlmOutputTextTokens.to_string(),
+                MeterKey::LlmCacheWriteTokens.to_string(),
+            ]
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        assert_eq!(upstream.requests().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+fn assert_anthropic_stream_cache_usage_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Anthropic target fixture for protocol");
+    run_case(test_name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: fixture.stream.upstream_events.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router.attach_cost_catalog(Some(100), Some(2)).await;
+
+        let response = router
+            .send(&fixture, true, &fixture.stream.downstream_request)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{protocol:?}");
+        let request_id = assert_downstream_request_identity(&response);
+        let body = timeout(
+            WAIT_TIMEOUT,
+            axum::body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("Anthropic stream usage response should terminate")
+        .expect("Anthropic stream usage response should read");
+        let events = parse_downstream_events(protocol, &body);
+        assert_eq!(
+            stream_text(protocol, &events),
+            "baseline pong",
+            "{protocol:?}"
+        );
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &fixture,
+            &captured,
+            &fixture.stream.upstream_path,
+            None,
+            &fixture.stream.upstream_request,
+            &router.requested_model(),
+            &request_id,
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_log_common(&router, &fixture, &log);
+        assert!(log.is_stream);
+        assert_usage(&log, &fixture.usage);
+        assert_eq!(log.input_text_tokens, Some(11));
+        assert_eq!(log.cache_read_tokens, Some(3));
+        assert_eq!(log.cache_write_tokens, Some(2));
+        assert_eq!(log.estimated_cost_nanos, Some(128));
+        let snapshot: CostSnapshot = serde_json::from_str(
+            log.cost_snapshot_json
+                .as_deref()
+                .expect("Anthropic stream cache cost snapshot should persist"),
+        )
+        .expect("Anthropic stream cache cost snapshot should parse");
+        assert!(
+            snapshot
+                .unmatched_items
+                .contains(&MeterKey::LlmCacheWriteTokens.to_string())
+        );
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1);
+        assert_eq!(upstream.requests().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! anthropic_base_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_anthropic_non_stream_base_cell(stringify!($name), $protocol);
+            assert_anthropic_stream_cache_usage_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+anthropic_base_cell_test!(
+    openai_to_anthropic_base_cell_success_is_verified,
+    DownstreamProtocol::Openai
+);
+anthropic_base_cell_test!(
+    responses_to_anthropic_base_cell_success_is_verified,
+    DownstreamProtocol::Responses
+);
+anthropic_base_cell_test!(
+    anthropic_to_anthropic_base_cell_success_is_verified,
+    DownstreamProtocol::Anthropic
+);
+anthropic_base_cell_test!(
+    gemini_to_anthropic_base_cell_success_is_verified,
+    DownstreamProtocol::Gemini
+);
+
+fn assert_stream_failure_has_no_usage_or_cost(log: &RequestLogRecord, case_name: &str) {
+    assert_eq!(log.total_input_tokens, None, "{case_name}");
+    assert_eq!(log.total_output_tokens, None, "{case_name}");
+    assert_eq!(log.total_tokens, None, "{case_name}");
+    assert_eq!(log.input_text_tokens, None, "{case_name}");
+    assert_eq!(log.cache_read_tokens, None, "{case_name}");
+    assert_eq!(log.cache_write_tokens, None, "{case_name}");
+    assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+    assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+}
+
+#[test]
+fn anthropic_stream_message_stop_closes_hanging_upstream_for_all_downstreams() {
+    for (name, fixture) in anthropic_target_fixtures() {
+        let case_name = format!("anthropic-stream-success-terminal-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let dropped = Arc::new(DropSignal::default());
+            let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+                content_encoding: None,
+                chunks: vec![events_to_sse_bytes(&fixture.stream.upstream_events)],
+                hang_after_chunks: true,
+                dropped: Some(Arc::clone(&dropped)),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = timeout(
+                WAIT_TIMEOUT,
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("message_stop should close the downstream Body")
+            .expect("successful Anthropic stream should remain readable");
+            let events = parse_downstream_events(fixture.protocol, &body);
+            assert_eq!(
+                stream_text(fixture.protocol, &events),
+                "baseline pong",
+                "{case_name}"
+            );
+            dropped.wait().await;
+
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &fixture,
+                &captured,
+                &fixture.stream.upstream_path,
+                None,
+                &fixture.stream.upstream_request,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_usage(&log, &fixture.usage);
+            assert_eq!(log.estimated_cost_nanos, Some(128), "{case_name}");
+            assert!(log.final_error_code.is_none(), "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(captured.len(), 1, "{case_name}: no retry");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn anthropic_stream_error_is_raw_same_wire_and_one_native_terminal_cross_wire() {
+    let stream_error_event = anthropic_target_golden().error.stream_error_event;
+    for (name, fixture) in anthropic_target_fixtures() {
+        let case_name = format!("anthropic-stream-error-{name}");
+        let runtime_name = case_name.clone();
+        let stream_error_event = stream_error_event.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: vec![stream_error_event.clone()],
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+            let persisted_sink = router.install_recording_persisted_sink();
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = timeout(
+                WAIT_TIMEOUT,
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("Anthropic error event should terminate the Body")
+            .expect("protocol terminal errors should close normally");
+            let events = parse_downstream_events(fixture.protocol, &body);
+            assert_eq!(events.len(), 1, "{case_name}: exactly one terminal event");
+            if fixture.protocol == DownstreamProtocol::Anthropic {
+                assert_eq!(events[0], stream_error_event, "{case_name}: raw same-wire");
+            } else {
+                assert_native_fatal_stream_event(fixture.protocol, &events[0], &request_id);
+                assert!(
+                    !body
+                        .windows("baseline stream failure".len())
+                        .any(|window| window == b"baseline stream failure"),
+                    "{case_name}: upstream payload must not cross Wire"
+                );
+            }
+
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            assert_eq!(persisted_sink.contexts.lock().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn anthropic_stream_eof_emits_one_native_error_and_clears_partial_usage() {
+    for (name, fixture) in anthropic_target_fixtures() {
+        let case_name = format!("anthropic-stream-eof-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: vec![fixture.stream.upstream_events[0].clone()],
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = timeout(
+                WAIT_TIMEOUT,
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("Anthropic EOF should terminate the downstream Body")
+            .expect("EOF transform error should use a native terminal event");
+            let events = parse_downstream_events(fixture.protocol, &body);
+            let terminal = events.last().expect("EOF native terminal event");
+            assert_native_fatal_stream_event(fixture.protocol, terminal, &request_id);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| match fixture.protocol {
+                        DownstreamProtocol::Openai => {
+                            event.data["error"]["code"] == "upstream_response_error"
+                        }
+                        DownstreamProtocol::Responses => {
+                            event.data["type"] == "response.error"
+                                && event.data["error"]["code"] == "upstream_response_error"
+                        }
+                        DownstreamProtocol::Anthropic => {
+                            event.event.as_deref() == Some("error")
+                                && event.data["error"]["code"] == "upstream_response_error"
+                        }
+                        DownstreamProtocol::Gemini => {
+                            event.data["error"]["details"][0]["reason"] == "UPSTREAM_RESPONSE_ERROR"
+                        }
+                    })
+                    .count(),
+                1,
+                "{case_name}: exactly one target error terminal"
+            );
+
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn anthropic_stream_client_cancellation_logs_cancelled_and_releases_once_for_all_downstreams() {
+    for (name, fixture) in anthropic_target_fixtures() {
+        let case_name = format!("anthropic-stream-cancel-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let dropped = Arc::new(DropSignal::default());
+            let upstream_prefix = fixture.stream.upstream_events[..4].to_vec();
+            let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+                content_encoding: None,
+                chunks: vec![events_to_sse_bytes(&upstream_prefix)],
+                hang_after_chunks: true,
+                dropped: Some(Arc::clone(&dropped)),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+            let persisted_sink = router.install_recording_persisted_sink();
+
+            let response = router
+                .send(&fixture, true, &fixture.cancellation.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let mut body = response.into_body().into_data_stream();
+            let first = timeout(WAIT_TIMEOUT, body.next())
+                .await
+                .expect("first transformed frame deadline")
+                .expect("first transformed frame")
+                .expect("first transformed frame should be readable");
+            assert!(!first.is_empty(), "{case_name}");
+            drop(body);
+            dropped.wait().await;
+
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &fixture,
+                &captured,
+                &fixture.cancellation.upstream_path,
+                None,
+                &fixture.cancellation.upstream_request,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Cancelled).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(log.overall_status, RequestStatus::Cancelled, "{case_name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("client_cancelled_error"),
+                "{case_name}"
+            );
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(captured.len(), 1, "{case_name}: no retry");
+            assert_single_persisted_terminal_fact(
+                &persisted_sink,
+                ExecutionStage::DownstreamSend,
+                ResponseVisibility::BodyStarted,
+            )
+            .await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn anthropic_target_precommit_client_cancellation_returns_499_and_releases_once() {
+    for (name, fixture) in anthropic_target_fixtures() {
+        let case_name = format!("anthropic-target-precommit-cancel-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let dropped = Arc::new(DropSignal::default());
+            let upstream = TestUpstream::spawn(ScriptedReply::HangingBody {
+                content_type: "application/json".to_string(),
+                first_chunk: br#"{"#.to_vec(),
+                dropped: Arc::clone(&dropped),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+            let cancellation = ProxyCancellationContext::new();
+            let cancellation_trigger = cancellation.clone();
+            let captured_requests = Arc::clone(&upstream.captured);
+            let cancel_task = tokio::spawn(async move {
+                let deadline = Instant::now() + WAIT_TIMEOUT;
+                loop {
+                    if !captured_requests.lock().await.is_empty() {
+                        cancellation_trigger.cancel_now("Anthropic target client disconnected");
+                        return;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "Anthropic target request should reach upstream before cancellation"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+
+            let response = timeout(
+                WAIT_TIMEOUT,
+                router.send_with_cancellation(
+                    &fixture,
+                    false,
+                    &fixture.request.downstream,
+                    cancellation,
+                ),
+            )
+            .await
+            .expect("cancelled Anthropic target request should finish");
+            cancel_task
+                .await
+                .expect("Anthropic target cancellation trigger should join");
+
+            assert_eq!(response.status().as_u16(), 499, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("cancellation envelope should read");
+            dropped.wait().await;
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &fixture,
+                &captured,
+                &fixture.request.upstream_path,
+                None,
+                &fixture.request.upstream,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Cancelled).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(log.overall_status, RequestStatus::Cancelled, "{case_name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("client_cancelled_error"),
+                "{case_name}"
+            );
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(captured.len(), 1, "{case_name}: no retry");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn anthropic_same_wire_non_stream_preserves_unknown_response_bytes() {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Anthropic)
+        .expect("Anthropic same-wire target fixture");
+    run_case(
+        "anthropic-same-wire-non-stream-extension",
+        move |context| async move {
+            let original = br#"{
+  "id": "msg_extension",
+  "type": "message",
+  "role": "assistant",
+  "content": [{"type":"vendor_future_block","private":{"opaque":true}}],
+  "model": "baseline-upstream-model",
+  "stop_reason": "vendor_future_stop",
+  "stop_sequence": null,
+  "usage": {"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2},
+  "vendor_extension": {"spacing":"must remain exact"}
+}
+"#
+            .to_vec();
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+                body: original.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("same-wire extension response should read");
+            assert_eq!(body.as_ref(), original.as_slice());
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(log.upstream_http_status, Some(200));
+            assert_eq!(log.total_input_tokens, Some(16));
+            assert_eq!(log.total_output_tokens, Some(7));
+            assert_eq!(log.total_tokens, Some(23));
+            assert_eq!(log.input_text_tokens, Some(11));
+            assert_eq!(log.cache_read_tokens, Some(3));
+            assert_eq!(log.cache_write_tokens, Some(2));
+            assert_eq!(log.estimated_cost_nanos, Some(128));
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            assert_eq!(upstream.requests().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn anthropic_unknown_non_stream_terminal_fails_closed_cross_wire_without_cost() {
+    const PRIVATE_REASON: &str = "vendor_private_stop_reason";
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Anthropic target fixture");
+    let mut upstream_body = fixture.non_stream.upstream_response.clone();
+    upstream_body["stop_reason"] = json!(PRIVATE_REASON);
+    upstream_body["vendor_extension"] = json!({"private": PRIVATE_REASON});
+    run_case(
+        "openai-anthropic-unknown-non-stream-terminal",
+        move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_body).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("unknown Anthropic terminal error should read");
+            assert_payload_free_transform_bytes(&body, PRIVATE_REASON);
+            let body: Value = serde_json::from_slice(&body).expect("error should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("upstream_response_error")
+            );
+            let captured = upstream.requests().await;
+            assert_upstream(
+                "openai-anthropic-unknown-non-stream-terminal",
+                &fixture,
+                &captured,
+                &fixture.request.upstream_path,
+                None,
+                &fixture.request.upstream,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error")
+            );
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_REASON)
+            );
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            assert_eq!(log.cost_snapshot_json, None);
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            assert_eq!(upstream.requests().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn anthropic_final_validation_rejects_before_credentials_and_network() {
+    let (_, fixture) = anthropic_target_fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "anthropic")
+        .expect("Anthropic same-wire target fixture");
+    let cases = [
+        (
+            "max-tokens-zero",
+            json!({
+                "model":"$REQUESTED_MODEL","max_tokens":0,
+                "messages":[{"role":"user","content":"private-payload-marker"}]
+            }),
+            "/max_tokens",
+        ),
+        (
+            "invalid-role",
+            json!({
+                "model":"$REQUESTED_MODEL","max_tokens":64,
+                "messages":[{"role":"system","content":"private-payload-marker"}]
+            }),
+            "/messages/*/role",
+        ),
+        (
+            "invalid-tool-schema",
+            json!({
+                "model":"$REQUESTED_MODEL","max_tokens":64,
+                "messages":[{"role":"user","content":"private-payload-marker"}],
+                "tools":[{"name":"lookup","input_schema":"private-payload-marker"}]
+            }),
+            "/tools/*/input_schema",
+        ),
+        (
+            "invalid-thinking-output-combination",
+            json!({
+                "model":"$REQUESTED_MODEL","max_tokens":64,
+                "messages":[{"role":"user","content":"private-payload-marker"}],
+                "thinking":{"type":"disabled"},"output_config":{"effort":"high"}
+            }),
+            "/output_config/effort",
+        ),
+    ];
+
+    for (case, request, expected_path) in cases {
+        let fixture = fixture.clone();
+        run_case(case, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("invalid target response should read");
+            let body: Value = serde_json::from_slice(&body).expect("error response should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("invalid_request_error"),
+                "{case}"
+            );
+            assert!(
+                !body.to_string().contains("private-payload-marker"),
+                "{case}"
+            );
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "{case}: final validation must precede credentials"
+            );
+            assert!(upstream.requests().await.is_empty(), "{case}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error")
+            );
+            let error = log.final_error_message.unwrap_or_default();
+            assert!(error.contains(expected_path), "{case}: {error}");
+            assert!(!error.contains("private-payload-marker"), "{case}");
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
 }
 
 #[test]
@@ -8308,7 +11420,7 @@ fn all_public_downstream_portable_tool_lifecycles_reach_the_responses_target() {
                             {"type":"tool_use","id":"anthropic-time","name":"time","input":{"zone":"UTC"}}
                         ]},
                         {"role":"user","content":[
-                            {"type":"tool_result","tool_use_id":"anthropic-weather","content":{"temp":21}},
+                            {"type":"tool_result","tool_use_id":"anthropic-weather","content":"{\"temp\":21}"},
                             {"type":"tool_result","tool_use_id":"anthropic-time","content":"12:00"}
                         ]}
                     ]);

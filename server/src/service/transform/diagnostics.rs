@@ -207,6 +207,10 @@ pub enum TransformReasonCode {
     UnsupportedStructuredError,
     UnsupportedRefusal,
     UnsupportedContent,
+    UnsupportedImageDetail,
+    TextDocumentMimeNormalized,
+    StructuredOutputMetadataDropped,
+    GeminiPropertyOrderingDropped,
     UnsupportedImageDelta,
     UnknownSemanticUnit,
     DeterministicTextDowngrade,
@@ -217,6 +221,7 @@ pub enum TransformReasonCode {
     InvalidProtocolShape,
     DiagnosticOverflow,
     SyntheticEnvelope,
+    SyntheticAnthropicMaxTokens,
     SyntheticCorrelationId,
     SyntheticIndex,
     NoSemanticOutput,
@@ -224,6 +229,9 @@ pub enum TransformReasonCode {
     UpstreamApplicationFailed,
     IllegalUpstreamTerminal,
     UnknownIncompleteReason,
+    UnknownStopReason,
+    UsageOverflow,
+    StreamEventTypeMismatch,
 }
 
 impl TransformReasonCode {
@@ -241,6 +249,10 @@ impl TransformReasonCode {
             Self::UnsupportedStructuredError => "unsupported_structured_error",
             Self::UnsupportedRefusal => "unsupported_refusal",
             Self::UnsupportedContent => "unsupported_content",
+            Self::UnsupportedImageDetail => "unsupported_image_detail",
+            Self::TextDocumentMimeNormalized => "text_document_mime_normalized",
+            Self::StructuredOutputMetadataDropped => "structured_output_metadata_dropped",
+            Self::GeminiPropertyOrderingDropped => "gemini_property_ordering_dropped",
             Self::UnsupportedImageDelta => "unsupported_image_delta",
             Self::UnknownSemanticUnit => "unknown_semantic_unit",
             Self::DeterministicTextDowngrade => "deterministic_text_downgrade",
@@ -251,6 +263,7 @@ impl TransformReasonCode {
             Self::InvalidProtocolShape => "invalid_protocol_shape",
             Self::DiagnosticOverflow => "diagnostic_overflow",
             Self::SyntheticEnvelope => "synthetic_envelope",
+            Self::SyntheticAnthropicMaxTokens => "synthetic_anthropic_max_tokens",
             Self::SyntheticCorrelationId => "synthetic_correlation_id",
             Self::SyntheticIndex => "synthetic_index",
             Self::NoSemanticOutput => "no_semantic_output",
@@ -258,6 +271,9 @@ impl TransformReasonCode {
             Self::UpstreamApplicationFailed => "upstream_application_failed",
             Self::IllegalUpstreamTerminal => "illegal_upstream_terminal",
             Self::UnknownIncompleteReason => "unknown_incomplete_reason",
+            Self::UnknownStopReason => "unknown_stop_reason",
+            Self::UsageOverflow => "usage_overflow",
+            Self::StreamEventTypeMismatch => "stream_event_type_mismatch",
         }
     }
 }

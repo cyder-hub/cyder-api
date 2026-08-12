@@ -472,7 +472,9 @@ impl From<CacheRequestPatchConflict> for RuntimeRequestPatchConflict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
     use crate::service::cache::types::{RequestPatchVariantOrigin, RuntimeResolvedRequestPatch};
+    use crate::service::transform::validate_final_generation_request_for_downstream;
 
     fn runtime_rule(
         operation: RequestPatchOperation,
@@ -520,6 +522,63 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_max_tokens_patch_is_revalidated_after_synthesis() {
+        let base = serde_json::json!({
+            "model":"claude-real",
+            "max_tokens":4096,
+            "messages":[{"role":"user","content":"hello"}]
+        });
+        let mut url = Url::parse("https://api.anthropic.test/messages").unwrap();
+        let mut headers = HeaderMap::new();
+
+        let mut valid = base.clone();
+        apply_request_patches(
+            &mut valid,
+            &mut url,
+            &mut headers,
+            &[runtime_rule(
+                RequestPatchOperation::Set,
+                "/max_tokens",
+                Some("128"),
+            )],
+        )
+        .expect("positive max_tokens Patch should apply");
+        assert_eq!(valid["max_tokens"], 128);
+        validate_final_generation_request_for_downstream(
+            &valid,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("positive patched value should pass final validation");
+
+        for (operation, value) in [
+            (RequestPatchOperation::Set, Some("0")),
+            (RequestPatchOperation::Set, Some("-1")),
+            (RequestPatchOperation::Set, Some("1.5")),
+            (RequestPatchOperation::Set, Some("4294967296")),
+            (RequestPatchOperation::Remove, None),
+        ] {
+            let mut invalid = base.clone();
+            apply_request_patches(
+                &mut invalid,
+                &mut url,
+                &mut headers,
+                &[runtime_rule(operation, "/max_tokens", value)],
+            )
+            .expect("syntactically valid Patch should reach final validation");
+            let error = validate_final_generation_request_for_downstream(
+                &invalid,
+                DownstreamProtocol::Openai,
+                UpstreamProtocol::Anthropic,
+                &UpstreamProfileType::Anthropic,
+            )
+            .expect_err("invalid patched max_tokens must fail closed");
+            assert_eq!(error.path, "/max_tokens");
+        }
+    }
+
+    #[test]
     fn runtime_rejects_persisted_forbidden_targets_before_mutation() {
         let mut body = serde_json::json!({"model": "safe-model", "messages": []});
         let mut url = Url::parse("https://example.test?existing=safe").unwrap();
@@ -552,6 +611,42 @@ mod tests {
         assert!(error.operator_message().contains("authorization"));
         assert!(!headers.contains_key("authorization"));
         assert_eq!(url.query(), Some("existing=safe"));
+
+        let mut forbidden_version = runtime_rule(
+            RequestPatchOperation::Set,
+            "anthropic-version",
+            Some("\"2099-01-01\""),
+        );
+        forbidden_version.placement = RequestPatchPlacement::Header;
+        let error = apply_request_patches(
+            &mut body,
+            &mut url,
+            &mut headers,
+            std::slice::from_ref(&forbidden_version),
+        )
+        .expect_err("runtime must defend against a corrupted Anthropic version Patch");
+        assert!(error.operator_message().contains("anthropic-version"));
+        assert!(!headers.contains_key("anthropic-version"));
+
+        let mut allowed_beta = runtime_rule(
+            RequestPatchOperation::Set,
+            "anthropic-beta",
+            Some("\"structured-outputs-2099-01-01\""),
+        );
+        allowed_beta.placement = RequestPatchPlacement::Header;
+        apply_request_patches(
+            &mut body,
+            &mut url,
+            &mut headers,
+            std::slice::from_ref(&allowed_beta),
+        )
+        .expect("Source-bound Patch may explicitly set anthropic-beta");
+        assert_eq!(
+            headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("structured-outputs-2099-01-01")
+        );
 
         for (operation, target, value) in [
             (RequestPatchOperation::Set, "/store", Some("true")),

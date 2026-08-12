@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use cyder_tools::log::debug;
@@ -383,6 +384,670 @@ fn validate_final_responses_structured_output(
     Ok(())
 }
 
+fn invalid_anthropic_request(
+    path: &'static str,
+    reason: &'static str,
+) -> FinalRequestValidationError {
+    FinalRequestValidationError { path, reason }
+}
+
+fn validate_anthropic_system(data: &Value) -> Result<(), FinalRequestValidationError> {
+    let Some(system) = data.get("system").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    if system.is_string() {
+        return Ok(());
+    }
+    let Some(blocks) = system.as_array() else {
+        return Err(invalid_anthropic_request(
+            "/system",
+            "must be a string or an array of text blocks",
+        ));
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("text")
+            || block.get("text").and_then(Value::as_str).is_none()
+        {
+            return Err(invalid_anthropic_request(
+                "/system/*",
+                "must be an Anthropic text block",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_anthropic_media_source(
+    block_type: &str,
+    source: &Value,
+    same_wire: bool,
+) -> Result<(), FinalRequestValidationError> {
+    let Some(source) = source.as_object() else {
+        return Err(invalid_anthropic_request(
+            "/messages/*/content/*/source",
+            "must be an object",
+        ));
+    };
+    match (block_type, source.get("type").and_then(Value::as_str)) {
+        ("image", Some("base64")) => {
+            let valid_mime = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .is_some_and(|mime| {
+                    matches!(
+                        mime,
+                        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+                    )
+                });
+            let valid_data = source
+                .get("data")
+                .and_then(Value::as_str)
+                .is_some_and(super::media::is_valid_base64);
+            if !valid_mime || !valid_data {
+                return Err(invalid_anthropic_request(
+                    "/messages/*/content/*/source",
+                    "image base64 sources require a supported media_type and valid base64 data",
+                ));
+            }
+        }
+        ("image", Some("url")) => {
+            if !source
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(super::media::is_valid_http_url)
+            {
+                return Err(invalid_anthropic_request(
+                    "/messages/*/content/*/source/url",
+                    "must be an HTTP or HTTPS URL",
+                ));
+            }
+        }
+        ("document", Some("base64")) => {
+            let valid_mime = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .is_some_and(|mime| {
+                    if same_wire {
+                        super::media::classify_inline_mime(mime)
+                            == Some(super::media::InlineMediaKind::File)
+                    } else {
+                        mime == "application/pdf"
+                    }
+                });
+            let valid_data = source
+                .get("data")
+                .and_then(Value::as_str)
+                .is_some_and(super::media::is_valid_base64);
+            if !valid_mime || !valid_data {
+                return Err(invalid_anthropic_request(
+                    "/messages/*/content/*/source",
+                    "document base64 sources require a supported media_type and valid base64 data",
+                ));
+            }
+        }
+        ("document", Some("url")) => {
+            if !source
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(super::media::is_valid_http_url)
+            {
+                return Err(invalid_anthropic_request(
+                    "/messages/*/content/*/source/url",
+                    "must be an HTTP or HTTPS URL",
+                ));
+            }
+        }
+        ("document", Some("text")) => {
+            let supported_mime = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .is_some_and(|mime| {
+                    if same_wire {
+                        matches!(
+                            mime,
+                            "text/plain" | "text/markdown" | "text/csv" | "application/json"
+                        )
+                    } else {
+                        mime == "text/plain"
+                    }
+                });
+            if !supported_mime || source.get("data").and_then(Value::as_str).is_none() {
+                return Err(invalid_anthropic_request(
+                    "/messages/*/content/*/source",
+                    "text documents require supported UTF-8 media_type and string data",
+                ));
+            }
+        }
+        (_, Some("file")) if same_wire => {
+            if !source
+                .get("file_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+            {
+                return Err(invalid_anthropic_request(
+                    "/messages/*/content/*/source/file_id",
+                    "must be a non-empty string",
+                ));
+            }
+        }
+        (_, Some(_)) if same_wire => {}
+        _ => {
+            return Err(invalid_anthropic_request(
+                "/messages/*/content/*/source/type",
+                "is not a portable Anthropic media source",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_final_anthropic_tools(
+    data: &Value,
+    same_wire: bool,
+) -> Result<(BTreeSet<String>, bool), FinalRequestValidationError> {
+    let Some(tools) = data.get("tools").filter(|value| !value.is_null()) else {
+        return Ok((BTreeSet::new(), false));
+    };
+    let Some(tools) = tools.as_array() else {
+        return Err(invalid_anthropic_request(
+            "/tools",
+            "must be an array when present",
+        ));
+    };
+    let mut names = BTreeSet::new();
+    for tool in tools {
+        let Some(tool) = tool.as_object() else {
+            return Err(invalid_anthropic_request("/tools/*", "must be an object"));
+        };
+        if tool.get("type").is_some() {
+            if same_wire
+                && tool
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| !kind.trim().is_empty())
+            {
+                if let Some(name) = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                {
+                    if !names.insert(name.to_string()) {
+                        return Err(invalid_anthropic_request(
+                            "/tools/*/name",
+                            "tool names must be unique",
+                        ));
+                    }
+                }
+                continue;
+            }
+            return Err(invalid_anthropic_request(
+                "/tools/*/type",
+                "non-portable Anthropic tools are only allowed on same-wire requests",
+            ));
+        }
+        let Some(name) = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+        else {
+            return Err(invalid_anthropic_request(
+                "/tools/*/name",
+                "must be a non-empty string",
+            ));
+        };
+        if !names.insert(name.to_string()) {
+            return Err(invalid_anthropic_request(
+                "/tools/*/name",
+                "tool names must be unique",
+            ));
+        }
+        if !tool.get("input_schema").is_some_and(Value::is_object) {
+            return Err(invalid_anthropic_request(
+                "/tools/*/input_schema",
+                "must be a JSON object",
+            ));
+        }
+        if tool
+            .get("description")
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+            || tool
+                .get("strict")
+                .is_some_and(|value| !value.is_null() && !value.is_boolean())
+        {
+            return Err(invalid_anthropic_request(
+                "/tools/*",
+                "description must be a string and strict must be a boolean when present",
+            ));
+        }
+    }
+    Ok((names, !tools.is_empty()))
+}
+
+fn validate_final_anthropic_tool_choice(
+    data: &Value,
+    tool_names: &BTreeSet<String>,
+    has_tools: bool,
+) -> Result<(), FinalRequestValidationError> {
+    let Some(choice) = data.get("tool_choice").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let Some(choice) = choice.as_object() else {
+        return Err(invalid_anthropic_request(
+            "/tool_choice",
+            "must be an object when present",
+        ));
+    };
+    let choice_type = choice.get("type").and_then(Value::as_str);
+    if !matches!(choice_type, Some("none" | "auto" | "any" | "tool")) {
+        return Err(invalid_anthropic_request(
+            "/tool_choice/type",
+            "must be none, auto, any, or tool",
+        ));
+    }
+    if choice
+        .get("disable_parallel_tool_use")
+        .is_some_and(|value| !value.is_null() && !value.is_boolean())
+    {
+        return Err(invalid_anthropic_request(
+            "/tool_choice/disable_parallel_tool_use",
+            "must be a boolean when present",
+        ));
+    }
+    if choice_type == Some("tool") {
+        let Some(name) = choice.get("name").and_then(Value::as_str) else {
+            return Err(invalid_anthropic_request(
+                "/tool_choice/name",
+                "named tool choice requires a name",
+            ));
+        };
+        if !tool_names.contains(name) {
+            return Err(invalid_anthropic_request(
+                "/tool_choice/name",
+                "must reference a declared portable tool",
+            ));
+        }
+    } else if choice.get("name").is_some_and(|value| !value.is_null()) {
+        return Err(invalid_anthropic_request(
+            "/tool_choice/name",
+            "is only valid for named tool choice",
+        ));
+    }
+    if !has_tools && choice_type != Some("none") {
+        return Err(invalid_anthropic_request(
+            "/tool_choice",
+            "requires at least one declared portable tool",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_final_anthropic_reasoning_and_output(
+    data: &Value,
+    same_wire: bool,
+) -> Result<(), FinalRequestValidationError> {
+    let max_tokens = data
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .expect("Anthropic max_tokens must be validated before reasoning configuration");
+    let thinking_type = match data.get("thinking").filter(|value| !value.is_null()) {
+        None => None,
+        Some(thinking) => {
+            let Some(thinking) = thinking.as_object() else {
+                return Err(invalid_anthropic_request(
+                    "/thinking",
+                    "must be an object when present",
+                ));
+            };
+            let kind = thinking.get("type").and_then(Value::as_str);
+            if !matches!(kind, Some("adaptive" | "enabled" | "disabled")) {
+                return Err(invalid_anthropic_request(
+                    "/thinking/type",
+                    "must be adaptive, enabled, or disabled",
+                ));
+            }
+            let budget = thinking
+                .get("budget_tokens")
+                .filter(|value| !value.is_null());
+            if kind == Some("enabled") {
+                if !budget
+                    .and_then(Value::as_u64)
+                    .is_some_and(|value| value >= 1024 && value < max_tokens)
+                {
+                    return Err(invalid_anthropic_request(
+                        "/thinking/budget_tokens",
+                        "enabled thinking requires a budget of at least 1024 tokens and less than max_tokens",
+                    ));
+                }
+            } else if budget.is_some() {
+                return Err(invalid_anthropic_request(
+                    "/thinking/budget_tokens",
+                    "is only valid for enabled thinking",
+                ));
+            }
+            if thinking.get("display").is_some_and(|value| {
+                !value.is_null() && !matches!(value.as_str(), Some("summarized" | "omitted"))
+            }) {
+                return Err(invalid_anthropic_request(
+                    "/thinking/display",
+                    "must be summarized or omitted when present",
+                ));
+            }
+            kind
+        }
+    };
+
+    if let Some(output) = data.get("output_config").filter(|value| !value.is_null()) {
+        let Some(output) = output.as_object() else {
+            return Err(invalid_anthropic_request(
+                "/output_config",
+                "must be an object when present",
+            ));
+        };
+        if !same_wire
+            && output
+                .keys()
+                .any(|key| !matches!(key.as_str(), "effort" | "format"))
+        {
+            return Err(invalid_anthropic_request(
+                "/output_config",
+                "cross-wire output_config only supports effort and format",
+            ));
+        }
+        if output.get("effort").is_some_and(|value| {
+            !value.is_null()
+                && !matches!(
+                    value.as_str(),
+                    Some("low" | "medium" | "high" | "xhigh" | "max")
+                )
+        }) {
+            return Err(invalid_anthropic_request(
+                "/output_config/effort",
+                "must be a supported qualitative effort",
+            ));
+        }
+        if thinking_type == Some("disabled")
+            && output.get("effort").is_some_and(|value| !value.is_null())
+        {
+            return Err(invalid_anthropic_request(
+                "/output_config/effort",
+                "cannot be combined with disabled thinking",
+            ));
+        }
+        if let Some(format) = output.get("format").filter(|value| !value.is_null()) {
+            let Some(format) = format.as_object() else {
+                return Err(invalid_anthropic_request(
+                    "/output_config/format",
+                    "must be an object when present",
+                ));
+            };
+            if !same_wire
+                && format
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "type" | "schema"))
+            {
+                return Err(invalid_anthropic_request(
+                    "/output_config/format",
+                    "cross-wire json_schema format only supports type and schema",
+                ));
+            }
+            if format.get("type").and_then(Value::as_str) != Some("json_schema")
+                || !format.get("schema").is_some_and(Value::is_object)
+            {
+                return Err(invalid_anthropic_request(
+                    "/output_config/format",
+                    "must be json_schema with an object schema",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_final_anthropic_messages(
+    data: &Value,
+    same_wire: bool,
+) -> Result<(), FinalRequestValidationError> {
+    let Some(messages) = data.get("messages").and_then(Value::as_array) else {
+        return Err(invalid_anthropic_request("/messages", "must be an array"));
+    };
+    if messages.is_empty() {
+        return Err(invalid_anthropic_request(
+            "/messages",
+            "must contain at least one message",
+        ));
+    }
+    let mut tool_uses = BTreeSet::new();
+    let mut tool_results = BTreeSet::new();
+    for message in messages {
+        let Some(message) = message.as_object() else {
+            return Err(invalid_anthropic_request(
+                "/messages/*",
+                "must be an object",
+            ));
+        };
+        let role = message.get("role").and_then(Value::as_str);
+        if !matches!(role, Some("user" | "assistant")) {
+            return Err(invalid_anthropic_request(
+                "/messages/*/role",
+                "must be user or assistant",
+            ));
+        }
+        let Some(content) = message.get("content") else {
+            return Err(invalid_anthropic_request(
+                "/messages/*/content",
+                "is required",
+            ));
+        };
+        if content.is_string() {
+            continue;
+        }
+        let Some(blocks) = content.as_array().filter(|blocks| !blocks.is_empty()) else {
+            return Err(invalid_anthropic_request(
+                "/messages/*/content",
+                "must be a string or non-empty block array",
+            ));
+        };
+        let mut saw_non_tool_result = false;
+        for block in blocks {
+            let Some(block) = block.as_object() else {
+                return Err(invalid_anthropic_request(
+                    "/messages/*/content/*",
+                    "must be an object",
+                ));
+            };
+            let block_type = block.get("type").and_then(Value::as_str);
+            match block_type {
+                Some("text") => {
+                    saw_non_tool_result = true;
+                    if block.get("text").and_then(Value::as_str).is_none() {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*/text",
+                            "must be a string",
+                        ));
+                    }
+                }
+                Some("image" | "document") if role == Some("user") => {
+                    saw_non_tool_result = true;
+                    validate_anthropic_media_source(
+                        block_type.expect("matched block type"),
+                        block.get("source").unwrap_or(&Value::Null),
+                        same_wire,
+                    )?;
+                }
+                Some("tool_use") if role == Some("assistant") => {
+                    saw_non_tool_result = true;
+                    let Some(id) = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                    else {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*/id",
+                            "tool_use id must be a non-empty string",
+                        ));
+                    };
+                    if !tool_uses.insert(id.to_string()) {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*/id",
+                            "tool_use ids must be unique",
+                        ));
+                    }
+                    if !block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| !name.trim().is_empty())
+                        || !block.get("input").is_some_and(Value::is_object)
+                    {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*",
+                            "tool_use requires a name and object input",
+                        ));
+                    }
+                }
+                Some("tool_result") if role == Some("user") => {
+                    if saw_non_tool_result {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content",
+                            "tool_result blocks must precede other user content",
+                        ));
+                    }
+                    let Some(id) = block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                    else {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*/tool_use_id",
+                            "must be a non-empty string",
+                        ));
+                    };
+                    if !tool_uses.contains(id) || !tool_results.insert(id.to_string()) {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*/tool_use_id",
+                            "must uniquely reference an earlier tool_use",
+                        ));
+                    }
+                    if block
+                        .get("is_error")
+                        .is_some_and(|value| !value.is_null() && !value.is_boolean())
+                    {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*/is_error",
+                            "must be a boolean when present",
+                        ));
+                    }
+                }
+                Some("thinking") if role == Some("assistant") => {
+                    saw_non_tool_result = true;
+                    if block.get("thinking").and_then(Value::as_str).is_none()
+                        || block
+                            .get("signature")
+                            .is_some_and(|value| !value.is_null() && !value.is_string())
+                    {
+                        return Err(invalid_anthropic_request(
+                            "/messages/*/content/*",
+                            "thinking blocks require string thinking and optional string signature",
+                        ));
+                    }
+                }
+                Some(_) if same_wire => {
+                    saw_non_tool_result = true;
+                }
+                _ => {
+                    return Err(invalid_anthropic_request(
+                        "/messages/*/content/*/type",
+                        "is not valid for the message role or target wire",
+                    ));
+                }
+            }
+        }
+    }
+    if tool_uses != tool_results {
+        return Err(invalid_anthropic_request(
+            "/messages",
+            "every tool_use must have exactly one later tool_result",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_final_anthropic_request(
+    data: &Value,
+    same_wire: bool,
+) -> Result<(), FinalRequestValidationError> {
+    require_non_empty_string(data, "/model", "model")?;
+    let max_tokens = data.get("max_tokens").and_then(Value::as_u64);
+    if !max_tokens.is_some_and(|value| value > 0 && value <= u32::MAX as u64) {
+        return Err(invalid_anthropic_request(
+            "/max_tokens",
+            "must be a positive u32 integer",
+        ));
+    }
+    if data
+        .get("stream")
+        .is_some_and(|value| !value.is_null() && !value.is_boolean())
+    {
+        return Err(invalid_anthropic_request(
+            "/stream",
+            "must be a boolean when present",
+        ));
+    }
+    if data.get("stop_sequences").is_some_and(|value| {
+        !value.is_null()
+            && !value.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+            })
+    }) {
+        return Err(invalid_anthropic_request(
+            "/stop_sequences",
+            "must be an array of non-empty strings when present",
+        ));
+    }
+    for (field, path, min, max) in [
+        ("temperature", "/temperature", 0.0, 1.0),
+        ("top_p", "/top_p", 0.0, 1.0),
+    ] {
+        if data.get(field).is_some_and(|value| {
+            !value.is_null()
+                && !value
+                    .as_f64()
+                    .is_some_and(|value| value.is_finite() && value >= min && value <= max)
+        }) {
+            return Err(invalid_anthropic_request(
+                path,
+                "must be a finite number in the supported range",
+            ));
+        }
+    }
+    if data.get("top_k").is_some_and(|value| {
+        !value.is_null()
+            && !value
+                .as_u64()
+                .is_some_and(|value| value > 0 && value <= u32::MAX as u64)
+    }) {
+        return Err(invalid_anthropic_request(
+            "/top_k",
+            "must be a positive u32 integer when present",
+        ));
+    }
+    if data
+        .get("metadata")
+        .is_some_and(|value| !value.is_null() && !value.is_object())
+    {
+        return Err(invalid_anthropic_request(
+            "/metadata",
+            "must be an object when present",
+        ));
+    }
+    validate_anthropic_system(data)?;
+    validate_final_anthropic_messages(data, same_wire)?;
+    let (tool_names, has_tools) = validate_final_anthropic_tools(data, same_wire)?;
+    validate_final_anthropic_tool_choice(data, &tool_names, has_tools)?;
+    validate_final_anthropic_reasoning_and_output(data, same_wire)
+}
+
 /// Validates the invariant-bearing core of the already materialized request.
 ///
 /// This intentionally borrows the existing JSON tree instead of cloning and
@@ -391,6 +1056,15 @@ fn validate_final_responses_structured_output(
 /// global rejection policy.
 pub(in crate::service::transform) fn validate_final_generation_request(
     data: &Value,
+    upstream_protocol: UpstreamProtocol,
+    profile_type: &UpstreamProfileType,
+) -> Result<(), FinalRequestValidationError> {
+    validate_final_generation_request_for_downstream(data, None, upstream_protocol, profile_type)
+}
+
+pub(in crate::service::transform) fn validate_final_generation_request_for_downstream(
+    data: &Value,
+    downstream_protocol: Option<DownstreamProtocol>,
     upstream_protocol: UpstreamProtocol,
     profile_type: &UpstreamProfileType,
 ) -> Result<(), FinalRequestValidationError> {
@@ -491,17 +1165,10 @@ pub(in crate::service::transform) fn validate_final_generation_request(
             validate_final_responses_stateless_controls(data)?;
             Ok(())
         }
-        UpstreamProtocol::Anthropic => {
-            require_non_empty_string(data, "/model", "model")?;
-            require_array(data, "/messages", "messages")?;
-            if !data.get("max_tokens").is_some_and(Value::is_u64) {
-                return Err(FinalRequestValidationError {
-                    path: "/max_tokens",
-                    reason: "must be a non-negative integer",
-                });
-            }
-            Ok(())
-        }
+        UpstreamProtocol::Anthropic => validate_final_anthropic_request(
+            data,
+            downstream_protocol == Some(DownstreamProtocol::Anthropic),
+        ),
         UpstreamProtocol::Gemini => require_array(data, "/contents", "contents"),
         UpstreamProtocol::Ollama => {
             require_non_empty_string(data, "/model", "model")?;
@@ -856,5 +1523,284 @@ mod final_validation_tests {
         );
         assert_eq!(finalized["store"], false);
         assert_eq!(finalized["vendor_extension"]["preserved"], true);
+    }
+
+    #[test]
+    fn anthropic_final_validation_accepts_portable_combinations_and_same_wire_extensions() {
+        let portable = json!({
+            "model": "claude-target",
+            "max_tokens": 4096,
+            "system": [{"type": "text", "text": "system"}],
+            "messages": [
+                {"role": "user", "content": "use the tool"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan"},
+                    {"type": "tool_use", "id": "tool-1", "name": "lookup", "input": {"q": "safe"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tool-1", "content": "done"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+                    {"type": "document", "title": "doc", "source": {"type": "text", "media_type": "text/plain", "data": "hello"}},
+                    {"type": "text", "text": "continue"}
+                ]}
+            ],
+            "tools": [{
+                "name": "lookup",
+                "description": "safe description",
+                "input_schema": {"type": "object"},
+                "strict": true
+            }],
+            "tool_choice": {"type": "tool", "name": "lookup", "disable_parallel_tool_use": false},
+            "thinking": {"type": "adaptive"},
+            "output_config": {
+                "effort": "high",
+                "format": {"type": "json_schema", "schema": {"type": "object"}}
+            },
+            "temperature": 0.5,
+            "top_p": 1.0,
+            "top_k": 10,
+            "stop_sequences": ["done"],
+            "metadata": {"user_id": "safe"},
+            "stream": true
+        });
+        validate_final_generation_request_for_downstream(
+            &portable,
+            Some(DownstreamProtocol::Openai),
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("portable Anthropic target combination should pass");
+
+        let enabled_thinking = json!({
+            "model": "claude-target",
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": "reason"}],
+            "thinking": {"type": "enabled", "budget_tokens": 1024}
+        });
+        validate_final_generation_request_for_downstream(
+            &enabled_thinking,
+            Some(DownstreamProtocol::Anthropic),
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("enabled Anthropic thinking budget below max_tokens should pass");
+
+        let same_wire_future = json!({
+            "model": "claude-target",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [
+                {"type": "future_block", "future": "private-payload-marker"},
+                {"type": "document", "source": {"type": "file", "file_id": "file_beta"}}
+            ]}],
+            "tools": [{"type": "web_search_20990101", "name": "server-search"}]
+        });
+        validate_final_generation_request_for_downstream(
+            &same_wire_future,
+            Some(DownstreamProtocol::Anthropic),
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("same-wire future blocks and server tools remain transparent");
+
+        let error = validate_final_generation_request_for_downstream(
+            &same_wire_future,
+            Some(DownstreamProtocol::Responses),
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect_err("cross-wire future blocks must fail closed");
+        assert_eq!(error.path, "/messages/*/content/*/type");
+        assert!(!error.to_string().contains("private-payload-marker"));
+    }
+
+    #[test]
+    fn anthropic_final_validation_rejects_invalid_core_tools_media_and_combinations() {
+        let base = json!({
+            "model": "claude-target",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let cases = [
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[]}),
+                "/messages",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":0,"messages":[{"role":"user","content":"hello"}]}),
+                "/max_tokens",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":4294967296_u64,"messages":[{"role":"user","content":"hello"}]}),
+                "/max_tokens",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":-1,"messages":[{"role":"user","content":"hello"}]}),
+                "/max_tokens",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":1.5,"messages":[{"role":"user","content":"hello"}]}),
+                "/max_tokens",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"system","content":"private-payload-marker"}]}),
+                "/messages/*/role",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"not base64"}}]}]}),
+                "/messages/*/content/*/source",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"missing"}]}]}),
+                "/messages/*/content/*/tool_use_id",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"dup","name":"one","input":{}},{"type":"tool_use","id":"dup","name":"two","input":{}}]}]}),
+                "/messages/*/content/*/id",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call","name":"one","input":{}}]},{"role":"user","content":[{"type":"text","text":"first"},{"type":"tool_result","tool_use_id":"call"}]}]}),
+                "/messages/*/content",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"tools":[{"name":"dup","input_schema":{}},{"name":"dup","input_schema":{}}]}),
+                "/tools/*/name",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"tools":[{"name":"one","input_schema":{}}],"tool_choice":{"type":"tool","name":"missing"}}),
+                "/tool_choice/name",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"thinking":{"type":"enabled","budget_tokens":0}}),
+                "/thinking/budget_tokens",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":4096,"messages":[{"role":"user","content":"hello"}],"thinking":{"type":"enabled","budget_tokens":1023}}),
+                "/thinking/budget_tokens",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":1024,"messages":[{"role":"user","content":"hello"}],"thinking":{"type":"enabled","budget_tokens":1024}}),
+                "/thinking/budget_tokens",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}),
+                "/output_config/effort",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"output_config":{"format":{"type":"json_object"}}}),
+                "/output_config/format",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":"yes"}),
+                "/stream",
+            ),
+            (
+                json!({"model":"claude-target","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"temperature":2}),
+                "/temperature",
+            ),
+        ];
+
+        validate_final_generation_request_for_downstream(
+            &base,
+            Some(DownstreamProtocol::Openai),
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("baseline request should remain valid");
+        for (payload, expected_path) in cases {
+            let error = validate_final_generation_request_for_downstream(
+                &payload,
+                Some(DownstreamProtocol::Openai),
+                UpstreamProtocol::Anthropic,
+                &UpstreamProfileType::Anthropic,
+            )
+            .expect_err("invalid Anthropic target must fail closed");
+            assert_eq!(error.path, expected_path, "payload shape: {payload}");
+            assert!(!error.to_string().contains("private-payload-marker"));
+        }
+    }
+
+    #[test]
+    fn anthropic_max_tokens_synthesis_is_cross_wire_only_and_payload_free() {
+        let missing = [
+            (
+                DownstreamProtocol::Openai,
+                json!({"model":"alias","messages":[{"role":"user","content":"hello"}]}),
+            ),
+            (
+                DownstreamProtocol::Responses,
+                json!({"model":"alias","input":"hello"}),
+            ),
+            (
+                DownstreamProtocol::Gemini,
+                json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}]}),
+            ),
+        ];
+        for (downstream, payload) in missing {
+            let transformed = transform_request_data(
+                payload,
+                downstream,
+                UpstreamProtocol::Anthropic,
+                false,
+            )
+            .expect("cross-wire request without output limit should synthesize a target default");
+            assert_eq!(transformed.value["max_tokens"], 4096, "{downstream:?}");
+            assert!(transformed.summary.facts.iter().any(|fact| {
+                fact.reason_code == TransformReasonCode::SyntheticAnthropicMaxTokens
+                    && fact.action == TransformAction::Synthesize
+                    && fact.safe_summary.is_none()
+            }));
+        }
+
+        for (downstream, payload, expected) in [
+            (
+                DownstreamProtocol::Openai,
+                json!({"model":"alias","max_tokens":17,"messages":[{"role":"user","content":"hello"}]}),
+                17,
+            ),
+            (
+                DownstreamProtocol::Responses,
+                json!({"model":"alias","max_output_tokens":18,"input":"hello"}),
+                18,
+            ),
+            (
+                DownstreamProtocol::Gemini,
+                json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":{"maxOutputTokens":19}}),
+                19,
+            ),
+        ] {
+            let transformed =
+                transform_request_data(payload, downstream, UpstreamProtocol::Anthropic, false)
+                    .expect("explicit output limit should remain explicit");
+            assert_eq!(transformed.value["max_tokens"], expected, "{downstream:?}");
+            assert!(!transformed.summary.facts.iter().any(|fact| {
+                fact.reason_code == TransformReasonCode::SyntheticAnthropicMaxTokens
+            }));
+        }
+
+        let same_wire = transform_request_data(
+            json!({
+                "model":"claude-alias",
+                "messages":[{"role":"user","content":"private-payload-marker"}]
+            }),
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Anthropic,
+            false,
+        )
+        .expect("same-wire request remains raw until final validation");
+        assert!(same_wire.value.get("max_tokens").is_none());
+        assert!(
+            !same_wire.summary.facts.iter().any(|fact| {
+                fact.reason_code == TransformReasonCode::SyntheticAnthropicMaxTokens
+            })
+        );
+        let error = validate_final_generation_request_for_downstream(
+            &same_wire.value,
+            Some(DownstreamProtocol::Anthropic),
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect_err("same-wire request must provide max_tokens");
+        assert_eq!(error.path, "/max_tokens");
+        assert!(!error.to_string().contains("private-payload-marker"));
     }
 }

@@ -51,8 +51,8 @@ use crate::service::provider_credential::{
     upstream_protocol_for_profile,
 };
 use crate::service::provider_http::{
-    base_url_is_default, join_base_url_and_operation_path, normalize_provider_base_url,
-    normalize_source_base_url,
+    anthropic_messages_url, base_url_is_default, enforce_anthropic_version_header,
+    join_base_url_and_operation_path, normalize_provider_base_url, normalize_source_base_url,
 };
 use crate::service::secret_encryption::SensitiveSecret;
 use crate::service::transform::{finalize_request_data, validate_final_generation_request};
@@ -916,9 +916,13 @@ async fn build_provider_check_request(
             }),
         },
         UpstreamProfileType::Anthropic => {
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            enforce_anthropic_version_header(&mut headers);
             ProviderCheckRequest {
-                url: format!("{}/messages", source.base_url.trim_end_matches('/')),
+                url: anthropic_messages_url(&source.base_url).map_err(|error| {
+                    BaseError::ParamInvalid(Some(format!(
+                        "Source does not support Anthropic Messages check: {error}"
+                    )))
+                })?,
                 headers,
                 body: json!({
                     "model": model_name,
@@ -996,9 +1000,12 @@ async fn build_provider_check_request(
         request_patches,
     )
     .map_err(provider_check_patch_error)?;
+    if upstream_protocol == UpstreamProtocol::Anthropic {
+        enforce_anthropic_version_header(&mut request.headers);
+    }
     if matches!(
         upstream_protocol,
-        UpstreamProtocol::Openai | UpstreamProtocol::Responses
+        UpstreamProtocol::Openai | UpstreamProtocol::Responses | UpstreamProtocol::Anthropic
     ) {
         validate_final_generation_request(
             &request.body,
@@ -1799,34 +1806,104 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_check_request_uses_messages_and_version_header() {
+        for base_url in [
+            "https://api.anthropic.com/v1",
+            "https://api.anthropic.com/v1/",
+        ] {
+            let provider = sample_provider(UpstreamProfileType::Anthropic, base_url);
+            let request = super::build_provider_check_request(
+                &provider,
+                &provider.upstream_sources[0],
+                &credential("ak-test"),
+                "claude-3-5-haiku-latest",
+                &[
+                    request_patch(
+                        21,
+                        RequestPatchPlacement::Header,
+                        "anthropic-beta",
+                        RequestPatchOperation::Set,
+                        Some(json!("source-check-beta")),
+                    ),
+                    request_patch(
+                        22,
+                        RequestPatchPlacement::Body,
+                        "/max_tokens",
+                        RequestPatchOperation::Set,
+                        Some(json!(2)),
+                    ),
+                ],
+            )
+            .await
+            .expect("request should build");
+
+            assert_eq!(request.url, "https://api.anthropic.com/v1/messages");
+            assert_eq!(
+                request.headers.get("x-api-key").expect("x-api-key"),
+                "ak-test"
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("anthropic-version")
+                    .expect("anthropic-version"),
+                "2023-06-01"
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("anthropic-beta")
+                    .expect("anthropic-beta"),
+                "source-check-beta"
+            );
+            assert_eq!(request.body["model"], "claude-3-5-haiku-latest");
+            assert_eq!(request.body["max_tokens"], 2);
+            assert_eq!(request.body["messages"][0]["content"], "hi");
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_check_rejects_invalid_patch_and_auth_before_transport() {
         let provider = sample_provider(
             UpstreamProfileType::Anthropic,
             "https://api.anthropic.com/v1",
         );
-        let request = super::build_provider_check_request(
+        let error = match super::build_provider_check_request(
             &provider,
             &provider.upstream_sources[0],
-            &credential("ak-test"),
-            "claude-3-5-haiku-latest",
+            &credential("ak-private-secret"),
+            "claude-model",
+            &[request_patch(
+                23,
+                RequestPatchPlacement::Body,
+                "/max_tokens",
+                RequestPatchOperation::Set,
+                Some(json!(0)),
+            )],
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid Patch must fail final validation"),
+            Err(error) => error,
+        };
+        let message = super::base_error_message(&error);
+        assert!(message.contains("/max_tokens"));
+        assert!(!message.contains("ak-private-secret"));
+
+        let error = match super::build_provider_check_request(
+            &provider,
+            &provider.upstream_sources[0],
+            &credential("invalid\ncredential"),
+            "claude-model",
             &[],
         )
         .await
-        .expect("request should build");
-
-        assert_eq!(request.url, "https://api.anthropic.com/v1/messages");
-        assert_eq!(
-            request.headers.get("x-api-key").expect("x-api-key"),
-            "ak-test"
-        );
-        assert_eq!(
-            request
-                .headers
-                .get("anthropic-version")
-                .expect("anthropic-version"),
-            "2023-06-01"
-        );
-        assert_eq!(request.body["model"], "claude-3-5-haiku-latest");
-        assert_eq!(request.body["max_tokens"], 1);
+        {
+            Ok(_) => panic!("invalid auth header must fail request construction"),
+            Err(error) => error,
+        };
+        let message = super::base_error_message(&error);
+        assert!(message.contains("auth header"));
+        assert!(!message.contains("invalid\ncredential"));
     }
 
     #[tokio::test]

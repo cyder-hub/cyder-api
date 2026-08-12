@@ -32,6 +32,20 @@ pub(crate) fn validate_final_generation_request(
     request::validate_final_generation_request(data, upstream_protocol, profile_type)
 }
 
+pub(crate) fn validate_final_generation_request_for_downstream(
+    data: &Value,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+    profile_type: &UpstreamProfileType,
+) -> Result<(), request::FinalRequestValidationError> {
+    request::validate_final_generation_request_for_downstream(
+        data,
+        Some(downstream_protocol),
+        upstream_protocol,
+        profile_type,
+    )
+}
+
 pub fn transform_result(
     data: Value,
     upstream_protocol: UpstreamProtocol,

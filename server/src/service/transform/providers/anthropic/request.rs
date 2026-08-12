@@ -1,12 +1,15 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::payload::*;
 
-use crate::schema::enum_def::UpstreamProtocol;
-use crate::service::transform::capability::TransformValueKind;
-use crate::service::transform::{TransformProtocol, apply_transform_policy, unified::*};
+use crate::service::transform::unified::*;
 
 fn build_anthropic_image_block(mime_type: &str, data: &str) -> Value {
+    let mime_type = if mime_type == "image/jpg" {
+        "image/jpeg"
+    } else {
+        mime_type
+    };
     json!({
         "type": "image",
         "source": {
@@ -15,6 +18,46 @@ fn build_anthropic_image_block(mime_type: &str, data: &str) -> Value {
             "data": data,
         }
     })
+}
+
+fn build_anthropic_image_url_block(url: &str) -> Value {
+    if let Some(data_url) = crate::service::transform::media::parse_base64_data_url(url) {
+        return build_anthropic_image_block(
+            if data_url.mime_type == "image/jpg" {
+                "image/jpeg"
+            } else {
+                data_url.mime_type
+            },
+            data_url.data,
+        );
+    }
+    json!({
+        "type": "image",
+        "source": {"type": "url", "url": url}
+    })
+}
+
+fn build_anthropic_document_block(source: Value, filename: Option<&str>) -> Value {
+    let mut block = Map::from_iter([
+        ("type".to_string(), Value::String("document".to_string())),
+        ("source".to_string(), source),
+    ]);
+    if let Some(filename) = filename.filter(|filename| !filename.trim().is_empty()) {
+        block.insert("title".to_string(), Value::String(filename.to_string()));
+    }
+    Value::Object(block)
+}
+
+fn anthropic_tool_result_content(output: &UnifiedToolResultOutput) -> String {
+    match output {
+        UnifiedToolResultOutput::Error {
+            error: Value::String(text),
+        } => text.clone(),
+        UnifiedToolResultOutput::Error { error } => {
+            serde_json::to_string(error).unwrap_or_else(|_| error.to_string())
+        }
+        output => stringify_unified_tool_result_output(output),
+    }
 }
 
 pub(super) fn render_anthropic_image_reference_text(url: &str, detail: Option<&str>) -> String {
@@ -70,14 +113,14 @@ fn anthropic_tool_choice(
         return None;
     }
     let (type_, name) = match choice.unwrap_or(UnifiedToolChoice::Auto) {
+        UnifiedToolChoice::None => ("none", None),
         UnifiedToolChoice::Required => ("any", None),
         UnifiedToolChoice::Named { name } => ("tool", Some(name)),
         UnifiedToolChoice::Allowed {
             mode: UnifiedAllowedToolMode::Required,
             ..
         } => ("any", None),
-        UnifiedToolChoice::None
-        | UnifiedToolChoice::Auto
+        UnifiedToolChoice::Auto
         | UnifiedToolChoice::Allowed {
             mode: UnifiedAllowedToolMode::Auto,
             ..
@@ -97,6 +140,7 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
             .as_ref()
             .map(|choice| {
                 let choice = match choice.type_.as_str() {
+                    "none" => UnifiedToolChoice::None,
                     "any" => UnifiedToolChoice::Required,
                     "tool" => UnifiedToolChoice::Named {
                         name: choice
@@ -456,20 +500,8 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                                 content_blocks.push(json!({ "type": "text", "text": text }));
                             }
                             UnifiedContentPart::ImageUrl { url, detail } => {
-                                if apply_transform_policy(
-                                    TransformProtocol::Unified,
-                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
-                                    TransformValueKind::ImageUrl,
-                                    "Downgrading remote image URL to recoverable text during Anthropic request conversion.",
-                                ) {
-                                    content_blocks.push(json!({
-                                        "type": "text",
-                                        "text": render_anthropic_image_reference_text(
-                                            &url,
-                                            detail.as_deref(),
-                                        )
-                                    }));
-                                }
+                                let _ = detail;
+                                content_blocks.push(build_anthropic_image_url_block(&url));
                             }
                             UnifiedContentPart::ImageData { mime_type, data } => {
                                 content_blocks.push(build_anthropic_image_block(&mime_type, &data));
@@ -481,48 +513,48 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                                 mime_type,
                                 filename,
                             } => {
-                                if apply_transform_policy(
-                                    TransformProtocol::Unified,
-                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
-                                    TransformValueKind::FileUrl,
-                                    "Downgrading file reference to recoverable text during Anthropic request conversion.",
-                                ) {
-                                    content_blocks.push(json!({
-                                        "type": "text",
-                                        "text": render_anthropic_file_reference_text(&url, mime_type.as_deref(), filename.as_deref())
-                                    }));
+                                let resolved_mime = mime_type
+                                    .as_deref()
+                                    .or_else(|| {
+                                        filename.as_deref().and_then(
+                                            crate::service::transform::media::mime_type_from_filename,
+                                        )
+                                    })
+                                    .or_else(|| {
+                                        crate::service::transform::media::mime_type_from_url(&url)
+                                    });
+                                if resolved_mime != Some("application/pdf") {
+                                    continue;
                                 }
+                                content_blocks.push(build_anthropic_document_block(
+                                    json!({"type":"url","url":url}),
+                                    filename.as_deref(),
+                                ));
                             }
                             UnifiedContentPart::FileData {
                                 data,
                                 mime_type,
                                 filename,
                             } => {
-                                if apply_transform_policy(
-                                    TransformProtocol::Unified,
-                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
-                                    TransformValueKind::FileData,
-                                    "Downgrading inline file data to recoverable text during Anthropic request conversion.",
-                                ) {
-                                    content_blocks.push(json!({
-                                        "type": "text",
-                                        "text": render_anthropic_inline_file_data_text(&data, &mime_type, filename.as_deref())
-                                    }));
-                                }
+                                let source = if mime_type == "application/pdf" {
+                                    json!({"type":"base64","media_type":mime_type,"data":data})
+                                } else if let Some(text) =
+                                    crate::service::transform::media::decode_base64_utf8(&data)
+                                {
+                                    json!({
+                                        "type":"text",
+                                        "media_type":"text/plain",
+                                        "data":text
+                                    })
+                                } else {
+                                    continue;
+                                };
+                                content_blocks.push(build_anthropic_document_block(
+                                    source,
+                                    filename.as_deref(),
+                                ));
                             }
-                            UnifiedContentPart::ExecutableCode { language, code } => {
-                                if apply_transform_policy(
-                                    TransformProtocol::Unified,
-                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
-                                    TransformValueKind::ExecutableCode,
-                                    "Downgrading executable code to fenced text during Anthropic request conversion.",
-                                ) {
-                                    content_blocks.push(json!({
-                                        "type": "text",
-                                        "text": render_anthropic_executable_code_text(&language, &code)
-                                    }));
-                                }
-                            }
+                            UnifiedContentPart::ExecutableCode { .. } => {}
                             UnifiedContentPart::ToolCall(call) => {
                                 content_blocks.push(json!({
                                     "type": "tool_use",
@@ -532,16 +564,15 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                                 }));
                             }
                             UnifiedContentPart::ToolResult(result) => {
-                                let (content, is_error) = match result.output {
-                                    UnifiedToolResultOutput::Error { error } => (error, Some(true)),
-                                    output => (unified_tool_result_output_to_value(&output), None),
-                                };
+                                let is_error =
+                                    matches!(&result.output, UnifiedToolResultOutput::Error { .. });
+                                let content = anthropic_tool_result_content(&result.output);
                                 let mut block = json!({
                                     "type": "tool_result",
                                     "tool_use_id": result.tool_call_id,
                                     "content": content
                                 });
-                                if is_error == Some(true) {
+                                if is_error {
                                     block["is_error"] = Value::Bool(true);
                                 }
                                 content_blocks.push(block);
@@ -586,6 +617,48 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
         });
         let tool_choice =
             anthropic_tool_choice(unified_req.tool_choice, unified_req.parallel_tool_calls);
+        let (thinking, reasoning_effort) = match unified_req.reasoning_effort {
+            None => (None, None),
+            Some(UnifiedReasoningEffort::None) => (
+                Some(AnthropicThinkingConfig {
+                    type_: AnthropicThinkingType::Disabled,
+                    budget_tokens: None,
+                    display: None,
+                }),
+                None,
+            ),
+            Some(effort) => {
+                let effort = match effort {
+                    UnifiedReasoningEffort::None => unreachable!("handled above"),
+                    UnifiedReasoningEffort::Minimal | UnifiedReasoningEffort::Low => {
+                        AnthropicEffort::Low
+                    }
+                    UnifiedReasoningEffort::Medium => AnthropicEffort::Medium,
+                    UnifiedReasoningEffort::High => AnthropicEffort::High,
+                    UnifiedReasoningEffort::Xhigh => AnthropicEffort::Xhigh,
+                };
+                (
+                    Some(AnthropicThinkingConfig {
+                        type_: AnthropicThinkingType::Adaptive,
+                        budget_tokens: None,
+                        display: None,
+                    }),
+                    Some(effort),
+                )
+            }
+        };
+        let output_format = match unified_req.structured_output {
+            Some(UnifiedStructuredOutput::JsonSchema { schema, .. }) => {
+                Some(AnthropicOutputFormat::JsonSchema { schema })
+            }
+            Some(UnifiedStructuredOutput::JsonObject) | None => None,
+        };
+        let output_config = (reasoning_effort.is_some() || output_format.is_some()).then_some(
+            AnthropicOutputConfig {
+                effort: reasoning_effort,
+                format: output_format,
+            },
+        );
 
         AnthropicRequestPayload {
             model: unified_req.model.unwrap_or_default(),
@@ -600,8 +673,8 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
             stream: Some(unified_req.stream),
             metadata: anthropic_extension.metadata,
             top_k: anthropic_extension.top_k,
-            thinking: None,
-            output_config: None,
+            thinking,
+            output_config,
         }
     }
 }

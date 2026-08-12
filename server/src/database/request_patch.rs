@@ -18,6 +18,7 @@ const HARD_FORBIDDEN_HEADERS: &[&str] = &[
     "api-key",
     "x-api-key",
     "x-goog-api-key",
+    "anthropic-version",
     "cookie",
     "host",
     "content-length",
@@ -1561,6 +1562,10 @@ mod tests {
         );
         assert!(validate_reserved_target(RequestPatchPlacement::Header, "host").is_err());
         assert!(validate_reserved_target(RequestPatchPlacement::Header, "x-request-id").is_err());
+        assert!(
+            validate_reserved_target(RequestPatchPlacement::Header, "anthropic-version").is_err()
+        );
+        assert!(validate_reserved_target(RequestPatchPlacement::Header, "anthropic-beta").is_ok());
     }
 
     #[test]
@@ -1606,6 +1611,7 @@ mod tests {
             (RequestPatchPlacement::Header, "api-key"),
             (RequestPatchPlacement::Header, "x-api-key"),
             (RequestPatchPlacement::Header, "x-goog-api-key"),
+            (RequestPatchPlacement::Header, "anthropic-version"),
             (RequestPatchPlacement::Header, "cookie"),
             (RequestPatchPlacement::Header, "openai-request-id"),
             (RequestPatchPlacement::Query, "key"),

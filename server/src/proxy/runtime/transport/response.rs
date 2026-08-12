@@ -174,6 +174,22 @@ mod tests {
         Bytes::from(serde_json::to_vec_pretty(&body).expect("fixture serializes"))
     }
 
+    fn anthropic_body(stop_reason: Value, content: Value) -> Bytes {
+        Bytes::from(
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": "msg_terminal",
+                "type": "message",
+                "role": "assistant",
+                "content": content,
+                "model": "anthropic-model",
+                "stop_reason": stop_reason,
+                "stop_sequence": null,
+                "usage": {"input_tokens": 11, "output_tokens": 7}
+            }))
+            .expect("Anthropic fixture serializes"),
+        )
+    }
+
     #[test]
     fn downstream_success_builder_inherits_only_normalized_content_type() {
         let mut headers = HeaderMap::new();
@@ -505,5 +521,275 @@ mod tests {
                 "{status}"
             );
         }
+    }
+
+    #[test]
+    fn anthropic_cross_wire_maps_every_closed_non_stream_terminal() {
+        for (source_reason, openai_reason, responses_status, responses_reason, gemini_reason) in [
+            ("end_turn", "stop", "completed", None, "STOP"),
+            ("stop_sequence", "stop", "completed", None, "STOP"),
+            ("tool_use", "tool_calls", "completed", None, "TOOL_USE"),
+            (
+                "max_tokens",
+                "length",
+                "incomplete",
+                Some("max_output_tokens"),
+                "MAX_TOKENS",
+            ),
+            (
+                "model_context_window_exceeded",
+                "length",
+                "incomplete",
+                Some("max_output_tokens"),
+                "MAX_TOKENS",
+            ),
+            (
+                "refusal",
+                "content_filter",
+                "incomplete",
+                Some("content_filter"),
+                "SAFETY",
+            ),
+        ] {
+            let content = if source_reason == "tool_use" {
+                serde_json::json!([{
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "lookup",
+                    "input": {"q": "safe"}
+                }])
+            } else {
+                serde_json::json!([{"type": "text", "text": "partial or complete"}])
+            };
+            let body = anthropic_body(serde_json::json!(source_reason), content);
+
+            for (protocol, pointer, expected) in [
+                (
+                    DownstreamProtocol::Openai,
+                    "/choices/0/finish_reason",
+                    openai_reason,
+                ),
+                (DownstreamProtocol::Responses, "/status", responses_status),
+                (
+                    DownstreamProtocol::Gemini,
+                    "/candidates/0/finishReason",
+                    gemini_reason,
+                ),
+            ] {
+                let (output, usage, normalization, outcome, _) =
+                    process_success_response_body(&body, protocol, UpstreamProtocol::Anthropic)
+                        .expect("known Anthropic terminal should transform");
+                assert_eq!(
+                    outcome,
+                    crate::service::transform::ResponseApplicationOutcome::Success
+                );
+                let output: Value = serde_json::from_slice(&output).expect("target JSON");
+                assert_eq!(
+                    output.pointer(pointer).and_then(Value::as_str),
+                    Some(expected),
+                    "{source_reason} -> {protocol:?}"
+                );
+                assert_eq!(usage.expect("usage").total_tokens, 18);
+                assert_eq!(
+                    normalization
+                        .expect("usage normalization")
+                        .normalized_total_tokens(),
+                    18
+                );
+                if protocol == DownstreamProtocol::Responses {
+                    assert_eq!(
+                        output
+                            .pointer("/incomplete_details/reason")
+                            .and_then(Value::as_str),
+                        responses_reason,
+                        "{source_reason} -> Responses incomplete reason"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_same_wire_preserves_known_and_degraded_terminal_bytes() {
+        let cases = [
+            (
+                "known",
+                anthropic_body(
+                    serde_json::json!("end_turn"),
+                    serde_json::json!([{"type":"text","text":"ok"}]),
+                ),
+                false,
+            ),
+            (
+                "pause",
+                anthropic_body(
+                    serde_json::json!("pause_turn"),
+                    serde_json::json!([{"type":"text","text":"paused"}]),
+                ),
+                true,
+            ),
+            (
+                "unknown-stop",
+                anthropic_body(
+                    serde_json::json!("private_future_stop"),
+                    serde_json::json!([{"type":"text","text":"future"}]),
+                ),
+                true,
+            ),
+            (
+                "null-stop",
+                anthropic_body(
+                    Value::Null,
+                    serde_json::json!([{"type":"text","text":"partial"}]),
+                ),
+                true,
+            ),
+            (
+                "unknown-block",
+                anthropic_body(
+                    serde_json::json!("end_turn"),
+                    serde_json::json!([{"type":"vendor_future_block","private":true}]),
+                ),
+                true,
+            ),
+            ("bad-json", Bytes::from_static(b"{private-not-json}"), true),
+        ];
+
+        for (case, body, degraded) in cases {
+            let (output, _, _, outcome, summary) = process_success_response_body(
+                &body,
+                DownstreamProtocol::Anthropic,
+                UpstreamProtocol::Anthropic,
+            )
+            .expect("same-wire Anthropic body must remain pass-through");
+
+            assert_eq!(output, body, "{case}: exact bytes");
+            assert_eq!(
+                outcome,
+                crate::service::transform::ResponseApplicationOutcome::Success,
+                "{case}"
+            );
+            assert_eq!(
+                summary.facts.iter().any(|fact| {
+                    fact.outcome == TransformOutcomeKind::ObservationDegraded
+                        && fact.action == TransformAction::PassThrough
+                        && fact.reason_code == TransformReasonCode::ObservationParseFailed
+                }),
+                degraded,
+                "{case}: observation degradation"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_cross_wire_rejects_pause_unknown_null_unknown_block_and_bad_json() {
+        let cases = [
+            (
+                "pause",
+                anthropic_body(
+                    serde_json::json!("pause_turn"),
+                    serde_json::json!([{"type":"text","text":"private"}]),
+                ),
+                TransformReasonCode::IllegalUpstreamTerminal,
+            ),
+            (
+                "unknown-stop",
+                anthropic_body(
+                    serde_json::json!("private_future_stop"),
+                    serde_json::json!([{"type":"text","text":"private"}]),
+                ),
+                TransformReasonCode::UnknownStopReason,
+            ),
+            (
+                "null-stop",
+                anthropic_body(
+                    Value::Null,
+                    serde_json::json!([{"type":"text","text":"private"}]),
+                ),
+                TransformReasonCode::IllegalUpstreamTerminal,
+            ),
+            (
+                "unknown-block",
+                anthropic_body(
+                    serde_json::json!("end_turn"),
+                    serde_json::json!([{"type":"vendor_future_block","private":true}]),
+                ),
+                TransformReasonCode::UnknownSemanticUnit,
+            ),
+            (
+                "bad-json",
+                Bytes::from_static(b"{private-not-json}"),
+                TransformReasonCode::SourceDecodeFailed,
+            ),
+        ];
+
+        for (case, body, expected_reason) in cases {
+            let failure = process_success_response_body(
+                &body,
+                DownstreamProtocol::Openai,
+                UpstreamProtocol::Anthropic,
+            )
+            .expect_err("cross-wire Anthropic terminal must fail closed");
+            assert_eq!(
+                failure.origin,
+                TransformFailureOrigin::UpstreamPayload,
+                "{case}"
+            );
+            assert_eq!(failure.reason_code, expected_reason, "{case}");
+            assert!(failure.summary.facts.iter().all(|fact| {
+                fact.safe_summary
+                    .as_ref()
+                    .is_none_or(|summary| summary.bytes > 0 && summary.event_count == 0)
+            }));
+        }
+    }
+
+    #[test]
+    fn anthropic_usage_overflow_degrades_same_wire_and_fails_cross_wire() {
+        let body = Bytes::from(
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": "msg_usage_overflow",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "private"}],
+                "model": "anthropic-model",
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": u32::MAX,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 1
+                }
+            }))
+            .expect("overflow fixture serializes"),
+        );
+
+        let (output, usage, normalization, outcome, summary) = process_success_response_body(
+            &body,
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Anthropic,
+        )
+        .expect("same-wire usage overflow must not rewrite or reject provider bytes");
+        assert_eq!(output, body);
+        assert!(usage.is_none());
+        assert!(normalization.is_none());
+        assert_eq!(
+            outcome,
+            crate::service::transform::ResponseApplicationOutcome::Success
+        );
+        assert!(summary.facts.iter().any(|fact| {
+            fact.outcome == TransformOutcomeKind::ObservationDegraded
+                && fact.action == TransformAction::PassThrough
+        }));
+
+        let failure = process_success_response_body(
+            &body,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Anthropic,
+        )
+        .expect_err("cross-wire usage overflow must fail closed");
+        assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+        assert_eq!(failure.semantic_unit, TransformSemanticUnit::Usage);
+        assert_eq!(failure.reason_code, TransformReasonCode::UsageOverflow);
     }
 }

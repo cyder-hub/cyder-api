@@ -579,7 +579,8 @@ pub fn map_anthropic_finish_reason_to_openai(reason: &str) -> String {
     match reason {
         "end_turn" | "stop_sequence" => "stop".to_string(),
         "tool_use" => "tool_calls".to_string(),
-        "max_tokens" => "length".to_string(),
+        "max_tokens" | "model_context_window_exceeded" => "length".to_string(),
+        "refusal" => "content_filter".to_string(),
         _ => "stop".to_string(),
     }
 }

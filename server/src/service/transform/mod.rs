@@ -26,10 +26,12 @@ pub use diagnostics::{
     TransformSuccess,
 };
 use diagnostics::{TransformDiagnosticFact as DiagnosticFact, record_captured_transform_fact};
-pub(crate) use facade::validate_final_generation_request;
 pub use facade::{
     ResponseApplicationOutcome, ResponseTransformValue, finalize_request_data,
     transform_request_data, transform_result, transform_result_with_cost,
+};
+pub(crate) use facade::{
+    validate_final_generation_request, validate_final_generation_request_for_downstream,
 };
 use policy::PolicyEngine;
 pub(crate) use stream::AnthropicActiveBlockKind;

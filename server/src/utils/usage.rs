@@ -9,6 +9,7 @@ pub struct UsageInfo {
     pub input_image_tokens: i32,
     pub output_image_tokens: i32,
     pub cached_tokens: i32,
+    pub cache_write_tokens: i32,
     pub reasoning_tokens: i32,
     pub total_tokens: i32,
 }
@@ -58,6 +59,7 @@ pub fn parse_usage_info(
                     input_image_tokens: 0,
                     output_image_tokens: 0,
                     cached_tokens: 0,
+                    cache_write_tokens: 0,
                     reasoning_tokens,
                     total_tokens,
                 })
@@ -98,6 +100,7 @@ pub fn parse_usage_info(
                     input_image_tokens: 0,
                     output_image_tokens: 0,
                     cached_tokens,
+                    cache_write_tokens: 0,
                     reasoning_tokens,
                     total_tokens,
                 })
@@ -111,24 +114,30 @@ pub fn parse_usage_info(
                 if usage.is_null() {
                     return None;
                 }
-                let prompt_tokens = usage
-                    .get("input_tokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let completion_tokens = usage
-                    .get("output_tokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let total_tokens = prompt_tokens + completion_tokens;
+                let token = |field: &str| {
+                    usage
+                        .get(field)
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                };
+                let input_tokens = token("input_tokens")?;
+                let output_tokens = token("output_tokens")?;
+                let cache_read_tokens = token("cache_read_input_tokens").unwrap_or(0);
+                let cache_write_tokens = token("cache_creation_input_tokens").unwrap_or(0);
+                let total_input_tokens = input_tokens
+                    .checked_add(cache_read_tokens)?
+                    .checked_add(cache_write_tokens)?;
+                let total_tokens = total_input_tokens.checked_add(output_tokens)?;
 
                 Some(UsageInfo {
-                    input_tokens: prompt_tokens,
-                    output_tokens: completion_tokens,
+                    input_tokens: i32::try_from(total_input_tokens).ok()?,
+                    output_tokens: i32::try_from(output_tokens).ok()?,
                     input_image_tokens: 0,
                     output_image_tokens: 0,
-                    cached_tokens: 0,
+                    cached_tokens: i32::try_from(cache_read_tokens).ok()?,
+                    cache_write_tokens: i32::try_from(cache_write_tokens).ok()?,
                     reasoning_tokens: 0,
-                    total_tokens,
+                    total_tokens: i32::try_from(total_tokens).ok()?,
                 })
             } else {
                 None
@@ -173,6 +182,7 @@ pub fn parse_usage_info(
                     input_image_tokens: 0,
                     output_image_tokens: 0,
                     cached_tokens,
+                    cache_write_tokens: 0,
                     reasoning_tokens,
                     total_tokens,
                 })
@@ -199,6 +209,7 @@ pub fn parse_usage_info(
                     input_image_tokens: 0,
                     output_image_tokens: 0,
                     cached_tokens: 0,
+                    cache_write_tokens: 0,
                     reasoning_tokens: 0,
                     total_tokens: p_tokens + c_tokens,
                 })
@@ -235,9 +246,50 @@ mod tests {
                 input_image_tokens: 0,
                 output_image_tokens: 0,
                 cached_tokens: 0,
+                cache_write_tokens: 0,
                 reasoning_tokens: 2,
                 total_tokens: 17,
             }
         );
+    }
+
+    #[test]
+    fn parses_anthropic_aggregate_cache_usage_with_checked_boundaries() {
+        let response = json!({
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 1,
+                    "ephemeral_1h_input_tokens": 1
+                }
+            }
+        });
+
+        let usage = parse_usage_info(&response, UpstreamProtocol::Anthropic).expect("usage");
+        assert_eq!(
+            usage,
+            UsageInfo {
+                input_tokens: 16,
+                output_tokens: 7,
+                input_image_tokens: 0,
+                output_image_tokens: 0,
+                cached_tokens: 3,
+                cache_write_tokens: 2,
+                reasoning_tokens: 0,
+                total_tokens: 23,
+            }
+        );
+
+        let overflow = json!({
+            "usage": {
+                "input_tokens": u32::MAX,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 1
+            }
+        });
+        assert!(parse_usage_info(&overflow, UpstreamProtocol::Anthropic).is_none());
     }
 }

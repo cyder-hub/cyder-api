@@ -121,6 +121,10 @@ impl From<ResponsesResponse> for UnifiedResponse {
 
 impl From<UnifiedResponse> for ResponsesResponse {
     fn from(unified_res: UnifiedResponse) -> Self {
+        let unified_finish_reason = unified_res
+            .choices
+            .first()
+            .and_then(|choice| choice.finish_reason.as_deref());
         let responses_metadata = unified_res
             .provider_response_metadata
             .clone()
@@ -140,8 +144,17 @@ impl From<UnifiedResponse> for ResponsesResponse {
             .as_ref()
             .map(|metadata| metadata.files.clone())
             .unwrap_or_default();
-        let (metadata, safety_identifier, prompt_cache_key, status, incomplete_details) =
+        let (metadata, safety_identifier, prompt_cache_key, mut status, mut incomplete_details) =
             unified_responses_metadata_to_payload(responses_metadata);
+        if unified_res
+            .provider_response_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.responses.as_ref())
+            .is_none()
+        {
+            (status, incomplete_details) =
+                response_status_from_finish_reason(unified_finish_reason);
+        }
         let mut output = Vec::new();
 
         for choice in unified_res.choices {

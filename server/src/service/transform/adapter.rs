@@ -6,7 +6,7 @@ use super::audit::{
     audit_target_request, audit_target_response, normalize_portable_tool_request,
     validate_downstream_request, validate_upstream_response,
 };
-use super::diagnostics::{transform_failure, transform_success};
+use super::diagnostics::{record_captured_transform_fact, transform_failure, transform_success};
 use super::providers::{anthropic, gemini, ollama, openai, responses};
 use super::stream::StreamTransformContext;
 use super::stream_audit::{
@@ -347,12 +347,33 @@ fn decode_ollama_response(data: Value) -> TransformResult<UnifiedResponse> {
 
 fn decode_anthropic_response(data: Value) -> TransformResult<UnifiedResponse> {
     validate_response_source(UpstreamProtocol::Anthropic, &data)?;
-    decode_json::<anthropic::AnthropicResponse, _>(
-        data,
-        TransformFailureOrigin::UpstreamPayload,
+    let safe_summary = TransformSafeSummary::from_json(&data);
+    let response = serde_json::from_value::<anthropic::AnthropicResponse>(data).map_err(|_| {
+        transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::ResponseDecode,
+            TransformSemanticUnit::ResponseEnvelope,
+            TransformReasonCode::SourceDecodeFailed,
+            Some(safe_summary.clone()),
+        )
+    })?;
+    if anthropic::anthropic_usage_to_unified(&response.usage).is_none() {
+        return Err(transform_failure(
+            TransformFailureOrigin::UpstreamPayload,
+            TransformPhase::ResponseDecode,
+            TransformSemanticUnit::Usage,
+            TransformReasonCode::UsageOverflow,
+            Some(safe_summary),
+        ));
+    }
+    Ok(transform_success(
+        response.into(),
         TransformPhase::ResponseDecode,
         TransformSemanticUnit::ResponseEnvelope,
-    )
+        TransformOutcomeKind::Lossless,
+        TransformAction::Send,
+        TransformReasonCode::LosslessConversion,
+    ))
 }
 
 fn encode_anthropic_response(unified: UnifiedResponse) -> TransformResult<Value> {
@@ -638,9 +659,10 @@ fn encode_stream_result(
 }
 
 fn encode_openai_stream_events(
-    stream_events: Vec<UnifiedStreamEvent>,
+    mut stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
 ) -> TransformResult<Vec<SseEvent>> {
+    drop_cross_wire_anthropic_signatures(&mut stream_events);
     audit_target_stream_events(DownstreamProtocol::Openai, &stream_events, context);
     encode_stream_result(
         openai::try_transform_unified_stream_events_to_openai_events(stream_events, context),
@@ -662,9 +684,10 @@ fn encode_openai_legacy_chunk(
 }
 
 fn encode_gemini_stream_events(
-    stream_events: Vec<UnifiedStreamEvent>,
+    mut stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
 ) -> TransformResult<Vec<SseEvent>> {
+    drop_cross_wire_anthropic_signatures(&mut stream_events);
     audit_target_stream_events(DownstreamProtocol::Gemini, &stream_events, context);
     encode_stream_result(
         gemini::try_transform_unified_stream_events_to_gemini_events(stream_events, context),
@@ -704,13 +727,34 @@ fn encode_anthropic_legacy_chunk(
 }
 
 fn encode_responses_stream_events(
-    stream_events: Vec<UnifiedStreamEvent>,
+    mut stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
 ) -> TransformResult<Vec<SseEvent>> {
+    drop_cross_wire_anthropic_signatures(&mut stream_events);
     audit_target_stream_events(DownstreamProtocol::Responses, &stream_events, context);
     encode_stream_result(
         responses::try_transform_unified_stream_events_to_responses_events(stream_events, context),
     )
+}
+
+fn drop_cross_wire_anthropic_signatures(events: &mut Vec<UnifiedStreamEvent>) {
+    events.retain(|event| {
+        let is_signature = matches!(event, UnifiedStreamEvent::BlobDelta { data, .. }
+            if data.get("provider").and_then(Value::as_str) == Some("anthropic")
+                && data.get("type").and_then(Value::as_str) == Some("signature_delta"));
+        if is_signature {
+            record_captured_transform_fact(super::TransformDiagnosticFact {
+                sequence: 0,
+                phase: TransformPhase::StreamEncode,
+                semantic_unit: TransformSemanticUnit::ReasoningContent,
+                outcome: TransformOutcomeKind::ControlledLossMinor,
+                action: TransformAction::Drop,
+                reason_code: TransformReasonCode::UnsupportedReasoning,
+                safe_summary: None,
+            });
+        }
+        !is_signature
+    });
 }
 
 fn encode_responses_legacy_chunk(

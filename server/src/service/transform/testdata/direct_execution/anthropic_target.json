@@ -1,0 +1,181 @@
+{
+  "profile_type": "ANTHROPIC",
+  "base_url": "/v1",
+  "upstream_headers": {
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+    "x-api-key": "provider-baseline-secret"
+  },
+  "upstream_path": "/v1/messages",
+  "requests": [
+    {
+      "downstream": "openai",
+      "non_stream": {
+        "model": "$UPSTREAM_MODEL",
+        "messages": [{"role": "user", "content": "baseline ping"}],
+        "max_tokens": 4096,
+        "stream": false
+      },
+      "stream": {
+        "model": "$UPSTREAM_MODEL",
+        "messages": [{"role": "user", "content": "baseline ping"}],
+        "max_tokens": 4096,
+        "stream": true
+      }
+    },
+    {
+      "downstream": "responses",
+      "non_stream": {
+        "model": "$UPSTREAM_MODEL",
+        "messages": [{"role": "user", "content": "baseline ping"}],
+        "max_tokens": 4096,
+        "stream": false
+      },
+      "stream": {
+        "model": "$UPSTREAM_MODEL",
+        "messages": [{"role": "user", "content": "baseline ping"}],
+        "max_tokens": 4096,
+        "stream": true
+      }
+    },
+    {
+      "downstream": "anthropic",
+      "non_stream": {
+        "model": "$UPSTREAM_MODEL",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "baseline ping"}]
+      },
+      "stream": {
+        "model": "$UPSTREAM_MODEL",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "baseline ping"}],
+        "stream": true
+      }
+    },
+    {
+      "downstream": "gemini",
+      "non_stream": {
+        "model": "$UPSTREAM_MODEL",
+        "messages": [{"role": "user", "content": "baseline ping"}],
+        "max_tokens": 4096,
+        "stream": false
+      },
+      "stream": {
+        "model": "$UPSTREAM_MODEL",
+        "messages": [{"role": "user", "content": "baseline ping"}],
+        "max_tokens": 4096,
+        "stream": true
+      }
+    }
+  ],
+  "non_stream_response": {
+    "id": "msg_baseline",
+    "type": "message",
+    "role": "assistant",
+    "content": [{"type": "text", "text": "baseline pong"}],
+    "model": "baseline-upstream-model",
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 11,
+      "output_tokens": 7,
+      "cache_read_input_tokens": 3,
+      "cache_creation_input_tokens": 2
+    }
+  },
+  "stream_events": [
+    {
+      "event": "message_start",
+      "data": {
+        "type": "message_start",
+        "message": {
+          "id": "msg_baseline",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "model": "baseline-upstream-model",
+          "stop_reason": null,
+          "stop_sequence": null,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 2
+          }
+        }
+      }
+    },
+    {
+      "event": "content_block_start",
+      "data": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""}
+      }
+    },
+    {
+      "event": "content_block_delta",
+      "data": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": "baseline "}
+      }
+    },
+    {
+      "event": "content_block_delta",
+      "data": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": "pong"}
+      }
+    },
+    {
+      "event": "content_block_stop",
+      "data": {"type": "content_block_stop", "index": 0}
+    },
+    {
+      "event": "message_delta",
+      "data": {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+        "usage": {"output_tokens": 7}
+      }
+    },
+    {"event": "message_stop", "data": {"type": "message_stop"}}
+  ],
+  "usage": {"input": 16, "output": 7, "total": 23},
+  "error": {
+    "http_429": {
+      "status": 429,
+      "response": {
+        "type": "error",
+        "error": {"type": "rate_limit_error", "message": "baseline throttled"}
+      }
+    },
+    "stream_error_event": {
+      "event": "error",
+      "data": {
+        "type": "error",
+        "error": {"type": "api_error", "message": "baseline stream failure"}
+      }
+    }
+  },
+  "cancellation": {
+    "first_upstream_event": {
+      "event": "message_start",
+      "data": {
+        "type": "message_start",
+        "message": {
+          "id": "msg_cancel",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "model": "baseline-upstream-model",
+          "stop_reason": null,
+          "stop_sequence": null,
+          "usage": {"input_tokens": 1, "output_tokens": 0}
+        }
+      }
+    }
+  }
+}

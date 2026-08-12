@@ -160,13 +160,8 @@ impl PolicyEngine {
         }
 
         match (source, target, kind) {
-            (_, target, TransformValueKind::ImageUrl)
-            | (_, target, TransformValueKind::FileUrl)
-            | (_, target, TransformValueKind::FileData)
-            | (_, target, TransformValueKind::ExecutableCode)
-                if target.is_anthropic() =>
-            {
-                PolicyDecision::deterministic_text_downgrade()
+            (_, target, TransformValueKind::ExecutableCode) if target.is_anthropic() => {
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
             (_, target, TransformValueKind::ImageUrl) if target.is_gemini() => {
                 PolicyDecision::deterministic_text_downgrade()
@@ -260,18 +255,29 @@ mod tests {
     }
 
     #[test]
-    fn only_registered_text_downgrades_may_send_major_loss() {
-        let allowed = PolicyEngine::evaluate(
+    fn anthropic_sends_portable_media_natively_and_rejects_executable_code() {
+        for kind in [
+            TransformValueKind::ImageUrl,
+            TransformValueKind::ImageData,
+            TransformValueKind::FileUrl,
+            TransformValueKind::FileData,
+        ] {
+            let allowed = PolicyEngine::evaluate(
+                TransformProtocol::Unified,
+                TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
+                kind,
+            );
+            assert_eq!(allowed.outcome, TransformOutcomeKind::Lossless, "{kind:?}");
+            assert_eq!(allowed.action, TransformAction::Send, "{kind:?}");
+        }
+
+        let executable = PolicyEngine::evaluate(
             TransformProtocol::Unified,
             TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
-            TransformValueKind::FileUrl,
+            TransformValueKind::ExecutableCode,
         );
-        assert_eq!(allowed.outcome, TransformOutcomeKind::ControlledLossMajor);
-        assert_eq!(allowed.action, TransformAction::Send);
-        assert_eq!(
-            allowed.reason_code,
-            TransformReasonCode::DeterministicTextDowngrade
-        );
+        assert_eq!(executable.outcome, TransformOutcomeKind::ExplicitReject);
+        assert_eq!(executable.action, TransformAction::Reject);
 
         let rejected = PolicyEngine::evaluate(
             TransformProtocol::Unified,

@@ -33,6 +33,109 @@ pub struct StreamTransformer {
     stream_summary: crate::service::transform::TransformDiagnosticCollector,
 }
 
+fn skip_json_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        index += 1;
+    }
+    index
+}
+
+fn parse_json_string_bounds(bytes: &[u8], start: usize) -> Option<(usize, usize, usize, bool)> {
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut index = start + 1;
+    let mut escaped = false;
+    while let Some(byte) = bytes.get(index) {
+        match byte {
+            b'\\' => {
+                escaped = true;
+                index = index.checked_add(2)?;
+            }
+            b'"' => return Some((start + 1, index, index + 1, escaped)),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_json_value(bytes: &[u8], start: usize) -> Option<usize> {
+    let start = skip_json_whitespace(bytes, start);
+    match *bytes.get(start)? {
+        b'"' => parse_json_string_bounds(bytes, start).map(|(_, _, end, _)| end),
+        b'{' | b'[' => {
+            let mut depth = 0_u32;
+            let mut index = start;
+            while let Some(byte) = bytes.get(index) {
+                match byte {
+                    b'"' => {
+                        index = parse_json_string_bounds(bytes, index)?.2;
+                        continue;
+                    }
+                    b'{' | b'[' => depth = depth.checked_add(1)?,
+                    b'}' | b']' => {
+                        depth = depth.checked_sub(1)?;
+                        if depth == 0 {
+                            return Some(index + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            None
+        }
+        _ => {
+            let mut index = start;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| !matches!(byte, b',' | b'}' | b' ' | b'\n' | b'\r' | b'\t'))
+            {
+                index += 1;
+            }
+            (index > start).then_some(index)
+        }
+    }
+}
+
+fn anthropic_sse_payload_type(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    let mut index = skip_json_whitespace(bytes, 0);
+    if bytes.get(index) != Some(&b'{') {
+        return None;
+    }
+    index += 1;
+    loop {
+        index = skip_json_whitespace(bytes, index);
+        if bytes.get(index) == Some(&b'}') {
+            return None;
+        }
+        let (key_start, key_end, key_next, key_escaped) = parse_json_string_bounds(bytes, index)?;
+        index = skip_json_whitespace(bytes, key_next);
+        if bytes.get(index) != Some(&b':') {
+            return None;
+        }
+        index = skip_json_whitespace(bytes, index + 1);
+        if !key_escaped && &bytes[key_start..key_end] == b"type" {
+            let (value_start, value_end, _, value_escaped) =
+                parse_json_string_bounds(bytes, index)?;
+            if value_escaped {
+                return None;
+            }
+            return std::str::from_utf8(&bytes[value_start..value_end]).ok();
+        }
+        index = skip_json_whitespace(bytes, skip_json_value(bytes, index)?);
+        match bytes.get(index) {
+            Some(b',') => index += 1,
+            Some(b'}') | None => return None,
+            _ => return None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceStreamTermination {
     Succeeded,
@@ -162,9 +265,8 @@ impl StreamTransformer {
     pub(in crate::service::transform) fn usage_merge_strategy(&self) -> UsageMergeStrategy {
         match self.upstream_protocol {
             UpstreamProtocol::Gemini | UpstreamProtocol::Responses => UsageMergeStrategy::Replace,
-            UpstreamProtocol::Openai | UpstreamProtocol::Anthropic | UpstreamProtocol::Ollama => {
-                UsageMergeStrategy::FinalOnly
-            }
+            UpstreamProtocol::Anthropic => UsageMergeStrategy::AnthropicFields,
+            UpstreamProtocol::Openai | UpstreamProtocol::Ollama => UsageMergeStrategy::FinalOnly,
         }
     }
 
@@ -272,9 +374,12 @@ impl StreamTransformer {
         if let Some(failure) = &self.terminal_failure {
             return Err(failure.clone());
         }
-        if self.upstream_protocol != UpstreamProtocol::Responses
-            || self.session.responses_source_terminal_seen()
-        {
+        let terminal_is_valid = match self.upstream_protocol {
+            UpstreamProtocol::Responses => self.session.responses_source_terminal_seen(),
+            UpstreamProtocol::Anthropic => self.session.anthropic_source_terminal_seen(),
+            UpstreamProtocol::Openai | UpstreamProtocol::Gemini | UpstreamProtocol::Ollama => true,
+        };
+        if terminal_is_valid {
             return Ok(transform_success(
                 (),
                 TransformPhase::StreamDecode,
@@ -295,16 +400,23 @@ impl StreamTransformer {
     }
 
     pub(crate) fn source_termination(&self) -> Option<SourceStreamTermination> {
-        if self.upstream_protocol != UpstreamProtocol::Responses
-            || !self.session.responses_source_terminal_seen()
-        {
-            return None;
+        match self.upstream_protocol {
+            UpstreamProtocol::Responses if self.session.responses_source_terminal_seen() => {
+                Some(if self.session.responses_source_failed() {
+                    SourceStreamTermination::Failed
+                } else {
+                    SourceStreamTermination::Succeeded
+                })
+            }
+            UpstreamProtocol::Anthropic if self.session.anthropic_source_terminal_seen() => {
+                Some(if self.session.anthropic_source_failed() {
+                    SourceStreamTermination::Failed
+                } else {
+                    SourceStreamTermination::Succeeded
+                })
+            }
+            _ => None,
         }
-        Some(if self.session.responses_source_failed() {
-            SourceStreamTermination::Failed
-        } else {
-            SourceStreamTermination::Succeeded
-        })
     }
 
     fn record_post_transform_diagnostic(&mut self, fact: TransformDiagnosticFact) {
@@ -555,6 +667,22 @@ impl StreamTransformer {
             ));
         }
 
+        if self.upstream_protocol == UpstreamProtocol::Anthropic
+            && let Some(event_name) = event.event.as_deref()
+            && let Some(payload_type) = anthropic_sse_payload_type(&event.data)
+            && event_name != payload_type
+        {
+            return Err(transform_failure(
+                TransformFailureOrigin::UpstreamPayload,
+                TransformPhase::StreamDecode,
+                TransformSemanticUnit::Lifecycle,
+                TransformReasonCode::StreamEventTypeMismatch,
+                Some(crate::service::transform::TransformSafeSummary::from_bytes(
+                    event.data.as_bytes(),
+                )),
+            ));
+        }
+
         // Handle OpenAI-compatible stream termination before same-wire observation,
         // because `[DONE]` is a valid marker rather than a JSON source frame.
         if self.upstream_protocol == UpstreamProtocol::Openai && event.data == "[DONE]" {
@@ -616,6 +744,11 @@ impl StreamTransformer {
                 Err(failure) => {
                     self.session
                         .restore_semantic_snapshot(observation_session_before);
+                    if self.upstream_protocol == UpstreamProtocol::Anthropic
+                        && failure.reason_code == TransformReasonCode::InvalidProtocolShape
+                    {
+                        return Err(failure);
+                    }
                     if self.upstream_protocol == UpstreamProtocol::Responses
                         && self.observe_degraded_responses_core(&event.data).is_err()
                     {

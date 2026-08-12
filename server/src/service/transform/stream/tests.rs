@@ -48,6 +48,54 @@ fn responses_event(event_type: &str, sequence_number: Option<u64>, mut fields: V
     sse(fields.to_string())
 }
 
+fn anthropic_event(event_type: &str, mut fields: Value) -> SseEvent {
+    fields["type"] = json!(event_type);
+    SseEvent {
+        event: Some(event_type.to_string()),
+        data: fields.to_string(),
+        ..Default::default()
+    }
+}
+
+fn anthropic_message_start() -> SseEvent {
+    anthropic_event(
+        "message_start",
+        json!({
+            "message": {
+                "id": "msg_state_machine",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-test",
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {"input_tokens": 3, "output_tokens": 0}
+            }
+        }),
+    )
+}
+
+fn assert_anthropic_lifecycle_failure(events: Vec<SseEvent>) {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic);
+    let mut events = events;
+    let failure_event = events.pop().expect("failure fixture event");
+    for event in events {
+        transformer
+            .transform_event(event)
+            .expect("fixture prefix must be a legal Anthropic stream");
+    }
+    let failure = transformer
+        .transform_event(failure_event)
+        .expect_err("illegal Anthropic lifecycle must fail");
+    assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+    assert_eq!(failure.phase, TransformPhase::StreamDecode);
+    assert_eq!(
+        failure.reason_code,
+        TransformReasonCode::InvalidProtocolShape
+    );
+}
+
 #[test]
 fn meaningful_output_observation_is_shared_by_four_source_protocols_and_targets() {
     let openai_text = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}";
@@ -371,7 +419,7 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
 
     let mut usage_transformer =
         StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
-    usage_transformer
+    let start = usage_transformer
         .transform_event(sse(json!({
             "type": "message_start",
             "message": {
@@ -379,11 +427,25 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
                 "type": "message",
                 "role": "assistant",
                 "content": [],
-                "model": "claude-test"
+                "model": "claude-test",
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 3,
+                    "cache_creation_input_tokens": 2
+                }
             }
         })
         .to_string()))
-        .expect("Anthropic usage lifecycle must start with a message");
+        .expect("Anthropic usage lifecycle must start with a message")
+        .value;
+    assert_eq!(start.len(), 1);
+    assert!(
+        serde_json::from_str::<Value>(&start[0].data)
+            .expect("OpenAI start chunk")
+            .get("usage")
+            .is_none()
+    );
     let transformed = usage_transformer
         .transform_event(sse(json!({
             "type": "message_delta",
@@ -391,8 +453,7 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
                 "stop_reason": "end_turn",
                 "stop_sequence": null,
                 "usage": {
-                    "input_tokens": 7,
-                    "output_tokens": 11
+                    "output_tokens": 7
                 }
             }
         })
@@ -401,6 +462,17 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
         .value;
 
     assert_eq!(transformed.len(), 2);
+    let usage_frames = transformed
+        .iter()
+        .filter_map(|event| {
+            let value = serde_json::from_str::<Value>(&event.data).ok()?;
+            value.get("usage").cloned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage_frames.len(), 1);
+    assert_eq!(usage_frames[0]["prompt_tokens"], 16);
+    assert_eq!(usage_frames[0]["completion_tokens"], 7);
+    assert_eq!(usage_frames[0]["total_tokens"], 23);
     assert_eq!(
         usage_transformer.session.finish_reason_cache(),
         Some("stop")
@@ -408,12 +480,20 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
     assert_eq!(
         usage_transformer.cached_usage_info(),
         Some(UsageInfo {
-            input_tokens: 7,
-            output_tokens: 11,
-            total_tokens: 18,
+            input_tokens: 16,
+            output_tokens: 7,
+            cached_tokens: 3,
+            cache_write_tokens: 2,
+            total_tokens: 23,
             ..Default::default()
         })
     );
+    let normalization = usage_transformer
+        .cached_usage_normalization()
+        .expect("Anthropic fieldwise usage normalization");
+    assert_eq!(normalization.input_text_tokens, 11);
+    assert_eq!(normalization.cache_read_tokens, 3);
+    assert_eq!(normalization.cache_write_tokens, 2);
     assert_eq!(
         usage_transformer.parse_usage_info(),
         usage_transformer.cached_usage_info()
@@ -468,6 +548,446 @@ fn test_anthropic_stream_event_bridge_matches_legacy_text_delta_output() {
     assert_eq!(transformed.len(), 1);
     let bridged_openai: Value = serde_json::from_str(&transformed[0].data).unwrap();
     assert_eq!(bridged_openai["choices"], legacy_openai["choices"]);
+}
+
+#[test]
+fn anthropic_core_state_machine_accepts_text_thinking_tool_ping_and_one_terminal() {
+    let events = vec![
+        anthropic_message_start(),
+        anthropic_event("ping", json!({})),
+        anthropic_event(
+            "content_block_start",
+            json!({"index": 0, "content_block": {"type": "text", "text": ""}}),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 0, "delta": {"type": "text_delta", "text": "hello"}}),
+        ),
+        anthropic_event("content_block_stop", json!({"index": 0})),
+        anthropic_event(
+            "content_block_start",
+            json!({
+                "index": 1,
+                "content_block": {"type": "thinking", "thinking": "", "signature": null}
+            }),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 1, "delta": {"type": "thinking_delta", "thinking": "consider"}}),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 1, "delta": {"type": "signature_delta", "signature": "sig_1"}}),
+        ),
+        anthropic_event("content_block_stop", json!({"index": 1})),
+        anthropic_event(
+            "content_block_start",
+            json!({
+                "index": 2,
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}
+            }),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 2, "delta": {"type": "input_json_delta", "partial_json": "{\"city\":"}}),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 2, "delta": {"type": "input_json_delta", "partial_json": "\"Paris\"}"}}),
+        ),
+        anthropic_event("content_block_stop", json!({"index": 2})),
+        anthropic_event(
+            "message_delta",
+            json!({
+                "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+                "usage": {"output_tokens": 7}
+            }),
+        ),
+        anthropic_event("message_stop", json!({})),
+    ];
+
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic);
+    for event in events {
+        let expected = event.clone();
+        let output = transformer
+            .transform_event(event)
+            .expect("legal Anthropic sequence");
+        assert_eq!(output.value.events, vec![expected]);
+    }
+
+    assert_eq!(
+        transformer.source_termination(),
+        Some(SourceStreamTermination::Succeeded)
+    );
+    transformer
+        .validate_source_termination()
+        .expect("message_stop completes the source stream");
+}
+
+#[test]
+fn anthropic_thinking_stream_preserves_signature_only_same_wire() {
+    const THINKING: &str = "private-stream-reasoning-marker";
+    const SIGNATURE: &str = "private-stream-signature-marker";
+    let events = vec![
+        anthropic_message_start(),
+        anthropic_event(
+            "content_block_start",
+            json!({
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": null}
+            }),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 0, "delta": {"type": "thinking_delta", "thinking": THINKING}}),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 0, "delta": {"type": "signature_delta", "signature": SIGNATURE}}),
+        ),
+        anthropic_event("content_block_stop", json!({"index": 0})),
+        anthropic_event(
+            "message_delta",
+            json!({
+                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": {"output_tokens": 7}
+            }),
+        ),
+        anthropic_event("message_stop", json!({})),
+    ];
+
+    let mut same_wire =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic);
+    let mut same_wire_output = String::new();
+    for event in events.clone() {
+        for output in same_wire
+            .transform_event(event)
+            .expect("same-wire thinking stream")
+            .value
+            .events
+        {
+            same_wire_output.push_str(&output.data);
+        }
+    }
+    assert!(same_wire_output.contains(THINKING));
+    assert!(same_wire_output.contains(SIGNATURE));
+    same_wire
+        .validate_source_termination()
+        .expect("same-wire thinking stream terminal");
+
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Gemini,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Anthropic, downstream);
+        let mut output_body = String::new();
+        let mut saw_signature_loss = false;
+        for event in events.clone() {
+            let output = transformer
+                .transform_event(event)
+                .expect("portable thinking stream must transform");
+            output
+                .summary
+                .facts
+                .iter()
+                .filter(|fact| {
+                    fact.semantic_unit == TransformSemanticUnit::ReasoningContent
+                        && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                        && fact.action == TransformAction::Drop
+                        && fact.reason_code == TransformReasonCode::UnsupportedReasoning
+                })
+                .for_each(|fact| {
+                    assert!(fact.safe_summary.is_none());
+                    saw_signature_loss = true;
+                });
+            for event in output.value.events {
+                output_body.push_str(&event.data);
+            }
+        }
+        assert!(!output_body.contains(SIGNATURE), "{downstream:?}");
+        if downstream == DownstreamProtocol::Openai {
+            assert!(!output_body.contains(THINKING));
+        } else {
+            assert!(output_body.contains(THINKING), "{downstream:?}");
+        }
+        assert!(saw_signature_loss, "{downstream:?}");
+        transformer
+            .validate_source_termination()
+            .expect("portable thinking stream terminal");
+    }
+}
+
+#[test]
+fn anthropic_redacted_and_unknown_thinking_stream_blocks_are_raw_only_same_wire() {
+    const PRIVATE_MARKER: &str = "opaque-stream-reasoning-marker";
+    for block in [
+        json!({"type":"redacted_thinking","data":PRIVATE_MARKER}),
+        json!({"type":"future_reasoning","opaque":PRIVATE_MARKER}),
+    ] {
+        let event = anthropic_event(
+            "content_block_start",
+            json!({"index":0,"content_block":block}),
+        );
+        let mut same_wire =
+            StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic);
+        same_wire
+            .transform_event(anthropic_message_start())
+            .expect("same-wire opaque thinking start");
+        let output = same_wire
+            .transform_event(event.clone())
+            .expect("same-wire opaque thinking block remains raw");
+        assert_eq!(output.value.events, vec![event.clone()]);
+        assert_eq!(
+            output.value.disposition,
+            StreamFrameDisposition::ObservationDegraded
+        );
+        assert!(output.value.events[0].data.contains(PRIVATE_MARKER));
+
+        for downstream in [
+            DownstreamProtocol::Openai,
+            DownstreamProtocol::Responses,
+            DownstreamProtocol::Gemini,
+        ] {
+            let mut transformer = StreamTransformer::new(UpstreamProtocol::Anthropic, downstream);
+            transformer
+                .transform_event(anthropic_message_start())
+                .expect("cross-wire message start");
+            let failure = transformer
+                .transform_event(event.clone())
+                .expect_err("opaque thinking block must fail closed cross-wire");
+            assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+            assert_eq!(
+                failure.reason_code,
+                TransformReasonCode::UnknownSemanticUnit
+            );
+            assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+        }
+    }
+}
+
+#[test]
+fn anthropic_core_state_machine_rejects_illegal_order_index_and_block_completion() {
+    let text_start = || {
+        anthropic_event(
+            "content_block_start",
+            json!({"index": 0, "content_block": {"type": "text", "text": ""}}),
+        )
+    };
+    let message_delta = || {
+        anthropic_event(
+            "message_delta",
+            json!({
+                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": {"output_tokens": 1}
+            }),
+        )
+    };
+
+    let fixtures = vec![
+        vec![text_start()],
+        vec![anthropic_message_start(), anthropic_message_start()],
+        vec![
+            anthropic_message_start(),
+            anthropic_event(
+                "content_block_start",
+                json!({"index": 1, "content_block": {"type": "text", "text": ""}}),
+            ),
+        ],
+        vec![anthropic_message_start(), text_start(), message_delta()],
+        vec![
+            anthropic_message_start(),
+            anthropic_event("message_stop", json!({})),
+        ],
+        vec![anthropic_event("ping", json!({}))],
+        vec![anthropic_message_start(), message_delta(), message_delta()],
+        vec![
+            anthropic_message_start(),
+            message_delta(),
+            anthropic_event("message_stop", json!({})),
+            anthropic_event("message_stop", json!({})),
+        ],
+        vec![
+            anthropic_message_start(),
+            message_delta(),
+            anthropic_event("message_stop", json!({})),
+            anthropic_event("ping", json!({})),
+        ],
+    ];
+
+    for fixture in fixtures {
+        assert_anthropic_lifecycle_failure(fixture);
+    }
+}
+
+#[test]
+fn anthropic_core_state_machine_validates_tool_json_and_thinking_signature() {
+    assert_anthropic_lifecycle_failure(vec![
+        anthropic_message_start(),
+        anthropic_event(
+            "content_block_start",
+            json!({
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_bad", "name": "lookup", "input": {}}
+            }),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 0, "delta": {"type": "input_json_delta", "partial_json": "{"}}),
+        ),
+        anthropic_event("content_block_stop", json!({"index": 0})),
+    ]);
+
+    assert_anthropic_lifecycle_failure(vec![
+        anthropic_message_start(),
+        anthropic_event(
+            "content_block_start",
+            json!({
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": null}
+            }),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 0, "delta": {"type": "thinking_delta", "thinking": "draft"}}),
+        ),
+        anthropic_event("content_block_stop", json!({"index": 0})),
+    ]);
+
+    assert_anthropic_lifecycle_failure(vec![
+        anthropic_message_start(),
+        anthropic_event(
+            "content_block_start",
+            json!({
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": null}
+            }),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 0, "delta": {"type": "signature_delta", "signature": "sig_1"}}),
+        ),
+        anthropic_event(
+            "content_block_delta",
+            json!({"index": 0, "delta": {"type": "signature_delta", "signature": "sig_2"}}),
+        ),
+    ]);
+}
+
+#[test]
+fn anthropic_sse_event_name_must_match_json_type_on_same_and_cross_wire() {
+    let mismatched = SseEvent {
+        event: Some("content_block_stop".to_string()),
+        data: json!({"type": "message_stop"}).to_string(),
+        ..Default::default()
+    };
+    for downstream in [
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Gemini,
+    ] {
+        let failure = StreamTransformer::new(UpstreamProtocol::Anthropic, downstream)
+            .transform_event(mismatched.clone())
+            .expect_err("mismatched Anthropic SSE name and payload type must fail");
+        assert_eq!(
+            failure.reason_code,
+            TransformReasonCode::StreamEventTypeMismatch
+        );
+        assert!(
+            failure
+                .summary
+                .facts
+                .iter()
+                .all(|fact| fact.safe_summary.is_some())
+        );
+    }
+}
+
+#[test]
+fn anthropic_unknown_and_bad_json_are_raw_only_on_same_wire() {
+    let unknown = anthropic_event("vendor_future_event", json!({"opaque": "preserve"}));
+    let bad_json = SseEvent {
+        event: Some("message_start".to_string()),
+        data: "{not-json}".to_string(),
+        ..Default::default()
+    };
+
+    for event in [unknown.clone(), bad_json.clone()] {
+        let output =
+            StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic)
+                .transform_event(event.clone())
+                .expect("same-wire future or undecodable frame must retain raw compatibility");
+        assert_eq!(output.value.events, vec![event]);
+        assert_eq!(
+            output.value.disposition,
+            StreamFrameDisposition::ObservationDegraded
+        );
+    }
+
+    let unknown_failure =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai)
+            .transform_event(unknown)
+            .expect_err("cross-wire unknown Anthropic event must fail");
+    assert_eq!(
+        unknown_failure.reason_code,
+        TransformReasonCode::UnknownSemanticUnit
+    );
+
+    let bad_json_failure =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai)
+            .transform_event(bad_json)
+            .expect_err("cross-wire undecodable Anthropic event must fail");
+    assert_eq!(
+        bad_json_failure.reason_code,
+        TransformReasonCode::SourceDecodeFailed
+    );
+}
+
+#[test]
+fn anthropic_error_is_a_unique_failed_terminal_and_eof_is_not_success() {
+    let mut partial =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic);
+    partial
+        .transform_event(anthropic_message_start())
+        .expect("message start");
+    let eof_failure = partial
+        .validate_source_termination()
+        .expect_err("Anthropic EOF without message_stop must fail");
+    assert_eq!(
+        eof_failure.reason_code,
+        TransformReasonCode::IllegalUpstreamTerminal
+    );
+
+    let mut errored =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic);
+    errored
+        .transform_event(anthropic_message_start())
+        .expect("message start");
+    let error = anthropic_event(
+        "error",
+        json!({"error": {"type": "overloaded_error", "message": "safe fixture"}}),
+    );
+    assert_eq!(
+        errored
+            .transform_event(error.clone())
+            .expect("same-wire error must be emitted unchanged")
+            .value
+            .events,
+        vec![error]
+    );
+    assert_eq!(
+        errored.source_termination(),
+        Some(SourceStreamTermination::Failed)
+    );
+    let post_error = errored
+        .transform_event(anthropic_event("ping", json!({})))
+        .expect_err("events after an Anthropic error terminal must fail");
+    assert_eq!(
+        post_error.reason_code,
+        TransformReasonCode::InvalidProtocolShape
+    );
 }
 
 #[test]

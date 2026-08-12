@@ -12,6 +12,20 @@ use crate::service::transform::{
 };
 use crate::utils::sse::SseEvent;
 
+fn anthropic_usage_from_info(usage: &crate::utils::usage::UsageInfo) -> AnthropicUsage {
+    let total_input = u32::try_from(usage.input_tokens).unwrap_or_default();
+    let cache_read_input_tokens = u32::try_from(usage.cached_tokens).unwrap_or_default();
+    let cache_creation_input_tokens = u32::try_from(usage.cache_write_tokens).unwrap_or_default();
+    AnthropicUsage {
+        input_tokens: total_input
+            .saturating_sub(cache_read_input_tokens)
+            .saturating_sub(cache_creation_input_tokens),
+        output_tokens: u32::try_from(usage.output_tokens).unwrap_or_default(),
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+    }
+}
+
 fn build_anthropic_stream_diagnostic(
     context: &mut StreamTransformContext<'_>,
     kind: TransformValueKind,
@@ -112,10 +126,7 @@ pub(crate) fn try_transform_unified_stream_events_to_anthropic_events(
                             .unwrap_or_else(|| context.get_or_default_stream_model()),
                     });
                     if let Some(usage) = context.usage_cache() {
-                        message["usage"] = json!(AnthropicUsage {
-                            input_tokens: usage.input_tokens as u32,
-                            output_tokens: usage.output_tokens as u32,
-                        });
+                        message["usage"] = json!(anthropic_usage_from_info(usage));
                     }
                     let event = json!({
                         "type": "message_start",
@@ -345,10 +356,7 @@ pub(crate) fn try_transform_unified_stream_events_to_anthropic_events(
                         }
                     });
                     if let Some(usage) = context.usage_cache() {
-                        event["usage"] = json!(AnthropicUsage {
-                            input_tokens: usage.input_tokens as u32,
-                            output_tokens: usage.output_tokens as u32,
-                        });
+                        event["usage"] = json!(anthropic_usage_from_info(usage));
                     }
                     events.push(SseEvent {
                         event: Some("message_delta".to_string()),

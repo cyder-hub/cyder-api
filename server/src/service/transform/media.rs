@@ -58,6 +58,16 @@ pub(crate) fn mime_type_from_filename(filename: &str) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn mime_type_from_url(value: &str) -> Option<&'static str> {
+    let url = reqwest::Url::parse(value).ok()?;
+    let filename = url.path_segments()?.next_back()?;
+    mime_type_from_filename(filename)
+}
+
+pub(crate) fn decode_base64_utf8(data: &str) -> Option<String> {
+    String::from_utf8(STANDARD.decode(data).ok()?).ok()
+}
+
 pub(crate) fn default_filename_for_mime(mime_type: &str) -> Option<&'static str> {
     match mime_type {
         "application/pdf" => Some("document.pdf"),

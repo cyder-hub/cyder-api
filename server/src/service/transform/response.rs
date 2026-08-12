@@ -2,8 +2,8 @@ use serde_json::Value;
 
 use super::adapter::{downstream_adapter_for, upstream_adapter_for};
 use super::diagnostics::{
-    capture_transform_diagnostics, merge_transform_summaries, transform_failure, transform_success,
-    upstream_usage_missing_summary,
+    capture_transform_diagnostics, merge_transform_summaries, record_captured_transform_fact,
+    transform_failure, transform_success, upstream_usage_missing_summary,
 };
 use super::{
     TransformAction, TransformDiagnosticCollector, TransformDiagnosticFact, TransformFailure,
@@ -69,12 +69,14 @@ pub(in crate::service::transform) fn transform_result_with_cost(
         let observation = (source_adapter.response.decode)(data.clone());
         let (usage_info, usage_normalization, observation_summary) = match observation {
             Ok(decoded) => {
-                let observed_usage = if upstream_protocol == UpstreamProtocol::Responses {
-                    observe_responses_usage(&data)
-                } else {
-                    decoded.value.usage
+                let observed_usage = match upstream_protocol {
+                    UpstreamProtocol::Responses => observe_responses_usage(&data),
+                    UpstreamProtocol::Anthropic => observe_anthropic_usage(&data).ok().flatten(),
+                    _ => decoded.value.usage,
                 };
-                let usage_info = observed_usage.clone().map(Into::into);
+                let usage_info = observed_usage
+                    .as_ref()
+                    .and_then(|usage| UsageInfo::try_from(usage).ok());
                 let usage_normalization = observed_usage.as_ref().map(Into::into);
                 let observation_summary = if observed_usage.is_some() {
                     transform_success(
@@ -106,10 +108,14 @@ pub(in crate::service::transform) fn transform_result_with_cost(
                         .first()
                         .and_then(|fact| fact.safe_summary.clone()),
                 });
-                let observed_usage = (upstream_protocol == UpstreamProtocol::Responses)
-                    .then(|| observe_responses_usage(&data))
-                    .flatten();
-                let usage_info = observed_usage.clone().map(Into::into);
+                let observed_usage = match upstream_protocol {
+                    UpstreamProtocol::Responses => observe_responses_usage(&data),
+                    UpstreamProtocol::Anthropic => observe_anthropic_usage(&data).ok().flatten(),
+                    _ => None,
+                };
+                let usage_info = observed_usage
+                    .as_ref()
+                    .and_then(|usage| UsageInfo::try_from(usage).ok());
                 let usage_normalization = observed_usage.as_ref().map(Into::into);
                 let summary = merge_transform_summaries([
                     collector.into_summary(),
@@ -197,10 +203,50 @@ fn transform_result_with_cost_inner(
     downstream_protocol: DownstreamProtocol,
     application_outcome: ResponseApplicationOutcome,
 ) -> TransformResult<ResponseTransformValue> {
+    if upstream_protocol == UpstreamProtocol::Anthropic
+        && downstream_protocol != DownstreamProtocol::Anthropic
+    {
+        for _ in data
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|block| {
+                block.get("type").and_then(Value::as_str) == Some("thinking")
+                    && block
+                        .get("signature")
+                        .is_some_and(|signature| !signature.is_null())
+            })
+        {
+            record_captured_transform_fact(TransformDiagnosticFact {
+                sequence: 0,
+                phase: TransformPhase::ResponseDecode,
+                semantic_unit: TransformSemanticUnit::ReasoningContent,
+                outcome: TransformOutcomeKind::ControlledLossMinor,
+                action: TransformAction::Drop,
+                reason_code: TransformReasonCode::UnsupportedReasoning,
+                safe_summary: None,
+            });
+        }
+    }
     let source_adapter = upstream_adapter_for(upstream_protocol);
     let target_adapter = downstream_adapter_for(downstream_protocol);
     let decoded = (source_adapter.response.decode)(data)?;
-    let usage_info = decoded.value.usage.clone().map(Into::into);
+    let usage_info = decoded
+        .value
+        .usage
+        .as_ref()
+        .map(UsageInfo::try_from)
+        .transpose()
+        .map_err(|_| {
+            transform_failure(
+                TransformFailureOrigin::UpstreamPayload,
+                TransformPhase::ResponseObserve,
+                TransformSemanticUnit::Usage,
+                TransformReasonCode::UsageOverflow,
+                None,
+            )
+        })?;
     let usage_normalization = decoded.value.usage.as_ref().map(Into::into);
     let usage_summary = if decoded.value.usage.is_some() {
         transform_success(
@@ -239,10 +285,6 @@ fn observe_application_outcome(
     upstream_protocol: UpstreamProtocol,
     downstream_protocol: DownstreamProtocol,
 ) -> Result<ResponseApplicationOutcome, TransformFailure> {
-    if upstream_protocol != UpstreamProtocol::Responses {
-        return Ok(ResponseApplicationOutcome::Success);
-    }
-
     let fail = |reason_code| {
         transform_failure(
             TransformFailureOrigin::UpstreamPayload,
@@ -252,6 +294,29 @@ fn observe_application_outcome(
             Some(TransformSafeSummary::from_json(data)),
         )
     };
+
+    if upstream_protocol == UpstreamProtocol::Anthropic {
+        if downstream_protocol == DownstreamProtocol::Anthropic {
+            return Ok(ResponseApplicationOutcome::Success);
+        }
+        return match data.get("stop_reason").and_then(Value::as_str) {
+            Some(
+                "end_turn"
+                | "stop_sequence"
+                | "tool_use"
+                | "max_tokens"
+                | "model_context_window_exceeded"
+                | "refusal",
+            ) => Ok(ResponseApplicationOutcome::Success),
+            Some("pause_turn") | None => Err(fail(TransformReasonCode::IllegalUpstreamTerminal)),
+            Some(_) => Err(fail(TransformReasonCode::UnknownStopReason)),
+        };
+    }
+
+    if upstream_protocol != UpstreamProtocol::Responses {
+        return Ok(ResponseApplicationOutcome::Success);
+    }
+
     let status = data
         .get("status")
         .and_then(Value::as_str)
@@ -320,4 +385,20 @@ pub(in crate::service::transform) fn observe_responses_usage(
             .and_then(|value| u32::try_from(value).ok()),
         ..Default::default()
     })
+}
+
+pub(in crate::service::transform) fn observe_anthropic_usage(
+    data: &Value,
+) -> Result<Option<super::unified::UnifiedUsage>, TransformReasonCode> {
+    let Some(usage) = data.get("usage") else {
+        return Ok(None);
+    };
+    if usage.is_null() {
+        return Ok(None);
+    }
+    let usage: super::providers::anthropic::AnthropicUsage = serde_json::from_value(usage.clone())
+        .map_err(|_| TransformReasonCode::SourceDecodeFailed)?;
+    super::providers::anthropic::anthropic_usage_to_unified(&usage)
+        .map(Some)
+        .ok_or(TransformReasonCode::UsageOverflow)
 }

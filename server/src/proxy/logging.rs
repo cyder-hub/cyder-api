@@ -845,7 +845,8 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         cache_write_tokens: context
             .usage_normalization
             .as_ref()
-            .and_then(|usage| i32::try_from(usage.cache_write_tokens).ok()),
+            .and_then(|usage| i32::try_from(usage.cache_write_tokens).ok())
+            .or_else(|| context.usage.as_ref().map(|usage| usage.cache_write_tokens)),
         reasoning_tokens: context
             .usage_normalization
             .as_ref()

@@ -30,15 +30,21 @@ use crate::{
             CacheModel, CacheProvider, CacheUpstreamSource, RuntimeResolvedRequestPatch,
         },
         provider_credential::{ProviderCredential, apply_provider_request_auth_header},
-        provider_http::join_base_url_and_operation_path,
+        provider_http::{
+            ANTHROPIC_BETA_HEADER, ANTHROPIC_MESSAGES_OPERATION, ANTHROPIC_VERSION_HEADER,
+            enforce_anthropic_version_header, join_base_url_and_operation_path,
+        },
         transform::{
             TransformFailure, TransformFailureOrigin, TransformPhase, TransformReasonCode,
             TransformSemanticUnit, TransformSuccess, finalize_request_data, transform_request_data,
-            validate_final_generation_request,
+            validate_final_generation_request_for_downstream,
         },
         upstream_response::apply_upstream_accept_encoding,
     },
 };
+
+#[cfg(test)]
+use crate::service::provider_http::ANTHROPIC_VERSION;
 use cyder_tools::log::debug;
 
 pub(in crate::proxy) struct MaterializedRequest {
@@ -75,19 +81,11 @@ fn select_generation_prepare_kind(
             path: "chat/completions",
         }),
         UpstreamProtocol::Responses => Ok(GenerationPrepareKind::Llm { path: "responses" }),
+        UpstreamProtocol::Anthropic => Ok(GenerationPrepareKind::Llm {
+            path: ANTHROPIC_MESSAGES_OPERATION,
+        }),
         UpstreamProtocol::Ollama => Ok(GenerationPrepareKind::Llm { path: "api/chat" }),
         UpstreamProtocol::Gemini => Ok(GenerationPrepareKind::Gemini { is_stream }),
-        _ => {
-            let message =
-                format!("unsupported generation upstream protocol: {upstream_protocol:?}");
-            Err(ProxyError::gateway(
-                ProxyErrorCode::UnsupportedCapabilityError,
-                ExecutionStage::Capability,
-                ResponseVisibility::NotVisible,
-                Some(message.clone()),
-                message,
-            ))
-        }
     }
 }
 
@@ -141,7 +139,11 @@ fn build_gemini_url(
     Ok(url)
 }
 
-fn build_new_headers(pre_headers: &HeaderMap) -> Result<HeaderMap, ProxyError> {
+fn build_new_headers(
+    pre_headers: &HeaderMap,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in pre_headers.iter() {
         if name != HOST
@@ -150,11 +152,18 @@ fn build_new_headers(pre_headers: &HeaderMap) -> Result<HeaderMap, ProxyError> {
             && name != AUTHORIZATION
             && name != "x-api-key"
             && name != "x-goog-api-key"
+            && name != ANTHROPIC_VERSION_HEADER
+            && (name != ANTHROPIC_BETA_HEADER
+                || (downstream_protocol == DownstreamProtocol::Anthropic
+                    && upstream_protocol == UpstreamProtocol::Anthropic))
             && name != X_REQUEST_ID
             && name != X_CLIENT_REQUEST_ID
         {
             headers.insert(name.clone(), value.clone());
         }
+    }
+    if upstream_protocol == UpstreamProtocol::Anthropic {
+        enforce_anthropic_version_header(&mut headers);
     }
     Ok(headers)
 }
@@ -212,6 +221,7 @@ async fn prepare_llm_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
+    downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     path: &str,
     resolved_target_url: Option<&str>,
@@ -242,7 +252,7 @@ async fn prepare_llm_request(
             format!("failed to parse target url: {error}"),
         )
     })?;
-    let mut headers = build_new_headers(original_headers)?;
+    let mut headers = build_new_headers(original_headers, downstream_protocol, upstream_protocol)?;
 
     ensure_request_body_object(&mut data);
     if let Value::Object(obj) = &mut data {
@@ -251,6 +261,9 @@ async fn prepare_llm_request(
 
     data = finalize_request_data(data, upstream_protocol, &source.profile_type, path);
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
+    if upstream_protocol == UpstreamProtocol::Anthropic {
+        enforce_anthropic_version_header(&mut headers);
+    }
 
     Ok((url.to_string(), headers, data))
 }
@@ -262,6 +275,7 @@ async fn prepare_generation_request(
     data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
+    downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     is_stream: bool,
     params: &HashMap<String, String>,
@@ -276,6 +290,7 @@ async fn prepare_generation_request(
                 data,
                 original_headers,
                 request_patches,
+                downstream_protocol,
                 upstream_protocol,
                 path,
                 operation_url,
@@ -378,14 +393,16 @@ pub(in crate::proxy) async fn materialize_generation_request(
         data,
         original_headers,
         request_patches,
+        downstream_protocol,
         upstream_protocol,
         is_stream,
         query_params,
         operation_url,
     )
     .await?;
-    if let Err(error) = validate_final_generation_request(
+    if let Err(error) = validate_final_generation_request_for_downstream(
         &prepared_request.final_body_value,
+        downstream_protocol,
         upstream_protocol,
         &target.upstream_source.profile_type,
     ) {
@@ -439,7 +456,7 @@ pub(in crate::proxy) fn preflight_generation_request(
 
     if matches!(
         target.upstream_protocol,
-        UpstreamProtocol::Openai | UpstreamProtocol::Responses
+        UpstreamProtocol::Openai | UpstreamProtocol::Responses | UpstreamProtocol::Anthropic
     ) {
         if let Value::Object(object) = &mut transformed.value {
             object.insert(
@@ -452,8 +469,9 @@ pub(in crate::proxy) fn preflight_generation_request(
         }
     }
 
-    if let Err(error) = validate_final_generation_request(
+    if let Err(error) = validate_final_generation_request_for_downstream(
         &transformed.value,
+        downstream_protocol,
         target.upstream_protocol,
         &target.upstream_source.profile_type,
     ) {
@@ -494,6 +512,122 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn anthropic_generation_prepare_kind_uses_messages_for_both_modes() {
+        for is_stream in [false, true] {
+            let kind = select_generation_prepare_kind(UpstreamProtocol::Anthropic, is_stream)
+                .expect("Anthropic generation should be materializable");
+            assert!(
+                matches!(
+                    kind,
+                    GenerationPrepareKind::Llm {
+                        path: ANTHROPIC_MESSAGES_OPERATION
+                    }
+                ),
+                "is_stream={is_stream}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_header_policy_fixes_version_and_scopes_client_beta_to_same_wire() {
+        let mut original = HeaderMap::new();
+        original.insert(
+            ANTHROPIC_VERSION_HEADER,
+            HeaderValue::from_static("2099-01-01"),
+        );
+        original.insert(
+            ANTHROPIC_BETA_HEADER,
+            HeaderValue::from_static("future-beta"),
+        );
+        original.insert(AUTHORIZATION, HeaderValue::from_static("Bearer downstream"));
+        original.insert("x-api-key", HeaderValue::from_static("downstream-secret"));
+        original.insert("x-client-feature", HeaderValue::from_static("preserved"));
+
+        let same_wire = build_new_headers(
+            &original,
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Anthropic,
+        )
+        .expect("same-wire headers");
+        assert_eq!(
+            same_wire
+                .get(ANTHROPIC_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(ANTHROPIC_VERSION)
+        );
+        assert_eq!(
+            same_wire
+                .get(ANTHROPIC_BETA_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("future-beta")
+        );
+        assert_eq!(
+            same_wire
+                .get("x-client-feature")
+                .and_then(|value| value.to_str().ok()),
+            Some("preserved")
+        );
+        assert!(!same_wire.contains_key(AUTHORIZATION));
+        assert!(!same_wire.contains_key("x-api-key"));
+        assert_eq!(
+            same_wire.get_all(ANTHROPIC_VERSION_HEADER).iter().count(),
+            1
+        );
+
+        for downstream in [
+            DownstreamProtocol::Openai,
+            DownstreamProtocol::Responses,
+            DownstreamProtocol::Gemini,
+        ] {
+            let cross_wire = build_new_headers(&original, downstream, UpstreamProtocol::Anthropic)
+                .expect("cross-wire headers");
+            assert_eq!(
+                cross_wire
+                    .get(ANTHROPIC_VERSION_HEADER)
+                    .and_then(|value| value.to_str().ok()),
+                Some(ANTHROPIC_VERSION),
+                "{downstream:?}"
+            );
+            assert!(
+                !cross_wire.contains_key(ANTHROPIC_BETA_HEADER),
+                "{downstream:?}"
+            );
+        }
+
+        let non_anthropic = build_new_headers(
+            &original,
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Openai,
+        )
+        .expect("non-Anthropic target headers");
+        assert!(!non_anthropic.contains_key(ANTHROPIC_VERSION_HEADER));
+        assert!(!non_anthropic.contains_key(ANTHROPIC_BETA_HEADER));
+    }
+
+    #[test]
+    fn anthropic_version_finalization_replaces_duplicate_or_mutated_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            ANTHROPIC_VERSION_HEADER,
+            HeaderValue::from_static("2020-01-01"),
+        );
+        headers.append(
+            ANTHROPIC_VERSION_HEADER,
+            HeaderValue::from_static("2099-01-01"),
+        );
+
+        enforce_anthropic_version_header(&mut headers);
+
+        assert_eq!(
+            headers
+                .get(ANTHROPIC_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(ANTHROPIC_VERSION)
+        );
+        assert_eq!(headers.get_all(ANTHROPIC_VERSION_HEADER).iter().count(), 1);
+    }
 }
 
 pub(in crate::proxy) async fn materialize_utility_request(
@@ -522,6 +656,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
                 data,
                 original_headers,
                 &[],
+                operation.downstream_protocol,
                 target.upstream_protocol,
                 &operation.downstream_path,
                 operation_url,

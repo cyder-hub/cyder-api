@@ -188,45 +188,61 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                     content: content_parts,
                 });
             } else if role == "user" && has_function_response {
-                parts
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(part_index, p)| match p {
+                let mut result_parts = Vec::new();
+                let mut trailing_parts = Vec::new();
+                for (part_index, part) in parts.into_iter().enumerate() {
+                    match part {
                         GeminiPart::FunctionResponse { function_response } => {
-                            Some((part_index, function_response))
-                        }
-                        _ => None,
-                    })
-                    .for_each(|(part_index, fr)| {
-                        let tool_call_id = tool_call_ids
-                            .get_mut(&fr.name)
-                            .and_then(|ids| ids.pop_front())
-                            .unwrap_or_else(|| {
-                                build_gemini_synthetic_tool_call_id(
-                                    0,
-                                    message_index as u32,
-                                    part_index as u32,
-                                    &fr.name,
-                                )
-                            });
-                        let output = gemini_function_response_to_unified_output(fr.response);
-                        items.push(UnifiedItem::FunctionCallOutput(
-                            UnifiedFunctionCallOutputItem {
-                                tool_call_id: tool_call_id.clone(),
-                                name: Some(fr.name.clone()),
-                                output: output.clone(),
-                            },
-                        ));
-
-                        messages.push(UnifiedMessage {
-                            role: UnifiedRole::Tool,
-                            content: vec![UnifiedContentPart::ToolResult(UnifiedToolResult {
+                            let fr = function_response;
+                            let tool_call_id = tool_call_ids
+                                .get_mut(&fr.name)
+                                .and_then(|ids| ids.pop_front())
+                                .unwrap_or_else(|| {
+                                    build_gemini_synthetic_tool_call_id(
+                                        0,
+                                        message_index as u32,
+                                        part_index as u32,
+                                        &fr.name,
+                                    )
+                                });
+                            let output = gemini_function_response_to_unified_output(fr.response);
+                            items.push(UnifiedItem::FunctionCallOutput(
+                                UnifiedFunctionCallOutputItem {
+                                    tool_call_id: tool_call_id.clone(),
+                                    name: Some(fr.name.clone()),
+                                    output: output.clone(),
+                                },
+                            ));
+                            result_parts.push(UnifiedContentPart::ToolResult(UnifiedToolResult {
                                 tool_call_id,
-                                name: Some(fr.name.clone()),
+                                name: Some(fr.name),
                                 output,
-                            })],
-                        });
-                    });
+                            }));
+                        }
+                        GeminiPart::Text { text } => {
+                            trailing_parts.push(UnifiedContentPart::Text { text });
+                        }
+                        GeminiPart::Thought { text, thought, .. } => {
+                            trailing_parts.push(if thought {
+                                UnifiedContentPart::Reasoning { text }
+                            } else {
+                                UnifiedContentPart::Text { text }
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if !trailing_parts.is_empty() {
+                    items.extend(legacy_content_to_unified_items(
+                        UnifiedRole::User,
+                        trailing_parts.clone(),
+                    ));
+                }
+                result_parts.extend(trailing_parts);
+                messages.push(UnifiedMessage {
+                    role: UnifiedRole::Tool,
+                    content: result_parts,
+                });
             } else {
                 let unified_role = if role == "model" {
                     UnifiedRole::Assistant

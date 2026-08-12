@@ -193,7 +193,7 @@ fn test_unified_request_to_anthropic_preserves_reasoning_as_text() {
 }
 
 #[test]
-fn test_unified_request_to_anthropic_preserves_image_file_and_code() {
+fn test_unified_request_to_anthropic_encodes_portable_media_natively() {
     let unified_request = UnifiedRequest {
         model: Some("claude-3-opus-20240229".to_string()),
         messages: vec![UnifiedMessage {
@@ -235,18 +235,49 @@ fn test_unified_request_to_anthropic_preserves_image_file_and_code() {
                 }
             },
             {
-                "type": "text",
-                "text": "image_url: https://example.com/chart.png\ndetail: high"
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/chart.png"
+                }
             },
             {
-                "type": "text",
-                "text": "file_url: https://files.example.com/report.pdf\nmime_type: application/pdf"
-            },
-            {
-                "type": "text",
-                "text": "```python\nprint(1)\n```"
+                "type": "document",
+                "source": {
+                    "type": "url",
+                    "url": "https://files.example.com/report.pdf"
+                }
             }
         ])
+    );
+}
+
+#[test]
+fn test_unified_request_to_anthropic_serializes_json_tool_results_as_text() {
+    let unified_request = UnifiedRequest {
+        model: Some("claude-3-opus-20240229".to_string()),
+        messages: vec![UnifiedMessage {
+            role: UnifiedRole::Tool,
+            content: vec![UnifiedContentPart::ToolResult(UnifiedToolResult {
+                tool_call_id: "toolu_weather".to_string(),
+                name: Some("weather".to_string()),
+                output: UnifiedToolResultOutput::Json {
+                    value: json!({"temp": 21}),
+                },
+            })],
+        }],
+        max_tokens: Some(100),
+        ..Default::default()
+    };
+
+    let anthropic_request: AnthropicRequestPayload = unified_request.into();
+    assert_eq!(
+        anthropic_request.messages[0].content,
+        json!([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_weather",
+            "content": "{\"temp\":21}"
+        }])
     );
 }
 
@@ -265,6 +296,7 @@ fn test_anthropic_response_to_unified() {
         usage: AnthropicUsage {
             input_tokens: 10,
             output_tokens: 20,
+            ..Default::default()
         },
     };
 
@@ -387,9 +419,10 @@ fn test_anthropic_event_to_unified_chunk() {
             stop_sequence: None,
             usage: None,
         },
-        usage: Some(AnthropicUsage {
-            input_tokens: 0,
-            output_tokens: 10,
+        usage: Some(AnthropicStreamUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(10),
+            ..Default::default()
         }),
     };
     let unified_chunk_stop: UnifiedChunkResponse = event_stop.into();
@@ -398,6 +431,67 @@ fn test_anthropic_event_to_unified_chunk() {
         Some("stop".to_string())
     );
     assert!(unified_chunk_stop.choices[0].delta.content.is_empty());
+}
+
+#[test]
+fn test_anthropic_source_usage_is_emitted_once_with_merged_terminal_totals() {
+    let mut session = AnthropicSessionState::default();
+    let start = anthropic_event_to_unified_stream_events_with_state(
+        AnthropicEvent::MessageStart {
+            message: AnthropicStreamMessage {
+                id: "msg_usage".to_string(),
+                type_: "message".to_string(),
+                role: "assistant".to_string(),
+                model: "claude-test".to_string(),
+                content: None,
+                stop_reason: None,
+                stop_sequence: None,
+                usage: Some(AnthropicUsage {
+                    input_tokens: 11,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 3,
+                    cache_creation_input_tokens: 2,
+                }),
+            },
+        },
+        &mut session,
+    );
+    assert_eq!(start.len(), 1);
+    assert!(matches!(start[0], UnifiedStreamEvent::MessageStart { .. }));
+
+    let terminal = anthropic_event_to_unified_stream_events_with_state(
+        AnthropicEvent::MessageDelta {
+            delta: MessageDelta {
+                stop_reason: Some("end_turn".to_string()),
+                stop_sequence: None,
+                usage: Some(AnthropicStreamUsage {
+                    output_tokens: Some(7),
+                    ..Default::default()
+                }),
+            },
+            usage: None,
+        },
+        &mut session,
+    );
+    let usage = terminal
+        .iter()
+        .filter_map(|event| match event {
+            UnifiedStreamEvent::Usage { usage } => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(
+        usage[0],
+        &UnifiedUsage {
+            input_tokens: 16,
+            output_tokens: 7,
+            total_tokens: 23,
+            cached_tokens: Some(3),
+            cache_write_tokens: Some(2),
+            ..Default::default()
+        }
+    );
 }
 
 #[test]
@@ -1085,6 +1179,7 @@ fn test_anthropic_response_with_tool_use_and_text_to_unified() {
         usage: AnthropicUsage {
             input_tokens: 10,
             output_tokens: 20,
+            ..Default::default()
         },
     };
 
@@ -1181,6 +1276,7 @@ fn test_anthropic_response_to_unified_preserves_items() {
         usage: AnthropicUsage {
             input_tokens: 10,
             output_tokens: 20,
+            ..Default::default()
         },
     };
 

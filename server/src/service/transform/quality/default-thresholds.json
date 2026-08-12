@@ -48,7 +48,7 @@
       "scenario": "anthropic_to_responses_fixture",
       "min_ops_per_sec": 15300.0,
       "max_p95_ms": 0.11,
-      "max_allocs_per_op": 675.0,
+      "max_allocs_per_op": 690.0,
       "max_reallocs_per_op": 38.0,
       "max_alloc_mib_per_op": 0.08,
       "max_peak_kib_per_op": 3.0

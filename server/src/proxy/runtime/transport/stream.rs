@@ -817,7 +817,7 @@ async fn run_guarded_stream_worker(
                         let proxy_error = upstream_stream_error(
                             ProxyErrorCode::UpstreamResponseError,
                             &response_visibility,
-                            "Responses stream reported an application failure",
+                            "Upstream stream reported an application failure",
                         );
                         log_stream_transform_summary_once(&log_context, &transformer).await;
                         coordinator.try_terminate_error(&proxy_error);

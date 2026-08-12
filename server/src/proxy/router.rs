@@ -1045,6 +1045,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_public_surface_exposes_only_messages_and_local_models() {
+        let database = TestDbContext::new_sqlite("proxy-anthropic-public-surface.sqlite");
+        database
+            .run_async(async {
+                let created = ApiKey::create(&payload()).expect("proxy key should create");
+                let api_key = created.reveal.api_key;
+                let api_key_id = created.detail.id;
+                let app_state = create_test_app_state(database.clone()).await;
+
+                for path in ["/anthropic/models", "/anthropic/v1/models"] {
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(request(path, "x-api-key", Some(&api_key)))
+                        .await
+                        .expect("Anthropic models route should respond");
+                    assert_eq!(response.status(), StatusCode::OK, "{path}");
+                    assert_proxy_security(&response);
+                }
+                for path in ["/anthropic/messages", "/anthropic/v1/messages"] {
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::POST, path))
+                        .await
+                        .expect("Anthropic messages route should respond");
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+                    assert_protocol_error_body(
+                        response,
+                        DownstreamProtocol::Anthropic,
+                        "authentication_error",
+                        "authentication_error",
+                    )
+                    .await;
+                }
+
+                app_state.secret_encryption.reset_decrypt_call_count();
+                let before = app_state
+                    .api_key_governance
+                    .get_api_key_governance_snapshot(api_key_id)
+                    .await
+                    .expect("governance snapshot should load");
+
+                for path in [
+                    "/anthropic/messages/count_tokens",
+                    "/anthropic/v1/messages/count_tokens",
+                    "/anthropic/messages/batches",
+                    "/anthropic/v1/messages/batches",
+                    "/anthropic/message_batches",
+                    "/anthropic/v1/message_batches",
+                    "/anthropic/files",
+                    "/anthropic/v1/files",
+                    "/anthropic/v1/files/file_beta",
+                    "/anthropic/v1beta/messages",
+                    "/anthropic/v1beta/models",
+                    "/anthropic/v1beta/files",
+                ] {
+                    let mut request = method_request(Method::POST, path);
+                    request.headers_mut().insert(
+                        "x-api-key",
+                        HeaderValue::from_str(&api_key).expect("API key header should be valid"),
+                    );
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(request)
+                        .await
+                        .expect("unsupported Anthropic product route should respond");
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                    assert!(response.headers().get(header::ALLOW).is_none(), "{path}");
+                    assert_protocol_error_body(
+                        response,
+                        DownstreamProtocol::Anthropic,
+                        "route_not_found_error",
+                        "not_found_error",
+                    )
+                    .await;
+                }
+
+                for (method, path, allow) in [
+                    (Method::GET, "/anthropic/messages", "POST"),
+                    (Method::PUT, "/anthropic/messages", "POST"),
+                    (Method::DELETE, "/anthropic/v1/messages", "POST"),
+                    (Method::POST, "/anthropic/models", "GET,HEAD"),
+                    (Method::PUT, "/anthropic/v1/models", "GET,HEAD"),
+                    (Method::DELETE, "/anthropic/v1/models", "GET,HEAD"),
+                ] {
+                    let mut request = method_request(method.clone(), path);
+                    request.headers_mut().insert(
+                        "x-api-key",
+                        HeaderValue::from_str(&api_key).expect("API key header should be valid"),
+                    );
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(request)
+                        .await
+                        .expect("wrong Anthropic method should respond");
+                    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+                    assert_eq!(response.headers().get(header::ALLOW).unwrap(), allow);
+                    assert_protocol_error_body(
+                        response,
+                        DownstreamProtocol::Anthropic,
+                        "method_not_allowed_error",
+                        "invalid_request_error",
+                    )
+                    .await;
+                }
+
+                app_state.flush_proxy_logs().await;
+                assert!(
+                    RequestLog::list_full(RequestLogQueryPayload::default())
+                        .expect("request logs should be queryable")
+                        .list
+                        .is_empty(),
+                    "route/auth/method rejections and local Models must not enter generation logging"
+                );
+                assert_eq!(
+                    app_state.secret_encryption.decrypt_call_count(),
+                    0,
+                    "unsupported Anthropic surface must not resolve provider credentials"
+                );
+                let after = app_state
+                    .api_key_governance
+                    .get_api_key_governance_snapshot(api_key_id)
+                    .await
+                    .expect("governance snapshot should load");
+                assert_eq!(after, before, "unsupported routes must not mutate governance");
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn gemini_exposes_only_count_tokens_utility_action() {
         let database = TestDbContext::new_sqlite("proxy-gemini-count-tokens-only.sqlite");
         database

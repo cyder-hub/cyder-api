@@ -432,8 +432,9 @@ fn rejection_after_diagnostic_detail_cap_still_fails_closed() {
     )
     .expect_err("unsupported file URL must reject even after diagnostic detail overflow");
 
-    assert_eq!(failure.origin, TransformFailureOrigin::DownstreamInput);
-    assert_eq!(failure.phase, TransformPhase::RequestDecode);
+    assert_eq!(failure.origin, TransformFailureOrigin::TargetCapability);
+    assert_eq!(failure.phase, TransformPhase::RequestEncode);
+    assert_eq!(failure.semantic_unit, TransformSemanticUnit::FileUrl);
     assert_eq!(failure.reason_code, TransformReasonCode::UnsupportedContent);
     assert!(failure.summary.dropped_diagnostic_count > 0);
     assert_eq!(
@@ -729,6 +730,211 @@ fn qualitative_reasoning_controls_from_all_public_wires_reach_responses_with_exp
         fact.outcome,
         TransformOutcomeKind::ControlledLossMinor | TransformOutcomeKind::ControlledLossMajor
     )));
+}
+
+#[test]
+fn qualitative_reasoning_controls_from_all_public_wires_reach_anthropic_with_expected_loss() {
+    for (effort, thinking_type, target_effort) in [
+        ("none", "disabled", None),
+        ("minimal", "adaptive", Some("low")),
+        ("low", "adaptive", Some("low")),
+        ("medium", "adaptive", Some("medium")),
+        ("high", "adaptive", Some("high")),
+        ("xhigh", "adaptive", Some("xhigh")),
+    ] {
+        let transformed = transform_request_data(
+            json!({
+                "model":"gpt-5","messages":[{"role":"user","content":"hello"}],
+                "reasoning_effort":effort
+            }),
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Anthropic,
+            false,
+        )
+        .expect("OpenAI qualitative reasoning must reach Anthropic");
+        assert_eq!(transformed.value["thinking"]["type"], thinking_type);
+        assert_eq!(
+            transformed
+                .value
+                .pointer("/output_config/effort")
+                .and_then(Value::as_str),
+            target_effort
+        );
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.semantic_unit == TransformSemanticUnit::ReasoningContent
+                && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                && fact.safe_summary.is_none()
+        }));
+        let mut materialized = transformed.value.clone();
+        materialized["model"] = json!("claude-sonnet");
+        validate_final_generation_request_for_downstream(
+            &materialized,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("mapped OpenAI reasoning must pass final Anthropic validation");
+    }
+
+    let responses = transform_request_data(
+        json!({
+            "model":"gpt-5","input":"hello",
+            "reasoning":{"effort":"xhigh","summary":"detailed"}
+        }),
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("Responses qualitative reasoning must reach Anthropic");
+    assert_eq!(responses.value["thinking"]["type"], "adaptive");
+    assert_eq!(responses.value["output_config"]["effort"], "xhigh");
+    assert!(responses.summary.facts.iter().any(|fact| {
+        fact.semantic_unit == TransformSemanticUnit::ReasoningContent
+            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+            && fact.safe_summary.is_none()
+    }));
+
+    for (thinking_config, thinking_type, target_effort) in [
+        (json!({"thinkingLevel":"minimal"}), "adaptive", Some("low")),
+        (json!({"thinkingLevel":"low"}), "adaptive", Some("low")),
+        (
+            json!({"thinkingLevel":"medium"}),
+            "adaptive",
+            Some("medium"),
+        ),
+        (json!({"thinkingLevel":"high"}), "adaptive", Some("high")),
+        (json!({"thinkingBudget":0}), "disabled", None),
+    ] {
+        let transformed = transform_request_data(
+            json!({
+                "contents":[{"role":"user","parts":[{"text":"hello"}]}],
+                "generationConfig":{"thinkingConfig":thinking_config}
+            }),
+            DownstreamProtocol::Gemini,
+            UpstreamProtocol::Anthropic,
+            false,
+        )
+        .expect("Gemini qualitative reasoning must reach Anthropic");
+        assert_eq!(transformed.value["thinking"]["type"], thinking_type);
+        assert_eq!(
+            transformed
+                .value
+                .pointer("/output_config/effort")
+                .and_then(Value::as_str),
+            target_effort
+        );
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.semantic_unit == TransformSemanticUnit::ReasoningContent
+                && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                && fact.safe_summary.is_none()
+        }));
+    }
+
+    let native = json!({
+        "model":"claude","max_tokens":4096,
+        "messages":[{"role":"user","content":"hello"}],
+        "thinking":{"type":"enabled","budget_tokens":1024},
+        "output_config":{"effort":"max"}
+    });
+    let same_wire = transform_request_data(
+        native.clone(),
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("Anthropic native thinking must remain same-wire");
+    assert_eq!(same_wire.value, native);
+    assert!(!same_wire.summary.facts.iter().any(|fact| matches!(
+        fact.outcome,
+        TransformOutcomeKind::ControlledLossMinor | TransformOutcomeKind::ControlledLossMajor
+    )));
+}
+
+#[test]
+fn anthropic_thinking_response_preserves_text_but_never_leaks_signature_cross_wire() {
+    const THINKING: &str = "private-reasoning-marker";
+    const SIGNATURE: &str = "private-signature-marker";
+    let source = json!({
+        "id":"msg_reasoning","type":"message","role":"assistant",
+        "content":[
+            {"type":"thinking","thinking":THINKING,"signature":SIGNATURE},
+            {"type":"text","text":"public answer"}
+        ],
+        "model":"claude-sonnet","stop_reason":"end_turn","stop_sequence":null,
+        "usage":{"input_tokens":1,"output_tokens":2}
+    });
+
+    let same_wire = transform_result(
+        source.clone(),
+        UpstreamProtocol::Anthropic,
+        DownstreamProtocol::Anthropic,
+    )
+    .expect("Anthropic thinking response must remain raw same-wire");
+    assert_eq!(same_wire.value.0, source);
+    assert!(same_wire.value.0.to_string().contains(SIGNATURE));
+
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Gemini,
+    ] {
+        let transformed = transform_result(source.clone(), UpstreamProtocol::Anthropic, downstream)
+            .expect("portable Anthropic thinking text must transform cross-wire");
+        let encoded = transformed.value.0.to_string();
+        assert!(!encoded.contains(SIGNATURE), "{downstream:?}");
+        if downstream == DownstreamProtocol::Openai {
+            assert!(!encoded.contains(THINKING));
+        } else {
+            assert!(encoded.contains(THINKING), "{downstream:?}");
+        }
+        if downstream == DownstreamProtocol::Gemini {
+            assert!(encoded.contains("\"thought\":true"));
+        }
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.semantic_unit == TransformSemanticUnit::ReasoningContent
+                && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                && fact.action == TransformAction::Drop
+                && fact.reason_code == TransformReasonCode::UnsupportedReasoning
+                && fact.safe_summary.is_none()
+        }));
+    }
+}
+
+#[test]
+fn anthropic_redacted_and_unknown_reasoning_blocks_are_raw_same_wire_and_fail_cross_wire() {
+    const PRIVATE_MARKER: &str = "opaque-private-reasoning-marker";
+    for block in [
+        json!({"type":"redacted_thinking","data":PRIVATE_MARKER}),
+        json!({"type":"future_reasoning","opaque":PRIVATE_MARKER}),
+    ] {
+        let source = json!({
+            "id":"msg_opaque","type":"message","role":"assistant",
+            "content":[block],"model":"claude-sonnet","stop_reason":"end_turn",
+            "stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}
+        });
+        let same_wire = transform_result(
+            source.clone(),
+            UpstreamProtocol::Anthropic,
+            DownstreamProtocol::Anthropic,
+        )
+        .expect("unknown Anthropic reasoning block must remain raw same-wire");
+        assert_eq!(same_wire.value.0, source);
+        assert!(same_wire.value.0.to_string().contains(PRIVATE_MARKER));
+        assert!(same_wire.summary.facts.iter().any(|fact| {
+            fact.outcome == TransformOutcomeKind::ObservationDegraded && fact.safe_summary.is_some()
+        }));
+
+        for downstream in [
+            DownstreamProtocol::Openai,
+            DownstreamProtocol::Responses,
+            DownstreamProtocol::Gemini,
+        ] {
+            let failure = transform_result(source.clone(), UpstreamProtocol::Anthropic, downstream)
+                .expect_err("opaque Anthropic reasoning must fail closed cross-wire");
+            assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+            assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+        }
+    }
 }
 
 #[test]
@@ -1206,6 +1412,304 @@ fn anthropic_media_cache_hint_is_dropped_with_payload_free_diagnostics_for_respo
 }
 
 #[test]
+fn anthropic_target_encodes_images_pdfs_and_text_documents_natively() {
+    let openai = transform_request_data(
+        json!({
+            "model":"gpt-5","messages":[{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":"https://images.example.com/photo.webp","detail":"high"}},
+                {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,ZmFrZQ=="}},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ=="}},
+                {"type":"image_url","image_url":{"url":"data:image/gif;base64,ZmFrZQ=="}},
+                {"type":"image_url","image_url":{"url":"data:image/webp;base64,ZmFrZQ=="}},
+                {"type":"file","file":{"filename":"report.pdf","file_data":"JVBERi0="}}
+            ]}]
+        }),
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("OpenAI portable media must map to Anthropic");
+    validate_final_generation_request_for_downstream(
+        &openai.value,
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect("encoded OpenAI media must pass the Anthropic final boundary");
+    let openai_blocks = openai.value["messages"][0]["content"]
+        .as_array()
+        .expect("Anthropic native content blocks");
+    assert!(openai_blocks.iter().any(|block| {
+        block["type"] == "image"
+            && block["source"]
+                == json!({"type":"url","url":"https://images.example.com/photo.webp"})
+    }));
+    let image_mimes = openai_blocks
+        .iter()
+        .filter(|block| block["type"] == "image" && block["source"]["type"] == "base64")
+        .filter_map(|block| block["source"]["media_type"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        image_mimes,
+        ["image/gif", "image/jpeg", "image/png", "image/webp"]
+            .into_iter()
+            .collect()
+    );
+    assert!(openai_blocks.iter().any(|block| {
+        block["type"] == "document"
+            && block["title"] == "report.pdf"
+            && block["source"]["type"] == "base64"
+            && block["source"]["media_type"] == "application/pdf"
+    }));
+    assert!(openai.summary.facts.iter().any(|fact| {
+        fact.reason_code == TransformReasonCode::UnsupportedImageDetail
+            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+            && fact.action == TransformAction::Drop
+            && fact.safe_summary.is_none()
+    }));
+
+    let responses = transform_request_data(
+        json!({
+            "model":"gpt-5","input":[{"type":"message","role":"user","content":[
+                {"type":"input_file","filename":"remote.pdf","file_url":"https://files.example.com/remote.pdf"},
+                {"type":"input_file","filename":"notes.txt","file_data":"cGxhaW4="},
+                {"type":"input_file","filename":"notes.md","file_data":"IyB0aXRsZQ=="},
+                {"type":"input_file","filename":"table.csv","file_data":"YSxi"},
+                {"type":"input_file","filename":"data.json","file_data":"e30="}
+            ]}]
+        }),
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("Responses portable documents must map to Anthropic");
+    validate_final_generation_request_for_downstream(
+        &responses.value,
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect("encoded Responses documents must pass the Anthropic final boundary");
+    let response_blocks = responses.value["messages"][0]["content"]
+        .as_array()
+        .expect("Anthropic document blocks");
+    assert!(response_blocks.iter().any(|block| {
+        block["type"] == "document"
+            && block["title"] == "remote.pdf"
+            && block["source"] == json!({"type":"url","url":"https://files.example.com/remote.pdf"})
+    }));
+    let text_documents = response_blocks
+        .iter()
+        .filter(|block| block["type"] == "document" && block["source"]["type"] == "text")
+        .collect::<Vec<_>>();
+    assert_eq!(text_documents.len(), 4);
+    assert!(text_documents.iter().all(|block| {
+        block["source"]["media_type"] == "text/plain"
+            && block["source"]["data"].is_string()
+            && block["title"].is_string()
+    }));
+    assert!(responses.summary.facts.iter().any(|fact| {
+        fact.reason_code == TransformReasonCode::TextDocumentMimeNormalized
+            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+            && fact.action == TransformAction::Drop
+            && fact.safe_summary.is_none()
+    }));
+
+    let mut gemini = transform_request_data(
+        json!({"contents":[{"role":"user","parts":[
+            {"inlineData":{"mimeType":"image/png","data":"ZmFrZQ=="}},
+            {"inlineData":{"mimeType":"application/pdf","data":"JVBERi0=","displayName":"inline.pdf"}},
+            {"fileData":{"mimeType":"application/pdf","fileUri":"https://files.example.com/remote.pdf","displayName":"remote.pdf"}}
+        ]}]}),
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("Gemini portable media must map to Anthropic");
+    gemini.value["model"] = json!("claude-target");
+    validate_final_generation_request_for_downstream(
+        &gemini.value,
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect("encoded Gemini media must pass the Anthropic final boundary");
+    let gemini_blocks = gemini.value["messages"][0]["content"]
+        .as_array()
+        .expect("Anthropic Gemini-derived blocks");
+    assert!(gemini_blocks.iter().any(|block| {
+        block["type"] == "document"
+            && block["title"] == "inline.pdf"
+            && block["source"]["type"] == "base64"
+    }));
+    assert!(gemini_blocks.iter().any(|block| {
+        block["type"] == "document"
+            && block["title"] == "remote.pdf"
+            && block["source"]["type"] == "url"
+    }));
+
+    for transformed in [&openai, &responses, &gemini] {
+        let serialized = transformed.value.to_string();
+        assert!(!serialized.contains("image_url:"));
+        assert!(!serialized.contains("file_url:"));
+        assert!(!serialized.contains("file_data:"));
+        assert!(
+            transformed
+                .summary
+                .facts
+                .iter()
+                .all(|fact| fact.safe_summary.is_none())
+        );
+    }
+}
+
+#[test]
+fn anthropic_target_rejects_unportable_or_illegally_positioned_media_without_payloads() {
+    const PRIVATE_MARKER: &str = "anthropic-media-private-marker";
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                {"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                {"type":"file","file":{"file_id":PRIVATE_MARKER}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PRIVATE_MARKER}")}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"assistant","content":[
+                {"type":"image_url","image_url":{"url":"https://images.example.com/a.png"}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":[{"type":"message","role":"user","content":[
+                {"type":"input_file","file_id":PRIVATE_MARKER}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":[{"type":"message","role":"user","content":[
+                {"type":"input_file","filename":"invalid.txt","file_data":"/w=="}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":[{"type":"message","role":"user","content":[
+                {"type":"input_file","filename":"payload.exe","file_data":"AA=="}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({"contents":[{"role":"user","parts":[
+                {"inlineData":{"mimeType":"audio/mpeg","data":"SUQz"}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({"contents":[{"role":"user","parts":[
+                {"inlineData":{"mimeType":"video/mp4","data":"ZmFrZQ=="}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({"contents":[{"role":"user","parts":[
+                {"inlineData":{"mimeType":"application/octet-stream","data":"AA=="}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({"contents":[{"role":"user","parts":[
+                {"executableCode":{"language":"python","code":PRIVATE_MARKER}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({"contents":[{"role":"model","parts":[
+                {"inlineData":{"mimeType":"image/png","data":"ZmFrZQ=="}}
+            ]}]}),
+        ),
+    ];
+
+    for (protocol, request) in cases {
+        let failure = transform_request_data(request, protocol, UpstreamProtocol::Anthropic, false)
+            .expect_err("unportable Anthropic-target media must fail before send");
+        assert!(matches!(
+            failure.origin,
+            TransformFailureOrigin::DownstreamInput | TransformFailureOrigin::TargetCapability
+        ));
+        assert!(
+            !format!("{failure:?}").contains(PRIVATE_MARKER),
+            "{protocol:?}"
+        );
+    }
+}
+
+#[test]
+fn anthropic_same_wire_media_extensions_are_raw_and_cross_wire_outputs_fail_closed() {
+    const PRIVATE_MARKER: &str = "anthropic-native-media-private-marker";
+    let request = json!({
+        "model":"claude","max_tokens":64,"messages":[{"role":"user","content":[
+            {"type":"document","source":{"type":"file","file_id":"file_beta"}},
+            {"type":"future_media","opaque":PRIVATE_MARKER}
+        ]}]
+    });
+    let same_wire = transform_request_data(
+        request.clone(),
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("same-wire Anthropic media must remain raw");
+    assert_eq!(same_wire.value, request);
+    validate_final_generation_request_for_downstream(
+        &same_wire.value,
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect("same-wire file and future media sources must pass the raw boundary");
+
+    let response = json!({
+        "id":"msg_media","type":"message","role":"assistant","model":"claude",
+        "content":[{"type":"future_media","opaque":PRIVATE_MARKER}],
+        "stop_reason":"end_turn","stop_sequence":null,
+        "usage":{"input_tokens":1,"output_tokens":1}
+    });
+    let native = transform_result(
+        response.clone(),
+        UpstreamProtocol::Anthropic,
+        DownstreamProtocol::Anthropic,
+    )
+    .expect("same-wire Anthropic output media must remain raw");
+    assert_eq!(native.value.0, response);
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Gemini,
+    ] {
+        let failure = transform_result(response.clone(), UpstreamProtocol::Anthropic, downstream)
+            .expect_err("unknown Anthropic output media must fail closed cross-wire");
+        assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+        assert_eq!(
+            failure.reason_code,
+            TransformReasonCode::UnknownSemanticUnit
+        );
+        assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+    }
+}
+
+#[test]
 fn responses_target_media_contract_rejects_unportable_shapes_without_payloads() {
     const PRIVATE_MARKER: &str = "responses-media-private-marker";
     let cross_wire_cases = [
@@ -1535,6 +2039,288 @@ fn gemini_structured_output_preserves_constraints_and_drops_only_property_orderi
 }
 
 #[test]
+fn portable_structured_outputs_from_all_public_wires_reach_anthropic_with_expected_loss() {
+    let schema = json!({
+        "$defs":{"answer":{"type":"string","minLength":2,"x-opaque":{"keep":true}}},
+        "type":"object",
+        "properties":{"answer":{"$ref":"#/$defs/answer"}},
+        "required":["answer"],
+        "additionalProperties":false
+    });
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"gpt-5","messages":[{"role":"user","content":"answer as JSON"}],
+                "response_format":{"type":"json_schema","json_schema":{
+                    "name":"answer_contract","description":"A stable answer",
+                    "schema":schema,"strict":true
+                }}
+            }),
+            schema.clone(),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"gpt-5","input":"answer as JSON","text":{"format":{
+                    "type":"json_schema","name":"answer_contract",
+                    "description":"A stable answer","schema":schema,"strict":false
+                }}
+            }),
+            schema.clone(),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"claude","max_tokens":64,
+                "messages":[{"role":"user","content":"answer as JSON"}],
+                "output_config":{"format":{"type":"json_schema","schema":schema}}
+            }),
+            schema.clone(),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({
+                "contents":[{"role":"user","parts":[{"text":"answer as JSON"}]}],
+                "generationConfig":{"responseJsonSchema":{
+                    "$defs":{"answer":{"type":"string","minLength":2,
+                        "propertyOrdering":[],"x-opaque":{"keep":true}}},
+                    "type":"object","propertyOrdering":["answer"],
+                    "properties":{"answer":{"$ref":"#/$defs/answer"}},
+                    "required":["answer"],"additionalProperties":false
+                },"responseMimeType":"application/json"}
+            }),
+            schema.clone(),
+        ),
+    ];
+
+    for (protocol, request, expected_schema) in cases {
+        let mut transformed = transform_request_data(
+            request.clone(),
+            protocol,
+            UpstreamProtocol::Anthropic,
+            false,
+        )
+        .expect("portable JSON schema must map to Anthropic");
+        if protocol == DownstreamProtocol::Anthropic {
+            assert_eq!(transformed.value, request);
+        } else if transformed.value["model"] == "" {
+            transformed.value["model"] = json!("claude-target");
+        }
+        validate_final_generation_request_for_downstream(
+            &transformed.value,
+            protocol,
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("Anthropic structured target must pass final validation");
+
+        let format = &transformed.value["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema", "{protocol:?}");
+        assert_eq!(format["schema"], expected_schema, "{protocol:?}");
+        assert!(format.get("name").is_none(), "{protocol:?}");
+        assert!(format.get("description").is_none(), "{protocol:?}");
+        assert!(format.get("strict").is_none(), "{protocol:?}");
+        assert!(
+            transformed
+                .summary
+                .facts
+                .iter()
+                .all(|fact| fact.safe_summary.is_none())
+        );
+
+        let controlled = transformed
+            .summary
+            .facts
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact.outcome,
+                    TransformOutcomeKind::ControlledLossMinor
+                        | TransformOutcomeKind::ControlledLossMajor
+                )
+            })
+            .collect::<Vec<_>>();
+        if protocol == DownstreamProtocol::Anthropic {
+            assert!(controlled.is_empty(), "same-wire schema must be full");
+        } else {
+            assert!(controlled.iter().any(|fact| {
+                fact.reason_code == TransformReasonCode::StructuredOutputMetadataDropped
+                    && fact.action == TransformAction::Drop
+            }));
+        }
+        let property_ordering_losses = controlled
+            .iter()
+            .filter(|fact| fact.reason_code == TransformReasonCode::GeminiPropertyOrderingDropped)
+            .count();
+        assert_eq!(
+            property_ordering_losses,
+            usize::from(protocol == DownstreamProtocol::Gemini),
+            "{protocol:?}"
+        );
+        assert!(!format["schema"].to_string().contains("propertyOrdering"));
+    }
+}
+
+#[test]
+fn anthropic_structured_output_combines_with_tools_thinking_and_stream() {
+    let schema = json!({
+        "type":"object",
+        "properties":{"answer":{"type":"string"}},
+        "required":["answer"],
+        "additionalProperties":false
+    });
+    let transformed = transform_request_data(
+        json!({
+            "model":"gpt-5","messages":[{"role":"user","content":"answer"}],
+            "max_tokens":128,"stream":true,"reasoning_effort":"high",
+            "tools":[{"type":"function","function":{
+                "name":"lookup","description":"Lookup","parameters":{"type":"object"},"strict":true
+            }}],
+            "tool_choice":"auto","parallel_tool_calls":false,
+            "response_format":{"type":"json_schema","json_schema":{
+                "name":"answer_contract","description":"A stable answer",
+                "schema":schema,"strict":true
+            }}
+        }),
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Anthropic,
+        true,
+    )
+    .expect("structured output must combine with tools, thinking, and streaming");
+    assert_eq!(transformed.value["stream"], true);
+    assert_eq!(transformed.value["thinking"], json!({"type":"adaptive"}));
+    assert_eq!(transformed.value["tools"][0]["name"], "lookup");
+    assert_eq!(
+        transformed.value["output_config"],
+        json!({
+            "effort":"high",
+            "format":{"type":"json_schema","schema":schema}
+        })
+    );
+    validate_final_generation_request_for_downstream(
+        &transformed.value,
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect("combined Anthropic target must pass final validation");
+
+    let disabled = transform_request_data(
+        json!({
+            "model":"gpt-5","input":"answer",
+            "reasoning":{"effort":"none"},
+            "text":{"format":{"type":"json_schema","name":"answer_contract",
+                "schema":{"type":"object"},"strict":true}}
+        }),
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("disabled thinking may be combined with structured output");
+    assert_eq!(disabled.value["thinking"], json!({"type":"disabled"}));
+    assert!(disabled.value["output_config"].get("effort").is_none());
+    assert_eq!(
+        disabled.value["output_config"]["format"],
+        json!({"type":"json_schema","schema":{"type":"object"}})
+    );
+}
+
+#[test]
+fn anthropic_target_rejects_non_schema_conflicts_and_invalid_structured_shapes() {
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":"json"}],
+                "response_format":{"type":"json_object"}}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":"json",
+                "text":{"format":{"type":"json_object"}}}),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({"contents":[{"role":"user","parts":[{"text":"json"}]}],
+                "generationConfig":{"responseMimeType":"application/json"}}),
+        ),
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":"json"}],
+                "response_format":{"type":"grammar","grammar":"private-schema-marker"}}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":"json",
+                "text":{"format":{"type":"grammar","grammar":"private-schema-marker"}}}),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({"contents":[{"role":"user","parts":[{"text":"json"}]}],
+            "generationConfig":{
+                "responseFormat":{"text":{"mimeType":"application/json","schema":{"type":"object"}}},
+                "responseJsonSchema":{"private":"private-schema-marker"}
+            }}),
+        ),
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":"json"}],
+            "response_format":{"type":"json_schema","json_schema":{
+                "name":"answer_contract","schema":["private-schema-marker"]
+            }}}),
+        ),
+    ];
+
+    for (protocol, request) in cases {
+        let failure = transform_request_data(request, protocol, UpstreamProtocol::Anthropic, false)
+            .expect_err("non-portable structured output must fail before send");
+        assert!(matches!(
+            failure.origin,
+            TransformFailureOrigin::DownstreamInput | TransformFailureOrigin::TargetCapability
+        ));
+        assert_eq!(
+            failure.semantic_unit,
+            TransformSemanticUnit::StructuredOutput
+        );
+        assert!(!format!("{failure:?}").contains("private-schema-marker"));
+    }
+
+    let invalid_native = transform_request_data(
+        json!({
+            "model":"claude","max_tokens":64,
+            "messages":[{"role":"user","content":"json"}],
+            "output_config":{"format":{"type":"json_schema","schema":[]}}
+        }),
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("same-wire remains raw until final validation");
+    validate_final_generation_request_for_downstream(
+        &invalid_native.value,
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect_err("invalid native schema must fail final validation");
+
+    let patched_cross = json!({
+        "model":"claude-target","max_tokens":64,
+        "messages":[{"role":"user","content":"json"}],
+        "output_config":{"format":{
+            "type":"json_schema","schema":{"type":"object"},"strict":true
+        }}
+    });
+    validate_final_generation_request_for_downstream(
+        &patched_cross,
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect_err("cross-wire Patch must not add unsupported structured metadata");
+}
+
+#[test]
 fn grammar_non_json_and_conflicting_structured_formats_fail_closed() {
     const PRIVATE_MARKER: &str = "structured-private-marker";
     let cases = [
@@ -1811,7 +2597,7 @@ fn responses_target_structured_output_rejects_conflicts_and_invalid_core_shapes(
 }
 
 #[test]
-fn registered_deterministic_text_downgrade_remains_sendable() {
+fn openai_image_reference_reaches_anthropic_natively_with_detail_loss() {
     let transformed = transform_request_data(
         json!({
             "model": "gpt-4",
@@ -1830,15 +2616,20 @@ fn registered_deterministic_text_downgrade_remains_sendable() {
         UpstreamProtocol::Anthropic,
         false,
     )
-    .expect("registered image reference text downgrade must remain sendable");
+    .expect("portable image reference must remain sendable");
 
     assert_eq!(
         transformed.value["messages"][0]["content"],
-        "image_url: https://images.example.com/chart.png\ndetail: high"
+        json!([{
+            "type":"image",
+            "source":{"type":"url","url":"https://images.example.com/chart.png"}
+        }])
     );
     assert!(transformed.summary.facts.iter().any(|fact| {
-        fact.outcome == TransformOutcomeKind::ControlledLossMajor
-            && fact.reason_code == TransformReasonCode::DeterministicTextDowngrade
+        fact.outcome == TransformOutcomeKind::ControlledLossMinor
+            && fact.action == TransformAction::Drop
+            && fact.reason_code == TransformReasonCode::UnsupportedImageDetail
+            && fact.safe_summary.is_none()
     }));
 }
 
@@ -2472,6 +3263,318 @@ fn portable_tool_lifecycles_from_all_public_wires_reach_responses_with_stable_pa
 }
 
 #[test]
+fn portable_tool_choices_to_anthropic_preserve_none_named_allowed_and_parallel_semantics() {
+    let cases = [
+        (json!("none"), "none", None, 2),
+        (json!("auto"), "auto", None, 2),
+        (json!("required"), "any", None, 2),
+        (
+            json!({"type":"function","function":{"name":"weather"}}),
+            "tool",
+            Some("weather"),
+            2,
+        ),
+        (
+            json!({"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[
+                {"type":"function","function":{"name":"weather"}}
+            ]}}),
+            "auto",
+            None,
+            1,
+        ),
+        (
+            json!({"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[
+                {"type":"function","function":{"name":"time"}}
+            ]}}),
+            "any",
+            None,
+            1,
+        ),
+    ];
+
+    for (source_choice, target_choice, target_name, tool_count) in cases {
+        let transformed = transform_request_data(
+            json!({
+                "model":"gpt-5",
+                "messages":[{"role":"user","content":"lookup"}],
+                "tools":[
+                    {"type":"function","function":{"name":"weather","description":"weather lookup","parameters":{"type":"object"},"strict":true}},
+                    {"type":"function","function":{"name":"time","description":"time lookup","parameters":{"type":"object"},"strict":false}}
+                ],
+                "tool_choice":source_choice,
+                "parallel_tool_calls":false
+            }),
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Anthropic,
+            false,
+        )
+        .expect("portable OpenAI tool choice must reach Anthropic");
+        assert_eq!(transformed.value["tool_choice"]["type"], target_choice);
+        assert_eq!(
+            transformed.value["tool_choice"]["disable_parallel_tool_use"],
+            true
+        );
+        assert_eq!(
+            transformed.value["tools"].as_array().map(Vec::len),
+            Some(tool_count)
+        );
+        if let Some(name) = target_name {
+            assert_eq!(transformed.value["tool_choice"]["name"], name);
+        }
+        assert!(!transformed.summary.facts.iter().any(|fact| matches!(
+            fact.outcome,
+            TransformOutcomeKind::ControlledLossMinor | TransformOutcomeKind::ControlledLossMajor
+        )));
+        let mut materialized = transformed.value.clone();
+        materialized["model"] = json!("claude-sonnet");
+        validate_final_generation_request_for_downstream(
+            &materialized,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("Anthropic portable tool target must pass final validation");
+    }
+
+    let same_wire_none = transform_request_data(
+        json!({
+            "model":"claude-sonnet","max_tokens":64,
+            "messages":[{"role":"user","content":"do not call tools"}],
+            "tools":[{"name":"weather","input_schema":{"type":"object"}}],
+            "tool_choice":{"type":"none","disable_parallel_tool_use":true}
+        }),
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("Anthropic none must remain same-wire");
+    assert_eq!(same_wire_none.value["tool_choice"]["type"], "none");
+}
+
+#[test]
+fn portable_tool_lifecycles_from_all_public_wires_reach_anthropic_with_stable_pairing() {
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"gpt-5",
+                "messages":[
+                    {"role":"assistant","tool_calls":[
+                        {"id":"call-weather","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}},
+                        {"id":"call-time","type":"function","function":{"name":"time","arguments":"{\"zone\":\"UTC\"}"}}
+                    ]},
+                    {"role":"tool","tool_call_id":"call-weather","content":"21"},
+                    {"role":"tool","tool_call_id":"call-time","content":"12:00"}
+                ],
+                "tools":[
+                    {"type":"function","function":{"name":"weather","description":"weather lookup","parameters":{"type":"object"},"strict":true}},
+                    {"type":"function","function":{"name":"time","description":"time lookup","parameters":{"type":"object"},"strict":false}}
+                ],
+                "tool_choice":{"type":"function","function":{"name":"weather"}},
+                "parallel_tool_calls":false
+            }),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"gpt-5",
+                "input":[
+                    {"type":"function_call","id":"fc-weather","call_id":"response-weather","name":"weather","arguments":"{\"city\":\"Paris\"}"},
+                    {"type":"function_call","id":"fc-time","call_id":"response-time","name":"time","arguments":"{\"zone\":\"UTC\"}"},
+                    {"type":"function_call_output","id":"fco-weather","call_id":"response-weather","output":{"temp":21}},
+                    {"type":"function_call_output","id":"fco-time","call_id":"response-time","output":"12:00"}
+                ],
+                "tools":[
+                    {"type":"function","name":"weather","description":"weather lookup","parameters":{"type":"object"},"strict":true},
+                    {"type":"function","name":"time","description":"time lookup","parameters":{"type":"object"},"strict":false}
+                ],
+                "tool_choice":{"type":"allowed_tools","mode":"required","tools":[
+                    {"type":"function","name":"weather"},{"type":"function","name":"time"}
+                ]},
+                "parallel_tool_calls":false
+            }),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"claude-sonnet","max_tokens":64,
+                "messages":[
+                    {"role":"assistant","content":[
+                        {"type":"tool_use","id":"anthropic-weather","name":"weather","input":{"city":"Paris"}},
+                        {"type":"tool_use","id":"anthropic-time","name":"time","input":{"zone":"UTC"}}
+                    ]},
+                    {"role":"user","content":[
+                        {"type":"tool_result","tool_use_id":"anthropic-weather","content":{"temp":21}},
+                        {"type":"tool_result","tool_use_id":"anthropic-time","content":"12:00"},
+                        {"type":"text","text":"summarize"}
+                    ]}
+                ],
+                "tools":[
+                    {"name":"weather","description":"weather lookup","input_schema":{"type":"object"},"strict":true},
+                    {"name":"time","description":"time lookup","input_schema":{"type":"object"},"strict":false}
+                ],
+                "tool_choice":{"type":"any","disable_parallel_tool_use":true}
+            }),
+        ),
+        (
+            DownstreamProtocol::Gemini,
+            json!({
+                "contents":[
+                    {"role":"model","parts":[
+                        {"functionCall":{"name":"weather","args":{"city":"Paris"}}},
+                        {"functionCall":{"name":"time","args":{"zone":"UTC"}}}
+                    ]},
+                    {"role":"user","parts":[
+                        {"text":"summarize"},
+                        {"functionResponse":{"name":"weather","response":{"temp":21}}},
+                        {"functionResponse":{"name":"time","response":{"result":"12:00"}}}
+                    ]}
+                ],
+                "tools":[{"functionDeclarations":[
+                    {"name":"weather","description":"weather lookup","parameters":{"type":"object"}},
+                    {"name":"time","description":"time lookup","parameters":{"type":"object"}}
+                ]}],
+                "toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["weather","time"]}}
+            }),
+        ),
+    ];
+
+    for (protocol, request) in cases {
+        let transformed = transform_request_data(
+            request.clone(),
+            protocol,
+            UpstreamProtocol::Anthropic,
+            false,
+        )
+        .expect("portable tool lifecycle must reach Anthropic");
+        let repeated =
+            transform_request_data(request, protocol, UpstreamProtocol::Anthropic, false)
+                .expect("repeated portable tool lifecycle must reach Anthropic");
+        let mut materialized = transformed.value.clone();
+        materialized["model"] = json!("claude-sonnet");
+        validate_final_generation_request_for_downstream(
+            &materialized,
+            protocol,
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect("portable tool lifecycle must pass final Anthropic validation");
+        assert_eq!(transformed.value, repeated.value, "{protocol:?}");
+
+        let messages = transformed.value["messages"]
+            .as_array()
+            .expect("Anthropic target messages");
+        let call_ids = messages
+            .iter()
+            .flat_map(|message| {
+                message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|block| {
+                        (block["type"] == "tool_use")
+                            .then(|| block["id"].as_str())
+                            .flatten()
+                    })
+            })
+            .collect::<Vec<_>>();
+        let result_ids = messages
+            .iter()
+            .flat_map(|message| {
+                message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|block| {
+                        (block["type"] == "tool_result")
+                            .then(|| block["tool_use_id"].as_str())
+                            .flatten()
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(call_ids, result_ids, "{protocol:?}");
+
+        if protocol == DownstreamProtocol::Gemini {
+            assert!(transformed.summary.facts.iter().any(|fact| {
+                fact.reason_code == TransformReasonCode::SyntheticCorrelationId
+                    && fact.safe_summary.is_none()
+            }));
+            let final_user_blocks = messages
+                .last()
+                .and_then(|message| message["content"].as_array())
+                .expect("Gemini result and text target message");
+            assert_eq!(final_user_blocks[0]["type"], "tool_result");
+            assert_eq!(final_user_blocks[1]["type"], "tool_result");
+            assert_eq!(
+                final_user_blocks[2],
+                json!({"type":"text","text":"summarize"})
+            );
+        } else {
+            assert!(!transformed.summary.facts.iter().any(|fact| matches!(
+                fact.outcome,
+                TransformOutcomeKind::ControlledLossMinor
+                    | TransformOutcomeKind::ControlledLossMajor
+            )));
+        }
+    }
+}
+
+#[test]
+fn anthropic_target_tool_references_and_result_order_are_strict() {
+    let cases = [
+        json!({
+            "model":"claude","max_tokens":64,
+            "messages":[{"role":"assistant","content":[
+                {"type":"tool_use","id":"dangling","name":"lookup","input":{}}
+            ]}]
+        }),
+        json!({
+            "model":"claude","max_tokens":64,
+            "messages":[
+                {"role":"assistant","content":[
+                    {"type":"tool_use","id":"duplicate","name":"lookup","input":{}},
+                    {"type":"tool_use","id":"duplicate","name":"lookup","input":{}}
+                ]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"duplicate","content":"ok"}]}
+            ]
+        }),
+        json!({
+            "model":"claude","max_tokens":64,
+            "messages":[{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"missing","content":"ok"}
+            ]}]
+        }),
+        json!({
+            "model":"claude","max_tokens":64,
+            "messages":[
+                {"role":"assistant","content":[{"type":"tool_use","id":"ordered","name":"lookup","input":{}}]},
+                {"role":"user","content":[
+                    {"type":"text","text":"too early"},
+                    {"type":"tool_result","tool_use_id":"ordered","content":"ok"}
+                ]}
+            ]
+        }),
+        json!({
+            "model":"claude","max_tokens":64,
+            "messages":[
+                {"role":"assistant","content":[{"type":"tool_use","name":"lookup","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"missing","content":"ok"}]}
+            ]
+        }),
+    ];
+
+    for request in cases {
+        validate_final_generation_request_for_downstream(
+            &request,
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Anthropic,
+            &UpstreamProfileType::Anthropic,
+        )
+        .expect_err("invalid tool references must fail before transport");
+    }
+}
+
+#[test]
 fn portable_function_definitions_reject_invalid_names_parameters_descriptions_and_parallel_controls()
  {
     let cases = [
@@ -2603,6 +3706,72 @@ fn optional_nonportable_tools_drop_but_forced_selection_rejects() {
         forced.reason_code,
         TransformReasonCode::UnsupportedToolDefinitions
     );
+
+    let optional_to_anthropic = transform_request_data(
+        json!({
+            "model":"gpt-5","input":"search",
+            "tools":[
+                {"type":"web_search_preview"},
+                {"type":"function","name":"lookup","parameters":{"type":"object"}}
+            ],
+            "tool_choice":"auto"
+        }),
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("optional built-in tool may be removed before Anthropic");
+    assert_eq!(
+        optional_to_anthropic.value["tools"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(optional_to_anthropic.value["tools"][0]["name"], "lookup");
+    assert!(optional_to_anthropic.summary.facts.iter().any(|fact| {
+        fact.semantic_unit == TransformSemanticUnit::ToolDefinitions
+            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+            && fact.action == TransformAction::Drop
+            && fact.safe_summary.is_none()
+    }));
+
+    let forced_to_anthropic = transform_request_data(
+        json!({
+            "model":"gpt-5","input":"search",
+            "tools":[{"type":"web_search_preview"}],
+            "tool_choice":"required"
+        }),
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect_err("forced built-in tool must reject before Anthropic");
+    assert_eq!(
+        forced_to_anthropic.reason_code,
+        TransformReasonCode::UnsupportedToolDefinitions
+    );
+
+    let same_wire_server_tool = json!({
+        "model":"claude-sonnet","max_tokens":64,
+        "messages":[{"role":"user","content":"search"}],
+        "tools":[{"type":"web_search_20250305","name":"web_search","max_uses":2}],
+        "tool_choice":{"type":"tool","name":"web_search"}
+    });
+    let same_wire = transform_request_data(
+        same_wire_server_tool.clone(),
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        false,
+    )
+    .expect("same-wire server tool must pass through");
+    assert_eq!(same_wire.value, same_wire_server_tool);
+    validate_final_generation_request_for_downstream(
+        &same_wire.value,
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Anthropic,
+        &UpstreamProfileType::Anthropic,
+    )
+    .expect("same-wire server tool must pass final validation");
 }
 
 #[test]
@@ -2820,6 +3989,6 @@ fn tool_error_result_survives_a_responses_round_trip() {
     assert_eq!(anthropic["messages"][0]["content"][0]["is_error"], true);
     assert_eq!(
         anthropic["messages"][0]["content"][0]["content"],
-        json!({"code":"not_found"})
+        json!("{\"code\":\"not_found\"}")
     );
 }

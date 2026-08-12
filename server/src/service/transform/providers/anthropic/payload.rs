@@ -159,10 +159,30 @@ pub enum AnthropicContentBlock {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_input_tokens: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_creation_input_tokens: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AnthropicStreamUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+}
+
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -185,7 +205,7 @@ pub enum AnthropicEvent {
     MessageDelta {
         delta: MessageDelta,
         #[serde(skip_serializing_if = "Option::is_none")]
-        usage: Option<AnthropicUsage>,
+        usage: Option<AnthropicStreamUsage>,
     },
     MessageStop,
     Error {
@@ -229,5 +249,5 @@ pub struct MessageDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<AnthropicUsage>,
+    pub usage: Option<AnthropicStreamUsage>,
 }

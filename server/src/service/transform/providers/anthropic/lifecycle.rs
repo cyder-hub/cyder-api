@@ -75,6 +75,7 @@ fn anthropic_block_stop_events(
             text,
             tool_call_id,
             tool_name,
+            ..
         }) => {
             let id =
                 tool_call_id.expect("Anthropic tool block must retain its validated tool-use id");
@@ -175,11 +176,9 @@ impl From<AnthropicEvent> for UnifiedChunkResponse {
                         ),
                     );
                 }
-                let usage = usage.or(delta.usage).map(|usage| UnifiedUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    total_tokens: usage.input_tokens + usage.output_tokens,
-                    ..Default::default()
+                let usage = usage.or(delta.usage).map(|usage| {
+                    super::response::anthropic_stream_usage_to_unified(&usage)
+                        .expect("Anthropic stream usage must be source-validated")
                 });
 
                 return UnifiedChunkResponse {
@@ -221,6 +220,11 @@ fn anthropic_event_to_unified_stream_events_inner(
                 model: Some(message.model),
                 role: UnifiedRole::Assistant,
             }];
+
+            session.source_usage = message.usage.as_ref().map(|usage| {
+                super::response::anthropic_usage_to_unified(usage)
+                    .expect("Anthropic message_start usage must be source-validated")
+            });
 
             if let Some(content_blocks) = message.content {
                 for (index, block) in content_blocks.into_iter().enumerate() {
@@ -544,14 +548,25 @@ fn anthropic_event_to_unified_stream_events_inner(
                 });
             }
             if let Some(usage) = usage.or(delta.usage) {
-                events.push(UnifiedStreamEvent::Usage {
-                    usage: UnifiedUsage {
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        total_tokens: usage.input_tokens + usage.output_tokens,
-                        ..Default::default()
-                    },
-                });
+                let mut usage = super::response::anthropic_stream_usage_to_unified(&usage)
+                    .expect("Anthropic message_delta usage must be source-validated");
+                if let Some(start_usage) = session.source_usage.as_ref() {
+                    if usage.input_tokens == 0 {
+                        usage.input_tokens = start_usage.input_tokens;
+                    }
+                    if usage.cached_tokens.is_none() {
+                        usage.cached_tokens = start_usage.cached_tokens;
+                    }
+                    if usage.cache_write_tokens.is_none() {
+                        usage.cache_write_tokens = start_usage.cache_write_tokens;
+                    }
+                    usage.total_tokens = usage
+                        .input_tokens
+                        .checked_add(usage.output_tokens)
+                        .expect("source-validated Anthropic stream usage must remain in range");
+                }
+                session.source_usage = Some(usage.clone());
+                events.push(UnifiedStreamEvent::Usage { usage });
             }
             events
         }

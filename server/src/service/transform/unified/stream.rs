@@ -20,6 +20,10 @@ pub enum UnifiedContentPartDelta {
         index: u32,
         text: String,
     },
+    ReasoningDelta {
+        index: u32,
+        text: String,
+    },
     ImageDelta {
         index: u32,
         url: Option<String>,
@@ -331,7 +335,8 @@ pub(crate) fn meaningful_output_from_stream_events(events: &[UnifiedStreamEvent]
 pub(crate) fn meaningful_output_from_legacy_chunk(chunk: &UnifiedChunkResponse) -> bool {
     chunk.choices.iter().any(|choice| {
         choice.delta.content.iter().any(|part| match part {
-            UnifiedContentPartDelta::TextDelta { text, .. } => meaningful_text(text),
+            UnifiedContentPartDelta::TextDelta { text, .. }
+            | UnifiedContentPartDelta::ReasoningDelta { text, .. } => meaningful_text(text),
             UnifiedContentPartDelta::ImageDelta { url, data, .. } => {
                 url.as_deref().is_some_and(meaningful_text)
                     || data.as_deref().is_some_and(meaningful_text)
@@ -558,9 +563,18 @@ pub fn map_gemini_finish_reason_to_openai(reason: &str, has_tool_call: bool) -> 
                 "stop".to_string()
             }
         }
-        "TOOL_USE" => "tool_calls".to_string(),
         "MAX_TOKENS" => "length".to_string(),
-        "SAFETY" | "RECITATION" => "content_filter".to_string(),
+        "SAFETY"
+        | "RECITATION"
+        | "LANGUAGE"
+        | "BLOCKLIST"
+        | "PROHIBITED_CONTENT"
+        | "SPII"
+        | "IMAGE_SAFETY"
+        | "IMAGE_PROHIBITED_CONTENT"
+        | "IMAGE_RECITATION"
+        | "ESCALATION"
+        | "MODEL_ARMOR" => "content_filter".to_string(),
         _ => "stop".to_string(),
     }
 }
@@ -570,7 +584,7 @@ pub fn map_openai_finish_reason_to_gemini(reason: &str) -> String {
         "stop" => "STOP".to_string(),
         "length" => "MAX_TOKENS".to_string(),
         "content_filter" => "SAFETY".to_string(),
-        "tool_calls" => "TOOL_USE".to_string(),
+        "tool_calls" => "STOP".to_string(),
         _ => "FINISH_REASON_UNSPECIFIED".to_string(),
     }
 }

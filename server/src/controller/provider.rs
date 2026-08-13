@@ -1,4 +1,4 @@
-use crate::config::ProxyTimeoutConfig;
+use crate::config::{NonStreamResponseConfig, ProxyTimeoutConfig};
 use crate::database::{
     DbResult,
     model::{Model, ModelDetail},
@@ -51,13 +51,19 @@ use crate::service::provider_credential::{
     upstream_protocol_for_profile,
 };
 use crate::service::provider_http::{
-    anthropic_messages_url, base_url_is_default, enforce_anthropic_version_header,
+    GeminiModelOperation, anthropic_messages_url, base_url_is_default,
+    enforce_anthropic_version_header, gemini_operation_target_url, gemini_source_check_body,
     join_base_url_and_operation_path, normalize_provider_base_url, normalize_source_base_url,
+    sanitize_gemini_request_headers, validate_gemini_pre_auth_target,
+    validate_gemini_source_check_response,
 };
 use crate::service::secret_encryption::SensitiveSecret;
 use crate::service::transform::{finalize_request_data, validate_final_generation_request};
 use crate::service::upstream_profile::{UpstreamOperation, resolve_source_operation_url};
-use crate::service::upstream_response::apply_upstream_accept_encoding;
+use crate::service::upstream_response::{
+    ResponseBodyReadTimeouts, apply_upstream_accept_encoding, normalize_content_type,
+    read_complete_response_body_with_timeouts,
+};
 
 #[derive(Serialize)]
 struct ProviderModelDetailResponse {
@@ -851,10 +857,8 @@ async fn resolve_provider_check_request_patches(
     Ok(trace.applied_rules)
 }
 
-async fn build_provider_check_request(
-    _provider: &ProviderAggregate,
+async fn build_provider_check_request_pre_auth(
     source: &UpstreamSource,
-    credential: &ProviderCredential,
     model_name: &str,
     request_patches: &[RuntimeResolvedRequestPatch],
 ) -> Result<ProviderCheckRequest, BaseError> {
@@ -875,31 +879,20 @@ async fn build_provider_check_request(
         is_default: source.is_default,
     };
     let mut request = match source.profile_type {
-        UpstreamProfileType::Gemini => ProviderCheckRequest {
-            url: format_gemini_generate_content_url(source, model_name),
-            headers,
-            body: json!({
-                "contents": [
-                    {
-                        "parts": [
-                            { "text": "hi" }
-                        ]
-                    }
-                ]
-            }),
-        },
-        UpstreamProfileType::Vertex => ProviderCheckRequest {
-            url: format_gemini_generate_content_url(source, model_name),
-            headers,
-            body: json!({
-                "contents": [
-                    {
-                        "parts": [
-                            { "text": "hi" }
-                        ]
-                    }
-                ]
-            }),
+        UpstreamProfileType::Gemini | UpstreamProfileType::Vertex => ProviderCheckRequest {
+            url: gemini_operation_target_url(
+                &source.base_url,
+                model_name,
+                GeminiModelOperation::GenerateContent,
+            )
+            .map_err(|error| {
+                BaseError::ParamInvalid(Some(format!(
+                    "Source does not support Gemini generateContent check: {error}"
+                )))
+            })?
+            .to_string(),
+            headers: sanitize_gemini_request_headers(&headers),
+            body: gemini_source_check_body(),
         },
         UpstreamProfileType::OpenaiCompatible => ProviderCheckRequest {
             url: resolve_source_operation_url(&cache_source, UpstreamOperation::ChatCompletions)
@@ -1005,7 +998,10 @@ async fn build_provider_check_request(
     }
     if matches!(
         upstream_protocol,
-        UpstreamProtocol::Openai | UpstreamProtocol::Responses | UpstreamProtocol::Anthropic
+        UpstreamProtocol::Openai
+            | UpstreamProtocol::Responses
+            | UpstreamProtocol::Anthropic
+            | UpstreamProtocol::Gemini
     ) {
         validate_final_generation_request(
             &request.body,
@@ -1018,24 +1014,42 @@ async fn build_provider_check_request(
             )))
         })?;
     }
-    apply_provider_request_auth_header(
-        &mut request.headers,
-        &cache_source,
-        upstream_protocol,
-        credential,
-    )
-    .map_err(provider_credential_error)?;
+    if upstream_protocol == UpstreamProtocol::Gemini {
+        validate_gemini_pre_auth_target(
+            &url,
+            &request.headers,
+            GeminiModelOperation::GenerateContent,
+        )
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(format!(
+                "final Gemini target validation failed: {error}"
+            )))
+        })?;
+    }
     request.url = url.to_string();
 
     Ok(request)
 }
 
-fn format_gemini_generate_content_url(source: &UpstreamSource, model_name: &str) -> String {
-    format!(
-        "{}/{}:generateContent",
-        source.base_url.trim_end_matches('/'),
-        model_name
+#[cfg(test)]
+async fn build_provider_check_request(
+    _provider: &ProviderAggregate,
+    source: &UpstreamSource,
+    credential: &ProviderCredential,
+    model_name: &str,
+    request_patches: &[RuntimeResolvedRequestPatch],
+) -> Result<ProviderCheckRequest, BaseError> {
+    let mut request =
+        build_provider_check_request_pre_auth(source, model_name, request_patches).await?;
+    let cache_source = crate::service::cache::types::CacheUpstreamSource::from(source.clone());
+    apply_provider_request_auth_header(
+        &mut request.headers,
+        &cache_source,
+        upstream_protocol_for_profile(&source.profile_type),
+        credential,
     )
+    .map_err(provider_credential_error)?;
+    Ok(request)
 }
 
 fn source_chat_check_error(error: impl std::fmt::Display) -> BaseError {
@@ -1176,18 +1190,23 @@ fn resolve_bootstrap_identity(
     Ok((provider_name, provider_key))
 }
 
-async fn perform_provider_check(
+async fn send_provider_check_request(
     client: &reqwest::Client,
-    provider: &ProviderAggregate,
     source: &UpstreamSource,
     credential: &ProviderCredential,
-    model_name: &str,
-    request_patches: &[RuntimeResolvedRequestPatch],
+    mut check_request: ProviderCheckRequest,
     proxy_timeouts: &ProxyTimeoutConfig,
+    response_limits: &NonStreamResponseConfig,
 ) -> Result<(), BaseError> {
-    let check_request =
-        build_provider_check_request(provider, source, credential, model_name, request_patches)
-            .await?;
+    let cache_source = crate::service::cache::types::CacheUpstreamSource::from(source.clone());
+    let upstream_protocol = upstream_protocol_for_profile(&source.profile_type);
+    apply_provider_request_auth_header(
+        &mut check_request.headers,
+        &cache_source,
+        upstream_protocol,
+        credential,
+    )
+    .map_err(provider_credential_error)?;
 
     let mut headers = check_request.headers;
     apply_upstream_accept_encoding(&mut headers, false);
@@ -1212,8 +1231,68 @@ async fn perform_provider_check(
         ))));
     }
 
-    drop(response);
+    if matches!(
+        source.profile_type,
+        UpstreamProfileType::Gemini | UpstreamProfileType::Vertex
+    ) {
+        if normalize_content_type(response.headers())
+            .is_none_or(|content_type| content_type.essence != "application/json")
+        {
+            return Err(BaseError::ParamInvalid(Some(
+                "Gemini Provider check returned an invalid content type".to_string(),
+            )));
+        }
+        let complete = read_complete_response_body_with_timeouts(
+            response,
+            response_limits,
+            Some(ResponseBodyReadTimeouts {
+                first_byte: proxy_timeouts.first_byte(),
+                response_idle: proxy_timeouts.response_idle(),
+            }),
+            |_, _, _| {},
+        )
+        .await
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(format!(
+                "Gemini Provider check response could not be read: {error}"
+            )))
+        })?;
+        let body: Value = serde_json::from_slice(&complete.bytes).map_err(|_| {
+            BaseError::ParamInvalid(Some(
+                "Gemini Provider check returned invalid JSON".to_string(),
+            ))
+        })?;
+        validate_gemini_source_check_response(&body).map_err(|error| {
+            BaseError::ParamInvalid(Some(format!("Gemini Provider check failed: {error}")))
+        })?;
+    } else {
+        drop(response);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+async fn perform_provider_check(
+    client: &reqwest::Client,
+    _provider: &ProviderAggregate,
+    source: &UpstreamSource,
+    credential: &ProviderCredential,
+    model_name: &str,
+    request_patches: &[RuntimeResolvedRequestPatch],
+    proxy_timeouts: &ProxyTimeoutConfig,
+    response_limits: &NonStreamResponseConfig,
+) -> Result<(), BaseError> {
+    let request =
+        build_provider_check_request_pre_auth(source, model_name, request_patches).await?;
+    send_provider_check_request(
+        client,
+        source,
+        credential,
+        request,
+        proxy_timeouts,
+        response_limits,
+    )
+    .await
 }
 
 fn build_bootstrap_response(
@@ -1256,6 +1335,8 @@ async fn check_provider(
         &cache_source,
     )
     .await?;
+    let check_request =
+        build_provider_check_request_pre_auth(&source, &model_name, &request_patches).await?;
     // Capture the durable identity before resolving the request credential. Draft
     // credentials use an internal key_id of 0 for provider-specific materialization,
     // but that implementation detail must never cross the manager API boundary.
@@ -1291,15 +1372,14 @@ async fn check_provider(
         .await
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
-    let proxy_timeouts = app_state.infra.proxy_request_config().timeouts.clone();
-    perform_provider_check(
+    let proxy_request_config = app_state.infra.proxy_request_config();
+    send_provider_check_request(
         client.as_ref(),
-        &provider,
         &source,
         &credential,
-        &model_name,
-        &request_patches,
-        &proxy_timeouts,
+        check_request,
+        &proxy_request_config.timeouts,
+        &proxy_request_config.non_stream_response,
     )
     .await?;
     info!(
@@ -1380,8 +1460,20 @@ async fn bootstrap_provider(
         )
         .await;
 
-        let credential_and_patches = match (chat_operation, client, request_patches) {
-            (Ok(()), Ok(client), Ok(request_patches)) => resolve_draft_provider_credential(
+        let prepared_check = match (chat_operation, client, request_patches) {
+            (Ok(()), Ok(client), Ok(request_patches)) => build_provider_check_request_pre_auth(
+                &source,
+                &model_name_to_check,
+                &request_patches,
+            )
+            .await
+            .map(|request| (client, request)),
+            (Err(error), _, _) => Err(error),
+            (_, Err(error), _) => Err(BaseError::ParamInvalid(Some(error.to_string()))),
+            (_, _, Err(error)) => Err(error),
+        };
+        let credential_and_request = match prepared_check {
+            Ok((client, request)) => resolve_draft_provider_credential(
                 &created.provider,
                 &cache_source,
                 created.created_key.id,
@@ -1389,24 +1481,21 @@ async fn bootstrap_provider(
                 &app_state,
             )
             .await
-            .map(|credential| (client, credential, request_patches))
+            .map(|credential| (client, credential, request))
             .map_err(provider_credential_error),
-            (Err(error), _, _) => Err(error),
-            (_, Err(error), _) => Err(BaseError::ParamInvalid(Some(error.to_string()))),
-            (_, _, Err(error)) => Err(error),
+            Err(error) => Err(error),
         };
-        match credential_and_patches {
+        match credential_and_request {
             Err(error) => Some(BootstrapCheckResult::failed(base_error_message(&error))),
-            Ok((client, credential, request_patches)) => {
-                let proxy_timeouts = app_state.infra.proxy_request_config().timeouts.clone();
-                match perform_provider_check(
+            Ok((client, credential, request)) => {
+                let proxy_request_config = app_state.infra.proxy_request_config();
+                match send_provider_check_request(
                     client.as_ref(),
-                    &created.provider,
                     &source,
                     &credential,
-                    &model_name_to_check,
-                    &request_patches,
-                    &proxy_timeouts,
+                    request,
+                    &proxy_request_config.timeouts,
+                    &proxy_request_config.non_stream_response,
                 )
                 .await
                 {
@@ -2003,6 +2092,7 @@ mod tests {
             "responses-non-success-model",
             &[],
             &crate::config::ProxyTimeoutConfig::default(),
+            &crate::config::NonStreamResponseConfig::default(),
         )
         .await
         .expect_err("non-success Responses check should fail");
@@ -2048,6 +2138,479 @@ mod tests {
             "gm-test"
         );
         assert_eq!(request.body["contents"][0]["parts"][0]["text"], "hi");
+        assert_eq!(request.body["generationConfig"]["candidateCount"], 1);
+        assert_eq!(request.body["generationConfig"]["maxOutputTokens"], 1);
+    }
+
+    #[tokio::test]
+    async fn gemini_check_revalidates_patched_body_before_authentication() {
+        let provider = sample_provider(
+            UpstreamProfileType::Gemini,
+            "https://generativelanguage.googleapis.com/v1beta/models",
+        );
+        let error = match super::build_provider_check_request(
+            &provider,
+            &provider.upstream_sources[0],
+            &credential("gemini-source-check-private-key"),
+            "gemini-2.0-flash",
+            &[request_patch(
+                19,
+                RequestPatchPlacement::Body,
+                "/contents/0/parts",
+                RequestPatchOperation::Set,
+                Some(json!("gemini-source-check-private-marker")),
+            )],
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid patched Gemini body must fail before authentication"),
+            Err(error) => error,
+        };
+
+        let message = super::base_error_message(&error);
+        assert!(message.contains("/contents/*/parts"));
+        assert!(!message.contains("private-marker"));
+        assert!(!message.contains("private-key"));
+    }
+
+    #[tokio::test]
+    async fn gemini_and_vertex_source_check_send_shared_minimal_contract_once() {
+        let response_body = br#"{"responseId":"check-response","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}"#;
+        for profile_type in [UpstreamProfileType::Gemini, UpstreamProfileType::Vertex] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (request_tx, request_rx) = oneshot::channel();
+            let upstream = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 8192];
+                let read = socket.read(&mut request).await.unwrap();
+                let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    String::from_utf8_lossy(response_body)
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let base_url = match profile_type {
+                UpstreamProfileType::Gemini => format!("http://{address}/v1beta/models"),
+                UpstreamProfileType::Vertex => {
+                    format!("http://{address}/v1/projects/p/locations/l/publishers/google/models")
+                }
+                _ => unreachable!(),
+            };
+            let provider = sample_provider(profile_type.clone(), &base_url);
+
+            super::perform_provider_check(
+                &reqwest::Client::new(),
+                &provider,
+                &provider.upstream_sources[0],
+                &credential("gemini-check-credential"),
+                "gemini-check-model",
+                &[],
+                &crate::config::ProxyTimeoutConfig::default(),
+                &crate::config::NonStreamResponseConfig::default(),
+            )
+            .await
+            .expect("valid native Gemini check should succeed");
+
+            let request = request_rx.await.expect("one captured Source Check");
+            let request_lower = request.to_ascii_lowercase();
+            assert!(request_lower.starts_with(&format!(
+                "post /{}",
+                match profile_type {
+                    UpstreamProfileType::Gemini => {
+                        "v1beta/models/gemini-check-model:generatecontent"
+                    }
+                    UpstreamProfileType::Vertex => "v1/projects/p/locations/l/publishers/google/models/gemini-check-model:generatecontent",
+                    _ => unreachable!(),
+                }
+            )));
+            match profile_type {
+                UpstreamProfileType::Gemini => {
+                    assert!(request_lower.contains("x-goog-api-key: gemini-check-credential"));
+                    assert!(!request_lower.contains("authorization: bearer"));
+                }
+                UpstreamProfileType::Vertex => {
+                    assert!(
+                        request_lower.contains("authorization: bearer gemini-check-credential")
+                    );
+                    assert!(!request_lower.contains("x-goog-api-key"));
+                }
+                _ => unreachable!(),
+            }
+            let body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .expect("captured HTTP body");
+            assert_eq!(
+                serde_json::from_str::<Value>(body).expect("Source Check JSON body"),
+                crate::service::provider_http::gemini_source_check_body()
+            );
+            timeout(Duration::from_secs(2), upstream)
+                .await
+                .expect("single check should finish")
+                .expect("upstream fixture should join");
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_source_check_rejects_malformed_2xx_application_and_http_errors() {
+        for (status, content_type, body, expected) in [
+            (200, "application/json", "", "invalid JSON"),
+            (200, "application/json", "{}", "exactly one candidate"),
+            (
+                200,
+                "application/json",
+                r#"{"error":{"message":"response-private-marker"}}"#,
+                "application error",
+            ),
+            (200, "text/plain", "not-json", "invalid content type"),
+            (
+                429,
+                "application/json",
+                r#"{"error":{"message":"rate-private-marker"}}"#,
+                "429",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let upstream = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 8192];
+                let _ = socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let provider = sample_provider(
+                UpstreamProfileType::Gemini,
+                &format!("http://{address}/v1beta/models"),
+            );
+
+            let error = super::perform_provider_check(
+                &reqwest::Client::new(),
+                &provider,
+                &provider.upstream_sources[0],
+                &credential("gemini-check-private-key"),
+                "gemini-check-model",
+                &[],
+                &crate::config::ProxyTimeoutConfig::default(),
+                &crate::config::NonStreamResponseConfig::default(),
+            )
+            .await
+            .expect_err("invalid Gemini check response must fail");
+            let message = super::base_error_message(&error);
+            assert!(message.contains(expected), "message={message}");
+            assert!(!message.contains("private-marker"));
+            assert!(!message.contains("private-key"));
+            timeout(Duration::from_secs(2), upstream)
+                .await
+                .expect("failed check should finish")
+                .expect("upstream fixture should join");
+        }
+    }
+
+    #[tokio::test]
+    async fn gemini_source_check_saved_and_draft_share_patch_contract_without_proxy_logs() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-gemini-source-check-native-http.sqlite");
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (requests_tx, requests_rx) = oneshot::channel();
+                let upstream = tokio::spawn(async move {
+                    let response_body = br#"{"responseId":"check-response","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}"#;
+                    let mut requests = Vec::new();
+                    for _ in 0..2 {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        let mut request = vec![0u8; 8192];
+                        let read = socket.read(&mut request).await.unwrap();
+                        requests.push(String::from_utf8_lossy(&request[..read]).to_string());
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            response_body.len(),
+                            String::from_utf8_lossy(response_body)
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                    }
+                    let _ = requests_tx.send(requests);
+                });
+
+                let provider_id = 26190;
+                let source_id = 26191;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "gemini-check-provider".to_string(),
+                        name: "Gemini Check Provider".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Gemini,
+                        base_url: format!("http://{address}/v1beta/models"),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Gemini,
+                        )
+                    },
+                )
+                .expect("Gemini provider should seed")
+                .provider;
+                let saved_model = Model::create(
+                    provider.id,
+                    "saved-gemini-check-model",
+                    Some("saved-gemini-upstream-model"),
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("saved Gemini model should seed");
+                let patch_input = |model_id, placement, target: &str, value: Value| {
+                    RequestPatchVariantInput {
+                        source_id,
+                        model_id,
+                        suffix: None,
+                        enabled: true,
+                        expose_in_models: false,
+                        rules: vec![RequestPatchRuleInput {
+                            placement,
+                            target: target.to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(value)),
+                            description: None,
+                        }],
+                    }
+                };
+                RequestPatchVariantRepository::create(&patch_input(
+                    None,
+                    RequestPatchPlacement::Query,
+                    "trace",
+                    json!("source-check"),
+                ))
+                .expect("source Patch should seed");
+                RequestPatchVariantRepository::create(&patch_input(
+                    Some(saved_model.id),
+                    RequestPatchPlacement::Header,
+                    "x-model-check-patch",
+                    json!("saved-model"),
+                ))
+                .expect("model Patch should seed");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let created = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/provider_keys"),
+                        json!({"api_key":"saved-gemini-check-secret"}),
+                    ),
+                )
+                .await;
+                assert_eq!(created.status(), StatusCode::OK);
+                let key_id = response_json(created).await["data"]["id"]
+                    .as_i64()
+                    .expect("saved key id");
+
+                let saved = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({"model_id":saved_model.id,"provider_api_key_id":key_id}),
+                    ),
+                )
+                .await;
+                assert_eq!(saved.status(), StatusCode::OK);
+                let saved_body = response_json(saved).await;
+                assert_eq!(saved_body["data"]["provider_api_key_id"], key_id);
+
+                let draft = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({
+                            "draft_model":{"model_kind":"CHAT","upstream_model_name":"draft-gemini-upstream-model"},
+                            "provider_api_key":"draft-gemini-check-secret"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(draft.status(), StatusCode::OK);
+                assert_eq!(response_json(draft).await["data"]["provider_api_key_id"], Value::Null);
+
+                let requests = timeout(Duration::from_secs(2), requests_rx)
+                    .await
+                    .expect("two Gemini checks should finish")
+                    .expect("captured Gemini Source Checks");
+                assert_eq!(requests.len(), 2);
+                let saved_request = requests[0].to_ascii_lowercase();
+                let draft_request = requests[1].to_ascii_lowercase();
+                assert!(saved_request.starts_with("post /v1beta/models/saved-gemini-upstream-model:generatecontent?trace=source-check "));
+                assert!(draft_request.starts_with("post /v1beta/models/draft-gemini-upstream-model:generatecontent?trace=source-check "));
+                assert!(saved_request.contains("x-goog-api-key: saved-gemini-check-secret"));
+                assert!(draft_request.contains("x-goog-api-key: draft-gemini-check-secret"));
+                assert!(saved_request.contains("x-model-check-patch: saved-model"));
+                assert!(!draft_request.contains("x-model-check-patch"));
+                for request in &requests {
+                    let body = request
+                        .split_once("\r\n\r\n")
+                        .map(|(_, body)| body)
+                        .expect("Source Check body");
+                    assert_eq!(
+                        serde_json::from_str::<Value>(body).expect("Gemini check body"),
+                        crate::service::provider_http::gemini_source_check_body()
+                    );
+                }
+                timeout(Duration::from_secs(2), upstream)
+                    .await
+                    .expect("Gemini Source Check upstream should finish")
+                    .expect("Gemini Source Check task should join");
+                assert!(RequestLog::list_full(RequestLogQueryPayload {
+                    provider_id: Some(provider_id),
+                    page: Some(1),
+                    page_size: Some(10),
+                    ..Default::default()
+                })
+                .expect("request logs should query")
+                .list
+                .is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn gemini_source_check_invalid_model_and_patch_fail_before_saved_key_decryption() {
+        const SENTINEL: &str = "gemini-check-private-marker";
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-gemini-check-zero-decrypt-http.sqlite");
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let provider_id = 26192;
+                let source_id = 26193;
+                let provider = Provider::create(
+                    &crate::database::provider::NewProvider {
+                        id: provider_id,
+                        provider_key: "gemini-check-zero-decrypt".to_string(),
+                        name: "Gemini Check Zero Decrypt".to_string(),
+                        is_enabled: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+                    },
+                    &crate::database::upstream_source::NewUpstreamSource {
+                        id: source_id,
+                        provider_id,
+                        profile_type: UpstreamProfileType::Gemini,
+                        base_url: format!("http://{address}/v1beta/models"),
+                        use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
+                        created_at: 1,
+                        updated_at: 1,
+                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                            UpstreamProfileType::Gemini,
+                        )
+                    },
+                )
+                .expect("Gemini provider should seed")
+                .provider;
+                let invalid_model = Model::create(
+                    provider.id,
+                    "invalid-gemini-model",
+                    Some(&format!("models/{SENTINEL}")),
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("invalid legacy model should seed");
+                let patched_model = Model::create(
+                    provider.id,
+                    "patched-gemini-model",
+                    Some("valid-gemini-model"),
+                    ModelKind::Chat,
+                    true,
+                )
+                .expect("patched model should seed");
+                RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+                    source_id,
+                    model_id: Some(patched_model.id),
+                    suffix: None,
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/contents/0/parts".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!(SENTINEL))),
+                        description: None,
+                    }],
+                })
+                .expect("invalid final-shape Patch should seed");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                let created = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/provider_keys"),
+                        json!({"api_key":"gemini-check-saved-private-key"}),
+                    ),
+                )
+                .await;
+                assert_eq!(created.status(), StatusCode::OK);
+                let key_id = response_json(created).await["data"]["id"]
+                    .as_i64()
+                    .expect("saved key id");
+
+                for model_id in [invalid_model.id, patched_model.id] {
+                    app_state.secret_encryption.reset_decrypt_call_count();
+                    let response = send(
+                        &app_state,
+                        json_request(
+                            Method::POST,
+                            &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                            json!({"model_id":model_id,"provider_api_key_id":key_id}),
+                        ),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    let body = response_json(response).await.to_string();
+                    assert!(!body.contains(SENTINEL));
+                    assert!(!body.contains("private-key"));
+                    assert_eq!(app_state.secret_encryption.decrypt_call_count(), 0);
+                }
+                assert!(
+                    timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err(),
+                    "invalid model and Patch must make zero upstream calls"
+                );
+                assert!(
+                    RequestLog::list_full(RequestLogQueryPayload {
+                        provider_id: Some(provider_id),
+                        page: Some(1),
+                        page_size: Some(10),
+                        ..Default::default()
+                    })
+                    .expect("request logs should query")
+                    .list
+                    .is_empty()
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -2209,6 +2772,7 @@ mod tests {
             "model",
             &[],
             &crate::config::ProxyTimeoutConfig::default(),
+            &crate::config::NonStreamResponseConfig::default(),
         )
         .await
         .expect("status-only provider check should succeed");
@@ -3083,6 +3647,7 @@ mod tests {
                 "model",
                 &[],
                 &proxy_timeouts,
+                &crate::config::NonStreamResponseConfig::default(),
             ),
         )
         .await
@@ -3286,6 +3851,80 @@ mod tests {
                         .len(),
                     2
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn gemini_bootstrap_save_and_test_uses_validated_native_probe_without_proxy_logs() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-gemini-bootstrap-check-http.sqlite");
+        test_db_context
+            .run_async(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (request_tx, request_rx) = oneshot::channel();
+                let upstream = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = vec![0u8; 8192];
+                    let read = socket.read(&mut request).await.unwrap();
+                    let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+                    let body = br#"{"responseId":"bootstrap-response","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        String::from_utf8_lossy(body)
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                });
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                let secret = "gemini-bootstrap-private-key";
+                let response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider/bootstrap",
+                        json!({
+                            "initial_source":{
+                                "profile_type":"GEMINI",
+                                "base_url":format!("http://{address}/v1beta/models"),
+                                "use_proxy":false,
+                                "is_enabled":true,
+                                "is_default":true
+                            },
+                            "api_key":secret,
+                            "model_name":"gemini-bootstrap-model",
+                            "model_kind":"CHAT",
+                            "key":"gemini-bootstrap-provider",
+                            "save_and_test":true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+                assert_eq!(body["data"]["check_result"]["status"], "success");
+                assert!(!body.to_string().contains(secret));
+
+                let request = request_rx.await.expect("one Gemini bootstrap check");
+                let request_lower = request.to_ascii_lowercase();
+                assert!(request_lower.starts_with(
+                    "post /v1beta/models/gemini-bootstrap-model:generatecontent http/1.1"
+                ));
+                assert!(request_lower.contains("x-goog-api-key: gemini-bootstrap-private-key"));
+                timeout(Duration::from_secs(2), upstream)
+                    .await
+                    .expect("Gemini bootstrap check should finish")
+                    .expect("Gemini bootstrap fixture should join");
+                assert!(RequestLog::list_full(RequestLogQueryPayload {
+                    provider_id: body["data"]["provider"]["id"].as_i64(),
+                    page: Some(1),
+                    page_size: Some(10),
+                    ..Default::default()
+                })
+                .expect("request logs should query")
+                .list
+                .is_empty());
             })
             .await;
     }

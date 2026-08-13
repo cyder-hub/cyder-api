@@ -203,6 +203,12 @@ fn gemini_usage_without_candidate_tokens_defaults_output_to_zero() {
     let mut transformer =
         StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
 
+    let finish = transformer
+        .transform_event(sse(
+            json!({"candidates":[{"index":0,"finishReason":"STOP"}]}).to_string(),
+        ))
+        .expect("formal Gemini terminal");
+    assert!(finish.value.events.is_empty());
     let output = transformer
         .transform_event(sse(json!({
             "candidates": [],
@@ -214,11 +220,694 @@ fn gemini_usage_without_candidate_tokens_defaults_output_to_zero() {
         .to_string()))
         .expect("Gemini may omit candidate tokens for a zero-output stream frame");
 
-    assert_eq!(output.value.events.len(), 1);
-    let payload: Value = serde_json::from_str(&output.value.events[0].data).unwrap();
+    assert!(output.value.events.is_empty());
+    transformer
+        .validate_source_termination()
+        .expect("STOP plus a usage tail is a complete stream");
+    let terminal = transformer
+        .finalize_source_eof_events()
+        .expect("OpenAI target terminal")
+        .value;
+    let payload = terminal
+        .iter()
+        .filter(|event| event.data != "[DONE]")
+        .find_map(|event| {
+            let value = serde_json::from_str::<Value>(&event.data).unwrap();
+            value.get("usage").is_some().then_some(value)
+        })
+        .expect("terminal usage event");
     assert_eq!(payload["usage"]["prompt_tokens"], 7);
     assert_eq!(payload["usage"]["completion_tokens"], 0);
     assert_eq!(payload["usage"]["total_tokens"], 7);
+}
+
+#[test]
+fn gemini_stream_usage_uses_last_cumulative_snapshot_with_inclusive_components() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+    for usage in [
+        json!({
+            "promptTokenCount":5,
+            "candidatesTokenCount":3,
+            "cachedContentTokenCount":1,
+            "thoughtsTokenCount":1,
+            "totalTokenCount":9
+        }),
+        json!({
+            "promptTokenCount":11,
+            "candidatesTokenCount":7,
+            "cachedContentTokenCount":3,
+            "thoughtsTokenCount":2,
+            "toolUsePromptTokenCount":1,
+            "totalTokenCount":21,
+            "promptTokensDetails":[
+                {"modality":"TEXT","tokenCount":8},
+                {"modality":"IMAGE","tokenCount":3}
+            ],
+            "cacheTokensDetails":[{"modality":"IMAGE","tokenCount":3}],
+            "candidatesTokensDetails":[
+                {"modality":"TEXT","tokenCount":5},
+                {"modality":"IMAGE","tokenCount":2}
+            ],
+            "toolUsePromptTokensDetails":[{"modality":"TEXT","tokenCount":1}]
+        }),
+    ] {
+        transformer
+            .transform_event(sse(
+                json!({"candidates":[],"usageMetadata":usage}).to_string()
+            ))
+            .expect("monotonic Gemini usage snapshot should transform");
+    }
+
+    assert_eq!(
+        transformer.cached_usage_info(),
+        Some(UsageInfo {
+            input_tokens: 12,
+            output_tokens: 9,
+            input_image_tokens: 0,
+            output_image_tokens: 2,
+            cached_tokens: 3,
+            cache_write_tokens: 0,
+            reasoning_tokens: 2,
+            total_tokens: 21,
+        })
+    );
+    let normalization = transformer
+        .cached_usage_normalization()
+        .expect("final cumulative normalization");
+    assert_eq!(normalization.input_text_tokens, 9);
+    assert_eq!(normalization.output_text_tokens, 5);
+    assert_eq!(normalization.output_image_tokens, 2);
+    assert_eq!(normalization.cache_read_tokens, 3);
+    assert_eq!(normalization.reasoning_tokens, 2);
+    assert_eq!(normalization.normalized_total_tokens(), 21);
+}
+
+#[test]
+fn gemini_stream_usage_regression_is_cross_wire_failure_and_same_wire_degraded_no_cost() {
+    let first = sse(json!({"candidates":[],"usageMetadata":{
+        "promptTokenCount":11,"candidatesTokenCount":7,
+        "thoughtsTokenCount":2,"toolUsePromptTokenCount":1,
+        "totalTokenCount":21
+    }})
+    .to_string());
+    let regressed = sse(json!({"candidates":[],"usageMetadata":{
+        "promptTokenCount":11,"candidatesTokenCount":6,
+        "thoughtsTokenCount":2,"toolUsePromptTokenCount":1,
+        "totalTokenCount":20
+    }})
+    .to_string());
+
+    let mut cross_wire =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+    cross_wire
+        .transform_event(first.clone())
+        .expect("first usage snapshot");
+    let failure = cross_wire
+        .transform_event(regressed.clone())
+        .expect_err("regressed cross-wire snapshot must fail");
+    assert_eq!(failure.semantic_unit, TransformSemanticUnit::Usage);
+    assert_eq!(
+        failure.reason_code,
+        TransformReasonCode::UsageSnapshotRegressed
+    );
+
+    let mut same_wire =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+    same_wire
+        .transform_event(first)
+        .expect("first same-wire usage snapshot");
+    assert!(same_wire.cached_usage_info().is_some());
+    let output = same_wire
+        .transform_event(regressed.clone())
+        .expect("same-wire regression should preserve raw frame");
+    assert_eq!(output.value.events, vec![regressed]);
+    assert_eq!(
+        output.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    assert!(same_wire.cached_usage_info().is_none());
+    assert!(same_wire.cached_usage_normalization().is_none());
+}
+
+#[test]
+fn gemini_same_wire_terminal_survives_malformed_or_regressed_usage_observation() {
+    let malformed_terminal = sse(json!({
+        "responseId":"gemini-malformed-terminal-usage",
+        "candidates":[{"index":0,"finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":"invalid"}
+    })
+    .to_string());
+    let mut malformed =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+    let output = malformed
+        .transform_event(malformed_terminal.clone())
+        .expect("valid terminal core must survive malformed usage");
+    assert_eq!(output.value.events, vec![malformed_terminal]);
+    assert_eq!(
+        output.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    malformed
+        .validate_source_termination()
+        .expect("malformed usage must not erase the terminal core");
+    assert!(!malformed.usage_is_billable());
+
+    let mut regressed =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+    regressed
+        .transform_event(sse(json!({
+            "responseId":"gemini-regressed-terminal-usage",
+            "candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"answer"}]}}],
+            "usageMetadata":{
+                "promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7
+            }
+        })
+        .to_string()))
+        .expect("initial Gemini frame");
+    let regressed_terminal = sse(json!({
+        "responseId":"gemini-regressed-terminal-usage",
+        "candidates":[{"index":0,"finishReason":"STOP"}],
+        "usageMetadata":{
+            "promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6
+        }
+    })
+    .to_string());
+    let output = regressed
+        .transform_event(regressed_terminal.clone())
+        .expect("valid terminal core must survive regressed usage");
+    assert_eq!(output.value.events, vec![regressed_terminal]);
+    assert_eq!(
+        output.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    regressed
+        .validate_source_termination()
+        .expect("regressed usage must not erase the terminal core");
+    assert!(!regressed.usage_is_billable());
+}
+
+#[test]
+fn gemini_stream_total_mismatch_is_nonfatal_and_auditable() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+    transformer
+        .transform_event(sse(json!({"candidates":[],"usageMetadata":{
+            "promptTokenCount":11,"candidatesTokenCount":7,
+            "thoughtsTokenCount":2,"toolUsePromptTokenCount":1,
+            "totalTokenCount":999
+        }})
+        .to_string()))
+        .expect("reported total mismatch must not fail stream");
+
+    let usage = transformer.cached_usage_info().expect("usage cache");
+    assert_eq!(usage.total_tokens, 999);
+    let normalization = transformer
+        .cached_usage_normalization()
+        .expect("normalization cache");
+    assert_eq!(normalization.normalized_total_tokens(), 21);
+    assert_eq!(normalization.warnings.len(), 1);
+    assert!(normalization.warnings[0].contains("999"));
+    assert!(normalization.warnings[0].contains("21"));
+}
+
+#[test]
+fn gemini_stream_state_machine_accepts_multiframe_thought_tool_finish_and_usage_tail() {
+    let frames = vec![
+        sse(json!({
+            "responseId":"gemini-state-machine",
+            "candidates":[{"index":0,"content":{"role":"model","parts":[
+                {"text":"consider","thought":true,"thoughtSignature":"private-signature"},
+                {"text":"checking"}
+            ]}}]
+        })
+        .to_string()),
+        sse(json!({
+            "responseId":"gemini-state-machine",
+            "candidates":[{"index":0,"content":{"role":"model","parts":[
+                {"functionCall":{"name":"lookup","args":{"city":"Paris"}}}
+            ]},"finishReason":"STOP"}]
+        })
+        .to_string()),
+        sse(json!({
+            "responseId":"gemini-state-machine",
+            "usageMetadata":{
+                "promptTokenCount":7,
+                "candidatesTokenCount":5,
+                "thoughtsTokenCount":2,
+                "totalTokenCount":14
+            }
+        })
+        .to_string()),
+    ];
+
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Gemini, downstream);
+        let mut emitted = Vec::new();
+        for frame in frames.clone() {
+            emitted.extend(
+                transformer
+                    .transform_event(frame)
+                    .unwrap_or_else(|failure| panic!("{downstream:?}: {failure:?}"))
+                    .value
+                    .events,
+            );
+        }
+        assert_eq!(transformer.source_termination(), None, "{downstream:?}");
+        transformer
+            .validate_source_termination()
+            .unwrap_or_else(|failure| panic!("{downstream:?}: {failure:?}"));
+        emitted.extend(
+            transformer
+                .finalize_source_eof_events()
+                .expect("legal Gemini EOF target flush")
+                .value,
+        );
+        assert_eq!(
+            transformer
+                .cached_usage_info()
+                .expect("final usage")
+                .total_tokens,
+            14,
+            "{downstream:?}"
+        );
+
+        match downstream {
+            DownstreamProtocol::Openai => {
+                let values = emitted
+                    .iter()
+                    .filter(|event| event.data != "[DONE]")
+                    .map(|event| serde_json::from_str::<Value>(&event.data).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(|value| value.pointer("/choices/0/finish_reason")
+                            == Some(&json!("tool_calls")))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| event.data == "[DONE]")
+                        .count(),
+                    1
+                );
+            }
+            DownstreamProtocol::Responses => {
+                let types = emitted
+                    .iter()
+                    .map(|event| {
+                        serde_json::from_str::<Value>(&event.data).unwrap()["type"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    types
+                        .iter()
+                        .filter(|event_type| event_type.as_str() == "response.completed")
+                        .count(),
+                    1
+                );
+            }
+            DownstreamProtocol::Anthropic => {
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| event.event.as_deref() == Some("message_stop"))
+                        .count(),
+                    1
+                );
+                assert!(emitted.iter().any(|event| {
+                    event.event.as_deref() == Some("message_delta")
+                        && event.data.contains("\"stop_reason\":\"tool_use\"")
+                }));
+            }
+            DownstreamProtocol::Gemini => {
+                assert_eq!(emitted, frames);
+                assert!(emitted.iter().all(|event| event.data != "[DONE]"));
+            }
+        }
+    }
+}
+
+#[test]
+fn gemini_stream_prompt_block_maps_to_one_formal_target_terminal() {
+    let prompt_block = sse(json!({
+        "responseId":"gemini-prompt-block",
+        "promptFeedback":{"blockReason":"SAFETY","safetyRatings":[]},
+        "usageMetadata":{"promptTokenCount":3,"totalTokenCount":3}
+    })
+    .to_string());
+
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Gemini, downstream);
+        let mut emitted = transformer
+            .transform_event(prompt_block.clone())
+            .unwrap_or_else(|failure| panic!("{downstream:?}: {failure:?}"))
+            .value
+            .events;
+        transformer
+            .validate_source_termination()
+            .expect("prompt block is a formal successful Gemini terminal");
+        emitted.extend(
+            transformer
+                .finalize_source_eof_events()
+                .expect("prompt block EOF flush")
+                .value,
+        );
+
+        match downstream {
+            DownstreamProtocol::Openai => assert_eq!(
+                emitted
+                    .iter()
+                    .filter(|event| serde_json::from_str::<Value>(&event.data)
+                        .ok()
+                        .is_some_and(|value| value.pointer("/choices/0/finish_reason")
+                            == Some(&json!("content_filter"))))
+                    .count(),
+                1
+            ),
+            DownstreamProtocol::Responses => assert_eq!(
+                emitted
+                    .iter()
+                    .filter(|event| serde_json::from_str::<Value>(&event.data)
+                        .ok()
+                        .and_then(|value| value["type"].as_str().map(str::to_string))
+                        .as_deref()
+                        == Some("response.incomplete"))
+                    .count(),
+                1
+            ),
+            DownstreamProtocol::Anthropic => {
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| event.event.as_deref() == Some("message_start"))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| event.event.as_deref() == Some("message_stop"))
+                        .count(),
+                    1
+                );
+                assert!(
+                    emitted
+                        .iter()
+                        .any(|event| event.data.contains("\"refusal\""))
+                );
+            }
+            DownstreamProtocol::Gemini => assert_eq!(emitted, vec![prompt_block.clone()]),
+        }
+    }
+}
+
+#[test]
+fn gemini_stream_state_machine_rejects_missing_duplicate_and_illegal_sequences() {
+    let finish = sse(json!({
+        "responseId":"gemini-illegal",
+        "candidates":[{"index":0,"finishReason":"STOP"}]
+    })
+    .to_string());
+    let content = sse(json!({
+        "responseId":"gemini-illegal",
+        "candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"late"}]}}]
+    })
+    .to_string());
+
+    let mut eof = StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+    eof.transform_event(content.clone())
+        .expect("legal content prefix");
+    assert_eq!(
+        eof.validate_source_termination()
+            .expect_err("EOF without a formal Gemini terminal")
+            .reason_code,
+        TransformReasonCode::IllegalUpstreamTerminal
+    );
+
+    let mut empty = StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+    assert!(
+        empty
+            .transform_event(sse(""))
+            .expect("empty SSE event")
+            .value
+            .events
+            .is_empty()
+    );
+    assert!(empty.validate_source_termination().is_err());
+
+    for (case_name, prefix, invalid, expected_reason) in [
+        (
+            "duplicate-terminal",
+            Some(finish.clone()),
+            finish.clone(),
+            TransformReasonCode::InvalidProtocolShape,
+        ),
+        (
+            "post-terminal-content",
+            Some(finish.clone()),
+            content.clone(),
+            TransformReasonCode::InvalidProtocolShape,
+        ),
+        (
+            "multiple-candidates",
+            None,
+            sse(json!({"candidates":[{"index":0},{"index":1}]}).to_string()),
+            TransformReasonCode::UnsupportedContent,
+        ),
+        (
+            "candidate-index",
+            None,
+            sse(json!({"candidates":[{"index":1,"finishReason":"STOP"}]}).to_string()),
+            TransformReasonCode::UnsupportedContent,
+        ),
+        (
+            "unknown-finish",
+            None,
+            sse(json!({"candidates":[{"index":0,"finishReason":"FUTURE_STOP"}]}).to_string()),
+            TransformReasonCode::UnknownStopReason,
+        ),
+        (
+            "unknown-part",
+            None,
+            sse(json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"futurePart":{"private":true}}]}}]}).to_string()),
+            TransformReasonCode::UnknownSemanticUnit,
+        ),
+        (
+            "malformed-json",
+            None,
+            sse("{not-json}"),
+            TransformReasonCode::SourceDecodeFailed,
+        ),
+        (
+            "openai-done-marker",
+            None,
+            sse("[DONE]"),
+            TransformReasonCode::SourceDecodeFailed,
+        ),
+    ] {
+        let mut transformer =
+            StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+        if let Some(prefix) = prefix {
+            transformer
+                .transform_event(prefix)
+                .unwrap_or_else(|failure| panic!("{case_name} prefix: {failure:?}"));
+        }
+        let failure = transformer
+            .transform_event(invalid)
+            .expect_err("illegal Gemini stream sequence must fail cross-wire");
+        assert_eq!(failure.reason_code, expected_reason, "{case_name}");
+    }
+
+    let mut identity = StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+    identity
+        .transform_event(sse(json!({
+            "responseId":"one",
+            "candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"a"}]}}]
+        })
+        .to_string()))
+        .expect("first response identity");
+    let failure = identity
+        .transform_event(sse(json!({
+            "responseId":"two",
+            "candidates":[{"index":0,"finishReason":"STOP"}]
+        })
+        .to_string()))
+        .expect_err("response identity conflict must fail");
+    assert_eq!(failure.semantic_unit, TransformSemanticUnit::Lifecycle);
+}
+
+#[test]
+fn gemini_same_wire_illegal_frames_are_raw_degraded_and_cannot_commit_success() {
+    let unknown = sse(json!({
+        "candidates":[{"index":0,"content":{"role":"model","parts":[
+            {"futurePart":{"private":"marker"}}
+        ]}}]
+    })
+    .to_string());
+    let mut same_wire =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+    let output = same_wire
+        .transform_event(unknown.clone())
+        .expect("same-wire unknown Part must preserve the raw frame");
+    assert_eq!(output.value.events, vec![unknown]);
+    assert_eq!(
+        output.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    assert!(!same_wire.usage_is_billable());
+    assert!(same_wire.validate_source_termination().is_err());
+
+    let finish = sse(json!({"candidates":[{"index":0,"finishReason":"STOP"}]}).to_string());
+    let late = sse(
+        json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"late"}]}}]})
+            .to_string(),
+    );
+    let mut post_terminal =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+    post_terminal
+        .transform_event(finish)
+        .expect("formal same-wire terminal");
+    let output = post_terminal
+        .transform_event(late.clone())
+        .expect("same-wire post-terminal content must remain raw");
+    assert_eq!(output.value.events, vec![late]);
+    assert_eq!(
+        output.value.disposition,
+        StreamFrameDisposition::ObservationDegraded
+    );
+    assert!(post_terminal.validate_source_termination().is_err());
+    assert!(!post_terminal.usage_is_billable());
+}
+
+#[test]
+fn gemini_same_wire_tracks_multiple_candidate_terminals_independently() {
+    let content = sse(json!({
+        "responseId":"gemini-multi-candidate",
+        "candidates":[
+            {"index":0,"content":{"role":"model","parts":[{"text":"zero"}]}},
+            {"index":1,"content":{"role":"model","parts":[{"text":"one"}]}}
+        ]
+    })
+    .to_string());
+    let finish_one = sse(json!({
+        "responseId":"gemini-multi-candidate",
+        "candidates":[{"index":1,"finishReason":"MAX_TOKENS"}]
+    })
+    .to_string());
+    let finish_zero = sse(json!({
+        "responseId":"gemini-multi-candidate",
+        "candidates":[{"index":0,"finishReason":"STOP"}]
+    })
+    .to_string());
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+
+    for frame in [&content, &finish_one, &finish_zero] {
+        let output = transformer
+            .transform_event(frame.clone())
+            .expect("same-wire multi-candidate frame must remain raw");
+        assert_eq!(output.value.events, vec![frame.clone()]);
+    }
+    transformer
+        .validate_source_termination()
+        .expect("all observed Gemini candidate indices have a formal terminal");
+
+    let mut cross_wire =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+    let failure = cross_wire
+        .transform_event(content)
+        .expect_err("cross-wire Gemini still permits only candidate index zero");
+    assert_eq!(failure.reason_code, TransformReasonCode::UnsupportedContent);
+}
+
+#[test]
+fn gemini_stream_application_failures_are_terminal_without_cross_wire_payload() {
+    for failed in [
+        sse(json!({
+            "responseId":"gemini-app-failed",
+            "candidates":[{"index":0,"finishReason":"OTHER"}]
+        })
+        .to_string()),
+        sse(json!({
+            "error":{"code":500,"message":"private-upstream-marker"}
+        })
+        .to_string()),
+    ] {
+        let mut cross_wire =
+            StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
+        let failure = cross_wire
+            .transform_event(failed.clone())
+            .expect_err("Gemini application failure must fail cross-wire");
+        assert_eq!(failure.semantic_unit, TransformSemanticUnit::StreamError);
+        assert!(!format!("{failure:?}").contains("private-upstream-marker"));
+
+        let mut same_wire =
+            StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+        let output = same_wire
+            .transform_event(failed.clone())
+            .expect("same-wire application failure must preserve its frame");
+        assert_eq!(output.value.events, vec![failed]);
+        assert_eq!(
+            same_wire.source_termination(),
+            Some(SourceStreamTermination::Failed)
+        );
+        assert!(!same_wire.usage_is_billable());
+    }
+}
+
+#[test]
+fn gemini_responses_target_flushes_completion_at_eof_when_usage_is_missing() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Responses);
+    transformer
+        .transform_event(sse(json!({
+            "responseId":"gemini-no-usage",
+            "candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"ok"}]}}]
+        })
+        .to_string()))
+        .expect("content frame");
+    let finish = transformer
+        .transform_event(sse(json!({
+            "responseId":"gemini-no-usage",
+            "candidates":[{"index":0,"finishReason":"STOP"}]
+        })
+        .to_string()))
+        .expect("finish without usage");
+    assert!(finish.value.events.is_empty());
+    transformer
+        .validate_source_termination()
+        .expect("STOP is a formal terminal");
+    let eof = transformer
+        .finalize_source_eof_events()
+        .expect("Responses EOF completion flush")
+        .value;
+    assert_eq!(
+        eof.iter()
+            .filter(|event| serde_json::from_str::<Value>(&event.data)
+                .ok()
+                .and_then(|value| value["type"].as_str().map(str::to_string))
+                .as_deref()
+                == Some("response.completed"))
+            .count(),
+        1
+    );
 }
 
 fn load_sse_fixture(raw: &str) -> Vec<SseEvent> {
@@ -306,6 +995,7 @@ fn test_openai_chunk_to_gemini_streamer_preserves_supported_events() {
                     "role": "model",
                     "parts": [{
                         "functionCall": {
+                            "id": "call_123",
                             "name": "get_weather",
                             "args": {"location": "Boston"}
                         }
@@ -327,11 +1017,11 @@ fn test_openai_chunk_to_gemini_streamer_preserves_supported_events() {
 }
 
 #[test]
-fn test_gemini_streamer_keeps_tool_ids_stable_and_advances_after_finish() {
+fn test_gemini_streamer_keeps_tool_ids_stable_for_one_response_id() {
     let mut transformer =
         StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
-    let gemini_tool = "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"location\":\"Boston\"}}}]},\"index\":0}]}";
-    let gemini_finish = "{\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"}]}";
+    let gemini_tool = "{\"responseId\":\"gemini-response-1\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"location\":\"Boston\"}}}]},\"index\":0}]}";
+    let gemini_finish = "{\"responseId\":\"gemini-response-1\",\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"}]}";
 
     let first = transformer.transform_event(sse(gemini_tool)).unwrap().value;
     let second = transformer.transform_event(sse(gemini_tool)).unwrap().value;
@@ -343,13 +1033,26 @@ fn test_gemini_streamer_keeps_tool_ids_stable_and_advances_after_finish() {
         second_json["choices"][0]["delta"]["tool_calls"][0]["id"]
     );
 
-    transformer.transform_event(sse(gemini_finish)).unwrap();
-    let after_finish = transformer.transform_event(sse(gemini_tool)).unwrap().value;
-    let after_finish_json: Value = serde_json::from_str(&after_finish[0].data).unwrap();
+    assert!(
+        transformer
+            .transform_event(sse(gemini_finish))
+            .unwrap()
+            .value
+            .is_empty()
+    );
+    let terminal = transformer.finalize_source_eof_events().unwrap().value;
+    assert_eq!(terminal.len(), 2);
+    let terminal_json: Value = serde_json::from_str(&terminal[0].data).unwrap();
+    assert_eq!(terminal_json["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(terminal[1].data, "[DONE]");
 
-    assert_ne!(
-        first_json["choices"][0]["delta"]["tool_calls"][0]["id"],
-        after_finish_json["choices"][0]["delta"]["tool_calls"][0]["id"]
+    let failure = transformer
+        .transform_event(sse(gemini_tool))
+        .expect_err("Gemini content after a formal finish must fail closed");
+    assert_eq!(failure.semantic_unit, TransformSemanticUnit::Lifecycle);
+    assert_eq!(
+        failure.reason_code,
+        TransformReasonCode::InvalidProtocolShape
     );
 }
 
@@ -707,11 +1410,7 @@ fn anthropic_thinking_stream_preserves_signature_only_same_wire() {
             }
         }
         assert!(!output_body.contains(SIGNATURE), "{downstream:?}");
-        if downstream == DownstreamProtocol::Openai {
-            assert!(!output_body.contains(THINKING));
-        } else {
-            assert!(output_body.contains(THINKING), "{downstream:?}");
-        }
+        assert!(output_body.contains(THINKING), "{downstream:?}");
         assert!(saw_signature_loss, "{downstream:?}");
         transformer
             .validate_source_termination()
@@ -1573,7 +2272,7 @@ fn responses_function_arguments_delta_done_and_tool_finish_reach_every_downstrea
                     values
                         .iter()
                         .filter(|value| value.pointer("/candidates/0/finishReason")
-                            == Some(&json!("TOOL_USE")))
+                            == Some(&json!("STOP")))
                         .count(),
                     1
                 );
@@ -1674,13 +2373,18 @@ fn responses_visible_reasoning_stream_is_native_or_typed_and_never_relabelled_as
             .join("\n");
         match downstream {
             DownstreamProtocol::Openai => {
-                assert!(!serialized.contains("visible summary"));
-                assert!(transformer.diagnostics_snapshot().facts.iter().any(|fact| {
-                    fact.semantic_unit == TransformSemanticUnit::ReasoningDelta
-                        && fact.outcome == TransformOutcomeKind::ControlledLossMinor
-                        && fact.action == TransformAction::Drop
-                        && fact.safe_summary.is_none()
-                }));
+                assert!(serialized.contains("visible summary"));
+                assert!(serialized.contains("reasoning_content"));
+                assert!(
+                    !transformer.diagnostics_snapshot().facts.iter().any(|fact| {
+                        fact.semantic_unit == TransformSemanticUnit::ReasoningDelta
+                            && matches!(
+                                fact.outcome,
+                                TransformOutcomeKind::ControlledLossMajor
+                                    | TransformOutcomeKind::FatalError
+                            )
+                    })
+                );
                 assert_eq!(
                     emitted
                         .iter()
@@ -1751,6 +2455,64 @@ fn responses_unknown_hidden_reasoning_event_fails_closed_without_payload_diagnos
             .as_ref()
             .is_none_or(|summary| !summary.sha256.contains(PRIVATE_MARKER))
     }));
+}
+
+#[test]
+fn gemini_thought_stream_uses_reasoning_channels_without_text_downgrade() {
+    const REASONING: &str = "private-gemini-stream-reasoning-marker";
+    const SIGNATURE: &str = "private-gemini-stream-signature-marker";
+    let frame = sse(json!({
+        "responseId":"gemini-stream-reasoning",
+        "candidates":[{"index":0,"content":{"role":"model","parts":[
+                {"text":REASONING,"thought":true,"thoughtSignature":SIGNATURE},{"text":"public answer"}
+        ]}}]
+    })
+    .to_string());
+
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Gemini, downstream);
+        let transformed = transformer
+            .transform_event(frame.clone())
+            .unwrap_or_else(|failure| panic!("{downstream:?}: {failure:?}"));
+        let serialized = transformed
+            .value
+            .events
+            .iter()
+            .map(|event| event.data.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(serialized.contains(REASONING), "{downstream:?}");
+        assert!(serialized.contains("public answer"), "{downstream:?}");
+        assert!(!serialized.contains(SIGNATURE), "{downstream:?}");
+        match downstream {
+            DownstreamProtocol::Openai => assert!(serialized.contains("reasoning_content")),
+            DownstreamProtocol::Responses => assert!(serialized.contains("reasoning")),
+            DownstreamProtocol::Anthropic => assert!(serialized.contains("thinking_delta")),
+            DownstreamProtocol::Gemini => unreachable!(),
+        }
+        assert!(!transformed.summary.facts.iter().any(|fact| {
+            fact.semantic_unit == TransformSemanticUnit::ReasoningDelta
+                && matches!(
+                    fact.outcome,
+                    TransformOutcomeKind::ControlledLossMajor | TransformOutcomeKind::FatalError
+                )
+        }));
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.reason_code == TransformReasonCode::ThoughtSignatureNotPortable
+                && fact.safe_summary.is_none()
+        }));
+    }
+
+    let mut same_wire =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Gemini);
+    let passthrough = same_wire
+        .transform_event(frame.clone())
+        .expect("Gemini thought stream must remain raw same-wire");
+    assert_eq!(passthrough.value.events, vec![frame]);
 }
 
 #[test]
@@ -2315,7 +3077,7 @@ fn disposition_classification_separates_controlled_loss_from_no_output() {
 }
 
 #[test]
-fn test_parse_usage_info_fallback_and_cache_miss_diagnostics() {
+fn gemini_usage_never_uses_permissive_raw_fallback_and_cache_miss_is_diagnostic() {
     let mut transformer =
         StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
     transformer.session.push_original_event(sse(json!({
@@ -2328,15 +3090,8 @@ fn test_parse_usage_info_fallback_and_cache_miss_diagnostics() {
     })
     .to_string()));
 
-    assert_eq!(
-        transformer.parse_usage_info(),
-        Some(UsageInfo {
-            input_tokens: 3,
-            output_tokens: 5,
-            total_tokens: 8,
-            ..Default::default()
-        })
-    );
+    assert!(transformer.parse_usage_info().is_none());
+    assert_eq!(transformer.session.diagnostics_len(), 1);
 
     let mut cache_miss =
         StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);

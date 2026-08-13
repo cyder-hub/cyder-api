@@ -612,6 +612,42 @@ mod tests {
         assert!(!headers.contains_key("authorization"));
         assert_eq!(url.query(), Some("existing=safe"));
 
+        for target in ["key", "Key", "alt", "ALT"] {
+            let mut forbidden_query = runtime_rule(
+                RequestPatchOperation::Set,
+                target,
+                Some("\"sentinel-secret\""),
+            );
+            forbidden_query.placement = RequestPatchPlacement::Query;
+            let error = apply_request_patches(
+                &mut body,
+                &mut url,
+                &mut headers,
+                std::slice::from_ref(&forbidden_query),
+            )
+            .expect_err("runtime must defend against a corrupted Gemini target Query Patch");
+            assert!(error.operator_message().contains("reserved"), "{target}");
+            assert_eq!(url.query(), Some("existing=safe"), "{target}");
+        }
+
+        for target in ["/generationConfig/candidateCount", "/generationConfig"] {
+            let original = body.clone();
+            let forbidden_candidate = runtime_rule(
+                RequestPatchOperation::Set,
+                target,
+                Some("{\"candidateCount\":2}"),
+            );
+            let error = apply_request_patches(
+                &mut body,
+                &mut url,
+                &mut headers,
+                std::slice::from_ref(&forbidden_candidate),
+            )
+            .expect_err("runtime must defend against candidate target override");
+            assert!(error.operator_message().contains("reserved"), "{target}");
+            assert_eq!(body, original, "{target}");
+        }
+
         let mut forbidden_version = runtime_rule(
             RequestPatchOperation::Set,
             "anthropic-version",

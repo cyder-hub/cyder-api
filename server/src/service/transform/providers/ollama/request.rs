@@ -91,7 +91,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
                                 TransformProtocol::Upstream(UpstreamProtocol::Ollama),
-                                TransformValueKind::ReasoningContent,
+                                TransformValueKind::ReasoningHistory,
                                 "Downgrading reasoning content to plain text during Ollama request conversion.",
                             ) {
                                 append_ollama_text_segment(&mut final_content, text);

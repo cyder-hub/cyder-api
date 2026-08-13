@@ -13,6 +13,7 @@ fn test_openai_request_to_unified() {
                 content: Some(OpenAiContent::Text(
                     "You are a helpful assistant.".to_string(),
                 )),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,
@@ -21,6 +22,7 @@ fn test_openai_request_to_unified() {
             OpenAiMessage {
                 role: "user".to_string(),
                 content: Some(OpenAiContent::Text("Hello".to_string())),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,
@@ -32,6 +34,7 @@ fn test_openai_request_to_unified() {
         stream: Some(false),
         temperature: Some(0.8),
         max_tokens: Some(100),
+        max_completion_tokens: None,
         top_p: Some(0.9),
         stop: Some(OpenAiStop::String("stop".to_string())),
         n: None,
@@ -126,17 +129,17 @@ fn test_unified_request_to_openai() {
 }
 
 #[test]
-fn test_unified_request_to_openai_preserves_reasoning_as_text() {
+fn openai_request_reasoning_history_uses_the_dedicated_reasoning_channel() {
     let unified_req = UnifiedRequest {
-        model: Some("gpt-4".to_string()),
+        model: Some("reasoning-model".to_string()),
         messages: vec![UnifiedMessage {
-            role: UnifiedRole::User,
+            role: UnifiedRole::Assistant,
             content: vec![
-                UnifiedContentPart::Text {
-                    text: "Question".to_string(),
-                },
                 UnifiedContentPart::Reasoning {
-                    text: "hidden reasoning".to_string(),
+                    text: "private reasoning".to_string(),
+                },
+                UnifiedContentPart::Text {
+                    text: "visible answer".to_string(),
                 },
             ],
         }],
@@ -144,16 +147,28 @@ fn test_unified_request_to_openai_preserves_reasoning_as_text() {
     };
 
     let openai_req: OpenAiRequestPayload = unified_req.into();
-    match openai_req.messages[0].content.as_ref().unwrap() {
-        OpenAiContent::Parts(parts) => {
-            assert_eq!(parts.len(), 2);
-            assert!(matches!(
-                &parts[1],
-                OpenAiContentPart::Text { text } if text == "hidden reasoning"
-            ));
-        }
-        other => panic!("Expected multipart OpenAI content, got {:?}", other),
-    }
+    assert_eq!(openai_req.messages.len(), 1);
+    assert_eq!(
+        openai_req.messages[0].reasoning_content.as_deref(),
+        Some("private reasoning")
+    );
+    assert!(matches!(
+        openai_req.messages[0].content.as_ref(),
+        Some(OpenAiContent::Text(text)) if text == "visible answer"
+    ));
+
+    let round_trip: UnifiedRequest = openai_req.into();
+    assert_eq!(
+        round_trip.messages[0].content,
+        vec![
+            UnifiedContentPart::Reasoning {
+                text: "private reasoning".to_string(),
+            },
+            UnifiedContentPart::Text {
+                text: "visible answer".to_string(),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -217,6 +232,7 @@ fn test_openai_response_to_unified() {
             message: OpenAiMessage {
                 role: "assistant".to_string(),
                 content: Some(OpenAiContent::Text("Hi there!".to_string())),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,
@@ -314,6 +330,7 @@ fn test_openai_response_to_unified_promotes_refusal() {
             message: OpenAiMessage {
                 role: "assistant".to_string(),
                 content: Some(OpenAiContent::Text("safe answer".to_string())),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,

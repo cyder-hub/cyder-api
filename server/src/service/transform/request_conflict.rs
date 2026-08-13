@@ -27,8 +27,20 @@ fn is_positive_number(value: &Value) -> bool {
     value.as_f64().is_some_and(|number| number > 0.0)
 }
 
-const REGISTERED_REQUEST_CONFLICTS: &[RegisteredRequestConflictRule] =
-    &[RegisteredRequestConflictRule {
+fn is_active_value(value: &Value) -> bool {
+    !value.is_null()
+}
+
+fn requests_non_text_modality(value: &Value) -> bool {
+    value.as_array().is_some_and(|modalities| {
+        modalities
+            .iter()
+            .any(|modality| modality.as_str() != Some("text"))
+    })
+}
+
+const REGISTERED_REQUEST_CONFLICTS: &[RegisteredRequestConflictRule] = &[
+    RegisteredRequestConflictRule {
         id: "gemini_positive_thinking_budget_to_openai",
         source: DownstreamProtocol::Gemini,
         target: UpstreamProtocol::Openai,
@@ -37,7 +49,48 @@ const REGISTERED_REQUEST_CONFLICTS: &[RegisteredRequestConflictRule] =
         semantic_unit: TransformSemanticUnit::ReasoningContent,
         reason_code: TransformReasonCode::UnsupportedReasoning,
         matches: is_positive_number,
-    }];
+    },
+    RegisteredRequestConflictRule {
+        id: "openai_prediction_to_gemini",
+        source: DownstreamProtocol::Openai,
+        target: UpstreamProtocol::Gemini,
+        path: &["prediction"],
+        path_label: "/prediction",
+        semantic_unit: TransformSemanticUnit::Metadata,
+        reason_code: TransformReasonCode::UnsupportedContent,
+        matches: is_active_value,
+    },
+    RegisteredRequestConflictRule {
+        id: "openai_output_modalities_to_gemini",
+        source: DownstreamProtocol::Openai,
+        target: UpstreamProtocol::Gemini,
+        path: &["modalities"],
+        path_label: "/modalities",
+        semantic_unit: TransformSemanticUnit::Metadata,
+        reason_code: TransformReasonCode::UnsupportedContent,
+        matches: requests_non_text_modality,
+    },
+    RegisteredRequestConflictRule {
+        id: "openai_output_audio_to_gemini",
+        source: DownstreamProtocol::Openai,
+        target: UpstreamProtocol::Gemini,
+        path: &["audio"],
+        path_label: "/audio",
+        semantic_unit: TransformSemanticUnit::AudioData,
+        reason_code: TransformReasonCode::UnsupportedContent,
+        matches: is_active_value,
+    },
+    RegisteredRequestConflictRule {
+        id: "openai_web_search_options_to_gemini",
+        source: DownstreamProtocol::Openai,
+        target: UpstreamProtocol::Gemini,
+        path: &["web_search_options"],
+        path_label: "/web_search_options",
+        semantic_unit: TransformSemanticUnit::ToolDefinitions,
+        reason_code: TransformReasonCode::UnsupportedContent,
+        matches: is_active_value,
+    },
+];
 
 fn value_at_path<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
     path.iter()
@@ -70,7 +123,7 @@ mod tests {
 
     #[test]
     fn registry_is_small_directional_and_borrows_targeted_values() {
-        assert_eq!(REGISTERED_REQUEST_CONFLICTS.len(), 1);
+        assert_eq!(REGISTERED_REQUEST_CONFLICTS.len(), 5);
         let request = json!({
             "generationConfig": {
                 "thinkingConfig": {"thinkingBudget": 256},

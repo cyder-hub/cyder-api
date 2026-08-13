@@ -1169,7 +1169,14 @@ pub(in crate::service::transform) fn validate_final_generation_request_for_downs
             data,
             downstream_protocol == Some(DownstreamProtocol::Anthropic),
         ),
-        UpstreamProtocol::Gemini => require_array(data, "/contents", "contents"),
+        UpstreamProtocol::Gemini => super::providers::gemini::validate_gemini_target_request(
+            data,
+            downstream_protocol == Some(DownstreamProtocol::Gemini),
+        )
+        .map_err(|error| FinalRequestValidationError {
+            path: error.path,
+            reason: error.reason,
+        }),
         UpstreamProtocol::Ollama => {
             require_non_empty_string(data, "/model", "model")?;
             require_array(data, "/messages", "messages")
@@ -1425,7 +1432,10 @@ mod final_validation_tests {
             ),
             (
                 UpstreamProtocol::Gemini,
-                json!({"contents": [{"parts": [{"text": "hi"}]}]}),
+                json!({
+                    "contents": [{"parts": [{"text": "hi"}]}],
+                    "generationConfig":{"candidateCount":1}
+                }),
             ),
             (
                 UpstreamProtocol::Ollama,

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{body::Body, http::HeaderMap, response::Response};
 use serde_json::Value;
@@ -22,7 +22,6 @@ pub(in crate::proxy) struct GenerationOrchestrationInput {
     pub downstream_protocol: DownstreamProtocol,
     pub execution_plan: ExecutionPlan,
     pub is_stream: bool,
-    pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
     pub request_context: Arc<ProxyRequestContext>,
@@ -34,7 +33,6 @@ pub(in crate::proxy) struct UtilityOrchestrationInput {
     pub api_key: Arc<CacheApiKey>,
     pub operation: UtilityOperation,
     pub execution_plan: ExecutionPlan,
-    pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
     pub request_context: Arc<ProxyRequestContext>,
@@ -51,7 +49,6 @@ pub(in crate::proxy) async fn execute_generation(
             cancellation: input.cancellation,
             api_key: input.api_key,
             execution_plan: input.execution_plan,
-            query_params: input.query_params,
             original_headers: input.original_headers,
             client_ip_addr: input.client_ip_addr,
             request_context: input.request_context,
@@ -75,7 +72,6 @@ pub(in crate::proxy) async fn execute_utility(
             cancellation: input.cancellation,
             api_key: input.api_key,
             execution_plan: input.execution_plan,
-            query_params: input.query_params,
             original_headers: input.original_headers,
             client_ip_addr: input.client_ip_addr,
             request_context: input.request_context,

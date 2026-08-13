@@ -68,7 +68,6 @@ pub(super) enum ProxyOperation {
 pub(super) struct ProxyPipelineContext {
     pub app_state: Arc<AppState>,
     pub api_key: Arc<CacheApiKey>,
-    pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
     pub request_context: Arc<ProxyRequestContext>,
@@ -184,7 +183,6 @@ impl OperationAdapter {
         let context = ProxyPipelineContext {
             app_state,
             api_key,
-            query_params,
             original_headers,
             client_ip_addr: Some(client_ip_addr),
             request_context,
@@ -286,7 +284,6 @@ async fn execute_generation_operation(
             downstream_protocol: operation.downstream_protocol,
             execution_plan,
             is_stream,
-            query_params: context.query_params,
             original_headers: context.original_headers,
             client_ip_addr: context.client_ip_addr,
             request_context: context.request_context,
@@ -332,7 +329,6 @@ async fn execute_utility_operation(
             api_key: context.api_key,
             operation: operation.operation,
             execution_plan,
-            query_params: context.query_params,
             original_headers: context.original_headers,
             client_ip_addr: context.client_ip_addr,
             request_context: context.request_context,

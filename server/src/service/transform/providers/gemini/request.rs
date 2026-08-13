@@ -6,6 +6,18 @@ use serde_json::Value;
 use super::metadata::*;
 use super::payload::*;
 
+fn gemini_inline_part(mime_type: &str, data: String) -> GeminiPart {
+    GeminiPart::InlineData {
+        inline_data: GeminiInlineData {
+            mime_type: crate::service::transform::media::portable_gemini_inline_mime(mime_type)
+                .expect("Gemini inline media is target-audited")
+                .to_string(),
+            data,
+            display_name: None,
+        },
+    }
+}
+
 fn gemini_structured_output(schema: Option<Value>) -> UnifiedStructuredOutput {
     match schema {
         Some(schema) => {
@@ -21,10 +33,7 @@ fn gemini_structured_output(schema: Option<Value>) -> UnifiedStructuredOutput {
     }
 }
 
-fn gemini_tool_config(
-    choice: Option<UnifiedToolChoice>,
-    any_strict: bool,
-) -> Option<GeminiToolConfig> {
+fn gemini_tool_config(choice: Option<UnifiedToolChoice>) -> Option<GeminiToolConfig> {
     let (mode, allowed_function_names) = match choice {
         Some(UnifiedToolChoice::None) => (GeminiFunctionCallingMode::None, Vec::new()),
         Some(UnifiedToolChoice::Required) => (GeminiFunctionCallingMode::Any, Vec::new()),
@@ -37,15 +46,7 @@ fn gemini_tool_config(
             names,
             mode: UnifiedAllowedToolMode::Auto,
         }) => (GeminiFunctionCallingMode::Validated, names),
-        Some(UnifiedToolChoice::Auto) => (
-            if any_strict {
-                GeminiFunctionCallingMode::Validated
-            } else {
-                GeminiFunctionCallingMode::Auto
-            },
-            Vec::new(),
-        ),
-        None if any_strict => (GeminiFunctionCallingMode::Validated, Vec::new()),
+        Some(UnifiedToolChoice::Auto) => (GeminiFunctionCallingMode::Auto, Vec::new()),
         None => return None,
     };
     Some(GeminiToolConfig {
@@ -54,6 +55,26 @@ fn gemini_tool_config(
             allowed_function_names,
         },
     })
+}
+
+fn push_gemini_content(
+    contents: &mut Vec<GeminiRequestContent>,
+    role: &'static str,
+    parts: Vec<GeminiPart>,
+) {
+    if parts.is_empty() {
+        return;
+    }
+    if let Some(previous) = contents.last_mut()
+        && previous.role.as_deref() == Some(role)
+    {
+        previous.parts.extend(parts);
+    } else {
+        contents.push(GeminiRequestContent {
+            role: Some(role.to_string()),
+            parts,
+        });
+    }
 }
 
 impl From<GeminiRequestPayload> for UnifiedRequest {
@@ -84,6 +105,7 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
         });
         let mut messages = Vec::new();
         let mut items = Vec::new();
+        let mut tool_associations = Vec::new();
         let mut tool_call_ids: std::collections::HashMap<
             String,
             std::collections::VecDeque<String>,
@@ -134,13 +156,24 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                 let mut content_parts = Vec::new();
                 for (part_index, p) in parts.into_iter().enumerate() {
                     match p {
-                        GeminiPart::FunctionCall { function_call } => {
-                            let tool_id = build_gemini_synthetic_tool_call_id(
-                                0,
-                                message_index as u32,
-                                part_index as u32,
-                                &function_call.name,
-                            );
+                        GeminiPart::FunctionCall {
+                            function_call,
+                            thought_signature,
+                        } => {
+                            let provider_tool_call_id = function_call.id.clone();
+                            let tool_id = provider_tool_call_id.clone().unwrap_or_else(|| {
+                                build_gemini_synthetic_tool_call_id(
+                                    "request-history",
+                                    message_index as u32,
+                                    part_index as u32,
+                                    &function_call.name,
+                                )
+                            });
+                            tool_associations.push(UnifiedGeminiToolAssociation {
+                                unified_tool_call_id: tool_id.clone(),
+                                provider_tool_call_id,
+                                thought_signature,
+                            });
                             tool_call_ids
                                 .entry(function_call.name.clone())
                                 .or_default()
@@ -194,17 +227,27 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                     match part {
                         GeminiPart::FunctionResponse { function_response } => {
                             let fr = function_response;
-                            let tool_call_id = tool_call_ids
-                                .get_mut(&fr.name)
-                                .and_then(|ids| ids.pop_front())
-                                .unwrap_or_else(|| {
-                                    build_gemini_synthetic_tool_call_id(
-                                        0,
-                                        message_index as u32,
-                                        part_index as u32,
-                                        &fr.name,
-                                    )
-                                });
+                            let tool_call_id = if let Some(explicit_id) = fr.id.clone() {
+                                if let Some(ids) = tool_call_ids.get_mut(&fr.name)
+                                    && let Some(position) =
+                                        ids.iter().position(|id| id == &explicit_id)
+                                {
+                                    ids.remove(position);
+                                }
+                                explicit_id
+                            } else {
+                                tool_call_ids
+                                    .get_mut(&fr.name)
+                                    .and_then(|ids| ids.pop_front())
+                                    .unwrap_or_else(|| {
+                                        build_gemini_synthetic_tool_call_id(
+                                            "request-history",
+                                            message_index as u32,
+                                            part_index as u32,
+                                            &fr.name,
+                                        )
+                                    })
+                            };
                             let output = gemini_function_response_to_unified_output(fr.response);
                             items.push(UnifiedItem::FunctionCallOutput(
                                 UnifiedFunctionCallOutputItem {
@@ -329,50 +372,77 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                 .collect()
         });
 
-        let (temperature, max_tokens, top_p, stop, reasoning_effort, structured_output) =
-            if let Some(config) = gemini_req.generation_config {
-                let reasoning_effort = config.thinking_config.as_ref().and_then(|thinking| {
-                    thinking
-                        .thinking_level
-                        .as_ref()
-                        .map(|level| match level {
-                            GeminiThinkingLevel::Minimal => UnifiedReasoningEffort::Minimal,
-                            GeminiThinkingLevel::Low => UnifiedReasoningEffort::Low,
-                            GeminiThinkingLevel::Medium => UnifiedReasoningEffort::Medium,
-                            GeminiThinkingLevel::High => UnifiedReasoningEffort::High,
+        let (
+            temperature,
+            max_tokens,
+            top_p,
+            stop,
+            seed,
+            presence_penalty,
+            frequency_penalty,
+            top_k,
+            reasoning_effort,
+            reasoning_budget_tokens,
+            structured_output,
+        ) = if let Some(config) = gemini_req.generation_config {
+            let reasoning_effort = config.thinking_config.as_ref().and_then(|thinking| {
+                thinking
+                    .thinking_level
+                    .as_ref()
+                    .map(|level| match level {
+                        GeminiThinkingLevel::Minimal => UnifiedReasoningEffort::Minimal,
+                        GeminiThinkingLevel::Low => UnifiedReasoningEffort::Low,
+                        GeminiThinkingLevel::Medium => UnifiedReasoningEffort::Medium,
+                        GeminiThinkingLevel::High => UnifiedReasoningEffort::High,
+                    })
+                    .or_else(|| match thinking.thinking_budget {
+                        Some(0) => Some(UnifiedReasoningEffort::None),
+                        Some(-1) | None => None,
+                        Some(_) => None,
+                    })
+            });
+            let structured_output = config
+                .response_format
+                .and_then(|format| format.text)
+                .map(|text| gemini_structured_output(text.schema))
+                .or_else(|| {
+                    config
+                        .response_json_schema
+                        .or(config.response_schema)
+                        .map(Some)
+                        .or_else(|| {
+                            (config.response_mime_type.as_deref() == Some("application/json"))
+                                .then_some(None)
                         })
-                        .or_else(|| match thinking.thinking_budget {
-                            Some(0) => Some(UnifiedReasoningEffort::None),
-                            Some(-1) | None => None,
-                            Some(_) => None,
-                        })
+                        .map(gemini_structured_output)
                 });
-                let structured_output = config
-                    .response_format
-                    .and_then(|format| format.text)
-                    .map(|text| gemini_structured_output(text.schema))
-                    .or_else(|| {
-                        config
-                            .response_json_schema
-                            .or(config.response_schema)
-                            .map(Some)
-                            .or_else(|| {
-                                (config.response_mime_type.as_deref() == Some("application/json"))
-                                    .then_some(None)
-                            })
-                            .map(gemini_structured_output)
-                    });
-                (
-                    config.temperature,
-                    config.max_output_tokens,
-                    config.top_p,
-                    config.stop_sequences,
-                    reasoning_effort,
-                    structured_output,
-                )
-            } else {
-                (None, None, None, None, None, None)
-            };
+            (
+                config.temperature,
+                config.max_output_tokens,
+                config.top_p,
+                config.stop_sequences,
+                config.seed.map(i64::from),
+                config.presence_penalty,
+                config.frequency_penalty,
+                config.top_k,
+                reasoning_effort,
+                config
+                    .thinking_config
+                    .as_ref()
+                    .and_then(|thinking| thinking.thinking_budget)
+                    .and_then(|budget| u32::try_from(budget).ok()),
+                structured_output,
+            )
+        } else {
+            (
+                None, None, None, None, None, None, None, None, None, None, None,
+            )
+        };
+
+        let gemini_extension = UnifiedGeminiRequestExtension {
+            tool_associations,
+            top_k,
+        };
 
         UnifiedRequest {
             model: None, // Not in Gemini request body
@@ -386,21 +456,38 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
             max_tokens,
             top_p,
             stop,
-            seed: None,
-            presence_penalty: None,
-            frequency_penalty: None,
+            seed,
+            presence_penalty,
+            frequency_penalty,
             reasoning_effort,
+            reasoning_budget_tokens,
             structured_output,
+            extensions: (!gemini_extension.is_empty()).then_some(UnifiedRequestExtensions {
+                gemini: Some(gemini_extension),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
 }
 
 impl From<UnifiedRequest> for GeminiRequestPayload {
-    fn from(unified_req: UnifiedRequest) -> Self {
+    fn from(mut unified_req: UnifiedRequest) -> Self {
         let tool_name_by_id = build_unified_tool_name_lookup(&unified_req);
+        let top_k = unified_req.top_k();
+        let tool_association_by_id = unified_req
+            .gemini_extension()
+            .into_iter()
+            .flat_map(|extension| extension.tool_associations.iter())
+            .map(|association| {
+                (
+                    association.unified_tool_call_id.clone(),
+                    association.clone(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         let mut contents = Vec::new();
-        let mut system_instruction: Option<GeminiSystemInstruction> = None;
+        let mut system_parts = Vec::new();
 
         for msg in unified_req.messages {
             match msg.role {
@@ -410,20 +497,16 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                         .iter()
                         .filter_map(|part| match part {
                             UnifiedContentPart::Text { text } => Some(text.clone()),
-                            UnifiedContentPart::ImageUrl { url, detail } => {
-                                Some(render_gemini_image_reference_text(url, detail.as_deref()))
-                            }
                             _ => None,
                         })
                         .collect();
 
                     if !system_texts.is_empty() {
-                        // Use object format with parts to match expected test format
-                        let parts: Vec<GeminiPart> = system_texts
-                            .into_iter()
-                            .map(|text| GeminiPart::Text { text })
-                            .collect();
-                        system_instruction = Some(GeminiSystemInstruction::Object { parts });
+                        system_parts.extend(
+                            system_texts
+                                .into_iter()
+                                .map(|text| GeminiPart::Text { text }),
+                        );
                     }
                 }
                 UnifiedRole::User => {
@@ -444,42 +527,33 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                 }
                             }
                             UnifiedContentPart::ImageUrl { url, detail } => {
-                                let keep = apply_transform_policy(
-                                    TransformProtocol::Unified,
-                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
-                                    TransformValueKind::ImageUrl,
-                                    "Downgrading remote image URL to recoverable text during Gemini request conversion.",
-                                );
-                                if keep {
-                                    parts.push(GeminiPart::Text {
-                                        text: render_gemini_image_reference_text(
-                                            &url,
-                                            detail.as_deref(),
-                                        ),
-                                    });
+                                if let Some(data_url) =
+                                    crate::service::transform::media::parse_base64_data_url(&url)
+                                {
+                                    parts.push(gemini_inline_part(
+                                        data_url.mime_type,
+                                        data_url.data.to_string(),
+                                    ));
+                                } else {
+                                    apply_transform_policy(
+                                        TransformProtocol::Unified,
+                                        TransformProtocol::Upstream(UpstreamProtocol::Gemini),
+                                        TransformValueKind::ImageUrl,
+                                        "Rejecting non-inline image URL during Gemini request conversion.",
+                                    );
                                 }
+                                let _ = detail;
                             }
                             UnifiedContentPart::ImageData { mime_type, data } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
+                                parts.push(gemini_inline_part(&mime_type, data));
                             }
                             UnifiedContentPart::AudioData { data, format } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type: if format == "mp3" {
-                                            "audio/mpeg".to_string()
-                                        } else {
-                                            "audio/wav".to_string()
-                                        },
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
+                                let mime_type = if format == "mp3" {
+                                    "audio/mpeg"
+                                } else {
+                                    "audio/wav"
+                                };
+                                parts.push(gemini_inline_part(mime_type, data));
                             }
                             UnifiedContentPart::Reasoning { text } => {
                                 parts.push(GeminiPart::Thought {
@@ -488,29 +562,13 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                     thought_signature: None,
                                 });
                             }
-                            UnifiedContentPart::FileUrl { url, mime_type, .. } => {
-                                parts.push(GeminiPart::FileData {
-                                    file_data: GeminiFileData {
-                                        mime_type: mime_type.unwrap_or_else(|| {
-                                            "application/octet-stream".to_string()
-                                        }),
-                                        file_uri: url,
-                                        display_name: None,
-                                    },
-                                });
-                            }
+                            UnifiedContentPart::FileUrl { .. } => {}
                             UnifiedContentPart::FileData {
                                 data,
                                 mime_type,
                                 filename: _,
                             } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
+                                parts.push(gemini_inline_part(&mime_type, data));
                             }
                             UnifiedContentPart::FileId { .. } => {}
                             UnifiedContentPart::ExecutableCode { language, code } => {
@@ -540,6 +598,14 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                     });
                                 parts.push(GeminiPart::FunctionResponse {
                                     function_response: GeminiFunctionResponse {
+                                        id: Some(
+                                            tool_association_by_id
+                                                .get(&result.tool_call_id)
+                                                .and_then(|association| {
+                                                    association.provider_tool_call_id.clone()
+                                                })
+                                                .unwrap_or_else(|| result.tool_call_id.clone()),
+                                        ),
                                         name,
                                         response: unified_tool_result_to_gemini_response(
                                             &result.output,
@@ -549,12 +615,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             }
                         }
                     }
-                    if !parts.is_empty() {
-                        contents.push(GeminiRequestContent {
-                            role: Some("user".to_string()),
-                            parts,
-                        });
-                    }
+                    push_gemini_content(&mut contents, "user", parts);
                 }
                 UnifiedRole::Assistant => {
                     let mut parts = Vec::new();
@@ -573,28 +634,8 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                     parts.push(GeminiPart::Text { text });
                                 }
                             }
-                            UnifiedContentPart::ImageData { mime_type, data } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
-                            }
-                            UnifiedContentPart::AudioData { data, format } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type: if format == "mp3" {
-                                            "audio/mpeg".to_string()
-                                        } else {
-                                            "audio/wav".to_string()
-                                        },
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
-                            }
+                            UnifiedContentPart::ImageData { .. }
+                            | UnifiedContentPart::AudioData { .. } => {}
                             UnifiedContentPart::Reasoning { text } => {
                                 parts.push(GeminiPart::Thought {
                                     text,
@@ -602,41 +643,26 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                     thought_signature: None,
                                 });
                             }
-                            UnifiedContentPart::FileUrl {
-                                url,
-                                mime_type,
-                                filename: _,
-                            } => {
-                                parts.push(GeminiPart::FileData {
-                                    file_data: GeminiFileData {
-                                        mime_type: mime_type.unwrap_or_else(|| {
-                                            "application/octet-stream".to_string()
-                                        }),
-                                        file_uri: url,
-                                        display_name: None,
-                                    },
-                                });
-                            }
-                            UnifiedContentPart::FileData {
-                                data,
-                                mime_type,
-                                filename: _,
-                            } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
-                            }
+                            UnifiedContentPart::FileUrl { .. }
+                            | UnifiedContentPart::FileData { .. } => {}
                             UnifiedContentPart::FileId { .. } => {}
                             UnifiedContentPart::ToolCall(call) => {
+                                let association = tool_association_by_id.get(&call.id);
                                 parts.push(GeminiPart::FunctionCall {
                                     function_call: GeminiFunctionCall {
+                                        id: Some(
+                                            association
+                                                .and_then(|association| {
+                                                    association.provider_tool_call_id.clone()
+                                                })
+                                                .unwrap_or_else(|| call.id.clone()),
+                                        ),
                                         name: call.name,
                                         args: call.arguments,
                                     },
+                                    thought_signature: association.and_then(|association| {
+                                        association.thought_signature.clone()
+                                    }),
                                 });
                             }
                             UnifiedContentPart::ExecutableCode { language, code } => {
@@ -673,12 +699,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             }
                         }
                     }
-                    if !parts.is_empty() {
-                        contents.push(GeminiRequestContent {
-                            role: Some("model".to_string()),
-                            parts,
-                        });
-                    }
+                    push_gemini_content(&mut contents, "model", parts);
                 }
                 UnifiedRole::Tool => {
                     let mut parts = Vec::new();
@@ -702,6 +723,14 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
 
                                 parts.push(GeminiPart::FunctionResponse {
                                     function_response: GeminiFunctionResponse {
+                                        id: Some(
+                                            tool_association_by_id
+                                                .get(&result.tool_call_id)
+                                                .and_then(|association| {
+                                                    association.provider_tool_call_id.clone()
+                                                })
+                                                .unwrap_or_else(|| result.tool_call_id.clone()),
+                                        ),
                                         name,
                                         response: response_content,
                                     },
@@ -727,28 +756,8 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                     thought_signature: None,
                                 });
                             }
-                            UnifiedContentPart::ImageData { mime_type, data } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
-                            }
-                            UnifiedContentPart::AudioData { data, format } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type: if format == "mp3" {
-                                            "audio/mpeg".to_string()
-                                        } else {
-                                            "audio/wav".to_string()
-                                        },
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
-                            }
+                            UnifiedContentPart::ImageData { .. }
+                            | UnifiedContentPart::AudioData { .. } => {}
                             UnifiedContentPart::ImageUrl { url, detail } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
@@ -764,30 +773,8 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                     });
                                 }
                             }
-                            UnifiedContentPart::FileUrl { url, mime_type, .. } => {
-                                parts.push(GeminiPart::FileData {
-                                    file_data: GeminiFileData {
-                                        mime_type: mime_type.unwrap_or_else(|| {
-                                            "application/octet-stream".to_string()
-                                        }),
-                                        file_uri: url,
-                                        display_name: None,
-                                    },
-                                });
-                            }
-                            UnifiedContentPart::FileData {
-                                data,
-                                mime_type,
-                                filename: _,
-                            } => {
-                                parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                        display_name: None,
-                                    },
-                                });
-                            }
+                            UnifiedContentPart::FileUrl { .. }
+                            | UnifiedContentPart::FileData { .. } => {}
                             UnifiedContentPart::FileId { .. } => {}
                             UnifiedContentPart::ExecutableCode { language, code } => {
                                 parts.push(GeminiPart::ExecutableCode {
@@ -795,30 +782,33 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                 });
                             }
                             UnifiedContentPart::ToolCall(call) => {
+                                let association = tool_association_by_id.get(&call.id);
                                 parts.push(GeminiPart::FunctionCall {
                                     function_call: GeminiFunctionCall {
+                                        id: Some(
+                                            association
+                                                .and_then(|association| {
+                                                    association.provider_tool_call_id.clone()
+                                                })
+                                                .unwrap_or_else(|| call.id.clone()),
+                                        ),
                                         name: call.name,
                                         args: call.arguments,
                                     },
+                                    thought_signature: association.and_then(|association| {
+                                        association.thought_signature.clone()
+                                    }),
                                 });
                             }
                         }
                     }
-                    if !parts.is_empty() {
-                        contents.push(GeminiRequestContent {
-                            role: Some("user".to_string()), // Gemini expects tool responses under 'user' role
-                            parts,
-                        });
-                    }
+                    // Gemini represents function responses under the user role.
+                    push_gemini_content(&mut contents, "user", parts);
                 }
             }
         }
 
         // Gemini has a specific structure for tools.
-        let any_strict = unified_req
-            .tools
-            .as_ref()
-            .is_some_and(|tools| tools.iter().any(|tool| tool.function.strict == Some(true)));
         let tools = unified_req.tools.map(|tools| {
             let function_declarations = tools
                 .into_iter()
@@ -832,27 +822,77 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                 function_declarations,
             }]
         });
-        let tool_config = gemini_tool_config(unified_req.tool_choice, any_strict);
+        let tool_config = gemini_tool_config(unified_req.tool_choice);
 
-        let generation_config = if unified_req.temperature.is_some()
-            || unified_req.max_tokens.is_some()
-            || unified_req.top_p.is_some()
-            || unified_req.stop.is_some()
-        {
-            Some(GeminiGenerationConfig {
-                temperature: unified_req.temperature,
-                max_output_tokens: unified_req.max_tokens,
-                top_p: unified_req.top_p,
-                stop_sequences: unified_req.stop,
-                thinking_config: None,
-                response_mime_type: None,
-                response_schema: None,
-                response_json_schema: None,
-                response_format: None,
+        let thinking_config = unified_req
+            .reasoning_budget_tokens
+            .map(|budget| GeminiThinkingConfig {
+                thinking_level: None,
+                thinking_budget: Some(i64::from(budget)),
+                include_thoughts: Some(true),
             })
-        } else {
-            None
+            .or_else(|| {
+                unified_req.reasoning_effort.map(|effort| match effort {
+                    UnifiedReasoningEffort::None => GeminiThinkingConfig {
+                        thinking_level: None,
+                        thinking_budget: Some(0),
+                        include_thoughts: None,
+                    },
+                    UnifiedReasoningEffort::Minimal => GeminiThinkingConfig {
+                        thinking_level: Some(GeminiThinkingLevel::Minimal),
+                        thinking_budget: None,
+                        include_thoughts: Some(true),
+                    },
+                    UnifiedReasoningEffort::Low => GeminiThinkingConfig {
+                        thinking_level: Some(GeminiThinkingLevel::Low),
+                        thinking_budget: None,
+                        include_thoughts: Some(true),
+                    },
+                    UnifiedReasoningEffort::Medium => GeminiThinkingConfig {
+                        thinking_level: Some(GeminiThinkingLevel::Medium),
+                        thinking_budget: None,
+                        include_thoughts: Some(true),
+                    },
+                    UnifiedReasoningEffort::High | UnifiedReasoningEffort::Xhigh => {
+                        GeminiThinkingConfig {
+                            thinking_level: Some(GeminiThinkingLevel::High),
+                            thinking_budget: None,
+                            include_thoughts: Some(true),
+                        }
+                    }
+                })
+            });
+        let (response_mime_type, response_json_schema) = match unified_req.structured_output.take()
+        {
+            Some(UnifiedStructuredOutput::JsonObject) => {
+                (Some("application/json".to_string()), None)
+            }
+            Some(UnifiedStructuredOutput::JsonSchema { schema, .. }) => {
+                (Some("application/json".to_string()), Some(schema))
+            }
+            None => (None, None),
         };
+        let generation_config = Some(GeminiGenerationConfig {
+            candidate_count: Some(1),
+            temperature: unified_req.temperature,
+            max_output_tokens: unified_req.max_tokens,
+            top_p: unified_req.top_p,
+            seed: unified_req.seed.and_then(|seed| i32::try_from(seed).ok()),
+            presence_penalty: unified_req.presence_penalty,
+            frequency_penalty: unified_req.frequency_penalty,
+            top_k,
+            stop_sequences: unified_req.stop,
+            thinking_config,
+            response_mime_type,
+            response_schema: None,
+            response_json_schema,
+            response_format: None,
+        });
+
+        let system_instruction =
+            (!system_parts.is_empty()).then_some(GeminiSystemInstruction::Object {
+                parts: system_parts,
+            });
 
         GeminiRequestPayload {
             contents,

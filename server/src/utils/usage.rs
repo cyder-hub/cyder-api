@@ -67,47 +67,9 @@ pub fn parse_usage_info(
                 None
             }
         }
-        UpstreamProtocol::Gemini => {
-            let usage_val = response_body.get("usageMetadata");
-            if let Some(usage) = usage_val {
-                if usage.is_null() {
-                    return None;
-                }
-                let prompt_tokens = usage
-                    .get("promptTokenCount")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let completion_tokens = usage
-                    .get("candidatesTokenCount")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let total_tokens = usage
-                    .get("totalTokenCount")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let reasoning_tokens = usage
-                    .get("thoughtsTokenCount")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let cached_tokens = usage
-                    .get("cachedContentTokenCount")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-
-                Some(UsageInfo {
-                    input_tokens: prompt_tokens,
-                    output_tokens: completion_tokens,
-                    input_image_tokens: 0,
-                    output_image_tokens: 0,
-                    cached_tokens,
-                    cache_write_tokens: 0,
-                    reasoning_tokens,
-                    total_tokens,
-                })
-            } else {
-                None
-            }
-        }
+        // Gemini generation usage is normalized by its typed response/stream adapter.
+        // Never fall back to permissive field casts here: malformed snapshots must not bill.
+        UpstreamProtocol::Gemini => None,
         UpstreamProtocol::Anthropic => {
             let usage_val = response_body.get("usage");
             if let Some(usage) = usage_val {

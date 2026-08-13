@@ -1174,36 +1174,180 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gemini_exposes_only_count_tokens_utility_action() {
-        let database = TestDbContext::new_sqlite("proxy-gemini-count-tokens-only.sqlite");
+    async fn r3_19_gemini_public_surface_aliases_methods_and_prohibited_products_are_closed() {
+        let database = TestDbContext::new_sqlite("r3-19-gemini-public-surface.sqlite");
         database
             .run_async(async {
+                let created = ApiKey::create(&payload()).expect("proxy key should create");
+                let api_key = created.reveal.api_key;
+                let api_key_id = created.detail.id;
                 let app_state = create_test_app_state(database.clone()).await;
+                let mut model_bodies = Vec::new();
                 for path in [
-                    "/gemini/models/test:countMessageTokens",
-                    "/gemini/v1/models/test:countTextTokens",
-                    "/gemini/v1beta/models/test:countMessageTokens",
+                    "/gemini/models",
+                    "/gemini/v1/models",
+                    "/gemini/v1beta/models",
                 ] {
                     let response = create_proxy_router(client_identity_resolver())
                         .with_state(Arc::clone(&app_state))
-                        .oneshot(method_request(Method::POST, path))
+                        .oneshot(request(path, "x-goog-api-key", Some(&api_key)))
                         .await
-                        .expect("unsupported Gemini action should respond");
-                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+                        .expect("Gemini Models alias should respond");
+                    assert_eq!(response.status(), StatusCode::OK, "{path}");
+                    assert_proxy_security(&response);
+                    model_bodies.push(
+                        to_bytes(response.into_body(), usize::MAX)
+                            .await
+                            .expect("Models response should read"),
+                    );
+                }
+                assert!(model_bodies.windows(2).all(|pair| pair[0] == pair[1]));
+                let before = app_state
+                    .api_key_governance
+                    .get_api_key_governance_snapshot(api_key_id)
+                    .await
+                    .expect("post-Models governance snapshot should load");
+
+                for version in ["", "/v1", "/v1beta"] {
+                    for action in ["generateContent", "streamGenerateContent", "countTokens"] {
+                        let path = format!("/gemini{version}/models/test:{action}");
+                        let response = create_proxy_router(client_identity_resolver())
+                            .with_state(Arc::clone(&app_state))
+                            .oneshot(method_request(Method::POST, &path))
+                            .await
+                            .expect("legal Gemini action should reach authentication");
+                        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+                        assert_proxy_security(&response);
+                        assert_protocol_error_body(
+                            response,
+                            DownstreamProtocol::Gemini,
+                            "authentication_error",
+                            "UNAUTHENTICATED",
+                        )
+                        .await;
+                    }
+                }
+
+                for version in ["", "/v1", "/v1beta"] {
+                    for action in ["generateContent", "streamGenerateContent", "countTokens"] {
+                        let path = format!("/gemini{version}/models/test:{action}");
+                        let response = create_proxy_router(client_identity_resolver())
+                            .with_state(Arc::clone(&app_state))
+                            .oneshot(method_request(Method::GET, &path))
+                            .await
+                            .expect("wrong Gemini action method should respond");
+                        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+                        assert_eq!(response.headers().get(header::ALLOW).unwrap(), "POST");
+                        assert_proxy_security(&response);
+                        assert_protocol_error_body(
+                            response,
+                            DownstreamProtocol::Gemini,
+                            "method_not_allowed_error",
+                            "UNIMPLEMENTED",
+                        )
+                        .await;
+                    }
+                    let path = format!("/gemini{version}/models");
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::POST, &path))
+                        .await
+                        .expect("wrong Gemini Models method should respond");
+                    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+                    assert_eq!(response.headers().get(header::ALLOW).unwrap(), "GET,HEAD");
+                    assert_proxy_security(&response);
+                    assert_protocol_error_body(
+                        response,
+                        DownstreamProtocol::Gemini,
+                        "method_not_allowed_error",
+                        "UNIMPLEMENTED",
+                    )
+                    .await;
                 }
 
                 for path in [
-                    "/gemini/models/test:countTokens",
-                    "/gemini/v1/models/test:countTokens",
-                    "/gemini/v1beta/models/test:countTokens",
+                    "/gemini/interactions",
+                    "/gemini/v1/interactions",
+                    "/gemini/v1beta/interactions",
+                    "/gemini/live",
+                    "/gemini/v1beta/live",
+                    "/gemini/batches",
+                    "/gemini/v1beta/batches",
+                    "/gemini/files",
+                    "/gemini/v1beta/files/file-private",
+                    "/gemini/cachedContents",
+                    "/gemini/v1beta/cachedContents/cache-private",
+                    "/gemini/embeddings",
+                    "/gemini/v1beta/embeddings",
                 ] {
+                    let mut request = method_request(Method::POST, path);
+                    request.headers_mut().insert(
+                        "x-goog-api-key",
+                        HeaderValue::from_str(&api_key).expect("API key header should be valid"),
+                    );
                     let response = create_proxy_router(client_identity_resolver())
                         .with_state(Arc::clone(&app_state))
-                        .oneshot(method_request(Method::POST, path))
+                        .oneshot(request)
                         .await
-                        .expect("countTokens route should respond");
-                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+                        .expect("prohibited Gemini product route should respond");
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                    assert!(response.headers().get(header::ALLOW).is_none(), "{path}");
+                    assert_proxy_security(&response);
+                    assert_protocol_error_body(
+                        response,
+                        DownstreamProtocol::Gemini,
+                        "route_not_found_error",
+                        "NOT_FOUND",
+                    )
+                    .await;
                 }
+
+                for path in [
+                    "/gemini/models/test",
+                    "/gemini/v1/models/test:embedContent",
+                    "/gemini/v1beta/models/test:batchEmbedContents",
+                    "/gemini/v1beta/models/test:countMessageTokens",
+                ] {
+                    let mut request = method_request(Method::POST, path);
+                    request.headers_mut().insert(
+                        "x-goog-api-key",
+                        HeaderValue::from_str(&api_key).expect("API key header should be valid"),
+                    );
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(request)
+                        .await
+                        .expect("unsupported Gemini model action should respond");
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+                    assert_proxy_security(&response);
+                    assert_protocol_error_body(
+                        response,
+                        DownstreamProtocol::Gemini,
+                        "invalid_request_error",
+                        "INVALID_ARGUMENT",
+                    )
+                    .await;
+                }
+
+                app_state.flush_proxy_logs().await;
+                assert!(
+                    RequestLog::list_full(RequestLogQueryPayload::default())
+                        .expect("request logs should be queryable")
+                        .list
+                        .is_empty(),
+                    "local Models and route/action/method/auth rejection must not create Proxy logs"
+                );
+                assert_eq!(
+                    app_state.secret_encryption.decrypt_call_count(),
+                    0,
+                    "closed Gemini surface must not resolve provider credentials"
+                );
+                let after = app_state
+                    .api_key_governance
+                    .get_api_key_governance_snapshot(api_key_id)
+                    .await
+                    .expect("governance snapshot should load");
+                assert_eq!(after, before, "closed surface must not mutate governance");
             })
             .await;
     }

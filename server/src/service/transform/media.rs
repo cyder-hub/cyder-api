@@ -27,6 +27,20 @@ pub(crate) enum InlineMediaKind {
 pub(crate) struct ParsedBase64DataUrl<'a> {
     pub(crate) mime_type: &'a str,
     pub(crate) data: &'a str,
+    pub(crate) has_parameters: bool,
+}
+
+pub(crate) fn portable_gemini_inline_mime(mime_type: &str) -> Option<&'static str> {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" => Some("audio/wav"),
+        "audio/mpeg" | "audio/mp3" => Some("audio/mpeg"),
+        "application/pdf" => Some("application/pdf"),
+        _ => None,
+    }
 }
 
 pub(crate) fn classify_inline_mime(mime_type: &str) -> Option<InlineMediaKind> {
@@ -85,11 +99,27 @@ pub(crate) fn is_valid_base64(data: &str) -> bool {
 
 pub(crate) fn parse_base64_data_url(value: &str) -> Option<ParsedBase64DataUrl<'_>> {
     let rest = value.strip_prefix("data:")?;
-    let (mime_type, data) = rest.split_once(";base64,")?;
+    let (metadata, data) = rest.split_once(',')?;
+    let mut fields = metadata.split(';').collect::<Vec<_>>();
+    if !fields
+        .pop()
+        .is_some_and(|encoding| encoding.eq_ignore_ascii_case("base64"))
+    {
+        return None;
+    }
+    let mime_type = fields.first().copied()?;
+    let has_parameters = fields.len() > 1;
+    if fields.iter().skip(1).any(|parameter| parameter.is_empty()) {
+        return None;
+    }
     if mime_type.is_empty() || !is_valid_base64(data) {
         return None;
     }
-    Some(ParsedBase64DataUrl { mime_type, data })
+    Some(ParsedBase64DataUrl {
+        mime_type,
+        data,
+        has_parameters,
+    })
 }
 
 pub(crate) fn is_valid_http_url(value: &str) -> bool {
@@ -140,5 +170,42 @@ mod tests {
         assert!(!is_valid_image_reference(
             "data:image/png;base64,not-base64"
         ));
+    }
+
+    #[test]
+    fn data_urls_accept_parameters_and_strict_base64_padding() {
+        let parsed =
+            parse_base64_data_url("data:image/png;charset=utf-8;name=preview.png;base64,ZmFrZQ==")
+                .expect("registered data URL parameters should parse");
+        assert_eq!(parsed.mime_type, "image/png");
+        assert_eq!(parsed.data, "ZmFrZQ==");
+        assert!(parsed.has_parameters);
+
+        assert!(parse_base64_data_url("data:image/png;base64,ZmFrZQ==").is_some());
+        assert!(parse_base64_data_url("data:image/png;base64,ZmFrZQ=").is_none());
+        assert!(parse_base64_data_url("data:image/png;charset=utf-8,ZmFrZQ==").is_none());
+    }
+
+    #[test]
+    fn gemini_inline_media_allowlist_is_canonical_and_closed() {
+        for (source, expected) in [
+            ("image/jpg", "image/jpeg"),
+            ("image/png", "image/png"),
+            ("image/gif", "image/gif"),
+            ("image/webp", "image/webp"),
+            ("audio/x-wav", "audio/wav"),
+            ("audio/mp3", "audio/mpeg"),
+            ("application/pdf", "application/pdf"),
+        ] {
+            assert_eq!(portable_gemini_inline_mime(source), Some(expected));
+        }
+        for rejected in [
+            "text/plain",
+            "application/json",
+            "application/octet-stream",
+            "video/mp4",
+        ] {
+            assert_eq!(portable_gemini_inline_mime(rejected), None);
+        }
     }
 }

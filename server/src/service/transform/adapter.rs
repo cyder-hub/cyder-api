@@ -487,6 +487,16 @@ fn decode_gemini_stream_frame(
     context: &mut StreamTransformContext<'_>,
 ) -> TransformResult<DecodedSourceStreamFrame> {
     validate_stream_source(UpstreamProtocol::Gemini, raw, context)?;
+    let value = serde_json::from_str::<Value>(raw)
+        .expect("Gemini stream JSON must parse after source validation");
+    let application_failed = value.get("error").is_some()
+        || gemini::classify_gemini_terminal(&value).kind
+            == gemini::GeminiTerminalKind::ApplicationFailure;
+    if application_failed {
+        return Ok(stream_decode_success(DecodedSourceStreamFrame::Events(
+            vec![UnifiedStreamEvent::Error { error: Value::Null }],
+        )));
+    }
     decode_stream_result(
         raw,
         serde_json::from_str::<gemini::GeminiChunkResponse>(raw)

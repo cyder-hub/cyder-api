@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::capability::TransformValueKind;
 use super::diagnostics::record_captured_transform_fact;
-use super::providers::{anthropic, openai, responses};
+use super::providers::{anthropic, gemini, openai, responses};
 use super::stream::session::{MAX_STREAM_TOOL_ARGUMENT_BYTES, try_append_tool_arguments};
 use super::stream::{AnthropicActiveBlockKind, StreamTransformContext};
 use super::unified::{
@@ -1044,7 +1044,10 @@ fn validate_anthropic_stream_frame(
     Ok(())
 }
 
-fn validate_gemini_part(part: &Value) -> Result<(), SourceStreamSemanticError> {
+fn validate_gemini_part(
+    part: &Value,
+    has_response_id: bool,
+) -> Result<(), SourceStreamSemanticError> {
     require_object(part, TransformSemanticUnit::StreamFrame)?;
     let known = [
         "text",
@@ -1066,6 +1069,24 @@ fn validate_gemini_part(part: &Value) -> Result<(), SourceStreamSemanticError> {
             SourceStreamSemanticError::invalid(TransformSemanticUnit::StreamFrame)
         });
     }
+    if part
+        .get("thought")
+        .is_some_and(|thought| !thought.is_null() && !thought.is_boolean())
+    {
+        return Err(SourceStreamSemanticError::invalid(
+            TransformSemanticUnit::ReasoningContent,
+        ));
+    }
+    if part.get("thoughtSignature").is_some_and(|signature| {
+        !signature.is_null()
+            && !signature
+                .as_str()
+                .is_some_and(|signature| !signature.is_empty())
+    }) {
+        return Err(SourceStreamSemanticError::invalid(
+            TransformSemanticUnit::Metadata,
+        ));
+    }
     match present[0] {
         "text" => {
             if !part.get("text").is_some_and(Value::is_string) {
@@ -1077,16 +1098,30 @@ fn validate_gemini_part(part: &Value) -> Result<(), SourceStreamSemanticError> {
         "functionCall" => {
             let call = &part["functionCall"];
             require_non_empty_string(call, "name", TransformSemanticUnit::ToolCall)?;
+            match call.get("id").filter(|value| !value.is_null()) {
+                Some(id) if !id.as_str().is_some_and(|id| !id.trim().is_empty()) => {
+                    return Err(SourceStreamSemanticError::invalid(
+                        TransformSemanticUnit::ToolCall,
+                    ));
+                }
+                None if !has_response_id => {
+                    return Err(SourceStreamSemanticError {
+                        semantic_unit: TransformSemanticUnit::ToolCall,
+                        reason_code: TransformReasonCode::ToolCorrelationSeedRequired,
+                    });
+                }
+                None => record_source_synthesis(
+                    TransformSemanticUnit::ToolCall,
+                    TransformReasonCode::SyntheticCorrelationId,
+                ),
+                Some(_) => {}
+            }
             require_object(
                 call.get("args").ok_or_else(|| {
                     SourceStreamSemanticError::invalid(TransformSemanticUnit::ToolCallDelta)
                 })?,
                 TransformSemanticUnit::ToolCallDelta,
             )?;
-            record_source_synthesis(
-                TransformSemanticUnit::ToolCall,
-                TransformReasonCode::SyntheticCorrelationId,
-            );
         }
         "inlineData" => {
             let data = &part["inlineData"];
@@ -1112,11 +1147,85 @@ fn validate_gemini_part(part: &Value) -> Result<(), SourceStreamSemanticError> {
     Ok(())
 }
 
-fn validate_gemini_stream_frame(value: &Value) -> Result<(), SourceStreamSemanticError> {
+const MAX_GEMINI_STREAM_CANDIDATES: usize = 32;
+
+fn validate_gemini_stream_frame(
+    value: &Value,
+    context: &mut StreamTransformContext<'_>,
+) -> Result<(), SourceStreamSemanticError> {
     require_object(value, TransformSemanticUnit::StreamFrame)?;
-    let candidates = require_array_field(value, "candidates", TransformSemanticUnit::StreamFrame)?;
-    let mut indices = HashSet::new();
+    let response_id = match value.get("responseId").filter(|value| !value.is_null()) {
+        Some(response_id)
+            if !response_id
+                .as_str()
+                .is_some_and(|response_id| !response_id.trim().is_empty()) =>
+        {
+            return Err(SourceStreamSemanticError::invalid(
+                TransformSemanticUnit::Metadata,
+            ));
+        }
+        Some(response_id) => response_id.as_str(),
+        None => None,
+    };
+    if let (Some(expected), Some(actual)) =
+        (context.gemini().source_response_id.as_deref(), response_id)
+        && expected != actual
+    {
+        return Err(SourceStreamSemanticError::invalid(
+            TransformSemanticUnit::Lifecycle,
+        ));
+    }
+
+    if let Some(error) = value.get("error") {
+        require_object(error, TransformSemanticUnit::StreamError)?;
+        let state = context.gemini();
+        let success_terminal_complete = state.source_prompt_block_seen
+            || (!state.source_candidate_indices.is_empty()
+                && state.source_candidate_indices == state.source_terminal_candidate_indices);
+        if state.source_terminal_failed || success_terminal_complete {
+            return Err(SourceStreamSemanticError::invalid(
+                TransformSemanticUnit::Lifecycle,
+            ));
+        }
+        if value.get("candidates").is_some()
+            || value.get("promptFeedback").is_some()
+            || value.get("usageMetadata").is_some()
+        {
+            return Err(SourceStreamSemanticError::invalid(
+                TransformSemanticUnit::StreamError,
+            ));
+        }
+        let state = context.gemini_mut();
+        if state.source_response_id.is_none() {
+            state.source_response_id = response_id.map(str::to_string);
+        }
+        state.source_terminal_failed = true;
+        return Ok(());
+    }
+
+    let candidates: &[Value] = match value.get("candidates") {
+        Some(candidates) => candidates.as_array().map(Vec::as_slice).ok_or_else(|| {
+            SourceStreamSemanticError::invalid(TransformSemanticUnit::StreamFrame)
+        })?,
+        None if value.get("usageMetadata").is_some() || value.get("promptFeedback").is_some() => {
+            &[]
+        }
+        None => {
+            return Err(SourceStreamSemanticError::invalid(
+                TransformSemanticUnit::StreamFrame,
+            ));
+        }
+    };
+    if candidates.len() > MAX_GEMINI_STREAM_CANDIDATES {
+        return Err(SourceStreamSemanticError {
+            semantic_unit: TransformSemanticUnit::Lifecycle,
+            reason_code: TransformReasonCode::UnsupportedContent,
+        });
+    }
+    let mut frame_indices = HashSet::new();
+    let mut candidate_frames = Vec::with_capacity(candidates.len());
     for (position, candidate) in candidates.iter().enumerate() {
+        require_object(candidate, TransformSemanticUnit::StreamFrame)?;
         let index = match candidate.get("index") {
             Some(value) => value
                 .as_u64()
@@ -1134,41 +1243,182 @@ fn validate_gemini_stream_frame(value: &Value) -> Result<(), SourceStreamSemanti
                 })?
             }
         };
-        if !indices.insert(index) {
+        if !frame_indices.insert(index) {
             return Err(SourceStreamSemanticError::invalid(
                 TransformSemanticUnit::Lifecycle,
             ));
         }
+        candidate_frames.push((index, candidate));
+    }
+    let new_candidate_count = frame_indices
+        .iter()
+        .filter(|index| !context.gemini().source_candidate_indices.contains(index))
+        .count();
+    if context
+        .gemini()
+        .source_candidate_indices
+        .len()
+        .saturating_add(new_candidate_count)
+        > MAX_GEMINI_STREAM_CANDIDATES
+    {
+        return Err(SourceStreamSemanticError {
+            semantic_unit: TransformSemanticUnit::Lifecycle,
+            reason_code: TransformReasonCode::UnsupportedContent,
+        });
+    }
+    if !context.is_same_wire()
+        && (candidate_frames.len() > 1
+            || candidate_frames
+                .first()
+                .is_some_and(|(index, _)| *index != 0))
+    {
+        return Err(SourceStreamSemanticError {
+            semantic_unit: TransformSemanticUnit::Lifecycle,
+            reason_code: TransformReasonCode::UnsupportedContent,
+        });
+    }
+
+    if !candidate_frames.is_empty()
+        && (context.gemini().source_prompt_block_seen || context.gemini().source_terminal_failed)
+    {
+        return Err(SourceStreamSemanticError::invalid(
+            TransformSemanticUnit::Lifecycle,
+        ));
+    }
+
+    let has_response_id = response_id.is_some() || context.gemini().source_response_id.is_some();
+    let mut terminal_indices = HashSet::new();
+    let mut application_failed = false;
+    for (index, candidate) in &candidate_frames {
+        let candidate_already_terminal = context
+            .gemini()
+            .source_terminal_candidate_indices
+            .contains(index);
         if let Some(content) = candidate.get("content").filter(|value| !value.is_null()) {
+            if candidate_already_terminal {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::Lifecycle,
+                ));
+            }
             if content.get("role").and_then(Value::as_str) != Some("model") {
                 return Err(SourceStreamSemanticError::unknown(
                     TransformSemanticUnit::Role,
                 ));
             }
-            for part in require_array_field(content, "parts", TransformSemanticUnit::StreamFrame)? {
-                validate_gemini_part(part)?;
+            let parts = require_array_field(content, "parts", TransformSemanticUnit::StreamFrame)?;
+            if parts.is_empty() {
+                return Err(SourceStreamSemanticError::invalid(
+                    TransformSemanticUnit::StreamFrame,
+                ));
+            }
+            for part in parts {
+                validate_gemini_part(part, has_response_id)?;
             }
         }
-        if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
-            if !matches!(
-                reason,
-                "STOP" | "TOOL_USE" | "MAX_TOKENS" | "SAFETY" | "RECITATION"
-            ) {
-                return Err(SourceStreamSemanticError::unknown(
+        if let Some(reason) = candidate.get("finishReason") {
+            if candidate_already_terminal {
+                return Err(SourceStreamSemanticError::invalid(
                     TransformSemanticUnit::Lifecycle,
                 ));
             }
+            let reason = reason
+                .as_str()
+                .filter(|reason| !reason.is_empty())
+                .ok_or_else(|| {
+                    SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle)
+                })?;
+            let classification = gemini::classify_gemini_finish_reason(Some(reason));
+            if classification.kind == gemini::GeminiTerminalKind::ObservationDegraded {
+                return Err(SourceStreamSemanticError {
+                    semantic_unit: TransformSemanticUnit::Lifecycle,
+                    reason_code: classification
+                        .reason_code
+                        .unwrap_or(TransformReasonCode::IllegalUpstreamTerminal),
+                });
+            }
+            terminal_indices.insert(*index);
+            application_failed |=
+                classification.kind == gemini::GeminiTerminalKind::ApplicationFailure;
         }
     }
-    if let Some(usage) = value.get("usageMetadata").filter(|value| !value.is_null()) {
-        require_u32(usage, "promptTokenCount", TransformSemanticUnit::Usage)?;
-        if usage
-            .get("candidatesTokenCount")
-            .is_some_and(|value| !value.is_null())
+
+    let block_reason = value
+        .get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .filter(|reason| !reason.is_null())
+        .map(|reason| {
+            reason
+                .as_str()
+                .filter(|reason| !reason.is_empty())
+                .ok_or_else(|| SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle))
+        })
+        .transpose()?;
+    let prompt_blocked = if block_reason.is_some() {
+        if !candidate_frames.is_empty()
+            || !context.gemini().source_candidate_indices.is_empty()
+            || context.gemini().source_prompt_block_seen
+            || context.gemini().source_terminal_failed
         {
-            require_u32(usage, "candidatesTokenCount", TransformSemanticUnit::Usage)?;
+            return Err(SourceStreamSemanticError {
+                semantic_unit: TransformSemanticUnit::Lifecycle,
+                reason_code: TransformReasonCode::UnsupportedContent,
+            });
         }
-        require_u32(usage, "totalTokenCount", TransformSemanticUnit::Usage)?;
+        let classification = gemini::classify_gemini_terminal(value);
+        if classification.kind == gemini::GeminiTerminalKind::ObservationDegraded {
+            return Err(SourceStreamSemanticError {
+                semantic_unit: TransformSemanticUnit::Lifecycle,
+                reason_code: classification
+                    .reason_code
+                    .unwrap_or(TransformReasonCode::IllegalUpstreamTerminal),
+            });
+        }
+        true
+    } else {
+        false
+    };
+
+    if candidates.is_empty()
+        && value.get("usageMetadata").is_none()
+        && value.get("promptFeedback").is_none()
+    {
+        return Err(SourceStreamSemanticError::invalid(
+            TransformSemanticUnit::StreamFrame,
+        ));
+    }
+
+    // Commit the independently validated Gemini lifecycle core before observing usage.
+    // Same-wire streams may preserve a valid terminal frame even when usage observation
+    // degrades; cross-wire failures remain transactional at the transformer boundary.
+    let state = context.gemini_mut();
+    if state.source_response_id.is_none() {
+        state.source_response_id = response_id.map(str::to_string);
+    }
+    state
+        .source_candidate_indices
+        .extend(candidate_frames.iter().map(|(index, _)| *index));
+    state
+        .source_terminal_candidate_indices
+        .extend(terminal_indices);
+    state.source_prompt_block_seen |= prompt_blocked;
+    state.source_terminal_failed |= application_failed;
+
+    if let Some(usage) = value.get("usageMetadata").filter(|value| !value.is_null()) {
+        let usage =
+            gemini::decode_gemini_usage(usage).map_err(|error| SourceStreamSemanticError {
+                semantic_unit: TransformSemanticUnit::Usage,
+                reason_code: error.reason_code(),
+            })?;
+        if context
+            .gemini_source_usage()
+            .is_some_and(|previous| gemini::gemini_usage_snapshot_regressed(previous, &usage))
+        {
+            return Err(SourceStreamSemanticError {
+                semantic_unit: TransformSemanticUnit::Usage,
+                reason_code: TransformReasonCode::UsageSnapshotRegressed,
+            });
+        }
+        context.set_gemini_source_usage(usage);
     }
     record_source_synthesis(
         TransformSemanticUnit::Lifecycle,
@@ -2366,7 +2616,7 @@ pub(in crate::service::transform) fn validate_upstream_stream_frame(
         UpstreamProtocol::Openai => validate_openai_stream_frame(&value, context),
         UpstreamProtocol::Responses => validate_responses_stream_frame(&value, context),
         UpstreamProtocol::Anthropic => validate_anthropic_stream_frame(&value, context),
-        UpstreamProtocol::Gemini => validate_gemini_stream_frame(&value),
+        UpstreamProtocol::Gemini => validate_gemini_stream_frame(&value, context),
         UpstreamProtocol::Ollama => validate_ollama_stream_frame(&value),
     }
 }
@@ -2396,7 +2646,9 @@ fn audit_target_finish_reason(target: DownstreamProtocol, reason: &str) {
         DownstreamProtocol::Gemini => {
             matches!(reason, "stop" | "length" | "tool_calls" | "content_filter")
         }
-        DownstreamProtocol::Anthropic => matches!(reason, "stop" | "length" | "tool_calls"),
+        DownstreamProtocol::Anthropic => {
+            matches!(reason, "stop" | "length" | "tool_calls" | "content_filter")
+        }
     };
     if !supported {
         record_rejection(
@@ -2867,6 +3119,14 @@ pub(in crate::service::transform) fn audit_target_legacy_chunk(
         for part in &choice.delta.content {
             match part {
                 UnifiedContentPartDelta::TextDelta { .. } => {}
+                UnifiedContentPartDelta::ReasoningDelta { .. } => {
+                    apply_transform_policy(
+                        TransformProtocol::Unified,
+                        TransformProtocol::Downstream(target),
+                        TransformValueKind::ReasoningDelta,
+                        "Auditing target legacy reasoning delta capability.",
+                    );
+                }
                 UnifiedContentPartDelta::ImageDelta { .. } => {
                     if target == DownstreamProtocol::Responses {
                         record_fact(
@@ -2906,19 +3166,52 @@ pub(in crate::service::transform) fn audit_target_legacy_chunk(
         }
     }
     if target != DownstreamProtocol::Gemini
-        && chunk
-            .provider_session_metadata
-            .as_ref()
-            .is_some_and(|metadata| {
-                metadata.gemini.is_some()
-                    || metadata.responses.is_some()
-                    || metadata.anthropic.is_some()
-            })
+        && let Some(metadata) = chunk.provider_session_metadata.as_ref()
     {
-        record_rejection(
-            TransformSemanticUnit::Metadata,
-            TransformReasonCode::UnsupportedContent,
-        );
+        if let Some(gemini) = metadata.gemini.as_ref() {
+            if gemini.candidates.iter().any(|candidate| {
+                candidate.thought_signature_present
+                    || candidate
+                        .tool_associations
+                        .iter()
+                        .any(|association| association.thought_signature.is_some())
+            }) {
+                record_fact(
+                    TransformSemanticUnit::Metadata,
+                    TransformOutcomeKind::ControlledLossMinor,
+                    TransformAction::Drop,
+                    TransformReasonCode::ThoughtSignatureNotPortable,
+                );
+            }
+            if gemini.prompt_feedback.is_some()
+                || gemini.candidates.iter().any(|candidate| {
+                    !candidate.safety_ratings.is_empty() || candidate.token_count.is_some()
+                })
+            {
+                record_fact(
+                    TransformSemanticUnit::Metadata,
+                    TransformOutcomeKind::ControlledLossMinor,
+                    TransformAction::Drop,
+                    TransformReasonCode::UnsupportedContent,
+                );
+            }
+            if gemini
+                .candidates
+                .iter()
+                .any(|candidate| candidate.citation_metadata.is_some())
+            {
+                record_rejection(
+                    TransformSemanticUnit::Metadata,
+                    TransformReasonCode::UnsupportedContent,
+                );
+            }
+        }
+        if metadata.responses.is_some() || metadata.anthropic.is_some() {
+            record_rejection(
+                TransformSemanticUnit::Metadata,
+                TransformReasonCode::UnsupportedContent,
+            );
+        }
     }
 }
 
@@ -2937,6 +3230,36 @@ mod tests {
             &value.to_string(),
             &mut transformer.stream_context(),
         )
+    }
+
+    #[test]
+    fn gemini_stream_tool_calls_require_a_stable_correlation_seed() {
+        let without_seed = validate(
+            UpstreamProtocol::Gemini,
+            json!({
+                "candidates":[{"index":0,"content":{"role":"model","parts":[{
+                    "functionCall":{"name":"weather","args":{"city":"Paris"}},
+                    "thoughtSignature":"private-signature"
+                }]}}]
+            }),
+        )
+        .expect_err("legacy tool call without an id or responseId must reject");
+        assert_eq!(
+            without_seed.reason_code,
+            TransformReasonCode::ToolCorrelationSeedRequired
+        );
+
+        validate(
+            UpstreamProtocol::Gemini,
+            json!({
+                "responseId":"gemini-response-1",
+                "candidates":[{"index":0,"content":{"role":"model","parts":[{
+                    "functionCall":{"name":"weather","args":{"city":"Paris"}},
+                    "thoughtSignature":"private-signature"
+                }]}}]
+            }),
+        )
+        .expect("responseId is a stable legacy tool-call correlation seed");
     }
 
     #[test]
@@ -3094,7 +3417,7 @@ mod tests {
     }
 
     #[test]
-    fn target_stream_audit_records_controlled_loss_for_openai_reasoning() {
+    fn target_stream_audit_accepts_openai_reasoning_channel() {
         let mut transformer =
             StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
         let (_, summary) = capture_transform_diagnostics(|| {
@@ -3110,13 +3433,12 @@ mod tests {
                 &mut transformer.stream_context(),
             )
         });
-        assert_eq!(
-            summary
+        assert!(
+            !summary
                 .outcome_counts
-                .get(&TransformOutcomeKind::ControlledLossMinor),
-            Some(&1)
+                .contains_key(&TransformOutcomeKind::ControlledLossMinor)
         );
-        assert_eq!(summary.action_counts.get(&TransformAction::Drop), Some(&1));
+        assert!(!summary.action_counts.contains_key(&TransformAction::Drop));
         assert!(!summary.action_counts.contains_key(&TransformAction::Reject));
     }
 }

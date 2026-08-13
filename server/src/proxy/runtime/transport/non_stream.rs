@@ -16,7 +16,7 @@ use crate::{
         classify_transform_failure, classify_upstream_status_captured,
         logging::{
             RequestLogContext, TransformLogStage, log_transform_failure, log_transform_summary,
-            log_upstream_usage_missing,
+            log_upstream_usage_missing, log_usage_normalization_warnings,
         },
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
@@ -25,12 +25,14 @@ use crate::{
         util::{
             json_top_level_field_count_from_bytes, parse_utility_usage_normalization, sha256_hex,
         },
+        utility::{UtilityResponseKind, observe_gemini_count_tokens_response},
     },
     schema::enum_def::RequestStatus,
     service::transform::{
-        ResponseApplicationOutcome, TransformPhase, diagnostics::upstream_usage_missing_summary,
+        ResponseApplicationOutcome, TransformAction, TransformDiagnosticCollector,
+        TransformDiagnosticFact, TransformOutcomeKind, TransformPhase, TransformReasonCode,
+        TransformSafeSummary, TransformSemanticUnit, diagnostics::upstream_usage_missing_summary,
     },
-    service::upstream_profile::UpstreamOperation,
     service::{cache::types::CacheCostCatalogVersion, upstream_response::parse_content_encoding},
 };
 use tokio::sync::Mutex as TokioMutex;
@@ -124,6 +126,7 @@ pub(super) async fn handle_non_streaming_response(
             content_encoding = complete_body.encoding.as_str(),
         );
         let is_generation_response = matches!(response_mode, ProxyResponseMode::Generation { .. });
+        let mut utility_observation_degraded = false;
         let transformed = match response_mode {
             ProxyResponseMode::Generation {
                 downstream_protocol,
@@ -133,14 +136,51 @@ pub(super) async fn handle_non_streaming_response(
                 downstream_protocol,
                 upstream_protocol,
             ),
-            ProxyResponseMode::Utility { operation, .. } => {
-                let usage_normalization = if operation == Some(UpstreamOperation::Rerank) {
-                    None
-                } else {
-                    serde_json::from_slice::<serde_json::Value>(&decompressed_body)
-                        .ok()
-                        .and_then(|val| parse_utility_usage_normalization(&val))
-                };
+            ProxyResponseMode::Utility { kind, .. } => {
+                let parsed = serde_json::from_slice::<serde_json::Value>(&decompressed_body).ok();
+                let usage_normalization = (kind == UtilityResponseKind::Embeddings)
+                    .then(|| {
+                        parsed
+                            .as_ref()
+                            .and_then(|value| parse_utility_usage_normalization(value))
+                    })
+                    .flatten();
+                if kind == UtilityResponseKind::GeminiCountTokens {
+                    match parsed
+                        .as_ref()
+                        .ok_or(crate::proxy::utility::GeminiCountTokensObservationError::InvalidEnvelope)
+                        .and_then(|value| observe_gemini_count_tokens_response(value))
+                    {
+                        Ok(observation) => {
+                            let modalities = observation
+                                .prompt_token_details
+                                .iter()
+                                .map(|detail| detail.modality.as_key())
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            crate::debug_event!(
+                                "proxy.gemini_count_tokens_observed",
+                                request_id = &request_id,
+                                log_id = log_id,
+                                total_tokens = observation.total_tokens,
+                                cached_content_token_count = observation.cached_content_token_count,
+                                modality_detail_count = observation.prompt_token_details.len(),
+                                modalities = modalities,
+                            );
+                        }
+                        Err(error) => {
+                            utility_observation_degraded = true;
+                            crate::warn_event!(
+                                "proxy.gemini_count_tokens_observation_degraded",
+                                request_id = &request_id,
+                                log_id = log_id,
+                                reason = error.as_key(),
+                                response_body_bytes = decompressed_body.len(),
+                                response_body_sha256 = sha256_hex(&decompressed_body),
+                            );
+                        }
+                    }
+                }
                 Ok((
                     decompressed_body.clone(),
                     None,
@@ -184,11 +224,28 @@ pub(super) async fn handle_non_streaming_response(
         if usage_missing && !is_generation_response {
             transform_summary = upstream_usage_missing_summary(TransformPhase::ResponseObserve);
         }
+        if utility_observation_degraded {
+            let mut collector = TransformDiagnosticCollector::default();
+            collector.record(TransformDiagnosticFact {
+                sequence: 0,
+                phase: TransformPhase::ResponseObserve,
+                semantic_unit: TransformSemanticUnit::ResponseEnvelope,
+                outcome: TransformOutcomeKind::ObservationDegraded,
+                action: TransformAction::PassThrough,
+                reason_code: TransformReasonCode::ObservationParseFailed,
+                safe_summary: Some(TransformSafeSummary::from_bytes(&decompressed_body)),
+            });
+            transform_summary = collector.into_summary();
+        }
 
         let mut context = log_context.lock().await;
         let overall_status = match application_outcome {
-            ResponseApplicationOutcome::Success => RequestStatus::Success,
-            ResponseApplicationOutcome::Failed => RequestStatus::Error,
+            ResponseApplicationOutcome::Success | ResponseApplicationOutcome::SuccessUnbillable => {
+                RequestStatus::Success
+            }
+            ResponseApplicationOutcome::Failed | ResponseApplicationOutcome::Indeterminate => {
+                RequestStatus::Error
+            }
         };
         let (logged_usage, logged_usage_normalization) = if overall_status == RequestStatus::Success
         {
@@ -201,18 +258,30 @@ pub(super) async fn handle_non_streaming_response(
             url,
             status_code,
             completed_at,
-            cost_catalog_version,
+            if application_outcome == ResponseApplicationOutcome::SuccessUnbillable {
+                None
+            } else {
+                cost_catalog_version
+            },
             overall_status.clone(),
             logged_usage,
             logged_usage_normalization,
         );
-        if application_outcome == ResponseApplicationOutcome::Failed {
+        if matches!(
+            application_outcome,
+            ResponseApplicationOutcome::Failed | ResponseApplicationOutcome::Indeterminate
+        ) {
+            let message = if application_outcome == ResponseApplicationOutcome::Failed {
+                "Upstream returned a failed application terminal."
+            } else {
+                "Upstream response terminal outcome could not be confirmed."
+            };
             let proxy_error = ProxyError::gateway(
                 ProxyErrorCode::UpstreamResponseError,
                 ExecutionStage::UpstreamResponse,
                 response_visibility.current(),
                 None,
-                "Responses upstream returned a failed application terminal.",
+                message,
             );
             apply_final_error_fact(&mut context, &proxy_error);
             crate::logging::log_proxy_error_event(
@@ -222,13 +291,17 @@ pub(super) async fn handle_non_streaming_response(
                 &proxy_error,
             );
         }
-        if is_generation_response || usage_missing {
+        if is_generation_response || usage_missing || utility_observation_degraded {
             log_transform_summary(TransformLogStage::Response, &context, &transform_summary);
         }
         if usage_missing {
             log_upstream_usage_missing(&context, &model_str, status_code);
         }
-        if application_outcome == ResponseApplicationOutcome::Success {
+        log_usage_normalization_warnings(&context, &model_str, status_code);
+        if matches!(
+            application_outcome,
+            ResponseApplicationOutcome::Success | ResponseApplicationOutcome::SuccessUnbillable
+        ) {
             crate::debug_event!(
                 "proxy.request_succeeded_debug",
                 request_id = &context.request_id,

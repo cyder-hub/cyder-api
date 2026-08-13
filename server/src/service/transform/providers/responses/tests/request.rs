@@ -540,6 +540,7 @@ fn test_unified_request_items_to_responses_input() {
         presence_penalty: None,
         frequency_penalty: None,
         reasoning_effort: None,
+        reasoning_budget_tokens: None,
         structured_output: None,
         extensions: None,
     };

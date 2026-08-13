@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderValue},
@@ -21,7 +19,8 @@ use crate::{
         },
         util::format_model_str,
         utility::{
-            UtilityOperation, UtilityProtocol, validate_embeddings_request, validate_rerank_request,
+            UtilityOperation, UtilityProtocol, validate_embeddings_request,
+            validate_gemini_count_tokens_request, validate_rerank_request,
         },
     },
     schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
@@ -32,7 +31,9 @@ use crate::{
         provider_credential::{ProviderCredential, apply_provider_request_auth_header},
         provider_http::{
             ANTHROPIC_BETA_HEADER, ANTHROPIC_MESSAGES_OPERATION, ANTHROPIC_VERSION_HEADER,
-            enforce_anthropic_version_header, join_base_url_and_operation_path,
+            GeminiModelOperation, enforce_anthropic_version_header, gemini_operation_target_url,
+            join_base_url_and_operation_path, sanitize_gemini_request_headers,
+            validate_gemini_pre_auth_target,
         },
         transform::{
             TransformFailure, TransformFailureOrigin, TransformPhase, TransformReasonCode,
@@ -66,10 +67,10 @@ struct PreparedGenerationRequest {
     final_body_value: Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum GenerationPrepareKind {
     Llm { path: &'static str },
-    Gemini { is_stream: bool },
+    Gemini { operation: GeminiModelOperation },
 }
 
 fn select_generation_prepare_kind(
@@ -85,58 +86,30 @@ fn select_generation_prepare_kind(
             path: ANTHROPIC_MESSAGES_OPERATION,
         }),
         UpstreamProtocol::Ollama => Ok(GenerationPrepareKind::Llm { path: "api/chat" }),
-        UpstreamProtocol::Gemini => Ok(GenerationPrepareKind::Gemini { is_stream }),
+        UpstreamProtocol::Gemini => Ok(GenerationPrepareKind::Gemini {
+            operation: if is_stream {
+                GeminiModelOperation::StreamGenerateContent
+            } else {
+                GeminiModelOperation::GenerateContent
+            },
+        }),
     }
 }
 
-fn build_gemini_headers(original_headers: &HeaderMap) -> Result<HeaderMap, ProxyError> {
-    let mut headers = reqwest::header::HeaderMap::new();
-    for (name, value) in original_headers.iter() {
-        if name != HOST
-            && name != CONTENT_LENGTH
-            && name != ACCEPT_ENCODING
-            && name != "x-api-key"
-            && name != "x-goog-api-key"
-            && name != AUTHORIZATION
-            && name != X_REQUEST_ID
-            && name != X_CLIENT_REQUEST_ID
-        {
-            headers.insert(name.clone(), value.clone());
-        }
-    }
-
-    Ok(headers)
-}
-
-fn build_gemini_url(
+fn build_gemini_operation_url(
     source: &CacheUpstreamSource,
     real_model_name: &str,
-    action: &str,
-    params: &HashMap<String, String>,
-    is_stream: bool,
+    operation: GeminiModelOperation,
 ) -> Result<Url, ProxyError> {
-    let target_url_str = format!("{}/{}:{}", source.base_url, real_model_name, action);
-    let mut url = Url::parse(&target_url_str).map_err(|error| {
+    gemini_operation_target_url(&source.base_url, real_model_name, operation).map_err(|error| {
         ProxyError::gateway(
             ProxyErrorCode::ProviderConfigurationError,
             ExecutionStage::Materialize,
             ResponseVisibility::NotVisible,
             None,
-            format!("failed to parse target url: {error}"),
+            format!("failed to resolve Gemini target URL: {error}"),
         )
-    })?;
-
-    for (k, v) in params {
-        if k != "key" {
-            url.query_pairs_mut().append_pair(k, v);
-        }
-    }
-
-    if is_stream {
-        url.query_pairs_mut().append_pair("alt", "sse");
-    }
-
-    Ok(url)
+    })
 }
 
 fn build_new_headers(
@@ -278,7 +251,6 @@ async fn prepare_generation_request(
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     is_stream: bool,
-    params: &HashMap<String, String>,
     operation_url: Option<&str>,
 ) -> Result<PreparedGenerationRequest, ProxyError> {
     match select_generation_prepare_kind(upstream_protocol, is_stream)? {
@@ -302,16 +274,15 @@ async fn prepare_generation_request(
                 final_body_value,
             })
         }
-        GenerationPrepareKind::Gemini { is_stream } => {
-            let (final_url, final_headers, final_body_value) = prepare_gemini_llm_request(
+        GenerationPrepareKind::Gemini { operation } => {
+            let (final_url, final_headers, final_body_value) = prepare_gemini_generation_request(
                 provider,
                 source,
                 model,
                 data,
                 original_headers,
                 request_patches,
-                is_stream,
-                params,
+                operation,
             )
             .await?;
             Ok(PreparedGenerationRequest {
@@ -330,31 +301,40 @@ async fn prepare_simple_gemini_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    action: &str,
-    params: &HashMap<String, String>,
+    operation: GeminiModelOperation,
 ) -> Result<(String, HeaderMap, Value), ProxyError> {
     debug!(
         "Preparing simple Gemini request for provider: {}, model: {}, action: {}",
-        provider.name, model.model_name, action
+        provider.name,
+        model.model_name,
+        operation.action()
     );
 
     let real_model_name = resolve_real_model_name(model);
-    let mut url = build_gemini_url(source, real_model_name, action, params, false)?;
-    let mut headers = build_gemini_headers(original_headers)?;
+    let mut url = build_gemini_operation_url(source, real_model_name, operation)?;
+    let mut headers = sanitize_gemini_request_headers(original_headers);
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
+    validate_gemini_pre_auth_target(&url, &headers, operation).map_err(|error| {
+        ProxyError::gateway(
+            ProxyErrorCode::ProviderConfigurationError,
+            ExecutionStage::Patch,
+            ResponseVisibility::NotVisible,
+            None,
+            format!("final Gemini target validation failed: {error}"),
+        )
+    })?;
 
     Ok((url.to_string(), headers, data))
 }
 
-async fn prepare_gemini_llm_request(
+async fn prepare_gemini_generation_request(
     provider: &CacheProvider,
     source: &CacheUpstreamSource,
     model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    is_stream: bool,
-    params: &HashMap<String, String>,
+    operation: GeminiModelOperation,
 ) -> Result<(String, HeaderMap, Value), ProxyError> {
     debug!(
         "Preparing Gemini LLM request for provider: {}, model: {}",
@@ -362,15 +342,23 @@ async fn prepare_gemini_llm_request(
     );
 
     let real_model_name = resolve_real_model_name(model);
-    let action = if is_stream {
-        "streamGenerateContent"
-    } else {
-        "generateContent"
-    };
-    let mut url = build_gemini_url(source, real_model_name, action, params, is_stream)?;
-    let mut headers = build_gemini_headers(original_headers)?;
+    debug_assert!(matches!(
+        operation,
+        GeminiModelOperation::GenerateContent | GeminiModelOperation::StreamGenerateContent
+    ));
+    let mut url = build_gemini_operation_url(source, real_model_name, operation)?;
+    let mut headers = sanitize_gemini_request_headers(original_headers);
 
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
+    validate_gemini_pre_auth_target(&url, &headers, operation).map_err(|error| {
+        ProxyError::gateway(
+            ProxyErrorCode::ProviderConfigurationError,
+            ExecutionStage::Patch,
+            ResponseVisibility::NotVisible,
+            None,
+            format!("final Gemini target validation failed: {error}"),
+        )
+    })?;
 
     Ok((url.to_string(), headers, data))
 }
@@ -381,7 +369,6 @@ pub(in crate::proxy) async fn materialize_generation_request(
     downstream_protocol: DownstreamProtocol,
     is_stream: bool,
     original_headers: &HeaderMap,
-    query_params: &HashMap<String, String>,
     request_patches: &[RuntimeResolvedRequestPatch],
     operation_url: Option<&str>,
 ) -> Result<MaterializedRequest, ProxyError> {
@@ -396,7 +383,6 @@ pub(in crate::proxy) async fn materialize_generation_request(
         downstream_protocol,
         upstream_protocol,
         is_stream,
-        query_params,
         operation_url,
     )
     .await?;
@@ -500,6 +486,42 @@ pub(in crate::proxy) fn preflight_generation_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::enum_def::UpstreamProfileType;
+
+    fn gemini_source(base_url: &str, profile_type: UpstreamProfileType) -> CacheUpstreamSource {
+        CacheUpstreamSource {
+            id: 1,
+            profile_type,
+            base_url: base_url.to_string(),
+            use_proxy: false,
+            chat_completions_enabled: Some(false),
+            chat_completions_path_override: None,
+            embeddings_enabled: Some(false),
+            embeddings_path_override: None,
+            rerank_enabled: Some(false),
+            rerank_path_override: None,
+            is_enabled: true,
+            is_default: true,
+        }
+    }
+
+    #[test]
+    fn gemini_generation_prepare_kind_owns_exact_typed_operation() {
+        assert_eq!(
+            select_generation_prepare_kind(UpstreamProtocol::Gemini, false)
+                .expect("Gemini non-stream prepare kind"),
+            GenerationPrepareKind::Gemini {
+                operation: GeminiModelOperation::GenerateContent,
+            }
+        );
+        assert_eq!(
+            select_generation_prepare_kind(UpstreamProtocol::Gemini, true)
+                .expect("Gemini stream prepare kind"),
+            GenerationPrepareKind::Gemini {
+                operation: GeminiModelOperation::StreamGenerateContent,
+            }
+        );
+    }
 
     #[test]
     fn responses_generation_prepare_kind_uses_one_native_path_for_both_modes() {
@@ -628,6 +650,55 @@ mod tests {
         );
         assert_eq!(headers.get_all(ANTHROPIC_VERSION_HEADER).iter().count(), 1);
     }
+
+    #[test]
+    fn gemini_runtime_url_uses_shared_typed_operation_builder_for_both_profiles() {
+        let cases = [
+            (
+                gemini_source(
+                    "https://generativelanguage.googleapis.com/v1beta/models/",
+                    UpstreamProfileType::Gemini,
+                ),
+                GeminiModelOperation::GenerateContent,
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-fixture:generateContent",
+            ),
+            (
+                gemini_source(
+                    "https://region-aiplatform.googleapis.com/v1/projects/p/locations/r/publishers/google/models",
+                    UpstreamProfileType::Vertex,
+                ),
+                GeminiModelOperation::StreamGenerateContent,
+                "https://region-aiplatform.googleapis.com/v1/projects/p/locations/r/publishers/google/models/gemini-fixture:streamGenerateContent?alt=sse",
+            ),
+            (
+                gemini_source(
+                    "http://127.0.0.1:9000/proxy/models",
+                    UpstreamProfileType::Gemini,
+                ),
+                GeminiModelOperation::CountTokens,
+                "http://127.0.0.1:9000/proxy/models/gemini-fixture:countTokens",
+            ),
+        ];
+
+        for (source, operation, expected) in cases {
+            let url = build_gemini_operation_url(&source, "gemini-fixture", operation)
+                .expect("typed Gemini URL");
+            assert_eq!(url.as_str(), expected);
+        }
+
+        let invalid = gemini_source(
+            "https://api.example/v1beta/models?key=sentinel-secret",
+            UpstreamProfileType::Gemini,
+        );
+        let error = build_gemini_operation_url(
+            &invalid,
+            "models/sentinel-model",
+            GeminiModelOperation::GenerateContent,
+        )
+        .expect_err("unsafe Gemini URL");
+        assert!(!error.operator_message().contains("sentinel"));
+        assert!(!error.operator_message().contains("https://"));
+    }
 }
 
 pub(in crate::proxy) async fn materialize_utility_request(
@@ -635,7 +706,6 @@ pub(in crate::proxy) async fn materialize_utility_request(
     operation: &UtilityOperation,
     data: Value,
     original_headers: &HeaderMap,
-    query_params: &HashMap<String, String>,
     operation_url: Option<&str>,
 ) -> Result<MaterializedRequest, ProxyError> {
     match operation.upstream_operation() {
@@ -646,6 +716,9 @@ pub(in crate::proxy) async fn materialize_utility_request(
             validate_rerank_request(&data, target.upstream_source.profile_type)?;
         }
         Some(crate::service::upstream_profile::UpstreamOperation::ChatCompletions) | None => {}
+    }
+    if operation.protocol == UtilityProtocol::GeminiCompatible {
+        validate_gemini_count_tokens_request(&data)?;
     }
     let (final_url, mut final_headers, final_body_value) = match operation.protocol {
         UtilityProtocol::OpenaiCompatible => {
@@ -671,8 +744,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
                 data,
                 original_headers,
                 &[],
-                &operation.downstream_path,
-                query_params,
+                GeminiModelOperation::CountTokens,
             )
             .await?
         }
@@ -695,7 +767,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
         response_mode: ProxyResponseMode::Utility {
             downstream_protocol: operation.downstream_protocol,
             upstream_protocol: target.upstream_protocol,
-            operation: operation.upstream_operation(),
+            kind: operation.response_kind(),
         },
     })
 }

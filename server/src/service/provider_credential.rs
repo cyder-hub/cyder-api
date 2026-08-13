@@ -235,6 +235,13 @@ pub fn apply_provider_request_auth_header(
     headers.remove("x-api-key");
     headers.remove("x-goog-api-key");
     headers.insert(header_name, header_value);
+    let auth_header_count = [AUTHORIZATION.as_str(), "x-api-key", "x-goog-api-key"]
+        .into_iter()
+        .map(|name| headers.get_all(name).iter().count())
+        .sum::<usize>();
+    if auth_header_count != 1 {
+        return Err(ProviderCredentialError::InvalidAuthHeader);
+    }
     Ok(())
 }
 
@@ -354,7 +361,7 @@ mod tests {
                 "provider-secret",
             ),
         ] {
-            let provider = provider(profile_type);
+            let provider = provider(profile_type.clone());
             let mut headers = HeaderMap::new();
             apply_provider_request_auth_header(
                 &mut headers,
@@ -364,6 +371,14 @@ mod tests {
             )
             .expect("supported auth should apply");
             assert_eq!(headers.get(name).unwrap(), expected);
+            assert_eq!(
+                [AUTHORIZATION.as_str(), "x-api-key", "x-goog-api-key"]
+                    .into_iter()
+                    .map(|name| headers.get_all(name).iter().count())
+                    .sum::<usize>(),
+                1,
+                "profile={profile_type:?}"
+            );
         }
     }
 

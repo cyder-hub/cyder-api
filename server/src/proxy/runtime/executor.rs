@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{body::Body, http::HeaderMap, response::Response};
 use serde_json::Value;
@@ -26,7 +26,7 @@ use crate::{
             transport::send_materialized_request,
         },
         util::get_cost_catalog_version,
-        utility::{UtilityOperation, validate_utility_target},
+        utility::{UtilityOperation, UtilityResponseKind, validate_utility_target},
     },
     schema::enum_def::{DownstreamProtocol, ModelKind, UpstreamProtocol},
     service::{
@@ -64,7 +64,6 @@ pub(in crate::proxy) struct RequestExecutionInput {
     pub cancellation: ProxyCancellationContext,
     pub api_key: Arc<CacheApiKey>,
     pub execution_plan: ExecutionPlan,
-    pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
     pub request_context: Arc<ProxyRequestContext>,
@@ -167,7 +166,6 @@ pub(in crate::proxy) async fn execute_request(
         cancellation,
         api_key,
         execution_plan,
-        query_params,
         original_headers,
         client_ip_addr,
         request_context,
@@ -216,6 +214,9 @@ pub(in crate::proxy) async fn execute_request(
     }
 
     if let RequestExecutionKind::Utility { operation, .. } = &kind {
+        if operation.response_kind() == UtilityResponseKind::GeminiCountTokens {
+            log_context.cost_catalog_id = None;
+        }
         if execution_plan.resolved_patch_suffix.is_some() {
             let message = format!(
                 "Patch suffixes are only supported for generation requests; '{}' is a utility operation.",
@@ -234,7 +235,11 @@ pub(in crate::proxy) async fn execute_request(
             )
             .await;
         }
-        if let Err(error) = validate_utility_target(operation, target.upstream_protocol) {
+        if let Err(error) = validate_utility_target(
+            operation,
+            target.upstream_protocol,
+            target.upstream_source.profile_type,
+        ) {
             return fail_before_send(&app_state, log_context, error).await;
         }
     }
@@ -363,6 +368,11 @@ pub(in crate::proxy) async fn execute_request(
         Vec::new()
     };
 
+    let skip_cost_catalog = matches!(
+        &kind,
+        RequestExecutionKind::Utility { operation, .. }
+            if operation.response_kind() == UtilityResponseKind::GeminiCountTokens
+    );
     let mut materialized = match kind {
         RequestExecutionKind::Generation {
             is_stream, data, ..
@@ -372,7 +382,6 @@ pub(in crate::proxy) async fn execute_request(
             target.downstream_protocol,
             is_stream,
             &original_headers,
-            &query_params,
             &request_patches,
             operation_url.as_deref(),
         )
@@ -386,7 +395,6 @@ pub(in crate::proxy) async fn execute_request(
             &operation,
             data,
             &original_headers,
-            &query_params,
             operation_url.as_deref(),
         )
         .await
@@ -415,7 +423,11 @@ pub(in crate::proxy) async fn execute_request(
         .await;
     }
 
-    let cost_catalog_version = get_cost_catalog_version(&target.model, &app_state).await;
+    let cost_catalog_version = if skip_cost_catalog {
+        None
+    } else {
+        get_cost_catalog_version(&target.model, &app_state).await
+    };
     let request_lease = match admit_api_key_request(&app_state, &api_key).await {
         Ok(lease) => lease,
         Err(error) => return fail_before_send(&app_state, log_context, error).await,

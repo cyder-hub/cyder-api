@@ -490,6 +490,40 @@ pub(in crate::proxy) fn log_upstream_usage_missing(
     );
 }
 
+pub(in crate::proxy) fn log_usage_normalization_warnings(
+    context: &RequestLogContext,
+    model: &str,
+    status_code: StatusCode,
+) {
+    let Some(normalization) = context
+        .usage_normalization
+        .as_ref()
+        .filter(|normalization| !normalization.warnings.is_empty())
+    else {
+        return;
+    };
+    crate::warn_event!(
+        "proxy.usage_normalization_warning",
+        request_id = &context.request_id,
+        log_id = context.id,
+        source_id = context.source_id,
+        source_profile_type = upstream_profile_type_name(context.source_profile_type),
+        model_kind = model_kind_name(context.model_kind),
+        upstream_protocol = upstream_protocol_name(context.upstream_protocol),
+        model = model,
+        status_code = status_code.as_u16(),
+        warning_count = normalization.warnings.len(),
+        reported_total_mismatch = normalization
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("reported total_tokens ")),
+        component_total_conflict = normalization
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("subcomponents exceeded total tokens")),
+    );
+}
+
 fn safe_source_base_url_snapshot(base_url: &str) -> Option<String> {
     normalize_provider_base_url(base_url).ok()
 }

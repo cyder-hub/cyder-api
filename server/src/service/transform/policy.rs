@@ -113,6 +113,11 @@ impl PolicyEngine {
                     TransformReasonCode::UnsupportedToolRoleMessage,
                 ))
             }
+            TransformValueKind::ReasoningHistory if !capabilities.request.reasoning_history => {
+                Some(PolicyDecision::major_reject(
+                    TransformReasonCode::UnsupportedReasoning,
+                ))
+            }
             TransformValueKind::ToolCallDelta if !capabilities.stream.tool_call_deltas => Some(
                 PolicyDecision::major_reject(TransformReasonCode::UnsupportedToolCallDelta),
             ),
@@ -146,15 +151,6 @@ impl PolicyEngine {
         target: TransformProtocol,
         kind: TransformValueKind,
     ) -> PolicyDecision {
-        if matches!(
-            target,
-            TransformProtocol::Downstream(DownstreamProtocol::Openai)
-        ) && matches!(
-            kind,
-            TransformValueKind::ReasoningContent | TransformValueKind::ReasoningDelta
-        ) {
-            return PolicyDecision::minor_drop(TransformReasonCode::UnsupportedReasoning);
-        }
         if let Some(decision) = Self::evaluate_capability_matrix(target, kind) {
             return decision;
         }
@@ -164,7 +160,7 @@ impl PolicyEngine {
                 PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
             (_, target, TransformValueKind::ImageUrl) if target.is_gemini() => {
-                PolicyDecision::deterministic_text_downgrade()
+                PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
             (_, target, TransformValueKind::FileUrl | TransformValueKind::ExecutableCode)
                 if target.is_responses() =>
@@ -241,6 +237,7 @@ mod tests {
         for kind in [
             TransformValueKind::ToolDefinitions,
             TransformValueKind::ToolRoleMessage,
+            TransformValueKind::ReasoningHistory,
             TransformValueKind::ReasoningContent,
             TransformValueKind::BlobDelta,
         ] {

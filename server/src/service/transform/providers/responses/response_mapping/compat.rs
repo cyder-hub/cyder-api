@@ -206,16 +206,12 @@ pub(in crate::service::transform::providers::responses) fn parse_responses_input
     file_data: &str,
     filename: Option<String>,
 ) -> UnifiedContentPart {
-    if let Some(rest) = file_data.strip_prefix("data:") {
-        let mut split = rest.splitn(2, ';');
-        let mime_type = split.next().unwrap_or("application/octet-stream");
-        if let Some(payload) = split.next().and_then(|value| value.strip_prefix("base64,")) {
-            return UnifiedContentPart::FileData {
-                data: payload.to_string(),
-                mime_type: mime_type.to_string(),
-                filename,
-            };
-        }
+    if let Some(data_url) = crate::service::transform::media::parse_base64_data_url(file_data) {
+        return UnifiedContentPart::FileData {
+            data: data_url.data.to_string(),
+            mime_type: data_url.mime_type.to_string(),
+            filename,
+        };
     }
 
     let mime_type = filename

@@ -258,6 +258,9 @@ pub(super) fn semantic_snapshot_from_unified_chunks(
                     UnifiedContentPartDelta::TextDelta { text, .. } => {
                         snapshot.text.push_str(&text);
                     }
+                    UnifiedContentPartDelta::ReasoningDelta { text, .. } => {
+                        snapshot.reasoning.push_str(&text);
+                    }
                     UnifiedContentPartDelta::ToolCallDelta(tool_call) => {
                         let entry = tool_calls.entry(tool_call.index).or_default();
                         if entry.name.is_none() {
@@ -379,16 +382,28 @@ pub(super) fn replay_fixture_through_transformer(
     fixture: &[SseEvent],
 ) -> Vec<SseEvent> {
     let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
-    fixture
-        .iter()
-        .flat_map(|event| {
+    let mut transformed = Vec::new();
+    for event in fixture {
+        transformed.extend(
             transformer
                 .transform_event(event.clone())
                 .expect("quality replay transform must succeed")
                 .value
-                .events
-        })
-        .collect()
+                .events,
+        );
+    }
+    if upstream_protocol == UpstreamProtocol::Gemini {
+        transformer
+            .validate_source_termination()
+            .expect("Gemini quality replay source stream must terminate formally");
+        transformed.extend(
+            transformer
+                .finalize_source_eof_events()
+                .expect("Gemini quality replay EOF target terminal must encode")
+                .value,
+        );
+    }
+    transformed
 }
 
 pub(super) fn validate_provider_native_schema(

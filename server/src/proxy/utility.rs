@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{body::Body, http::HeaderMap, response::Response};
 use serde_json::Value;
@@ -24,6 +24,14 @@ use crate::{
 pub(crate) enum UtilityProtocol {
     OpenaiCompatible,
     GeminiCompatible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::proxy) enum UtilityResponseKind {
+    Embeddings,
+    Rerank,
+    GeminiCountTokens,
+    Passthrough,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +61,17 @@ impl UtilityOperation {
             _ => None,
         }
     }
+
+    pub(in crate::proxy) fn response_kind(&self) -> UtilityResponseKind {
+        match (self.protocol, self.downstream_path.as_str()) {
+            (UtilityProtocol::OpenaiCompatible, "embeddings") => UtilityResponseKind::Embeddings,
+            (UtilityProtocol::OpenaiCompatible, "rerank") => UtilityResponseKind::Rerank,
+            (UtilityProtocol::GeminiCompatible, "countTokens") => {
+                UtilityResponseKind::GeminiCountTokens
+            }
+            _ => UtilityResponseKind::Passthrough,
+        }
+    }
 }
 
 pub(super) struct UtilityExecutionInput {
@@ -60,7 +79,6 @@ pub(super) struct UtilityExecutionInput {
     pub api_key: Arc<CacheApiKey>,
     pub operation: UtilityOperation,
     pub execution_plan: ExecutionPlan,
-    pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
     pub request_context: Arc<ProxyRequestContext>,
@@ -70,11 +88,16 @@ pub(super) struct UtilityExecutionInput {
 pub(super) fn validate_utility_target(
     operation: &UtilityOperation,
     upstream_protocol: UpstreamProtocol,
+    profile_type: UpstreamProfileType,
 ) -> Result<(), ProxyError> {
-    match (operation.protocol, upstream_protocol) {
-        (UtilityProtocol::OpenaiCompatible, UpstreamProtocol::Openai) => Ok(()),
-        (UtilityProtocol::GeminiCompatible, UpstreamProtocol::Gemini) => Ok(()),
-        (UtilityProtocol::OpenaiCompatible, _) => {
+    match (operation.protocol, upstream_protocol, profile_type) {
+        (UtilityProtocol::OpenaiCompatible, UpstreamProtocol::Openai, _) => Ok(()),
+        (
+            UtilityProtocol::GeminiCompatible,
+            UpstreamProtocol::Gemini,
+            UpstreamProfileType::Gemini | UpstreamProfileType::Vertex,
+        ) => Ok(()),
+        (UtilityProtocol::OpenaiCompatible, _, _) => {
             let message = format!(
                 "'{}' is only supported for OpenAI-compatible providers.",
                 operation.name
@@ -87,7 +110,7 @@ pub(super) fn validate_utility_target(
                 message,
             ))
         }
-        (UtilityProtocol::GeminiCompatible, _) => {
+        (UtilityProtocol::GeminiCompatible, _, _) => {
             let message = format!(
                 "Action '{}' is only supported for Gemini-compatible providers.",
                 operation.name
@@ -101,6 +124,230 @@ pub(super) fn validate_utility_target(
             ))
         }
     }
+}
+
+const MAX_COUNT_TOKENS_MODALITY_DETAILS: usize = 32;
+
+fn invalid_count_tokens_request(path: &'static str, reason: &'static str) -> ProxyError {
+    let message = format!("Invalid countTokens request at {path}: {reason}.");
+    ProxyError::gateway(
+        ProxyErrorCode::InvalidRequestError,
+        ExecutionStage::Parse,
+        ResponseVisibility::NotVisible,
+        Some(message.clone()),
+        message,
+    )
+}
+
+fn validate_gemini_contents(value: &Value, path: &'static str) -> Result<(), ProxyError> {
+    let contents = value
+        .as_array()
+        .ok_or_else(|| invalid_count_tokens_request(path, "contents must be a non-empty array"))?;
+    if contents.is_empty() {
+        return Err(invalid_count_tokens_request(
+            path,
+            "contents must be a non-empty array",
+        ));
+    }
+    for content in contents {
+        let parts = content
+            .as_object()
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| {
+                invalid_count_tokens_request("/contents/*/parts", "parts must be a non-empty array")
+            })?;
+        if parts
+            .iter()
+            .any(|part| !part.as_object().is_some_and(|part| !part.is_empty()))
+        {
+            return Err(invalid_count_tokens_request(
+                "/contents/*/parts/*",
+                "each part must be a non-empty object",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_gemini_count_tokens_request(data: &Value) -> Result<(), ProxyError> {
+    let object = data.as_object().ok_or_else(|| {
+        invalid_count_tokens_request("/", "the request body must be a JSON object")
+    })?;
+    if object.contains_key("model") {
+        return Err(invalid_count_tokens_request(
+            "/model",
+            "the model is owned by the request path",
+        ));
+    }
+    match (object.get("contents"), object.get("generateContentRequest")) {
+        (Some(contents), None) => validate_gemini_contents(contents, "/contents"),
+        (None, Some(request)) => {
+            let request = request
+                .as_object()
+                .filter(|request| !request.is_empty())
+                .ok_or_else(|| {
+                    invalid_count_tokens_request(
+                        "/generateContentRequest",
+                        "generateContentRequest must be a non-empty object",
+                    )
+                })?;
+            if request.contains_key("model") {
+                return Err(invalid_count_tokens_request(
+                    "/generateContentRequest/model",
+                    "the model is owned by the request path",
+                ));
+            }
+            let contents = request.get("contents").ok_or_else(|| {
+                invalid_count_tokens_request(
+                    "/generateContentRequest/contents",
+                    "contents is required",
+                )
+            })?;
+            validate_gemini_contents(contents, "/generateContentRequest/contents")
+        }
+        (Some(_), Some(_)) => Err(invalid_count_tokens_request(
+            "/",
+            "provide exactly one of contents or generateContentRequest",
+        )),
+        (None, None) => Err(invalid_count_tokens_request(
+            "/",
+            "provide exactly one of contents or generateContentRequest",
+        )),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::proxy) enum GeminiTokenModality {
+    Unspecified,
+    Text,
+    Image,
+    Video,
+    Audio,
+    Document,
+    Unknown,
+}
+
+impl GeminiTokenModality {
+    pub(in crate::proxy) const fn as_key(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Document => "document",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::proxy) struct GeminiModalityTokenObservation {
+    pub modality: GeminiTokenModality,
+    pub token_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::proxy) struct GeminiCountTokensObservation {
+    pub total_tokens: u64,
+    pub cached_content_token_count: Option<u64>,
+    pub prompt_token_details: Vec<GeminiModalityTokenObservation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::proxy) enum GeminiCountTokensObservationError {
+    InvalidEnvelope,
+    InvalidTotalTokens,
+    InvalidCachedContentTokenCount,
+    InvalidPromptTokenDetails,
+    TooManyPromptTokenDetails,
+    InvalidPromptTokenDetail,
+}
+
+impl GeminiCountTokensObservationError {
+    pub(in crate::proxy) const fn as_key(self) -> &'static str {
+        match self {
+            Self::InvalidEnvelope => "invalid_envelope",
+            Self::InvalidTotalTokens => "invalid_total_tokens",
+            Self::InvalidCachedContentTokenCount => "invalid_cached_content_token_count",
+            Self::InvalidPromptTokenDetails => "invalid_prompt_token_details",
+            Self::TooManyPromptTokenDetails => "too_many_prompt_token_details",
+            Self::InvalidPromptTokenDetail => "invalid_prompt_token_detail",
+        }
+    }
+}
+
+fn observe_gemini_modality(value: &str) -> GeminiTokenModality {
+    match value {
+        "MODALITY_UNSPECIFIED" => GeminiTokenModality::Unspecified,
+        "TEXT" => GeminiTokenModality::Text,
+        "IMAGE" => GeminiTokenModality::Image,
+        "VIDEO" => GeminiTokenModality::Video,
+        "AUDIO" => GeminiTokenModality::Audio,
+        "DOCUMENT" => GeminiTokenModality::Document,
+        _ => GeminiTokenModality::Unknown,
+    }
+}
+
+pub(in crate::proxy) fn observe_gemini_count_tokens_response(
+    data: &Value,
+) -> Result<GeminiCountTokensObservation, GeminiCountTokensObservationError> {
+    let object = data
+        .as_object()
+        .ok_or(GeminiCountTokensObservationError::InvalidEnvelope)?;
+    let total_tokens = object
+        .get("totalTokens")
+        .and_then(Value::as_u64)
+        .ok_or(GeminiCountTokensObservationError::InvalidTotalTokens)?;
+    let cached_content_token_count = object
+        .get("cachedContentTokenCount")
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or(GeminiCountTokensObservationError::InvalidCachedContentTokenCount)
+        })
+        .transpose()?;
+    let prompt_token_details = object
+        .get("promptTokensDetails")
+        .map(|value| {
+            let details = value
+                .as_array()
+                .ok_or(GeminiCountTokensObservationError::InvalidPromptTokenDetails)?;
+            if details.len() > MAX_COUNT_TOKENS_MODALITY_DETAILS {
+                return Err(GeminiCountTokensObservationError::TooManyPromptTokenDetails);
+            }
+            details
+                .iter()
+                .map(|detail| {
+                    let detail = detail
+                        .as_object()
+                        .ok_or(GeminiCountTokensObservationError::InvalidPromptTokenDetail)?;
+                    let modality = detail
+                        .get("modality")
+                        .and_then(Value::as_str)
+                        .filter(|modality| !modality.is_empty())
+                        .ok_or(GeminiCountTokensObservationError::InvalidPromptTokenDetail)?;
+                    let token_count = detail
+                        .get("tokenCount")
+                        .and_then(Value::as_u64)
+                        .ok_or(GeminiCountTokensObservationError::InvalidPromptTokenDetail)?;
+                    Ok(GeminiModalityTokenObservation {
+                        modality: observe_gemini_modality(modality),
+                        token_count,
+                    })
+                })
+                .collect()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(GeminiCountTokensObservation {
+        total_tokens,
+        cached_content_token_count,
+        prompt_token_details,
+    })
 }
 
 const MAX_EMBEDDING_INPUT_ARRAY_LENGTH: usize = 2_048;
@@ -302,7 +549,6 @@ pub(super) async fn execute_utility_proxy(
         api_key,
         operation,
         execution_plan,
-        query_params,
         original_headers,
         client_ip_addr,
         request_context,
@@ -317,7 +563,6 @@ pub(super) async fn execute_utility_proxy(
             api_key,
             operation,
             execution_plan,
-            query_params,
             original_headers,
             client_ip_addr,
             request_context,
@@ -332,8 +577,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MAX_EMBEDDING_INPUT_ARRAY_LENGTH, UtilityOperation, UtilityProtocol,
-        validate_embeddings_request, validate_rerank_request, validate_utility_target,
+        GeminiCountTokensObservationError, GeminiTokenModality, MAX_EMBEDDING_INPUT_ARRAY_LENGTH,
+        UtilityOperation, UtilityProtocol, observe_gemini_count_tokens_response,
+        validate_embeddings_request, validate_gemini_count_tokens_request, validate_rerank_request,
+        validate_utility_target,
     };
     use crate::{
         proxy::ProxyErrorCode,
@@ -349,8 +596,20 @@ mod tests {
             downstream_path: "embeddings".to_string(),
         };
 
-        assert!(validate_utility_target(&operation, UpstreamProtocol::Openai).is_ok());
-        let error = validate_utility_target(&operation, UpstreamProtocol::Gemini).unwrap_err();
+        assert!(
+            validate_utility_target(
+                &operation,
+                UpstreamProtocol::Openai,
+                UpstreamProfileType::Openai,
+            )
+            .is_ok()
+        );
+        let error = validate_utility_target(
+            &operation,
+            UpstreamProtocol::Gemini,
+            UpstreamProfileType::Gemini,
+        )
+        .unwrap_err();
         assert_eq!(error.code(), ProxyErrorCode::UnsupportedCapabilityError);
     }
 
@@ -363,9 +622,128 @@ mod tests {
             downstream_path: "countTokens".to_string(),
         };
 
-        assert!(validate_utility_target(&operation, UpstreamProtocol::Gemini).is_ok());
-        let error = validate_utility_target(&operation, UpstreamProtocol::Openai).unwrap_err();
+        for profile_type in [UpstreamProfileType::Gemini, UpstreamProfileType::Vertex] {
+            assert!(
+                validate_utility_target(&operation, UpstreamProtocol::Gemini, profile_type,)
+                    .is_ok()
+            );
+        }
+        let error = validate_utility_target(
+            &operation,
+            UpstreamProtocol::Openai,
+            UpstreamProfileType::Openai,
+        )
+        .unwrap_err();
         assert_eq!(error.code(), ProxyErrorCode::UnsupportedCapabilityError);
+    }
+
+    #[test]
+    fn gemini_count_tokens_request_requires_one_path_owned_shape() {
+        for valid in [
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "count me"}]}],
+                "futureRootField": true
+            }),
+            json!({
+                "generateContentRequest": {
+                    "contents": [{"parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]}],
+                    "generationConfig": {"temperature": 0.2}
+                }
+            }),
+        ] {
+            validate_gemini_count_tokens_request(&valid).expect("valid CountTokens request");
+        }
+
+        for invalid in [
+            json!(null),
+            json!({}),
+            json!({"contents": []}),
+            json!({"contents": "secret"}),
+            json!({"contents": [{"parts": []}]}),
+            json!({"contents": [{"parts": [{}]}]}),
+            json!({
+                "contents": [{"parts": [{"text": "a"}]}],
+                "generateContentRequest": {"contents": [{"parts": [{"text": "b"}]}]}
+            }),
+            json!({"model": "models/path-conflict", "contents": [{"parts": [{"text": "a"}]}]}),
+            json!({"generateContentRequest": {}}),
+            json!({"generateContentRequest": {"generationConfig": {"temperature": 0.2}}}),
+            json!({
+                "generateContentRequest": {
+                    "model": "models/path-conflict",
+                    "contents": [{"parts": [{"text": "a"}]}]
+                }
+            }),
+        ] {
+            let error = validate_gemini_count_tokens_request(&invalid)
+                .expect_err("invalid CountTokens request");
+            assert_eq!(error.code(), ProxyErrorCode::InvalidRequestError);
+            assert!(!error.operator_message().contains("secret"));
+            assert!(!error.operator_message().contains("path-conflict"));
+        }
+    }
+
+    #[test]
+    fn gemini_count_tokens_observer_is_typed_bounded_and_future_safe() {
+        let observed = observe_gemini_count_tokens_response(&json!({
+            "totalTokens": 23,
+            "cachedContentTokenCount": 3,
+            "promptTokensDetails": [
+                {"modality": "TEXT", "tokenCount": 20},
+                {"modality": "FUTURE_MODALITY", "tokenCount": 3}
+            ],
+            "futureCountField": {"private": "ignored"}
+        }))
+        .expect("valid CountTokens response observation");
+
+        assert_eq!(observed.total_tokens, 23);
+        assert_eq!(observed.cached_content_token_count, Some(3));
+        assert_eq!(observed.prompt_token_details.len(), 2);
+        assert_eq!(
+            observed.prompt_token_details[0].modality,
+            GeminiTokenModality::Text
+        );
+        assert_eq!(
+            observed.prompt_token_details[1].modality,
+            GeminiTokenModality::Unknown
+        );
+
+        for (invalid, expected) in [
+            (
+                json!([]),
+                GeminiCountTokensObservationError::InvalidEnvelope,
+            ),
+            (
+                json!({"totalTokens": -1}),
+                GeminiCountTokensObservationError::InvalidTotalTokens,
+            ),
+            (
+                json!({"totalTokens": 1, "cachedContentTokenCount": "private"}),
+                GeminiCountTokensObservationError::InvalidCachedContentTokenCount,
+            ),
+            (
+                json!({"totalTokens": 1, "promptTokensDetails": {}}),
+                GeminiCountTokensObservationError::InvalidPromptTokenDetails,
+            ),
+            (
+                json!({"totalTokens": 1, "promptTokensDetails": [{"modality": "TEXT"}]}),
+                GeminiCountTokensObservationError::InvalidPromptTokenDetail,
+            ),
+        ] {
+            assert_eq!(
+                observe_gemini_count_tokens_response(&invalid),
+                Err(expected)
+            );
+        }
+
+        let too_many = vec![json!({"modality": "TEXT", "tokenCount": 1}); 33];
+        assert_eq!(
+            observe_gemini_count_tokens_response(&json!({
+                "totalTokens": 33,
+                "promptTokensDetails": too_many
+            })),
+            Err(GeminiCountTokensObservationError::TooManyPromptTokenDetails)
+        );
     }
 
     #[test]

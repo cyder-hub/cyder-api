@@ -20,6 +20,8 @@ pub(crate) struct OpenAiRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stop: Option<OpenAiStop>,
@@ -75,6 +77,8 @@ pub(crate) enum OpenAiStop {
 pub(crate) struct OpenAiMessage {
     pub(crate) role: String,
     pub(crate) content: Option<OpenAiContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]

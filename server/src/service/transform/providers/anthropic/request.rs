@@ -191,6 +191,11 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                         }
                     })
             });
+        let reasoning_budget_tokens = anthropic_req
+            .thinking
+            .as_ref()
+            .filter(|thinking| matches!(thinking.type_, AnthropicThinkingType::Enabled))
+            .and_then(|thinking| thinking.budget_tokens);
         let mut messages = Vec::new();
         // Track tool call ID to name mapping for tool results
         let mut tool_id_to_name: std::collections::HashMap<String, String> =
@@ -399,6 +404,7 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
         let anthropic_extension = UnifiedAnthropicRequestExtension {
             metadata: anthropic_req.metadata,
             top_k: anthropic_req.top_k,
+            structured_output_envelope_present: structured_output.is_some(),
         };
 
         UnifiedRequest {
@@ -417,6 +423,7 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
             presence_penalty: None,
             frequency_penalty: None,
             reasoning_effort,
+            reasoning_budget_tokens,
             structured_output,
             extensions: (!anthropic_extension.is_empty()).then_some(UnifiedRequestExtensions {
                 anthropic: Some(anthropic_extension),

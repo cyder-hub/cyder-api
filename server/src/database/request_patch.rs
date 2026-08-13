@@ -35,8 +35,9 @@ const HARD_FORBIDDEN_BODY_TARGETS: &[&str] = &[
     "/previous_response_id",
     "/conversation",
     "/background",
+    "/generationConfig/candidateCount",
 ];
-const HARD_FORBIDDEN_QUERY_TARGETS: &[&str] = &["key"];
+const HARD_FORBIDDEN_QUERY_TARGETS: &[&str] = &["key", "alt"];
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug, Clone, Serialize)]
@@ -362,7 +363,10 @@ pub fn validate_reserved_target(placement: RequestPatchPlacement, target: &str) 
             }
         }
         RequestPatchPlacement::Query => {
-            if HARD_FORBIDDEN_QUERY_TARGETS.contains(&target) {
+            if HARD_FORBIDDEN_QUERY_TARGETS
+                .iter()
+                .any(|reserved| target.eq_ignore_ascii_case(reserved))
+            {
                 return Err(BaseError::ParamInvalid(Some(format!(
                     "QUERY target '{target}' is reserved and cannot be modified"
                 ))));
@@ -1615,10 +1619,18 @@ mod tests {
             (RequestPatchPlacement::Header, "cookie"),
             (RequestPatchPlacement::Header, "openai-request-id"),
             (RequestPatchPlacement::Query, "key"),
+            (RequestPatchPlacement::Query, "Key"),
+            (RequestPatchPlacement::Query, "alt"),
+            (RequestPatchPlacement::Query, "ALT"),
             (RequestPatchPlacement::Body, "/model"),
             (RequestPatchPlacement::Body, "/stream"),
             (RequestPatchPlacement::Body, "/stream_options"),
             (RequestPatchPlacement::Body, "/stream_options/include_usage"),
+            (
+                RequestPatchPlacement::Body,
+                "/generationConfig/candidateCount",
+            ),
+            (RequestPatchPlacement::Body, "/generationConfig"),
         ] {
             let rules = vec![rule(
                 placement,

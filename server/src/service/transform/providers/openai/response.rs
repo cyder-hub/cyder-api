@@ -2,9 +2,7 @@ use serde_json::{Value, json};
 
 use super::payload::*;
 
-use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::unified::*;
-use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 
 impl From<OpenAiUsage> for UnifiedUsage {
     fn from(openai_usage: OpenAiUsage) -> Self {
@@ -80,6 +78,10 @@ impl From<OpenAiResponse> for UnifiedResponse {
                 };
 
                 let mut content = Vec::new();
+
+                if let Some(reasoning) = choice.message.reasoning_content {
+                    content.push(UnifiedContentPart::Reasoning { text: reasoning });
+                }
 
                 if let Some(c) = choice.message.content {
                     match c {
@@ -219,6 +221,7 @@ impl From<UnifiedResponse> for OpenAiResponse {
                 let mut tool_call_id = None;
                 let mut name = None;
                 let mut refusal = None;
+                let mut reasoning_content = String::new();
                 let mut has_multimodal = false;
 
                 for part in choice.message.content {
@@ -235,13 +238,8 @@ impl From<UnifiedResponse> for OpenAiResponse {
                                 image_url: OpenAiImageUrl { url, detail },
                             });
                         }
-                        UnifiedContentPart::Reasoning { .. } => {
-                            apply_transform_policy(
-                                TransformProtocol::Unified,
-                                TransformProtocol::Downstream(DownstreamProtocol::Openai),
-                                TransformValueKind::ReasoningContent,
-                                "Dropping reasoning content that Chat Completions cannot preserve without presenting it as ordinary answer text.",
-                            );
+                        UnifiedContentPart::Reasoning { text } => {
+                            reasoning_content.push_str(&text);
                         }
                         UnifiedContentPart::ImageData { mime_type, data } => {
                             has_multimodal = true;
@@ -322,6 +320,7 @@ impl From<UnifiedResponse> for OpenAiResponse {
                 let message = OpenAiMessage {
                     role,
                     content,
+                    reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                     tool_calls: if tool_calls.is_empty() {
                         None
                     } else {

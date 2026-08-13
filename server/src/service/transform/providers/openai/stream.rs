@@ -39,11 +39,15 @@ impl From<UnifiedChunkResponse> for OpenAiChunkResponse {
                 });
 
                 let mut content = String::new();
+                let mut reasoning_content = String::new();
                 let mut tool_calls = Vec::new();
 
                 for part in choice.delta.content {
                     match part {
                         UnifiedContentPartDelta::TextDelta { text, .. } => content.push_str(&text),
+                        UnifiedContentPartDelta::ReasoningDelta { text, .. } => {
+                            reasoning_content.push_str(&text);
+                        }
                         UnifiedContentPartDelta::ImageDelta { .. } => {
                             apply_transform_policy(
                                 TransformProtocol::Unified,
@@ -73,7 +77,7 @@ impl From<UnifiedChunkResponse> for OpenAiChunkResponse {
                     } else {
                         Some(content)
                     },
-                    reasoning_content: None,
+                    reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                     tool_calls: if tool_calls.is_empty() {
                         None
                     } else {
@@ -135,7 +139,7 @@ impl From<OpenAiChunkResponse> for UnifiedChunkResponse {
 
                 if let Some(text) = choice.delta.reasoning_content {
                     if !text.is_empty() {
-                        content.push(UnifiedContentPartDelta::TextDelta { index: 0, text });
+                        content.push(UnifiedContentPartDelta::ReasoningDelta { index: 0, text });
                     }
                 }
 
@@ -585,10 +589,36 @@ pub(crate) fn transform_unified_stream_event_to_openai_event(
                 ..Default::default()
             })
         }),
-        UnifiedStreamEvent::ReasoningStart { .. }
-        | UnifiedStreamEvent::ReasoningDelta { .. }
-        | UnifiedStreamEvent::ReasoningStop { .. } => {
-            build_openai_stream_diagnostic(context, TransformValueKind::ReasoningDelta);
+        UnifiedStreamEvent::ReasoningDelta { text, .. } => {
+            serde_json::to_string(&OpenAiChunkResponse {
+                id,
+                object: "chat.completion.chunk".to_string(),
+                created,
+                model,
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: None,
+                        content: None,
+                        reasoning_content: Some(text),
+                        tool_calls: None,
+                        refusal: None,
+                        name: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+            })
+            .map(|data| {
+                Some(SseEvent {
+                    data,
+                    ..Default::default()
+                })
+            })
+        }
+        UnifiedStreamEvent::ReasoningStart { .. } | UnifiedStreamEvent::ReasoningStop { .. } => {
             Ok(None)
         }
         UnifiedStreamEvent::BlobDelta { .. } => {

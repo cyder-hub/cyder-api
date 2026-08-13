@@ -29,6 +29,7 @@ struct CompatibilityMatrix {
     upstream_source_contract: UpstreamSourceContract,
     upstream_source_profiles: Vec<UpstreamSourceProfileContract>,
     openai_wire_profiles: Vec<OpenAiWireProfileContract>,
+    gemini_wire_contract: GeminiWireContract,
     routes: Vec<RouteContract>,
     generation_cells: Vec<GenerationCell>,
     utilities: Vec<UtilityContract>,
@@ -246,6 +247,40 @@ struct OpenAiWireOperationContract {
     availability: OperationAvailability,
     default_enabled: bool,
     field_policy: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GeminiWireContract {
+    profiles: Vec<GeminiWireProfileContract>,
+    operations: Vec<GeminiWireOperationContract>,
+    downstream_surface: GeminiDownstreamSurfaceContract,
+    evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GeminiWireProfileContract {
+    profile_type: UpstreamProfileType,
+    auth: String,
+    endpoint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GeminiWireOperationContract {
+    action: String,
+    suffix: String,
+    query: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct GeminiDownstreamSurfaceContract {
+    exposed: Vec<String>,
+    prohibited: Vec<String>,
+    models_execution: String,
+    count_tokens_allowed_upstreams: Vec<UpstreamProtocol>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -546,11 +581,13 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
     validate_r316_executable_evidence(&evidence)?;
     validate_r317_executable_evidence(&evidence)?;
     validate_r318_executable_evidence(&evidence)?;
+    validate_r319_executable_evidence(&evidence)?;
     validate_downstream_error_contracts(&matrix.downstream_error_contracts, &evidence)?;
     validate_transform_runtime_contract(&matrix.transform_runtime_contract, &evidence)?;
     validate_upstream_source_contract(&matrix.upstream_source_contract, &evidence)?;
     validate_upstream_source_profiles(&matrix.upstream_source_profiles)?;
     validate_openai_wire_profiles(&matrix.openai_wire_profiles, &evidence)?;
+    validate_gemini_wire_contract(&matrix.gemini_wire_contract, &evidence)?;
     validate_routes(&matrix.routes)?;
     validate_generation_cells(&matrix.generation_cells, &evidence)?;
     validate_utilities(&matrix.utilities, &evidence)?;
@@ -1039,6 +1076,151 @@ fn validate_r318_executable_evidence(evidence: &HashMap<&str, &Evidence>) -> Res
     Ok(())
 }
 
+const REQUIRED_R319_EXECUTABLE_EVIDENCE: [(&str, &str); 32] = [
+    (
+        "r3-19-base-registry",
+        "proxy::direct_execution_regression::r3_19_gemini_target_evidence_registry_covers_exactly_24_base_dimensions",
+    ),
+    (
+        "r3-19-openai-base",
+        "proxy::direct_execution_regression::openai_to_gemini_base_cell_is_verified",
+    ),
+    (
+        "r3-19-responses-base",
+        "proxy::direct_execution_regression::responses_to_gemini_base_cell_is_verified",
+    ),
+    (
+        "r3-19-anthropic-base",
+        "proxy::direct_execution_regression::anthropic_to_gemini_base_cell_is_verified",
+    ),
+    (
+        "r3-19-gemini-base",
+        "proxy::direct_execution_regression::gemini_to_gemini_base_cell_is_verified",
+    ),
+    (
+        "r3-19-advanced-registry",
+        "proxy::direct_execution_regression::r3_19_gemini_advanced_evidence_registry_has_16_unique_cells_and_4_full_12_loss",
+    ),
+    (
+        "r3-19-openai-tools-cell",
+        "proxy::direct_execution_regression::openai_to_gemini_tools_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-responses-tools-cell",
+        "proxy::direct_execution_regression::responses_to_gemini_tools_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-anthropic-tools-cell",
+        "proxy::direct_execution_regression::anthropic_to_gemini_tools_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-gemini-tools-cell",
+        "proxy::direct_execution_regression::gemini_to_gemini_tools_cell_is_full",
+    ),
+    (
+        "r3-19-openai-reasoning-cell",
+        "proxy::direct_execution_regression::openai_to_gemini_reasoning_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-responses-reasoning-cell",
+        "proxy::direct_execution_regression::responses_to_gemini_reasoning_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-anthropic-reasoning-cell",
+        "proxy::direct_execution_regression::anthropic_to_gemini_reasoning_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-gemini-reasoning-cell",
+        "proxy::direct_execution_regression::gemini_to_gemini_reasoning_cell_is_full",
+    ),
+    (
+        "r3-19-openai-multimodal-cell",
+        "proxy::direct_execution_regression::openai_to_gemini_multimodal_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-responses-multimodal-cell",
+        "proxy::direct_execution_regression::responses_to_gemini_multimodal_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-anthropic-multimodal-cell",
+        "proxy::direct_execution_regression::anthropic_to_gemini_multimodal_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-gemini-multimodal-cell",
+        "proxy::direct_execution_regression::gemini_to_gemini_multimodal_cell_is_full",
+    ),
+    (
+        "r3-19-openai-structured-cell",
+        "proxy::direct_execution_regression::openai_to_gemini_structured_output_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-responses-structured-cell",
+        "proxy::direct_execution_regression::responses_to_gemini_structured_output_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-anthropic-structured-cell",
+        "proxy::direct_execution_regression::anthropic_to_gemini_structured_output_cell_has_typed_controlled_loss",
+    ),
+    (
+        "r3-19-gemini-structured-cell",
+        "proxy::direct_execution_regression::gemini_to_gemini_structured_output_cell_is_full",
+    ),
+    (
+        "r3-19-tools-reject",
+        "proxy::direct_execution_regression::r3_19_invalid_tools_and_unsigned_history_are_precredential_zero_call",
+    ),
+    (
+        "r3-19-reasoning-reject",
+        "proxy::direct_execution_regression::r3_19_invalid_reasoning_controls_are_precredential_zero_call",
+    ),
+    (
+        "r3-19-multimodal-reject",
+        "proxy::direct_execution_regression::r3_19_invalid_multimodal_inputs_are_precredential_zero_call",
+    ),
+    (
+        "r3-19-structured-reject",
+        "proxy::direct_execution_regression::r3_19_invalid_structured_outputs_are_precredential_zero_call",
+    ),
+    (
+        "r3-19-profile-equivalence",
+        "proxy::direct_execution_regression::r3_19_gemini_and_vertex_profiles_execute_equivalent_generate_and_stream_contracts",
+    ),
+    (
+        "r3-19-profile-registry",
+        "proxy::direct_execution_regression::r3_19_gemini_vertex_profile_evidence_registry_covers_all_four_operations",
+    ),
+    (
+        "r3-19-source-check",
+        "controller::provider::tests::gemini_and_vertex_source_check_send_shared_minimal_contract_once",
+    ),
+    (
+        "r3-19-route-boundary",
+        "proxy::router::tests::r3_19_gemini_public_surface_aliases_methods_and_prohibited_products_are_closed",
+    ),
+    (
+        "r3-19-count-tokens",
+        "proxy::direct_execution_regression::r3_19_count_tokens_two_legal_shapes_use_gemini_and_vertex_once_without_usage_or_cost",
+    ),
+    (
+        "r3-19-count-tokens-reject",
+        "proxy::direct_execution_regression::r3_19_count_tokens_invalid_shapes_and_incompatible_source_are_precredential_zero_call",
+    ),
+];
+
+fn validate_r319_executable_evidence(evidence: &HashMap<&str, &Evidence>) -> Result<(), String> {
+    for (id, reference) in REQUIRED_R319_EXECUTABLE_EVIDENCE {
+        let item = evidence
+            .get(id)
+            .ok_or_else(|| format!("R3.19 requires executable evidence '{id}'"))?;
+        if item.kind != EvidenceKind::Test || item.reference != reference {
+            return Err(format!(
+                "R3.19 evidence '{id}' must reference stable automated test '{reference}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_transform_runtime_contract(
     contract: &TransformRuntimeContract,
     evidence: &HashMap<&str, &Evidence>,
@@ -1101,19 +1283,10 @@ fn expected_transform_runtime_contract() -> TransformRuntimeContract {
             enabled: false,
             owner: "R4.6".to_string(),
         },
-        advanced_cell_owners: UpstreamProtocol::ALL
-            .into_iter()
-            .filter(|upstream_protocol| {
-                !matches!(
-                    upstream_protocol,
-                    UpstreamProtocol::Openai | UpstreamProtocol::Responses
-                )
-            })
-            .map(|upstream_protocol| TransformAdvancedCellOwner {
-                upstream_protocol,
-                owner: generation_owner(upstream_protocol).to_string(),
-            })
-            .collect(),
+        advanced_cell_owners: vec![TransformAdvancedCellOwner {
+            upstream_protocol: UpstreamProtocol::Ollama,
+            owner: "R3.20".to_string(),
+        }],
         final_matrix_owner: "R3.21".to_string(),
         evidence: REQUIRED_TRANSFORM_RUNTIME_EVIDENCE
             .iter()
@@ -1533,6 +1706,91 @@ fn openai_wire_operation(
     }
 }
 
+fn validate_gemini_wire_contract(
+    contract: &GeminiWireContract,
+    evidence: &HashMap<&str, &Evidence>,
+) -> Result<(), String> {
+    if contract != &expected_gemini_wire_contract() {
+        return Err(
+            "gemini_wire_contract must exactly pin GEMINI/VERTEX profiles, model operations, downstream surface, prohibited products, local Models, and Gemini-only countTokens"
+                .to_string(),
+        );
+    }
+    for id in &contract.evidence {
+        let item = evidence
+            .get(id.as_str())
+            .ok_or_else(|| format!("Gemini-wire contract references unknown evidence '{id}'"))?;
+        if item.kind != EvidenceKind::Test {
+            return Err(format!(
+                "Gemini-wire contract evidence '{id}' must be an executable test"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expected_gemini_wire_contract() -> GeminiWireContract {
+    GeminiWireContract {
+        profiles: vec![
+            GeminiWireProfileContract {
+                profile_type: UpstreamProfileType::Gemini,
+                auth: "x_goog_api_key".to_string(),
+                endpoint: "normalized_model_collection".to_string(),
+            },
+            GeminiWireProfileContract {
+                profile_type: UpstreamProfileType::Vertex,
+                auth: "oauth_bearer".to_string(),
+                endpoint: "vertex_publisher_model_collection".to_string(),
+            },
+        ],
+        operations: vec![
+            GeminiWireOperationContract {
+                action: "generate_content".to_string(),
+                suffix: ":generateContent".to_string(),
+                query: None,
+            },
+            GeminiWireOperationContract {
+                action: "stream_generate_content".to_string(),
+                suffix: ":streamGenerateContent".to_string(),
+                query: Some("alt=sse".to_string()),
+            },
+            GeminiWireOperationContract {
+                action: "count_tokens".to_string(),
+                suffix: ":countTokens".to_string(),
+                query: None,
+            },
+        ],
+        downstream_surface: GeminiDownstreamSurfaceContract {
+            exposed: vec![
+                "models".to_string(),
+                "generate_content".to_string(),
+                "stream_generate_content".to_string(),
+                "count_tokens".to_string(),
+            ],
+            prohibited: vec![
+                "interactions".to_string(),
+                "live".to_string(),
+                "batch".to_string(),
+                "files".to_string(),
+                "caching".to_string(),
+                "embeddings".to_string(),
+                "media_generation".to_string(),
+                "remote_model_discovery".to_string(),
+            ],
+            models_execution: "local_catalog".to_string(),
+            count_tokens_allowed_upstreams: vec![UpstreamProtocol::Gemini],
+        },
+        evidence: vec![
+            "r3-19-profile-equivalence".to_string(),
+            "r3-19-profile-registry".to_string(),
+            "r3-19-source-check".to_string(),
+            "r3-19-route-boundary".to_string(),
+            "r3-19-count-tokens".to_string(),
+            "r3-19-count-tokens-reject".to_string(),
+        ],
+    }
+}
+
 fn validate_routes(routes: &[RouteContract]) -> Result<(), String> {
     if routes != expected_routes() {
         return Err(
@@ -1624,6 +1882,26 @@ fn validate_generation_cells(
         ));
     }
 
+    let gemini_advanced = cells
+        .iter()
+        .filter(|cell| cell.upstream == UpstreamProtocol::Gemini)
+        .flat_map(|cell| cell.advanced.entries())
+        .map(|(_, assessment)| assessment.status)
+        .collect::<Vec<_>>();
+    let gemini_full = gemini_advanced
+        .iter()
+        .filter(|status| **status == AdvancedStatus::Full)
+        .count();
+    let gemini_controlled_loss = gemini_advanced
+        .iter()
+        .filter(|status| **status == AdvancedStatus::ControlledLoss)
+        .count();
+    if gemini_advanced.len() != 16 || (gemini_full, gemini_controlled_loss) != (4, 12) {
+        return Err(format!(
+            "R3.19 Gemini advanced column must contain exactly 4 full and 12 controlled_loss cells, found {gemini_full} full and {gemini_controlled_loss} controlled_loss"
+        ));
+    }
+
     let mut seen = HashSet::new();
     for cell in cells {
         if !seen.insert((cell.downstream, cell.upstream)) {
@@ -1684,14 +1962,13 @@ fn validate_generation_cells(
 fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String> {
     let verified_cell = matches!(
         cell.upstream,
-        UpstreamProtocol::Responses | UpstreamProtocol::Anthropic
+        UpstreamProtocol::Responses | UpstreamProtocol::Anthropic | UpstreamProtocol::Gemini
     ) || matches!(
         (cell.downstream, cell.upstream),
         (DownstreamProtocol::Openai, UpstreamProtocol::Openai)
             | (DownstreamProtocol::Responses, UpstreamProtocol::Openai)
             | (DownstreamProtocol::Anthropic, UpstreamProtocol::Openai)
             | (DownstreamProtocol::Gemini, UpstreamProtocol::Openai)
-            | (DownstreamProtocol::Gemini, UpstreamProtocol::Gemini)
     );
     let base_statuses = cell.base.entries().map(|(_, assessment)| assessment.status);
     if verified_cell {
@@ -1802,6 +2079,40 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
                 ));
             }
         }
+    } else if cell.upstream == UpstreamProtocol::Gemini {
+        for (dimension, assessment) in cell.base.entries() {
+            let expected_evidence = expected_gemini_base_evidence(cell.downstream, dimension);
+            if assessment.status != BaseStatus::Verified
+                || assessment
+                    .evidence
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    != expected_evidence
+            {
+                return Err(format!(
+                    "R3.19 base cell {:?}->Gemini {dimension} must be verified with its exact direct-execution evidence",
+                    cell.downstream
+                ));
+            }
+        }
+        for (dimension, assessment) in cell.advanced.entries() {
+            let expected_status = expected_gemini_advanced_status(cell.downstream);
+            let expected_evidence = expected_gemini_advanced_evidence(cell.downstream, dimension);
+            if assessment.status != expected_status
+                || assessment
+                    .evidence
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    != expected_evidence
+            {
+                return Err(format!(
+                    "R3.19 advanced cell {:?}->Gemini {dimension} must be {:?} with its exact executable main/rejection evidence",
+                    cell.downstream, expected_status
+                ));
+            }
+        }
     } else if !cell
         .advanced
         .entries()
@@ -1809,7 +2120,7 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
         .all(|(_, assessment)| assessment.status == AdvancedStatus::NotVerified)
     {
         return Err(format!(
-            "advanced dimensions outside the completed OpenAI, Responses, and Anthropic upstream columns for {:?}->{:?} must remain not_verified",
+            "advanced dimensions outside the completed OpenAI, Responses, Anthropic, and Gemini upstream columns for {:?}->{:?} must remain not_verified",
             cell.downstream, cell.upstream
         ));
     }
@@ -1966,6 +2277,63 @@ fn expected_anthropic_advanced_evidence(
             "reasoning" => "r3-18-reasoning-reject",
             "multimodal" => "r3-18-multimodal-reject",
             "structured_output" => "r3-18-structured-reject",
+            _ => unreachable!("advanced dimensions are closed"),
+        };
+        vec![cell, rejection]
+    } else {
+        vec![cell]
+    }
+}
+
+fn expected_gemini_base_evidence(
+    downstream: DownstreamProtocol,
+    _dimension: &str,
+) -> Vec<&'static str> {
+    vec![match downstream {
+        DownstreamProtocol::Openai => "r3-19-openai-base",
+        DownstreamProtocol::Responses => "r3-19-responses-base",
+        DownstreamProtocol::Anthropic => "r3-19-anthropic-base",
+        DownstreamProtocol::Gemini => "r3-19-gemini-base",
+    }]
+}
+
+fn expected_gemini_advanced_status(downstream: DownstreamProtocol) -> AdvancedStatus {
+    if downstream == DownstreamProtocol::Gemini {
+        AdvancedStatus::Full
+    } else {
+        AdvancedStatus::ControlledLoss
+    }
+}
+
+fn expected_gemini_advanced_evidence(
+    downstream: DownstreamProtocol,
+    dimension: &str,
+) -> Vec<&'static str> {
+    let cell = match (downstream, dimension) {
+        (DownstreamProtocol::Openai, "tools") => "r3-19-openai-tools-cell",
+        (DownstreamProtocol::Responses, "tools") => "r3-19-responses-tools-cell",
+        (DownstreamProtocol::Anthropic, "tools") => "r3-19-anthropic-tools-cell",
+        (DownstreamProtocol::Gemini, "tools") => "r3-19-gemini-tools-cell",
+        (DownstreamProtocol::Openai, "reasoning") => "r3-19-openai-reasoning-cell",
+        (DownstreamProtocol::Responses, "reasoning") => "r3-19-responses-reasoning-cell",
+        (DownstreamProtocol::Anthropic, "reasoning") => "r3-19-anthropic-reasoning-cell",
+        (DownstreamProtocol::Gemini, "reasoning") => "r3-19-gemini-reasoning-cell",
+        (DownstreamProtocol::Openai, "multimodal") => "r3-19-openai-multimodal-cell",
+        (DownstreamProtocol::Responses, "multimodal") => "r3-19-responses-multimodal-cell",
+        (DownstreamProtocol::Anthropic, "multimodal") => "r3-19-anthropic-multimodal-cell",
+        (DownstreamProtocol::Gemini, "multimodal") => "r3-19-gemini-multimodal-cell",
+        (DownstreamProtocol::Openai, "structured_output") => "r3-19-openai-structured-cell",
+        (DownstreamProtocol::Responses, "structured_output") => "r3-19-responses-structured-cell",
+        (DownstreamProtocol::Anthropic, "structured_output") => "r3-19-anthropic-structured-cell",
+        (DownstreamProtocol::Gemini, "structured_output") => "r3-19-gemini-structured-cell",
+        _ => unreachable!("advanced dimensions are a closed four-by-four matrix"),
+    };
+    if expected_gemini_advanced_status(downstream) == AdvancedStatus::ControlledLoss {
+        let rejection = match dimension {
+            "tools" => "r3-19-tools-reject",
+            "reasoning" => "r3-19-reasoning-reject",
+            "multimodal" => "r3-19-multimodal-reject",
+            "structured_output" => "r3-19-structured-reject",
             _ => unreachable!("advanced dimensions are closed"),
         };
         vec![cell, rejection]
@@ -2163,6 +2531,24 @@ fn validate_utilities(
             },
             evidence,
         )?;
+        if utility.name == "countTokens"
+            && utility
+                .verification
+                .evidence
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                != vec![
+                    "r3-19-count-tokens",
+                    "r3-19-count-tokens-reject",
+                    "r3-19-route-boundary",
+                ]
+        {
+            return Err(
+                "R3.19 countTokens utility must use its exact success, incompatible-source rejection, and public-surface evidence"
+                    .to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -2252,7 +2638,7 @@ fn expected_utility_shapes() -> Vec<UtilityShape> {
             execution: UtilityExecution::Upstream,
             allowed_upstreams: vec![UpstreamProtocol::Gemini],
             incompatible_upstream_behavior: IncompatibleUpstreamBehavior::PreSendReject,
-            verification_status: UtilityVerificationStatus::Partial,
+            verification_status: UtilityVerificationStatus::Verified,
         },
     ]
 }
@@ -2560,6 +2946,65 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
         )
         .unwrap();
     }
+
+    let gemini_contract = &matrix.gemini_wire_contract;
+    writeln!(output, "\n## Gemini-wire Profile and surface contract\n").unwrap();
+    writeln!(
+        output,
+        "| Profile | Auth | Model collection |\n| --- | --- | --- |"
+    )
+    .unwrap();
+    for profile in &gemini_contract.profiles {
+        writeln!(
+            output,
+            "| {} | `{}` | `{}` |",
+            profile_label(profile.profile_type),
+            profile.auth,
+            profile.endpoint
+        )
+        .unwrap();
+    }
+    writeln!(output, "\n### Model operations\n").unwrap();
+    writeln!(output, "| Action | Suffix | Query |\n| --- | --- | --- |").unwrap();
+    for operation in &gemini_contract.operations {
+        writeln!(
+            output,
+            "| `{}` | `{}` | `{}` |",
+            operation.action,
+            operation.suffix,
+            operation.query.as_deref().unwrap_or("—")
+        )
+        .unwrap();
+    }
+    writeln!(
+        output,
+        "\n- Exposed Gemini downstream surface: {}.",
+        gemini_contract.downstream_surface.exposed.join(", ")
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Prohibited Gemini downstream products: {}.",
+        gemini_contract.downstream_surface.prohibited.join(", ")
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Models execution: `{}`; countTokens allowed upstreams: {}.",
+        gemini_contract.downstream_surface.models_execution,
+        join_upstream(
+            &gemini_contract
+                .downstream_surface
+                .count_tokens_allowed_upstreams
+        )
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Evidence: {}.",
+        gemini_contract.evidence.join(", ")
+    )
+    .unwrap();
 
     writeln!(output, "\n## Public downstream routes\n").unwrap();
     writeln!(
@@ -3037,11 +3482,11 @@ mod tests {
     #[test]
     fn missing_owner_is_rejected() {
         let mut matrix = canonical_matrix();
-        matrix.generation_cells[3].advanced.tools.owner = None;
+        matrix.generation_cells[4].advanced.tools.owner = None;
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.19")
+                .contains("must be owned by R3.20")
         );
     }
 
@@ -3269,6 +3714,97 @@ mod tests {
     }
 
     #[test]
+    fn r319_missing_evidence_status_count_and_residual_owner_are_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix
+            .evidence
+            .retain(|item| item.id != "r3-19-openai-base");
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("R3.19 requires executable evidence 'r3-19-openai-base'")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[3].advanced.tools.status = AdvancedStatus::Full;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("exactly 4 full and 12 controlled_loss")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[3].base.non_stream_text.status = BaseStatus::Partial;
+        matrix.generation_cells[3].base.non_stream_text.owner = Some("R3.19".to_string());
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("representative cell")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[3].advanced.tools.owner = Some("R3.19".to_string());
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("complete and must not have an owner")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix
+            .transform_runtime_contract
+            .advanced_cell_owners
+            .push(TransformAdvancedCellOwner {
+                upstream_protocol: UpstreamProtocol::Gemini,
+                owner: "R3.19".to_string(),
+            });
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("transform_runtime_contract must pin")
+        );
+    }
+
+    #[test]
+    fn r319_utility_profile_and_surface_drift_are_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.utilities[3].allowed_upstreams = vec![UpstreamProtocol::Openai];
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("differs from the runtime utility contract")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.utilities[3].verification.evidence.pop();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("R3.19 countTokens utility")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.gemini_wire_contract.profiles[0].auth = "bearer".to_string();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("gemini_wire_contract must exactly pin")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix
+            .gemini_wire_contract
+            .downstream_surface
+            .prohibited
+            .pop();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("gemini_wire_contract must exactly pin")
+        );
+    }
+
+    #[test]
     fn r3_10_source_contract_drift_is_rejected() {
         let mut matrix = canonical_matrix();
         matrix.upstream_source_contract.source_cardinality = "exactly_one".to_string();
@@ -3303,14 +3839,14 @@ mod tests {
     #[test]
     fn protocol_and_advanced_owners_follow_r3_16_to_r3_20() {
         let mut matrix = canonical_matrix();
-        matrix.generation_cells[3].base.non_stream_text.owner = Some("R3.19".to_string());
+        matrix.generation_cells[4].base.non_stream_text.owner = Some("R3.20".to_string());
         assert!(validate_matrix(&matrix).is_ok());
 
-        matrix.generation_cells[3].advanced.tools.owner = Some("R3.17".to_string());
+        matrix.generation_cells[4].advanced.tools.owner = Some("R3.17".to_string());
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.19")
+                .contains("must be owned by R3.20")
         );
 
         let mut matrix = canonical_matrix();
@@ -3318,7 +3854,7 @@ mod tests {
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("utility countTokens verification must be owned by R3.19")
+                .contains("complete and must not have an owner")
         );
     }
 

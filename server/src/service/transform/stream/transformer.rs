@@ -253,7 +253,11 @@ impl StreamTransformer {
     }
 
     pub(in crate::service::transform) fn stream_context(&mut self) -> StreamTransformContext<'_> {
-        StreamTransformContext::new(self.upstream_protocol, &mut self.session)
+        StreamTransformContext::new(
+            self.upstream_protocol,
+            self.downstream_protocol,
+            &mut self.session,
+        )
     }
 
     fn record_transformed_events(&mut self, events: &[SseEvent]) {
@@ -357,6 +361,13 @@ impl StreamTransformer {
         self.session.usage_normalization_cache_clone()
     }
 
+    pub fn usage_is_billable(&self) -> bool {
+        self.upstream_protocol != UpstreamProtocol::Gemini
+            || (!self.session.gemini_usage_observation_degraded()
+                && !self.session.gemini_source_observation_degraded()
+                && !self.session.gemini_source_failed())
+    }
+
     pub fn parse_usage_normalization(&mut self) -> Option<UsageNormalization> {
         self.session.usage_normalization_cache_clone()
     }
@@ -374,10 +385,27 @@ impl StreamTransformer {
         if let Some(failure) = &self.terminal_failure {
             return Err(failure.clone());
         }
+        if self.upstream_protocol == UpstreamProtocol::Gemini
+            && self.session.gemini_source_observation_degraded()
+        {
+            let (semantic_unit, reason_code) =
+                self.session.gemini_source_observation_error().unwrap_or((
+                    TransformSemanticUnit::Lifecycle,
+                    TransformReasonCode::IllegalUpstreamTerminal,
+                ));
+            return Err(transform_failure(
+                TransformFailureOrigin::UpstreamPayload,
+                TransformPhase::StreamDecode,
+                semantic_unit,
+                reason_code,
+                None,
+            ));
+        }
         let terminal_is_valid = match self.upstream_protocol {
             UpstreamProtocol::Responses => self.session.responses_source_terminal_seen(),
             UpstreamProtocol::Anthropic => self.session.anthropic_source_terminal_seen(),
-            UpstreamProtocol::Openai | UpstreamProtocol::Gemini | UpstreamProtocol::Ollama => true,
+            UpstreamProtocol::Gemini => self.session.gemini_source_terminal_seen(),
+            UpstreamProtocol::Openai | UpstreamProtocol::Ollama => true,
         };
         if terminal_is_valid {
             return Ok(transform_success(
@@ -415,8 +443,57 @@ impl StreamTransformer {
                     SourceStreamTermination::Succeeded
                 })
             }
+            UpstreamProtocol::Gemini if self.session.gemini_source_failed() => {
+                Some(SourceStreamTermination::Failed)
+            }
             _ => None,
         }
+    }
+
+    pub(crate) fn finalize_source_eof_events(&mut self) -> TransformResult<Vec<SseEvent>> {
+        if self.upstream_protocol == UpstreamProtocol::Gemini
+            && self.downstream_protocol != DownstreamProtocol::Gemini
+        {
+            let finish_reason = self.session.finish_reason_cache_clone().ok_or_else(|| {
+                transform_failure(
+                    TransformFailureOrigin::UpstreamPayload,
+                    TransformPhase::StreamDecode,
+                    TransformSemanticUnit::Lifecycle,
+                    TransformReasonCode::IllegalUpstreamTerminal,
+                    None,
+                )
+            })?;
+            let mut terminal_events = Vec::new();
+            if self.downstream_protocol == DownstreamProtocol::Anthropic
+                && !self.session.anthropic_target_message_started()
+            {
+                terminal_events.push(UnifiedStreamEvent::MessageStart {
+                    id: Some(self.get_or_generate_stream_id()),
+                    model: self.session.stream_model_clone(),
+                    role: UnifiedRole::Assistant,
+                });
+            }
+            terminal_events.push(UnifiedStreamEvent::MessageDelta {
+                finish_reason: Some(finish_reason),
+            });
+            if let Some(usage) = self.session.unified_usage_cache_clone() {
+                terminal_events.push(UnifiedStreamEvent::Usage { usage });
+            }
+            terminal_events.push(UnifiedStreamEvent::MessageStop);
+            let success = self.stream_events_to_target_events(terminal_events)?;
+            self.record_transformed_events(&success.value);
+            self.stream_summary.absorb(success.summary.clone());
+            return Ok(success);
+        }
+
+        Ok(transform_success(
+            Vec::new(),
+            TransformPhase::StreamEncode,
+            TransformSemanticUnit::Lifecycle,
+            TransformOutcomeKind::Lossless,
+            TransformAction::Drop,
+            TransformReasonCode::NoSemanticOutput,
+        ))
     }
 
     fn record_post_transform_diagnostic(&mut self, fact: TransformDiagnosticFact) {
@@ -530,25 +607,46 @@ impl StreamTransformer {
         self.session.set_stream_model_if_present(chunk_core.model);
         if self.upstream_protocol == UpstreamProtocol::Gemini {
             for choice in &mut unified_chunk.choices {
+                let has_tool_call = choice
+                    .delta
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, UnifiedContentPartDelta::ToolCallDelta(_)));
+                if has_tool_call {
+                    self.session
+                        .mark_gemini_source_tool_call_candidate(choice.index);
+                }
+                if choice.finish_reason.as_deref() == Some("stop")
+                    && self
+                        .session
+                        .gemini_source_candidate_has_tool_call(choice.index)
+                {
+                    choice.finish_reason = Some("tool_calls".to_string());
+                }
                 for part in &mut choice.delta.content {
                     if let UnifiedContentPartDelta::ToolCallDelta(tool_call) = part {
-                        let stable_id = self.session.get_or_create_gemini_tool_call_id(
-                            choice.index,
-                            tool_call.index,
-                            tool_call.name.as_deref().unwrap_or(""),
-                        );
-                        tool_call.id = Some(stable_id.clone());
-                        self.session.remember_tool_call_id(stable_id);
+                        if let Some(id) = tool_call.id.clone() {
+                            self.session.remember_tool_call_id(id);
+                        } else {
+                            let stable_id = self.session.get_or_create_gemini_tool_call_id(
+                                choice.index,
+                                tool_call.index,
+                                tool_call.name.as_deref().unwrap_or(""),
+                            );
+                            tool_call.id = Some(stable_id.clone());
+                            self.session.remember_tool_call_id(stable_id);
+                        }
                     }
-                }
-                if choice.finish_reason.is_some() {
-                    self.session.advance_gemini_message_index(choice.index);
                 }
             }
         }
 
         if let Some(usage) = chunk_core.usage {
-            self.session.merge_usage(usage, self.usage_merge_strategy());
+            if self.upstream_protocol != UpstreamProtocol::Gemini
+                || !self.session.gemini_usage_observation_degraded()
+            {
+                self.session.merge_usage(usage, self.usage_merge_strategy());
+            }
         }
         if let Some(finish_reason) = unified_chunk
             .choices
@@ -742,8 +840,23 @@ impl StreamTransformer {
                     success.summary
                 }
                 Err(failure) => {
-                    self.session
-                        .restore_semantic_snapshot(observation_session_before);
+                    let preserve_gemini_core = self.upstream_protocol == UpstreamProtocol::Gemini
+                        && failure.semantic_unit == TransformSemanticUnit::Usage;
+                    if !preserve_gemini_core {
+                        self.session
+                            .restore_semantic_snapshot(observation_session_before);
+                    }
+                    if self.upstream_protocol == UpstreamProtocol::Gemini {
+                        let mut context = self.stream_context();
+                        if preserve_gemini_core {
+                            context.invalidate_gemini_usage_observation();
+                        } else {
+                            context.invalidate_gemini_stream_observation(
+                                failure.semantic_unit,
+                                failure.reason_code,
+                            );
+                        }
+                    }
                     if self.upstream_protocol == UpstreamProtocol::Anthropic
                         && failure.reason_code == TransformReasonCode::InvalidProtocolShape
                     {
@@ -805,9 +918,26 @@ impl StreamTransformer {
                 self.stream_events_to_target_events(stream_events)
             }
             DecodedSourceStreamFrame::LegacyChunk(mut unified_chunk) => {
+                if self.upstream_protocol == UpstreamProtocol::Gemini
+                    && unified_chunk
+                        .synthetic_metadata
+                        .as_ref()
+                        .is_none_or(|metadata| !metadata.id)
+                    && self.session.stream_id_clone().is_none()
+                {
+                    self.session.set_stream_id(unified_chunk.id.clone());
+                }
                 let consistent_id = self.get_or_generate_stream_id();
                 unified_chunk.id = consistent_id;
                 self.normalize_unified_chunk_session_state(&mut unified_chunk);
+                if self.upstream_protocol == UpstreamProtocol::Gemini
+                    && self.downstream_protocol != DownstreamProtocol::Gemini
+                {
+                    for choice in &mut unified_chunk.choices {
+                        choice.finish_reason = None;
+                    }
+                    unified_chunk.usage = None;
+                }
                 let mut context = self.stream_context();
                 (target_adapter.stream.encode_legacy_chunk)(unified_chunk, &mut context)
             }

@@ -396,6 +396,8 @@ pub(crate) fn try_transform_unified_chunk_to_anthropic_events(
     context: &mut StreamTransformContext<'_>,
 ) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut stream_events = Vec::new();
+    let message_id = unified_chunk.id.clone();
+    let message_model = unified_chunk.model.clone();
 
     if let Some(usage) = unified_chunk.usage.clone() {
         context.set_usage(usage.clone());
@@ -414,6 +416,15 @@ pub(crate) fn try_transform_unified_chunk_to_anthropic_events(
             match part {
                 UnifiedContentPartDelta::TextDelta { index, text } => {
                     stream_events.push(UnifiedStreamEvent::ContentBlockDelta {
+                        index: *index,
+                        item_index: None,
+                        item_id: None,
+                        part_index: None,
+                        text: text.clone(),
+                    });
+                }
+                UnifiedContentPartDelta::ReasoningDelta { index, text } => {
+                    stream_events.push(UnifiedStreamEvent::ReasoningDelta {
                         index: *index,
                         item_index: None,
                         item_id: None,
@@ -448,6 +459,17 @@ pub(crate) fn try_transform_unified_chunk_to_anthropic_events(
         }
 
         if let Some(finish_reason) = choice.finish_reason.clone() {
+            if !context.anthropic_message_started()
+                && !stream_events
+                    .iter()
+                    .any(|event| matches!(event, UnifiedStreamEvent::MessageStart { .. }))
+            {
+                stream_events.push(UnifiedStreamEvent::MessageStart {
+                    id: Some(message_id.clone()),
+                    model: message_model.clone(),
+                    role: UnifiedRole::Assistant,
+                });
+            }
             for (index, block) in context.anthropic_active_blocks().clone() {
                 match block.kind {
                     AnthropicActiveBlockKind::Text => {

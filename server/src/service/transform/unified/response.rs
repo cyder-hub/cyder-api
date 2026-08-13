@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::request::{UnifiedItem, UnifiedMessage, legacy_content_to_unified_items};
+use super::request::{
+    UnifiedGeminiToolAssociation, UnifiedItem, UnifiedMessage, legacy_content_to_unified_items,
+};
 use super::usage::UnifiedUsage;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -61,6 +63,10 @@ pub struct UnifiedGeminiPromptFeedback {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct UnifiedGeminiCandidateMetadata {
     pub index: u32,
+    #[serde(default)]
+    pub thought_signature_present: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_associations: Vec<UnifiedGeminiToolAssociation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub safety_ratings: Vec<UnifiedGeminiSafetyRating>,
     #[serde(skip_serializing_if = "Option::is_none")]

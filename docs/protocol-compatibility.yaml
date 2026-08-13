@@ -429,6 +429,134 @@ evidence:
     kind: test
     reference: "proxy::direct_execution_regression::invalid_structured_outputs_to_anthropic_are_zero_call"
     summary: "Pins non-schema, conflicting, and invalid structured controls to payload-safe rejection before credentials and network."
+  - id: r3-19-base-registry
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_gemini_target_evidence_registry_covers_exactly_24_base_dimensions"
+    summary: "Freezes four unique Gemini target base-cell references and all 24 base-dimension mappings."
+  - id: r3-19-openai-base
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_gemini_base_cell_is_verified"
+    summary: "Executes OpenAI non-stream, stream, usage, terminal, 429, and cancellation paths through one Gemini Source."
+  - id: r3-19-responses-base
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_gemini_base_cell_is_verified"
+    summary: "Executes Responses non-stream, stream, usage, terminal, 429, and cancellation paths through one Gemini Source."
+  - id: r3-19-anthropic-base
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_gemini_base_cell_is_verified"
+    summary: "Executes Anthropic non-stream, stream, usage, terminal, 429, and cancellation paths through one Gemini Source."
+  - id: r3-19-gemini-base
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_gemini_base_cell_is_verified"
+    summary: "Executes same-wire Gemini non-stream, stream, usage, terminal, 429, and cancellation paths with native fidelity."
+  - id: r3-19-advanced-registry
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_gemini_advanced_evidence_registry_has_16_unique_cells_and_4_full_12_loss"
+    summary: "Freezes 16 unique Gemini advanced cell references and the exact 4 full / 12 controlled-loss split."
+  - id: r3-19-openai-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_gemini_tools_cell_has_typed_controlled_loss"
+    summary: "Executes OpenAI tools through one Gemini request and asserts payload-free strictness loss."
+  - id: r3-19-responses-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_gemini_tools_cell_has_typed_controlled_loss"
+    summary: "Executes Responses tools through one Gemini request and asserts payload-free strictness loss."
+  - id: r3-19-anthropic-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_gemini_tools_cell_has_typed_controlled_loss"
+    summary: "Executes Anthropic tools through one Gemini request and asserts payload-free parallel-policy loss."
+  - id: r3-19-gemini-tools-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_gemini_tools_cell_is_full"
+    summary: "Executes native Gemini tool IDs, calls, results, and thought signatures with zero controlled loss."
+  - id: r3-19-openai-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_gemini_reasoning_cell_has_typed_controlled_loss"
+    summary: "Executes OpenAI reasoning through one Gemini request and asserts payload-free high-end effort clamping."
+  - id: r3-19-responses-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_gemini_reasoning_cell_has_typed_controlled_loss"
+    summary: "Executes Responses reasoning through one Gemini request and asserts payload-free high-end effort clamping."
+  - id: r3-19-anthropic-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_gemini_reasoning_cell_has_typed_controlled_loss"
+    summary: "Executes Anthropic adaptive reasoning through one Gemini request and asserts payload-free effort clamping."
+  - id: r3-19-gemini-reasoning-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_gemini_reasoning_cell_is_full"
+    summary: "Executes native Gemini thinking controls and future fields with zero controlled loss."
+  - id: r3-19-openai-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_gemini_multimodal_cell_has_typed_controlled_loss"
+    summary: "Executes OpenAI inline image input through one Gemini request and asserts payload-free detail loss."
+  - id: r3-19-responses-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_gemini_multimodal_cell_has_typed_controlled_loss"
+    summary: "Executes Responses inline image input through one Gemini request and asserts payload-free detail loss."
+  - id: r3-19-anthropic-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_gemini_multimodal_cell_has_typed_controlled_loss"
+    summary: "Executes Anthropic inline document input through one Gemini request and asserts payload-free filename loss."
+  - id: r3-19-gemini-multimodal-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_gemini_multimodal_cell_is_full"
+    summary: "Executes native Gemini inlineData, fileData, and future media fields with zero controlled loss."
+  - id: r3-19-openai-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::openai_to_gemini_structured_output_cell_has_typed_controlled_loss"
+    summary: "Executes OpenAI JSON Schema output through one Gemini request and asserts payload-free envelope metadata loss."
+  - id: r3-19-responses-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::responses_to_gemini_structured_output_cell_has_typed_controlled_loss"
+    summary: "Executes Responses JSON Schema output through one Gemini request and asserts payload-free envelope metadata loss."
+  - id: r3-19-anthropic-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::anthropic_to_gemini_structured_output_cell_has_typed_controlled_loss"
+    summary: "Executes Anthropic JSON Schema output through one Gemini request and asserts payload-free envelope loss."
+  - id: r3-19-gemini-structured-cell
+    kind: test
+    reference: "proxy::direct_execution_regression::gemini_to_gemini_structured_output_cell_is_full"
+    summary: "Executes native Gemini structured-output controls and future schema fields with zero controlled loss."
+  - id: r3-19-tools-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_invalid_tools_and_unsigned_history_are_precredential_zero_call"
+    summary: "Pins invalid tools and unsigned tool history to payload-safe rejection before credentials and network."
+  - id: r3-19-reasoning-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_invalid_reasoning_controls_are_precredential_zero_call"
+    summary: "Pins invalid and conflicting reasoning controls to payload-safe rejection before credentials and network."
+  - id: r3-19-multimodal-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_invalid_multimodal_inputs_are_precredential_zero_call"
+    summary: "Pins remote, foreign, invalid, or wrong-role media to payload-safe rejection before credentials and network."
+  - id: r3-19-structured-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_invalid_structured_outputs_are_precredential_zero_call"
+    summary: "Pins invalid or unrepresentable structured outputs to payload-safe rejection before credentials and network."
+  - id: r3-19-profile-equivalence
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_gemini_and_vertex_profiles_execute_equivalent_generate_and_stream_contracts"
+    summary: "Executes equivalent Gemini and Vertex generate/stream requests with profile-specific collection URL and authentication."
+  - id: r3-19-profile-registry
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_gemini_vertex_profile_evidence_registry_covers_all_four_operations"
+    summary: "Freezes Gemini and Vertex evidence for generate, stream, countTokens, and Source Check operations."
+  - id: r3-19-source-check
+    kind: test
+    reference: "controller::provider::tests::gemini_and_vertex_source_check_send_shared_minimal_contract_once"
+    summary: "Pins both Gemini-family Source Checks to one shared safe URL, body, query, header, and response contract."
+  - id: r3-19-route-boundary
+    kind: test
+    reference: "proxy::router::tests::r3_19_gemini_public_surface_aliases_methods_and_prohibited_products_are_closed"
+    summary: "Pins Gemini aliases, methods, local Models, generation, countTokens, and all prohibited product routes."
+  - id: r3-19-count-tokens
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_count_tokens_two_legal_shapes_use_gemini_and_vertex_once_without_usage_or_cost"
+    summary: "Executes both legal CountTokens shapes once through Gemini and Vertex without generation usage or cost settlement."
+  - id: r3-19-count-tokens-reject
+    kind: test
+    reference: "proxy::direct_execution_regression::r3_19_count_tokens_invalid_shapes_and_incompatible_source_are_precredential_zero_call"
+    summary: "Pins invalid CountTokens shapes and non-Gemini targets to precredential zero-call rejection."
   - id: r3-16-reasoning-direct
     kind: test
     reference: "proxy::direct_execution_regression::all_public_downstream_reasoning_controls_reach_the_openai_target"
@@ -668,8 +796,6 @@ transform_runtime_contract:
     enabled: false
     owner: R4.6
   advanced_cell_owners:
-    - { upstream_protocol: ANTHROPIC, owner: R3.18 }
-    - { upstream_protocol: GEMINI, owner: R3.19 }
     - { upstream_protocol: OLLAMA, owner: R3.20 }
   final_matrix_owner: R3.21
   evidence: [r3-15-transform-quality-contract, r3-15-transform-payload-free-contract, r3-15-same-wire-passthrough, r3-15-minor-loss-runtime, r3-15-four-protocol-stream-failure, r3-15-target-stream-failure]
@@ -767,6 +893,21 @@ openai_wire_profiles:
     rerank: { availability: unsupported, default_enabled: false, field_policy: unsupported }
     evidence: [r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-gemini-openai-closed-policy, r3-16-embeddings-direct, r3-16-rerank-profile-guard]
 
+gemini_wire_contract:
+  profiles:
+    - { profile_type: GEMINI, auth: x_goog_api_key, endpoint: normalized_model_collection }
+    - { profile_type: VERTEX, auth: oauth_bearer, endpoint: vertex_publisher_model_collection }
+  operations:
+    - { action: generate_content, suffix: ":generateContent", query: null }
+    - { action: stream_generate_content, suffix: ":streamGenerateContent", query: "alt=sse" }
+    - { action: count_tokens, suffix: ":countTokens", query: null }
+  downstream_surface:
+    exposed: [models, generate_content, stream_generate_content, count_tokens]
+    prohibited: [interactions, live, batch, files, caching, embeddings, media_generation, remote_model_discovery]
+    models_execution: local_catalog
+    count_tokens_allowed_upstreams: [GEMINI]
+  evidence: [r3-19-profile-equivalence, r3-19-profile-registry, r3-19-source-check, r3-19-route-boundary, r3-19-count-tokens, r3-19-count-tokens-reject]
+
 routes:
   - downstream_protocol: OPENAI
     public_prefix: /ai/openai
@@ -847,17 +988,17 @@ generation_cells:
   - downstream: OPENAI
     upstream: GEMINI
     base:
-      non_stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      usage: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      normal_termination: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
+      non_stream_text: { status: verified, evidence: [r3-19-openai-base] }
+      stream_text: { status: verified, evidence: [r3-19-openai-base] }
+      usage: { status: verified, evidence: [r3-19-openai-base] }
+      normal_termination: { status: verified, evidence: [r3-19-openai-base] }
+      upstream_error: { status: verified, evidence: [r3-19-openai-base] }
+      cancellation: { status: verified, evidence: [r3-19-openai-base] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      tools: { status: controlled_loss, evidence: [r3-19-openai-tools-cell, r3-19-tools-reject] }
+      reasoning: { status: controlled_loss, evidence: [r3-19-openai-reasoning-cell, r3-19-reasoning-reject] }
+      multimodal: { status: controlled_loss, evidence: [r3-19-openai-multimodal-cell, r3-19-multimodal-reject] }
+      structured_output: { status: controlled_loss, evidence: [r3-19-openai-structured-cell, r3-19-structured-reject] }
   - downstream: OPENAI
     upstream: OLLAMA
     base:
@@ -918,17 +1059,17 @@ generation_cells:
   - downstream: RESPONSES
     upstream: GEMINI
     base:
-      non_stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      usage: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      normal_termination: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
+      non_stream_text: { status: verified, evidence: [r3-19-responses-base] }
+      stream_text: { status: verified, evidence: [r3-19-responses-base] }
+      usage: { status: verified, evidence: [r3-19-responses-base] }
+      normal_termination: { status: verified, evidence: [r3-19-responses-base] }
+      upstream_error: { status: verified, evidence: [r3-19-responses-base] }
+      cancellation: { status: verified, evidence: [r3-19-responses-base] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      tools: { status: controlled_loss, evidence: [r3-19-responses-tools-cell, r3-19-tools-reject] }
+      reasoning: { status: controlled_loss, evidence: [r3-19-responses-reasoning-cell, r3-19-reasoning-reject] }
+      multimodal: { status: controlled_loss, evidence: [r3-19-responses-multimodal-cell, r3-19-multimodal-reject] }
+      structured_output: { status: controlled_loss, evidence: [r3-19-responses-structured-cell, r3-19-structured-reject] }
   - downstream: RESPONSES
     upstream: OLLAMA
     base:
@@ -989,17 +1130,17 @@ generation_cells:
   - downstream: ANTHROPIC
     upstream: GEMINI
     base:
-      non_stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      stream_text: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      usage: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      normal_termination: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      upstream_error: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
-      cancellation: { status: not_verified, evidence: [reachable-materializers-without-cell-regression], owner: R3.19 }
+      non_stream_text: { status: verified, evidence: [r3-19-anthropic-base] }
+      stream_text: { status: verified, evidence: [r3-19-anthropic-base] }
+      usage: { status: verified, evidence: [r3-19-anthropic-base] }
+      normal_termination: { status: verified, evidence: [r3-19-anthropic-base] }
+      upstream_error: { status: verified, evidence: [r3-19-anthropic-base] }
+      cancellation: { status: verified, evidence: [r3-19-anthropic-base] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      tools: { status: controlled_loss, evidence: [r3-19-anthropic-tools-cell, r3-19-tools-reject] }
+      reasoning: { status: controlled_loss, evidence: [r3-19-anthropic-reasoning-cell, r3-19-reasoning-reject] }
+      multimodal: { status: controlled_loss, evidence: [r3-19-anthropic-multimodal-cell, r3-19-multimodal-reject] }
+      structured_output: { status: controlled_loss, evidence: [r3-19-anthropic-structured-cell, r3-19-structured-reject] }
   - downstream: ANTHROPIC
     upstream: OLLAMA
     base:
@@ -1060,17 +1201,17 @@ generation_cells:
   - downstream: GEMINI
     upstream: GEMINI
     base:
-      non_stream_text: { status: verified, evidence: [direct-non-stream] }
-      stream_text: { status: verified, evidence: [direct-stream] }
-      usage: { status: verified, evidence: [direct-non-stream, direct-stream] }
-      normal_termination: { status: verified, evidence: [direct-non-stream, direct-stream] }
-      upstream_error: { status: verified, evidence: [direct-upstream-error] }
-      cancellation: { status: verified, evidence: [direct-cancellation] }
+      non_stream_text: { status: verified, evidence: [r3-19-gemini-base] }
+      stream_text: { status: verified, evidence: [r3-19-gemini-base] }
+      usage: { status: verified, evidence: [r3-19-gemini-base] }
+      normal_termination: { status: verified, evidence: [r3-19-gemini-base] }
+      upstream_error: { status: verified, evidence: [r3-19-gemini-base] }
+      cancellation: { status: verified, evidence: [r3-19-gemini-base] }
     advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.19 }
+      tools: { status: full, evidence: [r3-19-gemini-tools-cell] }
+      reasoning: { status: full, evidence: [r3-19-gemini-reasoning-cell] }
+      multimodal: { status: full, evidence: [r3-19-gemini-multimodal-cell] }
+      structured_output: { status: full, evidence: [r3-19-gemini-structured-cell] }
   - downstream: GEMINI
     upstream: OLLAMA
     base:
@@ -1129,6 +1270,5 @@ utilities:
     allowed_upstreams: [GEMINI]
     incompatible_upstream_behavior: pre_send_reject
     verification:
-      status: partial
-      evidence: [gemini-utility-exposure, router-method-contract, utility-pre-send-reject]
-      owner: R3.19
+      status: verified
+      evidence: [r3-19-count-tokens, r3-19-count-tokens-reject, r3-19-route-boundary]

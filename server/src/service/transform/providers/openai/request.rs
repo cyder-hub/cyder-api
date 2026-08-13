@@ -162,7 +162,7 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
             .into_iter()
             .map(|msg| {
                 let role = match msg.role.as_str() {
-                    "system" => UnifiedRole::System,
+                    "system" | "developer" => UnifiedRole::System,
                     "user" => UnifiedRole::User,
                     "assistant" => UnifiedRole::Assistant,
                     "tool" => UnifiedRole::Tool,
@@ -218,6 +218,10 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
                             }
                         }
                     }
+                }
+
+                if let Some(reasoning) = msg.reasoning_content {
+                    content.insert(0, UnifiedContentPart::Reasoning { text: reasoning });
                 }
 
                 if let Some(refusal) = msg.refusal {
@@ -315,7 +319,7 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
             parallel_tool_calls,
             stream: openai_req.stream.unwrap_or(false),
             temperature: openai_req.temperature,
-            max_tokens: openai_req.max_tokens,
+            max_tokens: openai_req.max_completion_tokens.or(openai_req.max_tokens),
             top_p: openai_req.top_p,
             stop,
             seed: openai_req.seed,
@@ -352,6 +356,7 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                 let mut tool_calls = Vec::new();
                 let mut tool_results = Vec::new();
                 let mut refusal = None;
+                let mut reasoning_content = String::new();
                 let mut has_multimodal = false;
 
                 for part in msg.content {
@@ -373,7 +378,7 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                             });
                         }
                         UnifiedContentPart::Reasoning { text } => {
-                            content_parts.push(OpenAiContentPart::Text { text });
+                            reasoning_content.push_str(&text);
                         }
                         UnifiedContentPart::ImageData { mime_type, data } => {
                             has_multimodal = true;
@@ -457,31 +462,28 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                     // Multiple parts or has images - use parts format
                     Some(OpenAiContent::Parts(content_parts.clone()))
                 };
+                let reasoning_content =
+                    (!reasoning_content.is_empty()).then_some(reasoning_content);
 
                 // If there are tool results, they must be separate messages in OpenAI
                 // We also need to handle mixed content (e.g. Text + ToolResults) by creating separate messages
                 let mut generated_messages = Vec::new();
 
                 // 1. If there is text content, create a message for it first
-                if let Some(c) = content_val {
+                if content_val.is_some()
+                    || reasoning_content.is_some()
+                    || !tool_calls.is_empty()
+                    || refusal.is_some()
+                {
                     generated_messages.push(OpenAiMessage {
                         role: role.clone(),
-                        content: Some(c),
+                        content: content_val,
+                        reasoning_content,
                         tool_calls: if tool_calls.is_empty() {
                             None
                         } else {
                             Some(tool_calls.clone())
                         },
-                        name: None,
-                        tool_call_id: None,
-                        refusal: refusal.clone(),
-                    });
-                } else if !tool_calls.is_empty() {
-                    // Case where there is no text but there are tool calls (Assistant invoking tool)
-                    generated_messages.push(OpenAiMessage {
-                        role: role.clone(),
-                        content: None,
-                        tool_calls: Some(tool_calls),
                         name: None,
                         tool_call_id: None,
                         refusal: refusal.clone(),
@@ -493,6 +495,7 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                     generated_messages.push(OpenAiMessage {
                         role: "tool".to_string(),
                         content: Some(OpenAiContent::Text(result.legacy_content())),
+                        reasoning_content: None,
                         tool_calls: None,
                         name: result.name,
                         tool_call_id: Some(result.tool_call_id),
@@ -546,6 +549,7 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
             stream: Some(unified_req.stream),
             temperature: unified_req.temperature,
             max_tokens: unified_req.max_tokens,
+            max_completion_tokens: None,
             top_p: unified_req.top_p,
             stop,
             n: openai_extension.n,

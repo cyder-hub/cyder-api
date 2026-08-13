@@ -23,6 +23,7 @@ use tokio::sync::Mutex as TokioMutex;
 pub(crate) use client::send_with_deadline;
 
 use self::{non_stream::handle_non_streaming_response, stream::handle_streaming_response_guarded};
+use crate::proxy::utility::UtilityResponseKind;
 use crate::{
     proxy::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
@@ -33,7 +34,7 @@ use crate::{
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
-        upstream_profile::UpstreamOperation, upstream_response::normalize_content_type,
+        upstream_response::normalize_content_type,
     },
 };
 
@@ -46,7 +47,7 @@ pub(in crate::proxy) enum ProxyResponseMode {
     Utility {
         downstream_protocol: DownstreamProtocol,
         upstream_protocol: UpstreamProtocol,
-        operation: Option<UpstreamOperation>,
+        kind: UtilityResponseKind,
     },
 }
 
@@ -68,7 +69,7 @@ impl ProxyResponseMode {
     fn expects_usage(self) -> bool {
         match self {
             Self::Generation { .. } => true,
-            Self::Utility { operation, .. } => operation == Some(UpstreamOperation::Embeddings),
+            Self::Utility { kind, .. } => kind == UtilityResponseKind::Embeddings,
         }
     }
 }

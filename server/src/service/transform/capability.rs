@@ -18,6 +18,7 @@ pub(crate) enum TransformValueKind {
     ExecutableCode,
     ToolCall,
     ToolResult,
+    ReasoningHistory,
     ReasoningContent,
     ImageDelta,
     ToolCallDelta,
@@ -38,6 +39,7 @@ pub(crate) struct ProtocolCapabilityMatrix {
 pub(crate) struct RequestCapabilityMatrix {
     pub tool_definitions: bool,
     pub tool_role_messages: bool,
+    pub reasoning_history: bool,
     pub top_k_parameter: bool,
     pub image_url_input: bool,
     pub image_inline_input: bool,
@@ -121,6 +123,7 @@ impl ProtocolCapabilityMatrix {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
+                    reasoning_history: true,
                     top_k_parameter: false,
                     image_url_input: true,
                     image_inline_input: true,
@@ -129,14 +132,14 @@ impl ProtocolCapabilityMatrix {
                     executable_code_input: false,
                 },
                 response: ResponseCapabilityMatrix {
-                    reasoning_content: false,
+                    reasoning_content: true,
                     refusal: true,
                     citations: false,
                     file_output: false,
                 },
                 stream: StreamCapabilityMatrix {
                     tool_call_deltas: true,
-                    reasoning_deltas: false,
+                    reasoning_deltas: true,
                     reasoning_summary_parts: false,
                     image_deltas: false,
                     blob_deltas: false,
@@ -155,6 +158,7 @@ impl ProtocolCapabilityMatrix {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
+                    reasoning_history: true,
                     top_k_parameter: false,
                     image_url_input: true,
                     image_inline_input: true,
@@ -189,6 +193,7 @@ impl ProtocolCapabilityMatrix {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
+                    reasoning_history: true,
                     top_k_parameter: true,
                     image_url_input: true,
                     image_inline_input: true,
@@ -223,6 +228,7 @@ impl ProtocolCapabilityMatrix {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
+                    reasoning_history: true,
                     top_k_parameter: false,
                     image_url_input: true,
                     image_inline_input: true,
@@ -257,6 +263,7 @@ impl ProtocolCapabilityMatrix {
                 request: RequestCapabilityMatrix {
                     tool_definitions: false,
                     tool_role_messages: false,
+                    reasoning_history: false,
                     top_k_parameter: false,
                     image_url_input: false,
                     image_inline_input: false,
@@ -314,6 +321,7 @@ impl From<&UnifiedContentPartDelta> for TransformValueKind {
     fn from(part: &UnifiedContentPartDelta) -> Self {
         match part {
             UnifiedContentPartDelta::TextDelta { .. } => Self::Text,
+            UnifiedContentPartDelta::ReasoningDelta { .. } => Self::ReasoningDelta,
             UnifiedContentPartDelta::ImageDelta { .. } => Self::ImageDelta,
             UnifiedContentPartDelta::ToolCallDelta(_) => Self::ToolCallDelta,
         }
@@ -329,6 +337,7 @@ mod tests {
         let caps = ProtocolCapabilityMatrix::for_downstream(DownstreamProtocol::Responses);
 
         assert!(caps.request.tool_definitions);
+        assert!(caps.request.reasoning_history);
         assert!(caps.request.image_inline_input);
         assert!(caps.request.file_inline_input);
         assert!(caps.response.reasoning_content);
@@ -349,11 +358,20 @@ mod tests {
     }
 
     #[test]
+    fn openai_declares_request_history_and_response_reasoning_separately() {
+        let caps = ProtocolCapabilityMatrix::for_upstream(UpstreamProtocol::Openai);
+
+        assert!(caps.request.reasoning_history);
+        assert!(caps.response.reasoning_content);
+    }
+
+    #[test]
     fn test_capability_matrix_reports_expected_gemini_and_ollama_boundaries() {
         let gemini = ProtocolCapabilityMatrix::for_downstream(DownstreamProtocol::Gemini);
         let ollama = ProtocolCapabilityMatrix::for_upstream(UpstreamProtocol::Ollama);
 
         assert!(gemini.request.image_url_input);
+        assert!(gemini.request.reasoning_history);
         assert!(gemini.request.image_inline_input);
         assert!(!gemini.request.file_inline_input);
         assert!(gemini.response.reasoning_content);
@@ -364,6 +382,7 @@ mod tests {
         assert!(gemini.structured_content.citations);
 
         assert!(!ollama.request.tool_definitions);
+        assert!(!ollama.request.reasoning_history);
         assert!(!ollama.request.image_inline_input);
         assert!(!ollama.response.refusal);
         assert!(!ollama.stream.tool_call_deltas);

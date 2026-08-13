@@ -61,7 +61,6 @@ pub(super) fn parse_utility_usage_normalization(
         .get("usage")
         .and_then(|u| u.get("prompt_tokens").or_else(|| u.get("total_tokens")))
         .and_then(|t| t.as_i64())
-        .or_else(|| response_body.get("totalTokens").and_then(|t| t.as_i64()))
         .or_else(|| {
             response_body
                 .get("meta")
@@ -144,20 +143,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_utility_usage_normalization_supports_openai_and_gemini_shapes() {
+    fn parse_utility_usage_normalization_supports_billable_utility_shapes_only() {
         let openai_usage = parse_utility_usage_normalization(&serde_json::json!({
             "usage": {"prompt_tokens": 4, "total_tokens": 7}
         }))
         .unwrap();
-        let gemini_usage =
-            parse_utility_usage_normalization(&serde_json::json!({"totalTokens": 9})).unwrap();
 
         assert_eq!(openai_usage.total_input_tokens, 4);
         assert_eq!(openai_usage.total_output_tokens, 0);
         assert!(!openai_usage.output_tokens_applicable);
-        assert_eq!(gemini_usage.total_input_tokens, 9);
-        assert_eq!(gemini_usage.total_output_tokens, 0);
-        assert!(!gemini_usage.output_tokens_applicable);
+        assert!(
+            parse_utility_usage_normalization(&serde_json::json!({"totalTokens": 9})).is_none()
+        );
         assert!(
             parse_utility_usage_normalization(&serde_json::json!({
                 "usage": {"prompt_tokens": -1}

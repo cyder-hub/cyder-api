@@ -1,42 +1,195 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::unified::*;
-use crate::service::transform::{TransformProtocol, TransformValueKind, record_stream_diagnostic};
+use crate::service::transform::{
+    TransformProtocol, TransformReasonCode, TransformValueKind, record_stream_diagnostic,
+};
 use crate::utils::ID_GENERATOR;
 
 use super::payload::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GeminiTerminalKind {
+    Stop,
+    MaxTokens,
+    Safety,
+    PromptBlock,
+    ApplicationFailure,
+    ObservationDegraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GeminiTerminalClassification {
+    pub(crate) kind: GeminiTerminalKind,
+    pub(crate) reason_code: Option<TransformReasonCode>,
+}
+
+impl GeminiTerminalClassification {
+    const fn confirmed(kind: GeminiTerminalKind) -> Self {
+        Self {
+            kind,
+            reason_code: None,
+        }
+    }
+
+    const fn degraded(reason_code: TransformReasonCode) -> Self {
+        Self {
+            kind: GeminiTerminalKind::ObservationDegraded,
+            reason_code: Some(reason_code),
+        }
+    }
+}
+
+pub(crate) fn is_gemini_safety_finish_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "SAFETY"
+            | "RECITATION"
+            | "LANGUAGE"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "IMAGE_RECITATION"
+            | "ESCALATION"
+            | "MODEL_ARMOR"
+    )
+}
+
+pub(crate) fn is_gemini_application_failure_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "MALFORMED_FUNCTION_CALL"
+            | "UNEXPECTED_TOOL_CALL"
+            | "TOO_MANY_TOOL_CALLS"
+            | "MISSING_THOUGHT_SIGNATURE"
+            | "MALFORMED_RESPONSE"
+            | "NO_IMAGE"
+            | "IMAGE_OTHER"
+            | "OTHER"
+    )
+}
+
+pub(crate) fn is_known_gemini_prompt_block_reason(reason: &str) -> bool {
+    is_gemini_safety_finish_reason(reason) || matches!(reason, "JAILBREAK" | "OTHER")
+}
+
+pub(crate) fn classify_gemini_finish_reason(reason: Option<&str>) -> GeminiTerminalClassification {
+    match reason {
+        Some("STOP") => GeminiTerminalClassification::confirmed(GeminiTerminalKind::Stop),
+        Some("MAX_TOKENS") => {
+            GeminiTerminalClassification::confirmed(GeminiTerminalKind::MaxTokens)
+        }
+        Some(reason) if is_gemini_safety_finish_reason(reason) => {
+            GeminiTerminalClassification::confirmed(GeminiTerminalKind::Safety)
+        }
+        Some(reason) if is_gemini_application_failure_reason(reason) => {
+            GeminiTerminalClassification::confirmed(GeminiTerminalKind::ApplicationFailure)
+        }
+        None | Some("") => {
+            GeminiTerminalClassification::degraded(TransformReasonCode::IllegalUpstreamTerminal)
+        }
+        Some(reason) if reason.ends_with("_UNSPECIFIED") => {
+            GeminiTerminalClassification::degraded(TransformReasonCode::IllegalUpstreamTerminal)
+        }
+        Some(_) => GeminiTerminalClassification::degraded(TransformReasonCode::UnknownStopReason),
+    }
+}
+
+pub(crate) fn classify_gemini_terminal(data: &Value) -> GeminiTerminalClassification {
+    let Some(object) = data.as_object() else {
+        return GeminiTerminalClassification::degraded(
+            TransformReasonCode::IllegalUpstreamTerminal,
+        );
+    };
+    let candidates = match object.get("candidates") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(candidates)) => candidates.as_slice(),
+        Some(_) => {
+            return GeminiTerminalClassification::degraded(
+                TransformReasonCode::InvalidProtocolShape,
+            );
+        }
+    };
+    let block_reason = object
+        .get("promptFeedback")
+        .and_then(Value::as_object)
+        .and_then(|feedback| feedback.get("blockReason"))
+        .filter(|reason| !reason.is_null())
+        .and_then(Value::as_str);
+
+    if candidates.is_empty() {
+        return match block_reason {
+            Some(reason) if is_known_gemini_prompt_block_reason(reason) => {
+                GeminiTerminalClassification::confirmed(GeminiTerminalKind::PromptBlock)
+            }
+            None | Some("") => {
+                GeminiTerminalClassification::degraded(TransformReasonCode::IllegalUpstreamTerminal)
+            }
+            Some(reason) if reason.ends_with("_UNSPECIFIED") => {
+                GeminiTerminalClassification::degraded(TransformReasonCode::IllegalUpstreamTerminal)
+            }
+            Some(_) => {
+                GeminiTerminalClassification::degraded(TransformReasonCode::UnknownStopReason)
+            }
+        };
+    }
+
+    if candidates.len() != 1 || block_reason.is_some() {
+        return GeminiTerminalClassification::degraded(TransformReasonCode::UnsupportedContent);
+    }
+    let Some(candidate) = candidates[0].as_object() else {
+        return GeminiTerminalClassification::degraded(TransformReasonCode::InvalidProtocolShape);
+    };
+    if candidate
+        .get("index")
+        .is_some_and(|index| !index.is_null() && index.as_u64() != Some(0))
+    {
+        return GeminiTerminalClassification::degraded(TransformReasonCode::UnsupportedContent);
+    }
+    let finish_reason = candidate
+        .get("finishReason")
+        .filter(|reason| !reason.is_null())
+        .and_then(Value::as_str);
+    classify_gemini_finish_reason(finish_reason)
+}
+
 pub(crate) fn build_gemini_tool_call_key(
+    response_id: &str,
     provider_order: u32,
-    message_index: u32,
     part_index: u32,
     function_name: &str,
 ) -> String {
     format!(
-        "provider_order={provider_order}:message_index={message_index}:part_index={part_index}:function_name={function_name}"
+        "response_id={response_id}:provider_order={provider_order}:part_index={part_index}:function_name={function_name}"
     )
 }
 
 pub(crate) fn build_gemini_synthetic_tool_call_id(
+    response_id: &str,
     provider_order: u32,
-    message_index: u32,
     part_index: u32,
     function_name: &str,
 ) -> String {
-    let normalized_name: String = function_name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-
-    format!("gemini-call-{provider_order}-{message_index}-{part_index}-{normalized_name}")
+    let mut digest = Sha256::new();
+    digest.update(b"cyder:gemini-tool-call-id:v1\0");
+    let provider_order = provider_order.to_string();
+    let part_index = part_index.to_string();
+    for value in [
+        response_id.as_bytes(),
+        provider_order.as_bytes(),
+        part_index.as_bytes(),
+        function_name.as_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+    let encoded = format!("{:x}", digest.finalize());
+    format!("gemini-call-{}", &encoded[..24])
 }
 
 pub(crate) fn build_gemini_synthetic_response_id(kind: &str) -> String {
@@ -292,22 +445,71 @@ pub(crate) fn gemini_prompt_feedback_to_unified(
 pub(crate) fn build_gemini_response_metadata(
     prompt_feedback: Option<GeminiPromptFeedback>,
     candidates: &[GeminiCandidate],
+    response_id: Option<&str>,
 ) -> Option<UnifiedProviderResponseMetadata> {
     let candidates = candidates
         .iter()
         .enumerate()
-        .map(|(position, candidate)| UnifiedGeminiCandidateMetadata {
-            index: candidate
+        .map(|(position, candidate)| {
+            let index = candidate
                 .index
-                .unwrap_or_else(|| u32::try_from(position).unwrap_or(u32::MAX)),
-            safety_ratings: gemini_safety_ratings_to_unified(candidate.safety_ratings.clone()),
-            citation_metadata: gemini_citation_metadata_to_unified(
-                candidate.citation_metadata.clone(),
-            ),
-            token_count: candidate.token_count,
+                .unwrap_or_else(|| u32::try_from(position).unwrap_or(u32::MAX));
+            let tool_associations = candidate
+                .content
+                .as_ref()
+                .into_iter()
+                .flat_map(|content| content.parts.iter().enumerate())
+                .filter_map(|(part_index, part)| {
+                    let GeminiPart::FunctionCall {
+                        function_call,
+                        thought_signature,
+                    } = part
+                    else {
+                        return None;
+                    };
+                    let unified_tool_call_id = function_call.id.clone().or_else(|| {
+                        response_id.map(|response_id| {
+                            build_gemini_synthetic_tool_call_id(
+                                response_id,
+                                index,
+                                u32::try_from(part_index).unwrap_or(u32::MAX),
+                                &function_call.name,
+                            )
+                        })
+                    })?;
+                    Some(UnifiedGeminiToolAssociation {
+                        unified_tool_call_id,
+                        provider_tool_call_id: function_call.id.clone(),
+                        thought_signature: thought_signature.clone(),
+                    })
+                })
+                .collect();
+            let thought_signature_present = candidate.content.as_ref().is_some_and(|content| {
+                content.parts.iter().any(|part| match part {
+                    GeminiPart::Thought {
+                        thought_signature, ..
+                    }
+                    | GeminiPart::FunctionCall {
+                        thought_signature, ..
+                    } => thought_signature.is_some(),
+                    _ => false,
+                })
+            });
+            UnifiedGeminiCandidateMetadata {
+                index,
+                thought_signature_present,
+                tool_associations,
+                safety_ratings: gemini_safety_ratings_to_unified(candidate.safety_ratings.clone()),
+                citation_metadata: gemini_citation_metadata_to_unified(
+                    candidate.citation_metadata.clone(),
+                ),
+                token_count: candidate.token_count,
+            }
         })
         .filter(|candidate| {
-            !candidate.safety_ratings.is_empty()
+            candidate.thought_signature_present
+                || !candidate.tool_associations.is_empty()
+                || !candidate.safety_ratings.is_empty()
                 || candidate.citation_metadata.is_some()
                 || candidate.token_count.is_some()
         })
@@ -331,8 +533,9 @@ pub(crate) fn build_gemini_response_metadata(
 pub(crate) fn build_gemini_session_metadata(
     prompt_feedback: Option<GeminiPromptFeedback>,
     candidates: &[GeminiCandidate],
+    response_id: Option<&str>,
 ) -> Option<UnifiedProviderSessionMetadata> {
-    build_gemini_response_metadata(prompt_feedback, candidates).map(|metadata| {
+    build_gemini_response_metadata(prompt_feedback, candidates, response_id).map(|metadata| {
         UnifiedProviderSessionMetadata {
             gemini: metadata.gemini,
             anthropic: None,

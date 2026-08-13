@@ -92,7 +92,11 @@ pub(crate) fn process_success_response_body(
                 decompressed_body.clone(),
                 None,
                 None,
-                crate::service::transform::ResponseApplicationOutcome::Success,
+                if upstream_protocol == UpstreamProtocol::Gemini {
+                    crate::service::transform::ResponseApplicationOutcome::Indeterminate
+                } else {
+                    crate::service::transform::ResponseApplicationOutcome::Success
+                },
                 collector.into_summary(),
             ))
         }
@@ -187,6 +191,23 @@ mod tests {
                 "usage": {"input_tokens": 11, "output_tokens": 7}
             }))
             .expect("Anthropic fixture serializes"),
+        )
+    }
+
+    fn gemini_candidate_body(finish_reason: &str, content: Option<Value>) -> Bytes {
+        let mut candidate = serde_json::json!({
+            "index": 0,
+            "finishReason": finish_reason
+        });
+        if let Some(content) = content {
+            candidate["content"] = content;
+        }
+        Bytes::from(
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "responseId": "gemini-terminal",
+                "candidates": [candidate]
+            }))
+            .expect("Gemini fixture serializes"),
         )
     }
 
@@ -528,7 +549,7 @@ mod tests {
         for (source_reason, openai_reason, responses_status, responses_reason, gemini_reason) in [
             ("end_turn", "stop", "completed", None, "STOP"),
             ("stop_sequence", "stop", "completed", None, "STOP"),
-            ("tool_use", "tool_calls", "completed", None, "TOOL_USE"),
+            ("tool_use", "tool_calls", "completed", None, "STOP"),
             (
                 "max_tokens",
                 "length",
@@ -791,5 +812,491 @@ mod tests {
         assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
         assert_eq!(failure.semantic_unit, TransformSemanticUnit::Usage);
         assert_eq!(failure.reason_code, TransformReasonCode::UsageOverflow);
+    }
+
+    #[test]
+    fn gemini_cross_wire_maps_stop_max_safety_and_prompt_block_terminals() {
+        let text_content = serde_json::json!({
+            "role":"model",
+            "parts":[{"text":"partial or complete"}]
+        });
+        for (reason, openai, responses_status, responses_reason, anthropic) in [
+            ("STOP", "stop", "completed", None, "end_turn"),
+            (
+                "MAX_TOKENS",
+                "length",
+                "incomplete",
+                Some("max_output_tokens"),
+                "max_tokens",
+            ),
+        ] {
+            let body = gemini_candidate_body(reason, Some(text_content.clone()));
+            for (target, pointer, expected) in [
+                (
+                    DownstreamProtocol::Openai,
+                    "/choices/0/finish_reason",
+                    openai,
+                ),
+                (DownstreamProtocol::Responses, "/status", responses_status),
+                (DownstreamProtocol::Anthropic, "/stop_reason", anthropic),
+            ] {
+                let (output, _, _, outcome, _) =
+                    process_success_response_body(&body, target, UpstreamProtocol::Gemini)
+                        .expect("confirmed Gemini terminal should transform");
+                assert_eq!(
+                    outcome,
+                    crate::service::transform::ResponseApplicationOutcome::Success
+                );
+                let output: Value = serde_json::from_slice(&output).expect("target JSON");
+                assert_eq!(
+                    output.pointer(pointer).and_then(Value::as_str),
+                    Some(expected),
+                    "{reason} -> {target:?}"
+                );
+                if target == DownstreamProtocol::Responses {
+                    assert_eq!(
+                        output
+                            .pointer("/incomplete_details/reason")
+                            .and_then(Value::as_str),
+                        responses_reason,
+                        "{reason} -> Responses"
+                    );
+                }
+            }
+        }
+
+        for reason in [
+            "SAFETY",
+            "RECITATION",
+            "LANGUAGE",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+            "IMAGE_SAFETY",
+            "IMAGE_PROHIBITED_CONTENT",
+            "IMAGE_RECITATION",
+            "ESCALATION",
+            "MODEL_ARMOR",
+        ] {
+            let body = gemini_candidate_body(reason, None);
+            for (target, pointer, expected) in [
+                (
+                    DownstreamProtocol::Openai,
+                    "/choices/0/finish_reason",
+                    "content_filter",
+                ),
+                (DownstreamProtocol::Responses, "/status", "incomplete"),
+                (DownstreamProtocol::Anthropic, "/stop_reason", "refusal"),
+            ] {
+                let (output, _, _, outcome, _) =
+                    process_success_response_body(&body, target, UpstreamProtocol::Gemini)
+                        .expect("Gemini safety terminal should transform");
+                assert_eq!(
+                    outcome,
+                    crate::service::transform::ResponseApplicationOutcome::Success
+                );
+                let output: Value = serde_json::from_slice(&output).expect("target JSON");
+                assert_eq!(
+                    output.pointer(pointer).and_then(Value::as_str),
+                    Some(expected),
+                    "{reason} -> {target:?}"
+                );
+                if target == DownstreamProtocol::Responses {
+                    assert_eq!(
+                        output
+                            .pointer("/incomplete_details/reason")
+                            .and_then(Value::as_str),
+                        Some("content_filter")
+                    );
+                }
+            }
+        }
+
+        for block_reason in ["SAFETY", "JAILBREAK", "OTHER"] {
+            let body = Bytes::from(
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "promptFeedback":{"blockReason":block_reason},
+                    "usageMetadata":{
+                        "promptTokenCount":3,
+                        "candidatesTokenCount":0,
+                        "totalTokenCount":3
+                    }
+                }))
+                .expect("prompt block fixture serializes"),
+            );
+            for (target, pointer, expected) in [
+                (
+                    DownstreamProtocol::Openai,
+                    "/choices/0/finish_reason",
+                    "content_filter",
+                ),
+                (DownstreamProtocol::Responses, "/status", "incomplete"),
+                (DownstreamProtocol::Anthropic, "/stop_reason", "refusal"),
+            ] {
+                let (output, usage, _, outcome, _) =
+                    process_success_response_body(&body, target, UpstreamProtocol::Gemini)
+                        .expect("Gemini prompt block should transform");
+                assert_eq!(
+                    outcome,
+                    crate::service::transform::ResponseApplicationOutcome::Success
+                );
+                assert_eq!(usage.expect("prompt block usage").total_tokens, 3);
+                let output: Value = serde_json::from_slice(&output).expect("target JSON");
+                assert_eq!(
+                    output.pointer(pointer).and_then(Value::as_str),
+                    Some(expected),
+                    "{block_reason} -> {target:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_stop_with_reasoning_and_tool_call_preserves_association() {
+        let body = gemini_candidate_body(
+            "STOP",
+            Some(serde_json::json!({
+                "role":"model",
+                "parts":[
+                    {"text":"thinking","thought":true,"thoughtSignature":"sig-safe"},
+                    {"functionCall":{"name":"lookup","args":{"q":"safe"}},
+                     "thoughtSignature":"sig-tool"}
+                ]
+            })),
+        );
+        let (output, _, _, outcome, _) = process_success_response_body(
+            &body,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Gemini,
+        )
+        .expect("STOP tool call should transform");
+        assert_eq!(
+            outcome,
+            crate::service::transform::ResponseApplicationOutcome::Success
+        );
+        let output: Value = serde_json::from_slice(&output).expect("OpenAI JSON");
+        assert_eq!(
+            output.pointer("/choices/0/finish_reason"),
+            Some(&serde_json::json!("tool_calls"))
+        );
+        assert_eq!(
+            output.pointer("/choices/0/message/reasoning_content"),
+            Some(&serde_json::json!("thinking"))
+        );
+        assert_eq!(
+            output.pointer("/choices/0/message/tool_calls/0/function/name"),
+            Some(&serde_json::json!("lookup"))
+        );
+        assert!(
+            output
+                .pointer("/choices/0/message/tool_calls/0/id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("gemini-call-"))
+        );
+    }
+
+    #[test]
+    fn gemini_same_wire_preserves_bytes_and_withholds_usage_for_unconfirmed_terminals() {
+        let cases = [
+            (
+                "stop",
+                gemini_candidate_body(
+                    "STOP",
+                    Some(serde_json::json!({"role":"model","parts":[{"text":"ok"}]})),
+                ),
+                crate::service::transform::ResponseApplicationOutcome::Success,
+                false,
+            ),
+            (
+                "application-failure",
+                gemini_candidate_body("MALFORMED_FUNCTION_CALL", None),
+                crate::service::transform::ResponseApplicationOutcome::Failed,
+                true,
+            ),
+            (
+                "unknown",
+                gemini_candidate_body("FUTURE_REASON", None),
+                crate::service::transform::ResponseApplicationOutcome::Indeterminate,
+                true,
+            ),
+            (
+                "unspecified",
+                gemini_candidate_body("FINISH_REASON_UNSPECIFIED", None),
+                crate::service::transform::ResponseApplicationOutcome::Indeterminate,
+                true,
+            ),
+            (
+                "missing",
+                Bytes::from_static(br#"{"candidates":[{"index":0}]}"#),
+                crate::service::transform::ResponseApplicationOutcome::Indeterminate,
+                true,
+            ),
+            (
+                "multi",
+                Bytes::from_static(
+                    br#"{"candidates":[{"index":0,"finishReason":"STOP"},{"index":1,"finishReason":"STOP"}]}"#,
+                ),
+                crate::service::transform::ResponseApplicationOutcome::Indeterminate,
+                true,
+            ),
+            (
+                "bad-index",
+                Bytes::from_static(
+                    br#"{"candidates":[{"index":9,"finishReason":"STOP"}]}"#,
+                ),
+                crate::service::transform::ResponseApplicationOutcome::Indeterminate,
+                true,
+            ),
+            (
+                "bad-json",
+                Bytes::from_static(b"{private-not-json}"),
+                crate::service::transform::ResponseApplicationOutcome::Indeterminate,
+                true,
+            ),
+        ];
+
+        for (case, body, expected_outcome, degraded) in cases {
+            let (output, usage, normalization, outcome, summary) = process_success_response_body(
+                &body,
+                DownstreamProtocol::Gemini,
+                UpstreamProtocol::Gemini,
+            )
+            .expect("same-wire Gemini body should remain pass-through");
+            assert_eq!(output, body, "{case}: exact bytes");
+            assert_eq!(outcome, expected_outcome, "{case}: outcome");
+            assert!(usage.is_none(), "{case}: no usage");
+            assert!(normalization.is_none(), "{case}: no cost normalization");
+            assert_eq!(
+                summary.facts.iter().any(|fact| {
+                    fact.outcome == TransformOutcomeKind::ObservationDegraded
+                        && fact.action == TransformAction::PassThrough
+                        && fact.reason_code == TransformReasonCode::ObservationParseFailed
+                }),
+                degraded,
+                "{case}: observation degradation"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_cross_wire_rejects_failed_unconfirmed_and_malformed_terminals() {
+        let cases = [
+            (
+                "application-failure",
+                gemini_candidate_body("MALFORMED_FUNCTION_CALL", None),
+                TransformReasonCode::UpstreamApplicationFailed,
+            ),
+            (
+                "unknown",
+                gemini_candidate_body("FUTURE_REASON", None),
+                TransformReasonCode::UnknownStopReason,
+            ),
+            (
+                "unspecified",
+                gemini_candidate_body("FINISH_REASON_UNSPECIFIED", None),
+                TransformReasonCode::IllegalUpstreamTerminal,
+            ),
+            (
+                "missing",
+                Bytes::from_static(br#"{"candidates":[{"index":0}]}"#),
+                TransformReasonCode::IllegalUpstreamTerminal,
+            ),
+            (
+                "multi",
+                Bytes::from_static(
+                    br#"{"candidates":[{"index":0,"finishReason":"STOP"},{"index":1,"finishReason":"STOP"}]}"#,
+                ),
+                TransformReasonCode::UnsupportedContent,
+            ),
+            (
+                "bad-index",
+                Bytes::from_static(
+                    br#"{"candidates":[{"index":7,"finishReason":"STOP"}]}"#,
+                ),
+                TransformReasonCode::UnsupportedContent,
+            ),
+            (
+                "bad-json",
+                Bytes::from_static(b"{private-not-json}"),
+                TransformReasonCode::SourceDecodeFailed,
+            ),
+        ];
+
+        for (case, body, expected_reason) in cases {
+            for target in [
+                DownstreamProtocol::Openai,
+                DownstreamProtocol::Responses,
+                DownstreamProtocol::Anthropic,
+            ] {
+                let failure =
+                    process_success_response_body(&body, target, UpstreamProtocol::Gemini)
+                        .expect_err("cross-wire Gemini terminal should fail before headers");
+                assert_eq!(failure.reason_code, expected_reason, "{case} -> {target:?}");
+                assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_nonstream_usage_uses_inclusive_formula_and_nonduplicated_meters() {
+        let body = Bytes::from(
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "responseId":"gemini-usage",
+                "candidates":[{"index":0,"content":{"role":"model","parts":[
+                    {"text":"ok"}
+                ]},"finishReason":"STOP"}],
+                "usageMetadata":{
+                    "promptTokenCount":11,
+                    "candidatesTokenCount":7,
+                    "cachedContentTokenCount":3,
+                    "thoughtsTokenCount":2,
+                    "toolUsePromptTokenCount":1,
+                    "totalTokenCount":21,
+                    "promptTokensDetails":[
+                        {"modality":"TEXT","tokenCount":8},
+                        {"modality":"IMAGE","tokenCount":3}
+                    ],
+                    "cacheTokensDetails":[{"modality":"IMAGE","tokenCount":3}],
+                    "candidatesTokensDetails":[
+                        {"modality":"TEXT","tokenCount":5},
+                        {"modality":"IMAGE","tokenCount":2}
+                    ],
+                    "toolUsePromptTokensDetails":[
+                        {"modality":"TEXT","tokenCount":1}
+                    ]
+                }
+            }))
+            .expect("Gemini usage fixture serializes"),
+        );
+
+        for target in [
+            DownstreamProtocol::Gemini,
+            DownstreamProtocol::Openai,
+            DownstreamProtocol::Responses,
+            DownstreamProtocol::Anthropic,
+        ] {
+            let (_, usage, normalization, outcome, _) =
+                process_success_response_body(&body, target, UpstreamProtocol::Gemini)
+                    .expect("valid Gemini usage should transform");
+            assert_eq!(
+                outcome,
+                crate::service::transform::ResponseApplicationOutcome::Success
+            );
+            let usage = usage.expect("usage info");
+            assert_eq!(usage.input_tokens, 12, "{target:?}");
+            assert_eq!(usage.output_tokens, 9, "{target:?}");
+            assert_eq!(usage.total_tokens, 21, "{target:?}");
+            assert_eq!(usage.input_image_tokens, 0, "{target:?}");
+            assert_eq!(usage.output_image_tokens, 2, "{target:?}");
+            assert_eq!(usage.cached_tokens, 3, "{target:?}");
+            assert_eq!(usage.reasoning_tokens, 2, "{target:?}");
+            let normalization = normalization.expect("usage normalization");
+            assert_eq!(normalization.input_text_tokens, 9, "{target:?}");
+            assert_eq!(normalization.output_text_tokens, 5, "{target:?}");
+            assert_eq!(normalization.input_image_tokens, 0, "{target:?}");
+            assert_eq!(normalization.output_image_tokens, 2, "{target:?}");
+            assert_eq!(normalization.cache_read_tokens, 3, "{target:?}");
+            assert_eq!(normalization.reasoning_tokens, 2, "{target:?}");
+            assert_eq!(normalization.normalized_total_tokens(), 21, "{target:?}");
+            assert!(normalization.warnings.is_empty(), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn gemini_total_mismatch_warns_without_failure_or_provider_rewrite() {
+        let body = Bytes::from_static(
+            br#"{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":2,"toolUsePromptTokenCount":1,"totalTokenCount":999}}"#,
+        );
+        let (output, usage, normalization, outcome, _) = process_success_response_body(
+            &body,
+            DownstreamProtocol::Gemini,
+            UpstreamProtocol::Gemini,
+        )
+        .expect("reported total mismatch should not fail");
+        assert_eq!(output, body);
+        assert_eq!(
+            outcome,
+            crate::service::transform::ResponseApplicationOutcome::Success
+        );
+        assert_eq!(usage.expect("usage").total_tokens, 999);
+        let normalization = normalization.expect("normalization");
+        assert_eq!(normalization.normalized_total_tokens(), 21);
+        assert_eq!(normalization.warnings.len(), 1);
+        assert!(normalization.warnings[0].contains("999"));
+        assert!(normalization.warnings[0].contains("21"));
+    }
+
+    #[test]
+    fn gemini_invalid_usage_is_same_wire_degraded_and_cross_wire_failed() {
+        for (case, usage, cross_wire_reason) in [
+            (
+                "negative",
+                serde_json::json!({"promptTokenCount":-1,"candidatesTokenCount":7,
+                    "totalTokenCount":6}),
+                TransformReasonCode::SourceDecodeFailed,
+            ),
+            (
+                "type",
+                serde_json::json!({"promptTokenCount":"11","candidatesTokenCount":7,
+                    "totalTokenCount":18}),
+                TransformReasonCode::SourceDecodeFailed,
+            ),
+            (
+                "overflow",
+                serde_json::json!({"promptTokenCount":u32::MAX,
+                    "toolUsePromptTokenCount":1,"candidatesTokenCount":0,
+                    "totalTokenCount":u32::MAX}),
+                TransformReasonCode::UsageOverflow,
+            ),
+            (
+                "component-conflict",
+                serde_json::json!({"promptTokenCount":3,"candidatesTokenCount":0,
+                    "cachedContentTokenCount":4,"totalTokenCount":3}),
+                TransformReasonCode::UsageComponentConflict,
+            ),
+        ] {
+            let body = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "candidates":[{"index":0,"content":{"role":"model","parts":[
+                        {"text":"private usage response"}
+                    ]},"finishReason":"STOP"}],
+                    "usageMetadata":usage
+                }))
+                .expect("invalid usage fixture serializes"),
+            );
+            let (output, parsed_usage, normalization, outcome, summary) =
+                process_success_response_body(
+                    &body,
+                    DownstreamProtocol::Gemini,
+                    UpstreamProtocol::Gemini,
+                )
+                .expect("same-wire invalid usage must remain raw");
+            assert_eq!(output, body, "{case}");
+            assert_eq!(
+                outcome,
+                crate::service::transform::ResponseApplicationOutcome::SuccessUnbillable,
+                "{case}"
+            );
+            assert!(parsed_usage.is_none(), "{case}");
+            assert!(normalization.is_none(), "{case}");
+            assert!(summary.facts.iter().any(|fact| {
+                fact.outcome == TransformOutcomeKind::ObservationDegraded
+                    && fact.action == TransformAction::PassThrough
+                    && fact.reason_code == TransformReasonCode::ObservationParseFailed
+            }));
+
+            let failure = process_success_response_body(
+                &body,
+                DownstreamProtocol::Openai,
+                UpstreamProtocol::Gemini,
+            )
+            .expect_err("cross-wire invalid usage must fail");
+            assert_eq!(
+                failure.semantic_unit,
+                TransformSemanticUnit::Usage,
+                "{case}"
+            );
+            assert_eq!(failure.reason_code, cross_wire_reason, "{case}");
+        }
     }
 }

@@ -65,11 +65,12 @@ use crate::{
         RequestPatchPlacement, RequestStatus, UpstreamProfileType, UpstreamProtocol,
     },
     service::{
-        admin::provider::BootstrapProviderCommand,
+        admin::provider::{BootstrapProviderCommand, ReplaceProviderApiKeyInput},
         app_state::{AppState, create_test_app_state},
         infra::AppInfra,
         transform::{StreamTransformer, TransformOutcomeKind},
         upstream_profile::upstream_runtime_profile,
+        vertex::{cache_vertex_token_for_test, vertex_token_is_cached_for_test},
     },
     utils::{
         ID_GENERATOR,
@@ -106,6 +107,8 @@ const RESPONSES_TARGET_SOURCE: &str =
     include_str!("../service/transform/testdata/direct_execution/responses_target.json");
 const ANTHROPIC_TARGET_SOURCE: &str =
     include_str!("../service/transform/testdata/direct_execution/anthropic_target.json");
+const GEMINI_TARGET_SOURCE: &str =
+    include_str!("../service/transform/testdata/direct_execution/gemini_target.json");
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct GoldenEvent {
@@ -260,6 +263,133 @@ struct AnthropicTargetGolden {
     cancellation: ResponsesTargetCancellationGolden,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum GeminiFixtureAuth {
+    XGoogApiKey,
+    Bearer,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum GeminiFixtureAction {
+    GenerateContent,
+    StreamGenerateContent,
+    CountTokens,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum GeminiFixtureCapability {
+    Tools,
+    Reasoning,
+    Multimodal,
+    StructuredOutput,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GeminiFixtureCellStatus {
+    Full,
+    ControlledLoss,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum GeminiFixtureTerminal {
+    Stop,
+    MaxTokens,
+    Safety,
+    PromptBlock,
+    ApplicationFailure,
+    ObservationDegraded,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiTargetProfileGolden {
+    profile_type: UpstreamProfileType,
+    base_url: String,
+    auth: GeminiFixtureAuth,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiTargetOperationGolden {
+    action: GeminiFixtureAction,
+    suffix: String,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiAdvancedRequestGolden {
+    capability: GeminiFixtureCapability,
+    status: GeminiFixtureCellStatus,
+    downstream_request: Value,
+    expected_upstream: Value,
+    #[serde(default)]
+    expected_loss_reason: Option<String>,
+    rejection_request: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiTargetRequestGolden {
+    downstream: DownstreamProtocol,
+    non_stream: Value,
+    stream: Value,
+    advanced: Vec<GeminiAdvancedRequestGolden>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiCountTokensGolden {
+    contents_request: Value,
+    generate_content_request: Value,
+    response: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiTerminalGolden {
+    terminal: GeminiFixtureTerminal,
+    response: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiOfficialFieldsGolden {
+    request_part_tags: Vec<String>,
+    finish_reasons: Vec<String>,
+    usage_fields: Vec<String>,
+    count_tokens_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiTargetErrorGolden {
+    http_429: ResponsesHttpErrorGolden,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeminiTargetGolden {
+    fixture_version: u8,
+    model: String,
+    profiles: Vec<GeminiTargetProfileGolden>,
+    operations: Vec<GeminiTargetOperationGolden>,
+    requests: Vec<GeminiTargetRequestGolden>,
+    non_stream_response: Value,
+    stream_events: Vec<GoldenEvent>,
+    count_tokens: GeminiCountTokensGolden,
+    error: GeminiTargetErrorGolden,
+    cancellation: ResponsesTargetCancellationGolden,
+    terminal_cases: Vec<GeminiTerminalGolden>,
+    official_fields: GeminiOfficialFieldsGolden,
+}
+
 pub(super) fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
     FIXTURE_SOURCES
         .iter()
@@ -292,6 +422,8 @@ fn openai_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
                 fixture.request.upstream_query = openai.request.upstream_query.clone();
                 fixture.non_stream.upstream_response =
                     openai.non_stream.upstream_response.clone();
+                fixture.non_stream.downstream_response["responseId"] =
+                    json!("chatcmpl-baseline");
                 fixture.non_stream.downstream_response["usageMetadata"]
                     ["promptTokensDetails"] =
                     json!([{"modality": "TEXT", "tokenCount": fixture.usage.input}]);
@@ -322,7 +454,9 @@ fn openai_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
                             "usageMetadata":{
                                 "promptTokenCount":11,
                                 "candidatesTokenCount":7,
-                                "totalTokenCount":18
+                                "totalTokenCount":18,
+                                "promptTokensDetails":[{"modality":"TEXT","tokenCount":11}],
+                                "candidatesTokensDetails":[{"modality":"TEXT","tokenCount":7}]
                             }
                         }),
                     },
@@ -417,6 +551,257 @@ fn parse_anthropic_target_golden(source: &str) -> Result<AnthropicTargetGolden, 
 fn anthropic_target_golden() -> AnthropicTargetGolden {
     parse_anthropic_target_golden(ANTHROPIC_TARGET_SOURCE)
         .expect("Anthropic target direct execution fixture should parse")
+}
+
+fn parse_gemini_target_golden(source: &str) -> Result<GeminiTargetGolden, String> {
+    let target: GeminiTargetGolden =
+        serde_json::from_str(source).map_err(|error| error.to_string())?;
+
+    if target.fixture_version != 1 {
+        return Err(format!(
+            "Gemini target fixture_version must be 1, got {}",
+            target.fixture_version
+        ));
+    }
+    if target.model != "$UPSTREAM_MODEL" {
+        return Err("Gemini target model must be $UPSTREAM_MODEL".to_string());
+    }
+
+    let mut profiles = Vec::new();
+    for profile in &target.profiles {
+        if profiles.contains(&profile.profile_type) {
+            return Err(format!(
+                "duplicate Gemini target profile: {:?}",
+                profile.profile_type
+            ));
+        }
+        profiles.push(profile.profile_type);
+    }
+    let expected_profiles = vec![UpstreamProfileType::Gemini, UpstreamProfileType::Vertex];
+    if profiles != expected_profiles {
+        return Err(format!(
+            "Gemini target profiles must be exactly {expected_profiles:?}, got {profiles:?}"
+        ));
+    }
+    if target.profiles[0].auth != GeminiFixtureAuth::XGoogApiKey
+        || target.profiles[1].auth != GeminiFixtureAuth::Bearer
+    {
+        return Err("Gemini target profile auth contract is invalid".to_string());
+    }
+
+    let mut operations = BTreeMap::new();
+    for operation in &target.operations {
+        if operations.insert(operation.action, operation).is_some() {
+            return Err(format!(
+                "duplicate Gemini target operation: {:?}",
+                operation.action
+            ));
+        }
+    }
+    let actual_operations = operations.keys().copied().collect::<Vec<_>>();
+    let expected_operations = vec![
+        GeminiFixtureAction::GenerateContent,
+        GeminiFixtureAction::StreamGenerateContent,
+        GeminiFixtureAction::CountTokens,
+    ];
+    if actual_operations != expected_operations {
+        return Err(format!(
+            "Gemini target operations must be exactly {expected_operations:?}, got {actual_operations:?}"
+        ));
+    }
+    for (action, expected_suffix, expected_query) in [
+        (
+            GeminiFixtureAction::GenerateContent,
+            ":generateContent",
+            None,
+        ),
+        (
+            GeminiFixtureAction::StreamGenerateContent,
+            ":streamGenerateContent",
+            Some("alt=sse"),
+        ),
+        (GeminiFixtureAction::CountTokens, ":countTokens", None),
+    ] {
+        let operation = operations[&action];
+        if operation.suffix != expected_suffix || operation.query.as_deref() != expected_query {
+            return Err(format!(
+                "Gemini target {action:?} operation contract is invalid"
+            ));
+        }
+    }
+
+    let mut requests = Vec::new();
+    for request in &target.requests {
+        if requests.contains(&request.downstream) {
+            return Err(format!(
+                "duplicate Gemini target downstream request: {:?}",
+                request.downstream
+            ));
+        }
+        requests.push(request.downstream);
+        let mut capabilities = BTreeMap::new();
+        for advanced in &request.advanced {
+            if capabilities.insert(advanced.capability, advanced).is_some() {
+                return Err(format!(
+                    "duplicate Gemini target capability {:?} for {:?}",
+                    advanced.capability, request.downstream
+                ));
+            }
+            let expected_status = if request.downstream == DownstreamProtocol::Gemini {
+                GeminiFixtureCellStatus::Full
+            } else {
+                GeminiFixtureCellStatus::ControlledLoss
+            };
+            if advanced.status != expected_status {
+                return Err(format!(
+                    "Gemini target {:?} {:?} status must be {expected_status:?}",
+                    request.downstream, advanced.capability
+                ));
+            }
+            if advanced.status == GeminiFixtureCellStatus::ControlledLoss
+                && advanced
+                    .expected_loss_reason
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+            {
+                return Err(format!(
+                    "Gemini target {:?} {:?} controlled loss needs a reason",
+                    request.downstream, advanced.capability
+                ));
+            }
+        }
+        let actual_capabilities = capabilities.keys().copied().collect::<Vec<_>>();
+        let expected_capabilities = vec![
+            GeminiFixtureCapability::Tools,
+            GeminiFixtureCapability::Reasoning,
+            GeminiFixtureCapability::Multimodal,
+            GeminiFixtureCapability::StructuredOutput,
+        ];
+        if actual_capabilities != expected_capabilities {
+            return Err(format!(
+                "Gemini target {:?} capabilities must be exactly {expected_capabilities:?}, got {actual_capabilities:?}",
+                request.downstream
+            ));
+        }
+    }
+    let expected_downstreams = vec![
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini,
+    ];
+    if requests != expected_downstreams {
+        return Err(format!(
+            "Gemini target downstream requests must be exactly {expected_downstreams:?}, got {requests:?}"
+        ));
+    }
+
+    let mut terminals = BTreeSet::new();
+    for terminal in &target.terminal_cases {
+        if !terminals.insert(terminal.terminal) {
+            return Err(format!(
+                "duplicate Gemini target terminal case: {:?}",
+                terminal.terminal
+            ));
+        }
+    }
+    let expected_terminals = BTreeSet::from([
+        GeminiFixtureTerminal::Stop,
+        GeminiFixtureTerminal::MaxTokens,
+        GeminiFixtureTerminal::Safety,
+        GeminiFixtureTerminal::PromptBlock,
+        GeminiFixtureTerminal::ApplicationFailure,
+        GeminiFixtureTerminal::ObservationDegraded,
+    ]);
+    if terminals != expected_terminals {
+        return Err(format!(
+            "Gemini target terminal cases must be exactly {expected_terminals:?}, got {terminals:?}"
+        ));
+    }
+
+    for (name, fields) in [
+        (
+            "request_part_tags",
+            target.official_fields.request_part_tags.as_slice(),
+        ),
+        (
+            "finish_reasons",
+            target.official_fields.finish_reasons.as_slice(),
+        ),
+        (
+            "usage_fields",
+            target.official_fields.usage_fields.as_slice(),
+        ),
+        (
+            "count_tokens_fields",
+            target.official_fields.count_tokens_fields.as_slice(),
+        ),
+    ] {
+        let unique = fields.iter().collect::<BTreeSet<_>>();
+        if fields.is_empty() || unique.len() != fields.len() {
+            return Err(format!(
+                "Gemini target official field list {name} must be non-empty and unique"
+            ));
+        }
+    }
+
+    Ok(target)
+}
+
+fn gemini_target_golden() -> GeminiTargetGolden {
+    parse_gemini_target_golden(GEMINI_TARGET_SOURCE)
+        .expect("Gemini target direct execution fixture should parse")
+}
+
+fn gemini_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
+    let target = gemini_target_golden();
+
+    fixtures()
+        .into_iter()
+        .map(|(name, mut fixture)| {
+            let request = target
+                .requests
+                .iter()
+                .find(|request| request.downstream == fixture.protocol)
+                .unwrap_or_else(|| panic!("{name}: Gemini target request fixture"));
+            fixture.profile_type = UpstreamProfileType::Gemini;
+            fixture.upstream_headers =
+                BTreeMap::from([("x-goog-api-key".to_string(), PROVIDER_SECRET.to_string())]);
+            fixture.request.upstream = request.non_stream.clone();
+            fixture.request.upstream_path =
+                format!("/v1beta/models/{UPSTREAM_MODEL}:generateContent");
+            fixture.request.upstream_query = None;
+            fixture.non_stream.upstream_response = target.non_stream_response.clone();
+            fixture.stream.upstream_request = request.stream.clone();
+            fixture.stream.upstream_path =
+                format!("/v1beta/models/{UPSTREAM_MODEL}:streamGenerateContent");
+            fixture.stream.upstream_query = Some("alt=sse".to_string());
+            fixture.stream.upstream_events = target.stream_events.clone();
+            fixture.usage = UsageGolden {
+                input: 12,
+                output: 9,
+                total: 21,
+            };
+            fixture.error.upstream_status = target.error.http_429.status;
+            fixture.error.upstream_response = target.error.http_429.response.clone();
+            fixture.error.downstream_status = 429;
+            fixture.cancellation.upstream_request = request.stream.clone();
+            fixture.cancellation.upstream_path =
+                format!("/v1beta/models/{UPSTREAM_MODEL}:streamGenerateContent");
+            fixture.cancellation.upstream_query = Some("alt=sse".to_string());
+            fixture.cancellation.first_upstream_event =
+                target.cancellation.first_upstream_event.clone();
+            if fixture.protocol == DownstreamProtocol::Gemini {
+                fixture.request.downstream = request.non_stream.clone();
+                fixture.error.downstream_request = request.non_stream.clone();
+                fixture.stream.downstream_request = request.stream.clone();
+                fixture.cancellation.downstream_request = request.stream.clone();
+                fixture.non_stream.downstream_response = target.non_stream_response.clone();
+                fixture.stream.downstream_events = target.stream_events.clone();
+            }
+            (name, fixture)
+        })
+        .collect()
 }
 
 fn anthropic_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
@@ -1131,6 +1516,9 @@ impl RouterFixture {
     ) -> i64 {
         let endpoint = match &profile_type {
             UpstreamProfileType::Gemini => format!("{base_url}/v1beta/models"),
+            UpstreamProfileType::Vertex => format!(
+                "{base_url}/v1/projects/project-fixture/locations/us-central1/publishers/google/models"
+            ),
             UpstreamProfileType::Ollama => base_url.to_string(),
             _ => format!("{base_url}/v1"),
         };
@@ -1216,6 +1604,64 @@ impl RouterFixture {
             .await
             .expect("in-place Source Profile replacement should invalidate catalog");
         self.source_id
+    }
+
+    async fn replace_default_gemini_profile_in_place(
+        &self,
+        base_url: &str,
+        profile_type: UpstreamProfileType,
+    ) -> i64 {
+        let profile_name = match profile_type {
+            UpstreamProfileType::Gemini => "GEMINI",
+            UpstreamProfileType::Vertex => "VERTEX",
+            _ => panic!("in-place replacement is only for the unique Gemini wire family"),
+        };
+        let endpoint = match profile_type {
+            UpstreamProfileType::Gemini => format!("{base_url}/v1beta/models"),
+            UpstreamProfileType::Vertex => format!(
+                "{base_url}/v1/projects/project-fixture/locations/us-central1/publishers/google/models"
+            ),
+            _ => unreachable!(),
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut connection = get_connection().expect("test database connection");
+        match &mut connection {
+            DbConnection::Sqlite(connection) => diesel::sql_query(
+                "UPDATE upstream_source SET profile_type = ?, base_url = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind::<diesel::sql_types::Text, _>(profile_name)
+            .bind::<diesel::sql_types::Text, _>(&endpoint)
+            .bind::<diesel::sql_types::BigInt, _>(now)
+            .bind::<diesel::sql_types::BigInt, _>(self.source_id)
+            .execute(connection)
+            .expect("Gemini wire Profile should update in place"),
+            DbConnection::Postgres(_) => {
+                panic!("direct execution regression uses the isolated SQLite fixture")
+            }
+        };
+        self.app_state
+            .catalog
+            .invalidate_provider(self.provider_id, Some(&self.provider_key))
+            .await
+            .expect("Gemini wire Profile replacement should invalidate catalog");
+        self.source_id
+    }
+
+    async fn prepare_cached_vertex_credential(&self, access_token: &str) {
+        self.app_state
+            .admin
+            .provider
+            .replace_provider_api_key(
+                self.provider_id,
+                self.provider_api_key_id,
+                ReplaceProviderApiKeyInput {
+                    api_key: r#"{"client_email":"svc@example.com","token_uri":"https://oauth2.googleapis.com/token","private_key_id":"fixture-key","private_key":"not-used-with-cached-token"}"#
+                        .to_string(),
+                },
+            )
+            .await
+            .expect("Vertex service account fixture should replace provider credential");
+        cache_vertex_token_for_test(self.provider_api_key_id, access_token);
     }
 
     async fn update_source_operation(&self, update: UpdateUpstreamSourceData) {
@@ -2376,6 +2822,5027 @@ fn anthropic_target_fixtures_define_four_complete_protocols_and_reject_bad_overl
 }
 
 #[test]
+fn r3_19_gemini_target_fixtures_define_complete_protocol_contract() {
+    let target = gemini_target_golden();
+
+    assert_eq!(target.fixture_version, 1);
+    assert_eq!(target.model, "$UPSTREAM_MODEL");
+    assert_eq!(target.profiles.len(), 2);
+    assert_eq!(target.operations.len(), 3);
+    assert_eq!(target.requests.len(), 4);
+    assert_eq!(
+        target
+            .requests
+            .iter()
+            .map(|request| request.advanced.len())
+            .sum::<usize>(),
+        16
+    );
+    assert_eq!(target.terminal_cases.len(), 6);
+
+    let gemini = target
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_type == UpstreamProfileType::Gemini)
+        .expect("GEMINI profile fixture");
+    assert_eq!(
+        gemini.base_url,
+        "https://generativelanguage.googleapis.com/v1beta/models"
+    );
+    assert_eq!(gemini.auth, GeminiFixtureAuth::XGoogApiKey);
+
+    let vertex = target
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_type == UpstreamProfileType::Vertex)
+        .expect("VERTEX profile fixture");
+    assert_eq!(
+        vertex.base_url,
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/project-fixture/locations/us-central1/publishers/google/models"
+    );
+    assert_eq!(vertex.auth, GeminiFixtureAuth::Bearer);
+
+    for request in &target.requests {
+        assert!(request.non_stream.is_object(), "{:?}", request.downstream);
+        assert!(request.stream.is_object(), "{:?}", request.downstream);
+        for advanced in &request.advanced {
+            assert!(
+                advanced.downstream_request.is_object(),
+                "{:?} {:?}",
+                request.downstream,
+                advanced.capability
+            );
+            assert!(
+                advanced.expected_upstream.is_object(),
+                "{:?} {:?}",
+                request.downstream,
+                advanced.capability
+            );
+            assert!(
+                advanced.rejection_request.is_object(),
+                "{:?} {:?}",
+                request.downstream,
+                advanced.capability
+            );
+        }
+    }
+
+    assert_eq!(
+        target.non_stream_response["candidates"][0]["finishReason"],
+        "STOP"
+    );
+    assert_eq!(target.stream_events.len(), 3);
+    assert_eq!(target.count_tokens.response["totalTokens"], json!(23));
+    assert_eq!(target.error.http_429.status, 429);
+    assert_eq!(
+        target.error.http_429.response["error"]["status"],
+        "RESOURCE_EXHAUSTED"
+    );
+    assert_eq!(
+        target
+            .cancellation
+            .first_upstream_event
+            .data
+            .pointer("/candidates/0/content/parts/0/text"),
+        Some(&json!("baseline "))
+    );
+    assert!(
+        target
+            .count_tokens
+            .contents_request
+            .get("contents")
+            .is_some()
+    );
+    assert!(
+        target
+            .count_tokens
+            .generate_content_request
+            .get("generateContentRequest")
+            .is_some()
+    );
+
+    for required in [
+        "functionCall",
+        "functionResponse",
+        "thoughtSignature",
+        "inlineData",
+        "fileData",
+    ] {
+        assert!(
+            target
+                .official_fields
+                .request_part_tags
+                .iter()
+                .any(|field| field == required),
+            "missing official Part field {required}"
+        );
+    }
+    for required in [
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "cachedContentTokenCount",
+        "thoughtsTokenCount",
+        "toolUsePromptTokenCount",
+        "totalTokenCount",
+    ] {
+        assert!(
+            target
+                .official_fields
+                .usage_fields
+                .iter()
+                .any(|field| field == required),
+            "missing official usage field {required}"
+        );
+    }
+}
+
+#[test]
+fn r3_19_gemini_target_fixture_loader_rejects_missing_duplicate_and_unknown_tags() {
+    let source: Value = serde_json::from_str(GEMINI_TARGET_SOURCE).expect("valid source JSON");
+
+    let mut missing = source.clone();
+    missing
+        .as_object_mut()
+        .expect("fixture object")
+        .remove("count_tokens");
+    let error = parse_gemini_target_golden(&missing.to_string()).expect_err("missing section");
+    assert!(error.contains("missing field `count_tokens`"), "{error}");
+
+    let mut duplicate = source.clone();
+    let duplicate_request = duplicate["requests"][0].clone();
+    duplicate["requests"]
+        .as_array_mut()
+        .expect("request cases")
+        .push(duplicate_request);
+    let error = parse_gemini_target_golden(&duplicate.to_string()).expect_err("duplicate case");
+    assert!(
+        error.contains("duplicate Gemini target downstream request"),
+        "{error}"
+    );
+
+    let mut illegal_protocol = source.clone();
+    illegal_protocol["requests"][0]["downstream"] = json!("UNSUPPORTED");
+    let error =
+        parse_gemini_target_golden(&illegal_protocol.to_string()).expect_err("illegal protocol");
+    assert!(error.contains("unknown variant"), "{error}");
+
+    let mut illegal_capability = source.clone();
+    illegal_capability["requests"][0]["advanced"][0]["capability"] = json!("web_search");
+    let error = parse_gemini_target_golden(&illegal_capability.to_string())
+        .expect_err("illegal capability");
+    assert!(error.contains("unknown variant"), "{error}");
+
+    let mut illegal_terminal = source.clone();
+    illegal_terminal["terminal_cases"][0]["terminal"] = json!("future_unknown");
+    let error =
+        parse_gemini_target_golden(&illegal_terminal.to_string()).expect_err("illegal terminal");
+    assert!(error.contains("unknown variant"), "{error}");
+
+    let mut unknown_fixture_tag = source;
+    unknown_fixture_tag["future_fixture_contract"] = json!(true);
+    let error = parse_gemini_target_golden(&unknown_fixture_tag.to_string())
+        .expect_err("unknown fixture tag");
+    assert!(error.contains("unknown field"), "{error}");
+}
+
+#[test]
+fn r3_19_gemini_query_auth_and_patch_boundary_is_enforced_end_to_end() {
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .expect("Gemini fixture");
+    run_case("r3-19-gemini-query-boundary", move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, fixture.non_stream.upstream_response.clone())
+                .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_source_variant(
+                router.source_id,
+                RequestPatchVariantInput {
+                    source_id: router.source_id,
+                    model_id: None,
+                    suffix: None,
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Query,
+                        target: "trace".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(json!("manager-safe"))),
+                        description: Some("R3.19 safe Gemini Query Patch".to_string()),
+                    }],
+                },
+            )
+            .await
+            .expect("safe Query Patch should save");
+        router
+            .app_state
+            .catalog
+            .invalidate_models_catalog()
+            .await
+            .expect("Patch catalog should invalidate");
+
+        let uri = format!(
+            "/gemini/v1beta/models/{}:generateContent?key={}&alt=client-owned&trace=downstream-owned&custom=discarded",
+            router.requested_model(),
+            router.downstream_key
+        );
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json")
+            .header("authorization", "Bearer downstream-auth-private-marker")
+            .header("x-api-key", "downstream-x-api-key-private-marker")
+            .header("x-goog-api-key", &router.downstream_key)
+            .header("cookie", "session=downstream-cookie-private-marker")
+            .header(
+                "proxy-authorization",
+                "Basic downstream-proxy-private-marker",
+            )
+            .body(Body::from(
+                serde_json::to_vec(&fixture.request.downstream).unwrap(),
+            ))
+            .expect("Gemini request");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                3019,
+            ))));
+        let response = create_proxy_router(Arc::new(ClientIdentityResolver::new(
+            &ClientIdentityConfig::default(),
+        )))
+        .with_state(Arc::clone(&router.app_state))
+        .oneshot(request)
+        .await
+        .expect("proxy router response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Gemini response body");
+        let captured = upstream.requests().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].path,
+            "/v1beta/models/baseline-upstream-model:generateContent"
+        );
+        assert_eq!(captured[0].query.as_deref(), Some("trace=manager-safe"));
+        assert_eq!(
+            captured[0]
+                .headers
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some(PROVIDER_SECRET)
+        );
+        for forbidden in [
+            "authorization",
+            "x-api-key",
+            "cookie",
+            "proxy-authorization",
+        ] {
+            assert!(!captured[0].headers.contains_key(forbidden), "{forbidden}");
+        }
+        assert_eq!(
+            ["authorization", "x-api-key", "x-goog-api-key"]
+                .into_iter()
+                .map(|name| captured[0].headers.get_all(name).iter().count())
+                .sum::<usize>(),
+            1
+        );
+        router.wait_for_log(RequestStatus::Success).await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn r3_19_gemini_invalid_model_fails_before_credentials_and_network() {
+    const SENTINEL: &str = "gemini-invalid-model-private-marker";
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .expect("Gemini fixture");
+    for profile_type in [UpstreamProfileType::Gemini, UpstreamProfileType::Vertex] {
+        let fixture = fixture.clone();
+        let case_name = format!("r3-19-gemini-invalid-model-{profile_type:?}");
+        run_case(&case_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if profile_type == UpstreamProfileType::Vertex {
+                router
+                    .replace_default_gemini_profile_in_place(&upstream.base_url, profile_type)
+                    .await;
+            }
+            Model::update(
+                router.model_id,
+                &UpdateModelData {
+                    model_name: None,
+                    real_model_name: Some(Some(format!("models/{SENTINEL}"))),
+                    is_enabled: None,
+                    cost_catalog_id: None,
+                },
+            )
+            .expect("invalid legacy model state should seed");
+            router
+                .app_state
+                .catalog
+                .invalidate_provider(router.provider_id, Some(&router.provider_key))
+                .await
+                .expect("provider cache should invalidate");
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("invalid model response");
+            assert!(!String::from_utf8_lossy(&body).contains(SENTINEL));
+            assert_eq!(
+                router.app_state.secret_encryption.decrypt_call_count(),
+                0,
+                "credential decryption precedes Vertex OAuth, so zero decrypt also proves zero OAuth"
+            );
+            assert!(upstream.requests().await.is_empty());
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("provider_configuration_error")
+            );
+            assert!(
+                !log.final_error_message
+                    .unwrap_or_default()
+                    .contains(SENTINEL)
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_post_patch_target_validation_precedes_credentials_and_network() {
+    const SENTINEL: &str = "gemini-invalid-body-private-marker";
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .expect("Gemini fixture");
+    for profile_type in [UpstreamProfileType::Gemini, UpstreamProfileType::Vertex] {
+        let fixture = fixture.clone();
+        let case_name = format!("r3-19-gemini-post-patch-final-validation-{profile_type:?}");
+        run_case(&case_name.clone(), move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if profile_type == UpstreamProfileType::Vertex {
+                router
+                    .replace_default_gemini_profile_in_place(&upstream.base_url, profile_type)
+                    .await;
+            }
+            router
+                .app_state
+                .admin
+                .request_patch
+                .create_source_variant(
+                    router.source_id,
+                    RequestPatchVariantInput {
+                        source_id: router.source_id,
+                        model_id: None,
+                        suffix: None,
+                        enabled: true,
+                        expose_in_models: false,
+                        rules: vec![RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Body,
+                            target: "/contents/0/parts".to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(json!(SENTINEL))),
+                            description: Some("R3.19 post-Patch body validation".to_string()),
+                        }],
+                    },
+                )
+                .await
+                .expect("ordinary body Patch should save");
+            router
+                .app_state
+                .catalog
+                .invalidate_models_catalog()
+                .await
+                .expect("Patch catalog should invalidate");
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("invalid target response body");
+            assert!(!String::from_utf8_lossy(&body).contains(SENTINEL));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            assert!(
+                profile_type != UpstreamProfileType::Vertex
+                    || !vertex_token_is_cached_for_test(router.provider_api_key_id),
+                "{case_name}: Vertex OAuth must not begin"
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("provider_configuration_error")
+            );
+            assert!(
+                !log.final_error_message
+                    .unwrap_or_default()
+                    .contains(SENTINEL)
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_four_downstreams_materialize_native_gemini_nonstream_and_stream_once() {
+    for (name, fixture) in gemini_target_fixtures() {
+        for is_stream in [false, true] {
+            let fixture = fixture.clone();
+            let case_name = format!(
+                "r3-19-{name}-to-gemini-materializer-{}",
+                if is_stream { "stream" } else { "nonstream" }
+            );
+            run_case(&case_name, move |context| async move {
+                let upstream = if is_stream {
+                    TestUpstream::spawn(ScriptedReply::Sse {
+                        events: fixture.stream.upstream_events.clone(),
+                    })
+                    .await
+                } else {
+                    TestUpstream::spawn_json(
+                        StatusCode::OK,
+                        fixture.non_stream.upstream_response.clone(),
+                    )
+                    .await
+                };
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                router
+                    .app_state
+                    .admin
+                    .request_patch
+                    .create_source_variant(
+                        router.source_id,
+                        RequestPatchVariantInput {
+                            source_id: router.source_id,
+                            model_id: None,
+                            suffix: None,
+                            enabled: true,
+                            expose_in_models: false,
+                            rules: vec![
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Query,
+                                    target: "trace".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!("materializer-safe"))),
+                                    description: Some(
+                                        "Gemini materializer query capture".to_string(),
+                                    ),
+                                },
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Header,
+                                    target: "x-r3-19-materializer".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!("enabled"))),
+                                    description: Some(
+                                        "Gemini materializer header capture".to_string(),
+                                    ),
+                                },
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Body,
+                                    target: "/requestTag".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!("patched"))),
+                                    description: Some(
+                                        "Gemini materializer body capture".to_string(),
+                                    ),
+                                },
+                            ],
+                        },
+                    )
+                    .await
+                    .expect("safe generation Patch should save");
+                router
+                    .app_state
+                    .catalog
+                    .invalidate_models_catalog()
+                    .await
+                    .expect("Patch catalog should invalidate");
+                router
+                    .app_state
+                    .secret_encryption
+                    .reset_decrypt_call_count();
+
+                let downstream_body = if is_stream {
+                    &fixture.stream.downstream_request
+                } else {
+                    &fixture.request.downstream
+                };
+                let response = router.send(&fixture, is_stream, downstream_body).await;
+
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{name} stream={is_stream}"
+                );
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("downstream response should complete");
+                let captured = upstream.requests().await;
+                assert_eq!(captured.len(), 1, "{name} stream={is_stream}");
+                let request = &captured[0];
+                assert_eq!(request.method, Method::POST);
+                assert_eq!(
+                    request.path,
+                    if is_stream {
+                        format!("/v1beta/models/{UPSTREAM_MODEL}:streamGenerateContent")
+                    } else {
+                        format!("/v1beta/models/{UPSTREAM_MODEL}:generateContent")
+                    }
+                );
+                let query = request
+                    .query
+                    .as_deref()
+                    .map(|query| {
+                        query
+                            .split('&')
+                            .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+                            .map(|(key, value)| (key.to_string(), value.to_string()))
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                assert_eq!(
+                    query.get("trace").map(String::as_str),
+                    Some("materializer-safe")
+                );
+                assert_eq!(
+                    query.get("alt").map(String::as_str),
+                    is_stream.then_some("sse")
+                );
+                assert_eq!(query.len(), if is_stream { 2 } else { 1 });
+                assert_eq!(
+                    request
+                        .headers
+                        .get("x-goog-api-key")
+                        .and_then(|value| value.to_str().ok()),
+                    Some(PROVIDER_SECRET)
+                );
+                assert_eq!(
+                    request
+                        .headers
+                        .get("x-r3-19-materializer")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("enabled")
+                );
+                assert!(request.headers.contains_key(CONTENT_TYPE));
+                assert!(request.headers.contains_key(&X_REQUEST_ID));
+                let actual_body: Value = serde_json::from_slice(&request.body)
+                    .expect("captured Gemini request should be JSON");
+                let mut expected_body = render_value(
+                    if is_stream {
+                        &fixture.stream.upstream_request
+                    } else {
+                        &fixture.request.upstream
+                    },
+                    &router.requested_model(),
+                );
+                expected_body["requestTag"] = json!("patched");
+                assert_eq!(actual_body, expected_body, "{name} stream={is_stream}");
+                if fixture.protocol == DownstreamProtocol::Gemini {
+                    assert_eq!(actual_body["futureRoot"], json!({"preserve":true}));
+                    assert_eq!(actual_body["generationConfig"]["candidateCount"], 2);
+                } else {
+                    assert_eq!(actual_body["generationConfig"]["candidateCount"], 1);
+                }
+
+                let deadline = Instant::now() + WAIT_TIMEOUT;
+                let log = loop {
+                    if let Some(log) = router.request_logs().await.into_iter().next() {
+                        break log;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{name} stream={is_stream}: request log should persist"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                };
+                assert_log_common(&router, &fixture, &log);
+                assert_eq!(log.source_id, Some(router.source_id));
+                assert_eq!(
+                    log.source_profile_type_snapshot,
+                    Some(UpstreamProfileType::Gemini)
+                );
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn r3_19_three_cross_wire_requests_capture_ordered_roles_and_generation_controls_once() {
+    let response = gemini_target_golden().non_stream_response;
+    for (case_name, protocol, downstream_request, expected_upstream) in [
+        (
+            "openai",
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"$REQUESTED_MODEL",
+                "messages":[
+                    {"role":"system","content":"system-one"},
+                    {"role":"developer","content":"developer-two"},
+                    {"role":"user","content":"user-one"},
+                    {"role":"user","content":"user-two"},
+                    {"role":"assistant","content":"assistant-three"}
+                ],
+                "temperature":0.7,
+                "max_completion_tokens":64,
+                "top_p":0.8,
+                "stop":["STOP"],
+                "seed":7,
+                "presence_penalty":0.25,
+                "frequency_penalty":-0.5,
+                "n":1
+            }),
+            json!({
+                "systemInstruction":{"parts":[{"text":"system-one"},{"text":"developer-two"}]},
+                "contents":[
+                    {"role":"user","parts":[{"text":"user-one"},{"text":"user-two"}]},
+                    {"role":"model","parts":[{"text":"assistant-three"}]}
+                ],
+                "generationConfig":{
+                    "candidateCount":1,"temperature":0.7,"maxOutputTokens":64,"topP":0.8,
+                    "seed":7,"presencePenalty":0.25,"frequencyPenalty":-0.5,
+                    "stopSequences":["STOP"]
+                }
+            }),
+        ),
+        (
+            "responses",
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"$REQUESTED_MODEL",
+                "instructions":"system-one",
+                "input":[
+                    {"role":"developer","content":"developer-two"},
+                    {"role":"user","content":"user-one"},
+                    {"role":"user","content":"user-two"},
+                    {"role":"assistant","content":"assistant-three"}
+                ],
+                "temperature":0.6,"max_output_tokens":63,"top_p":0.75
+            }),
+            json!({
+                "systemInstruction":{"parts":[{"text":"system-one"},{"text":"developer-two"}]},
+                "contents":[
+                    {"role":"user","parts":[{"text":"user-one"},{"text":"user-two"}]},
+                    {"role":"model","parts":[{"text":"assistant-three"}]}
+                ],
+                "generationConfig":{"candidateCount":1,"temperature":0.6,"maxOutputTokens":63,"topP":0.75}
+            }),
+        ),
+        (
+            "anthropic",
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"$REQUESTED_MODEL",
+                "system":"system-one",
+                "messages":[
+                    {"role":"user","content":"user-one"},
+                    {"role":"user","content":"user-two"},
+                    {"role":"assistant","content":"assistant-three"}
+                ],
+                "temperature":0.5,"max_tokens":62,"top_p":0.7,"top_k":31,
+                "stop_sequences":["STOP"]
+            }),
+            json!({
+                "systemInstruction":{"parts":[{"text":"system-one"}]},
+                "contents":[
+                    {"role":"user","parts":[{"text":"user-one"},{"text":"user-two"}]},
+                    {"role":"model","parts":[{"text":"assistant-three"}]}
+                ],
+                "generationConfig":{
+                    "candidateCount":1,"temperature":0.5,"maxOutputTokens":62,"topP":0.7,
+                    "topK":31,"stopSequences":["STOP"]
+                }
+            }),
+        ),
+    ] {
+        let (_, fixture) = gemini_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .expect("Gemini target fixture for downstream protocol");
+        let upstream_response = response.clone();
+        let runtime_name = format!("r3-19-gemini-portable-request-{case_name}");
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router.send(&fixture, false, &downstream_request).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("portable response should complete");
+            let requests = upstream.requests().await;
+            assert_eq!(requests.len(), 1, "{case_name}");
+            let captured: Value = serde_json::from_slice(&requests[0].body)
+                .expect("captured Gemini request should be JSON");
+            assert_eq!(captured, expected_upstream, "{case_name}");
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 1);
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_unrepresentable_gemini_request_controls_are_precredential_zero_call() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini target fixture");
+    for (case_name, field) in [
+        ("multiple-candidates", json!({"n":2})),
+        ("logprobs", json!({"logprobs":true})),
+        ("logit-bias", json!({"logit_bias":{"1":1}})),
+        (
+            "prediction",
+            json!({"prediction":{"type":"content","content":"private-marker"}}),
+        ),
+        ("output-audio", json!({"modalities":["text","audio"]})),
+        ("web-search", json!({"web_search_options":{}})),
+        ("seed-overflow", json!({"seed":2147483648_i64})),
+    ] {
+        let fixture = fixture.clone();
+        let runtime_name = format!("r3-19-gemini-zero-call-{case_name}");
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let mut request = json!({
+                "model":"$REQUESTED_MODEL",
+                "messages":[{"role":"user","content":"hello"}]
+            });
+            request
+                .as_object_mut()
+                .expect("request object")
+                .extend(field.as_object().expect("field object").clone());
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("rejection response should read");
+            assert!(!String::from_utf8_lossy(&body).contains("private-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert!(matches!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error" | "unsupported_capability_error")
+            ));
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_four_tool_cells_capture_native_gemini_requests_once() {
+    let target = gemini_target_golden();
+    let upstream_response = target.non_stream_response.clone();
+    for request_case in target.requests {
+        let advanced = request_case
+            .advanced
+            .iter()
+            .find(|advanced| advanced.capability == GeminiFixtureCapability::Tools)
+            .expect("Gemini tools fixture")
+            .clone();
+        let (_, fixture) = gemini_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == request_case.downstream)
+            .expect("Gemini target fixture for tools cell");
+        let upstream_response = upstream_response.clone();
+        let case_name = format!("r3-19-gemini-tools-{:?}", request_case.downstream);
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(&fixture, false, &advanced.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("tools response should complete");
+            let requests = upstream.requests().await;
+            assert_eq!(requests.len(), 1, "{case_name}");
+            let body: Value = serde_json::from_slice(&requests[0].body)
+                .expect("captured Gemini tools request should be JSON");
+            assert_eq!(
+                body,
+                render_value(&advanced.expected_upstream, &router.requested_model()),
+                "{case_name}"
+            );
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_invalid_tools_and_unsigned_history_are_precredential_zero_call() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini target fixture");
+    for (case_name, request) in [
+        (
+            "built-in",
+            json!({
+                "model":"$REQUESTED_MODEL","messages":[{"role":"user","content":"search"}],
+                "tools":[{"type":"web_search"}],
+                "tool_choice":"required"
+            }),
+        ),
+        (
+            "orphan-result",
+            json!({
+                "model":"$REQUESTED_MODEL","messages":[
+                    {"role":"tool","tool_call_id":"orphan","content":"private-tool-marker"}
+                ]
+            }),
+        ),
+        (
+            "duplicate-call-id",
+            json!({
+                "model":"$REQUESTED_MODEL","messages":[
+                    {"role":"assistant","tool_calls":[
+                        {"id":"duplicate","type":"function","function":{"name":"weather","arguments":"{}"}},
+                        {"id":"duplicate","type":"function","function":{"name":"time","arguments":"{}"}}
+                    ]}
+                ]
+            }),
+        ),
+        (
+            "mismatched-result",
+            json!({
+                "model":"$REQUESTED_MODEL","messages":[
+                    {"role":"assistant","tool_calls":[
+                        {"id":"call-weather","type":"function","function":{"name":"weather","arguments":"{}"}}
+                    ]},
+                    {"role":"tool","tool_call_id":"call-other","content":"private-tool-marker"}
+                ]
+            }),
+        ),
+        (
+            "missing-thought-signature",
+            json!({
+                "model":"$REQUESTED_MODEL","messages":[
+                    {"role":"assistant","tool_calls":[
+                        {"id":"call-weather","type":"function","function":{"name":"weather","arguments":"{}"}}
+                    ]},
+                    {"role":"tool","tool_call_id":"call-weather","content":"private-tool-marker"}
+                ]
+            }),
+        ),
+    ] {
+        let fixture = fixture.clone();
+        let runtime_name = format!("r3-19-gemini-tools-zero-call-{case_name}");
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("tools rejection should read");
+            assert!(!String::from_utf8_lossy(&body).contains("private-tool-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert!(matches!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error" | "unsupported_capability_error")
+            ));
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_four_reasoning_cells_capture_native_gemini_requests_once() {
+    let target = gemini_target_golden();
+    let upstream_response = target.non_stream_response.clone();
+    for request_case in target.requests {
+        let advanced = request_case
+            .advanced
+            .iter()
+            .find(|advanced| advanced.capability == GeminiFixtureCapability::Reasoning)
+            .expect("Gemini reasoning fixture")
+            .clone();
+        let (_, fixture) = gemini_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == request_case.downstream)
+            .expect("Gemini target fixture for reasoning cell");
+        let upstream_response = upstream_response.clone();
+        let case_name = format!("r3-19-gemini-reasoning-{:?}", request_case.downstream);
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(&fixture, false, &advanced.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("reasoning response should complete");
+            let requests = upstream.requests().await;
+            assert_eq!(requests.len(), 1, "{case_name}");
+            let body: Value = serde_json::from_slice(&requests[0].body)
+                .expect("captured Gemini reasoning request should be JSON");
+            assert_eq!(
+                body,
+                render_value(&advanced.expected_upstream, &router.requested_model()),
+                "{case_name}"
+            );
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_invalid_reasoning_controls_are_precredential_zero_call() {
+    let fixtures = gemini_target_fixtures();
+    for (case_name, protocol, request) in [
+        (
+            "openai-unknown-effort",
+            DownstreamProtocol::Openai,
+            json!({"model":"$REQUESTED_MODEL","messages":[{"role":"user","content":"private-reasoning-marker"}],"reasoning_effort":"future"}),
+        ),
+        (
+            "responses-unknown-effort",
+            DownstreamProtocol::Responses,
+            json!({"model":"$REQUESTED_MODEL","input":"private-reasoning-marker","reasoning":{"effort":"future"}}),
+        ),
+        (
+            "anthropic-zero-budget",
+            DownstreamProtocol::Anthropic,
+            json!({"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"user","content":"private-reasoning-marker"}],"thinking":{"type":"enabled","budget_tokens":0}}),
+        ),
+        (
+            "anthropic-negative-budget",
+            DownstreamProtocol::Anthropic,
+            json!({"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"user","content":"private-reasoning-marker"}],"thinking":{"type":"enabled","budget_tokens":-1}}),
+        ),
+        (
+            "anthropic-budget-overflow",
+            DownstreamProtocol::Anthropic,
+            json!({"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"user","content":"private-reasoning-marker"}],"thinking":{"type":"enabled","budget_tokens":4294967296_u64}}),
+        ),
+        (
+            "anthropic-budget-effort-conflict",
+            DownstreamProtocol::Anthropic,
+            json!({"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"user","content":"private-reasoning-marker"}],"thinking":{"type":"enabled","budget_tokens":1024},"output_config":{"effort":"high"}}),
+        ),
+    ] {
+        let fixture = fixtures
+            .iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .map(|(_, fixture)| fixture.clone())
+            .expect("Gemini target fixture for invalid reasoning case");
+        let runtime_name = format!("r3-19-gemini-reasoning-zero-call-{case_name}");
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("reasoning rejection should read");
+            assert!(!String::from_utf8_lossy(&body).contains("private-reasoning-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert!(matches!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error" | "unsupported_capability_error")
+            ));
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_valid_reasoning_model_capability_error_is_one_upstream_call() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini target fixture");
+    run_case(
+        "r3-19-gemini-reasoning-provider-reject",
+        move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::BAD_REQUEST,
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+                body:
+                    br#"{"error":{"code":400,"message":"thinking is not supported by this model"}}"#
+                        .to_vec(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(
+                    &fixture,
+                    false,
+                    &json!({
+                        "model":"$REQUESTED_MODEL",
+                        "messages":[{"role":"user","content":"reason"}],
+                        "reasoning_effort":"high"
+                    }),
+                )
+                .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("provider capability error should read");
+            assert_eq!(upstream.requests().await.len(), 1);
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.upstream_http_status, Some(400));
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn r3_19_four_multimodal_cells_capture_only_native_gemini_inline_data_once() {
+    let target = gemini_target_golden();
+    let upstream_response = target.non_stream_response.clone();
+    for request_case in target.requests {
+        let advanced = request_case
+            .advanced
+            .iter()
+            .find(|advanced| advanced.capability == GeminiFixtureCapability::Multimodal)
+            .expect("Gemini multimodal fixture")
+            .clone();
+        let (_, fixture) = gemini_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == request_case.downstream)
+            .expect("Gemini target fixture for multimodal cell");
+        let upstream_response = upstream_response.clone();
+        let case_name = format!("r3-19-gemini-multimodal-{:?}", request_case.downstream);
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let transformed = crate::service::transform::transform_request_data(
+                advanced.downstream_request.clone(),
+                fixture.protocol,
+                UpstreamProtocol::Gemini,
+                false,
+            )
+            .expect("multimodal cell must be sendable");
+            match advanced.status {
+                GeminiFixtureCellStatus::ControlledLoss => {
+                    let expected_reason = advanced
+                        .expected_loss_reason
+                        .as_deref()
+                        .expect("controlled-loss media fixture reason");
+                    assert!(transformed.summary.facts.iter().any(|fact| {
+                        fact.reason_code.as_str() == expected_reason
+                            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                            && fact.safe_summary.is_none()
+                    }));
+                }
+                GeminiFixtureCellStatus::Full => {
+                    assert!(transformed.summary.facts.iter().all(|fact| !matches!(
+                        fact.outcome,
+                        TransformOutcomeKind::ControlledLossMinor
+                            | TransformOutcomeKind::ControlledLossMajor
+                    )))
+                }
+            }
+
+            let response = router
+                .send(&fixture, false, &advanced.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("multimodal response should complete");
+            let requests = upstream.requests().await;
+            assert_eq!(requests.len(), 1, "{case_name}: no upload, probe, or retry");
+            let body: Value = serde_json::from_slice(&requests[0].body)
+                .expect("captured Gemini multimodal request should be JSON");
+            assert_eq!(
+                body,
+                render_value(&advanced.expected_upstream, &router.requested_model()),
+                "{case_name}"
+            );
+            if fixture.protocol != DownstreamProtocol::Gemini {
+                for inline_data in body["contents"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|content| content["parts"].as_array().into_iter().flatten())
+                    .filter_map(|part| part.get("inlineData"))
+                {
+                    assert!(inline_data.as_object().is_some_and(|object| {
+                        object.len() == 2
+                            && object.contains_key("mimeType")
+                            && object.contains_key("data")
+                    }));
+                }
+                assert!(!body.to_string().contains("fileData"));
+            }
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_invalid_multimodal_inputs_are_precredential_zero_call() {
+    let fixtures = gemini_target_fixtures();
+    for (case_name, protocol, request) in [
+        (
+            "remote-image",
+            DownstreamProtocol::Openai,
+            json!({"model":"$REQUESTED_MODEL","messages":[{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":"https://private.invalid/gemini-media-private-marker.png"}}
+            ]}]}),
+        ),
+        (
+            "provider-file-id",
+            DownstreamProtocol::Responses,
+            json!({"model":"$REQUESTED_MODEL","input":[{"role":"user","content":[
+                {"type":"input_file","filename":"report.pdf","file_id":"gemini-media-private-marker"}
+            ]}]}),
+        ),
+        (
+            "video",
+            DownstreamProtocol::Responses,
+            json!({"model":"$REQUESTED_MODEL","input":[{"role":"user","content":[
+                {"type":"input_video","video_url":"https://private.invalid/gemini-media-private-marker.mp4"}
+            ]}]}),
+        ),
+        (
+            "bad-base64-padding",
+            DownstreamProtocol::Openai,
+            json!({"model":"$REQUESTED_MODEL","messages":[{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ="}}
+            ]}]}),
+        ),
+        (
+            "assistant-role",
+            DownstreamProtocol::Anthropic,
+            json!({"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"assistant","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}
+            ]}]}),
+        ),
+    ] {
+        let fixture = fixtures
+            .iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .map(|(_, fixture)| fixture.clone())
+            .expect("Gemini target fixture for invalid multimodal case");
+        let runtime_name = format!("r3-19-gemini-multimodal-zero-call-{case_name}");
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("multimodal rejection should read");
+            assert!(!String::from_utf8_lossy(&body).contains("gemini-media-private-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("gemini-media-private-marker")
+            );
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_four_structured_output_cells_capture_native_gemini_requests_once() {
+    let target = gemini_target_golden();
+    let upstream_response = target.non_stream_response.clone();
+    for request_case in target.requests {
+        let advanced = request_case
+            .advanced
+            .iter()
+            .find(|advanced| advanced.capability == GeminiFixtureCapability::StructuredOutput)
+            .expect("Gemini structured output fixture")
+            .clone();
+        let (_, fixture) = gemini_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == request_case.downstream)
+            .expect("Gemini target fixture for structured output cell");
+        let upstream_response = upstream_response.clone();
+        let case_name = format!(
+            "r3-19-gemini-structured-output-{:?}",
+            request_case.downstream
+        );
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let transformed = crate::service::transform::transform_request_data(
+                advanced.downstream_request.clone(),
+                fixture.protocol,
+                UpstreamProtocol::Gemini,
+                false,
+            )
+            .expect("structured output cell must be sendable");
+            match advanced.status {
+                GeminiFixtureCellStatus::ControlledLoss => {
+                    let expected_reason = advanced
+                        .expected_loss_reason
+                        .as_deref()
+                        .expect("controlled-loss structured output reason");
+                    assert!(transformed.summary.facts.iter().any(|fact| {
+                        fact.reason_code.as_str() == expected_reason
+                            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                            && fact.safe_summary.is_none()
+                    }));
+                }
+                GeminiFixtureCellStatus::Full => {
+                    assert!(transformed.summary.facts.iter().all(|fact| !matches!(
+                        fact.outcome,
+                        TransformOutcomeKind::ControlledLossMinor
+                            | TransformOutcomeKind::ControlledLossMajor
+                    )))
+                }
+            }
+
+            let response = router
+                .send(&fixture, false, &advanced.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("structured output response should complete");
+            let requests = upstream.requests().await;
+            assert_eq!(requests.len(), 1, "{case_name}");
+            let body: Value = serde_json::from_slice(&requests[0].body)
+                .expect("captured Gemini structured output request should be JSON");
+            assert_eq!(
+                body,
+                render_value(&advanced.expected_upstream, &router.requested_model()),
+                "{case_name}"
+            );
+            if fixture.protocol != DownstreamProtocol::Gemini {
+                let config = &body["generationConfig"];
+                assert_eq!(config["responseMimeType"], "application/json");
+                assert!(config["responseJsonSchema"].is_object());
+                assert!(config.get("responseSchema").is_none());
+                assert!(config.get("responseFormat").is_none());
+            }
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_invalid_structured_outputs_are_precredential_zero_call() {
+    let target = gemini_target_golden();
+    let fixtures = gemini_target_fixtures();
+    let mut cases = target
+        .requests
+        .into_iter()
+        .map(|request_case| {
+            let rejection = request_case
+                .advanced
+                .into_iter()
+                .find(|advanced| advanced.capability == GeminiFixtureCapability::StructuredOutput)
+                .expect("structured output fixture rejection")
+                .rejection_request;
+            ("fixture-reject", request_case.downstream, rejection)
+        })
+        .collect::<Vec<_>>();
+    cases.extend([
+        (
+            "schema-array",
+            DownstreamProtocol::Openai,
+            json!({"model":"$REQUESTED_MODEL","messages":[{"role":"user","content":"private-structured-marker"}],
+                "response_format":{"type":"json_schema","json_schema":{
+                    "name":"answer","schema":[],"strict":true
+                }}}),
+        ),
+        (
+            "unknown-outer-metadata",
+            DownstreamProtocol::Responses,
+            json!({"model":"$REQUESTED_MODEL","input":"private-structured-marker","text":{"format":{
+                "type":"json_schema","name":"answer","schema":{"type":"object"},
+                "strict":true,"future":"private-structured-marker"
+            }}}),
+        ),
+    ]);
+
+    for (case_name, protocol, request) in cases {
+        let fixture = fixtures
+            .iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .map(|(_, fixture)| fixture.clone())
+            .expect("Gemini target fixture for invalid structured output case");
+        let runtime_name = format!("r3-19-gemini-structured-zero-call-{protocol:?}-{case_name}");
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router.send(&fixture, false, &request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{protocol:?}/{case_name}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("structured output rejection should read");
+            assert!(!String::from_utf8_lossy(&body).contains("private-structured-marker"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(
+                upstream.requests().await.is_empty(),
+                "{protocol:?}/{case_name}"
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("private-structured-marker")
+            );
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_structured_output_combines_with_tools_reasoning_media_and_stream_once() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini target fixture");
+    run_case(
+        "r3-19-gemini-structured-combined-stream",
+        move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: vec![GoldenEvent {
+                    event: None,
+                    data: json!({
+                        "responseId":"gemini-combined-response",
+                        "candidates":[{"index":0,"content":{"role":"model","parts":[
+                            {"text":"{\"answer\":\"ok\"}"}
+                        ]},"finishReason":"STOP"}],
+                        "usageMetadata":{
+                            "promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8
+                        }
+                    }),
+                }],
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let request = json!({
+                "model":"$REQUESTED_MODEL","stream":true,
+                "messages":[{"role":"user","content":[
+                    {"type":"text","text":"inspect"},
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ=="}}
+                ]}],
+                "tools":[{"type":"function","function":{
+                    "name":"lookup","parameters":{"type":"object"},"strict":true
+                }}],
+                "reasoning_effort":"high",
+                "response_format":{"type":"json_schema","json_schema":{
+                    "name":"answer","schema":{"type":"object","properties":{
+                        "answer":{"type":"string","x-future":true}
+                    }},"strict":true
+                }}
+            });
+
+            let response = router.send(&fixture, true, &request).await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("combined stream response should complete");
+            assert!(
+                !String::from_utf8_lossy(&response_body).contains("error"),
+                "{}",
+                String::from_utf8_lossy(&response_body)
+            );
+            let requests = upstream.requests().await;
+            assert_eq!(requests.len(), 1);
+            let body: Value = serde_json::from_slice(&requests[0].body)
+                .expect("combined Gemini request should be JSON");
+            assert_eq!(
+                body["generationConfig"]["responseMimeType"],
+                "application/json"
+            );
+            assert_eq!(
+                body["generationConfig"]["responseJsonSchema"]["properties"]["answer"]["x-future"],
+                true
+            );
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                "high"
+            );
+            assert!(body["tools"].is_array());
+            assert!(
+                body["contents"][0]["parts"]
+                    .as_array()
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| part.get("inlineData").is_some())
+                    })
+            );
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+fn assert_gemini_advanced_cell(
+    test_name: &'static str,
+    protocol: DownstreamProtocol,
+    capability: GeminiFixtureCapability,
+) {
+    let target = gemini_target_golden();
+    let request_case = target
+        .requests
+        .into_iter()
+        .find(|request| request.downstream == protocol)
+        .expect("Gemini advanced request fixture for protocol");
+    let advanced = request_case
+        .advanced
+        .into_iter()
+        .find(|advanced| advanced.capability == capability)
+        .expect("Gemini advanced capability fixture");
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Gemini target fixture for advanced cell");
+    let upstream_response = target.non_stream_response;
+
+    run_case(test_name, move |context| async move {
+        let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_response).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let transformed = crate::service::transform::transform_request_data(
+            advanced.downstream_request.clone(),
+            protocol,
+            UpstreamProtocol::Gemini,
+            false,
+        )
+        .expect("Gemini advanced cell must be sendable");
+        let controlled_facts = transformed
+            .summary
+            .facts
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact.outcome,
+                    TransformOutcomeKind::ControlledLossMinor
+                        | TransformOutcomeKind::ControlledLossMajor
+                )
+            })
+            .collect::<Vec<_>>();
+        match advanced.status {
+            GeminiFixtureCellStatus::ControlledLoss => {
+                let expected_reason = advanced
+                    .expected_loss_reason
+                    .as_deref()
+                    .expect("controlled-loss cell reason");
+                assert!(
+                    controlled_facts.iter().any(|fact| {
+                        fact.reason_code.as_str() == expected_reason
+                            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                    }),
+                    "{test_name}: expected typed controlled loss {expected_reason}"
+                );
+                assert!(
+                    controlled_facts
+                        .iter()
+                        .all(|fact| fact.safe_summary.is_none()),
+                    "{test_name}: controlled-loss facts must be payload-free"
+                );
+            }
+            GeminiFixtureCellStatus::Full => {
+                assert!(
+                    controlled_facts.is_empty(),
+                    "{test_name}: same-wire full cell must not manufacture loss"
+                );
+                assert!(
+                    transformed
+                        .summary
+                        .facts
+                        .iter()
+                        .all(|fact| fact.safe_summary.is_none()),
+                    "{test_name}: same-wire facts remain payload-free"
+                );
+            }
+        }
+
+        let response = router
+            .send(&fixture, false, &advanced.downstream_request)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{test_name}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Gemini advanced response should complete");
+        let response_body: Value = serde_json::from_slice(&response_body)
+            .expect("Gemini advanced downstream response should be JSON");
+        assert_eq!(
+            gemini_non_stream_text(protocol, &response_body),
+            Some("baseline pong"),
+            "{test_name}: response path executes"
+        );
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &fixture,
+            &captured,
+            &fixture.request.upstream_path,
+            None,
+            &advanced.expected_upstream,
+            &router.requested_model(),
+            &request_id,
+        );
+        assert_eq!(
+            router.app_state.secret_encryption.decrypt_call_count(),
+            1,
+            "{test_name}: one credential resolution"
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.request_id, request_id, "{test_name}");
+        assert_log_common(&router, &fixture, &log);
+        assert_usage(&log, &fixture.usage);
+        assert!(log.final_error_code.is_none(), "{test_name}");
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1, "{test_name}");
+        assert_eq!(captured.len(), 1, "{test_name}: no retry/probe/upload");
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! gemini_advanced_cell_test {
+    ($name:ident, $protocol:expr, $capability:expr) => {
+        #[test]
+        fn $name() {
+            assert_gemini_advanced_cell(stringify!($name), $protocol, $capability);
+        }
+    };
+}
+
+gemini_advanced_cell_test!(
+    openai_to_gemini_tools_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai,
+    GeminiFixtureCapability::Tools
+);
+gemini_advanced_cell_test!(
+    responses_to_gemini_tools_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Responses,
+    GeminiFixtureCapability::Tools
+);
+gemini_advanced_cell_test!(
+    anthropic_to_gemini_tools_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Anthropic,
+    GeminiFixtureCapability::Tools
+);
+gemini_advanced_cell_test!(
+    gemini_to_gemini_tools_cell_is_full,
+    DownstreamProtocol::Gemini,
+    GeminiFixtureCapability::Tools
+);
+gemini_advanced_cell_test!(
+    openai_to_gemini_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai,
+    GeminiFixtureCapability::Reasoning
+);
+gemini_advanced_cell_test!(
+    responses_to_gemini_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Responses,
+    GeminiFixtureCapability::Reasoning
+);
+gemini_advanced_cell_test!(
+    anthropic_to_gemini_reasoning_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Anthropic,
+    GeminiFixtureCapability::Reasoning
+);
+gemini_advanced_cell_test!(
+    gemini_to_gemini_reasoning_cell_is_full,
+    DownstreamProtocol::Gemini,
+    GeminiFixtureCapability::Reasoning
+);
+gemini_advanced_cell_test!(
+    openai_to_gemini_multimodal_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai,
+    GeminiFixtureCapability::Multimodal
+);
+gemini_advanced_cell_test!(
+    responses_to_gemini_multimodal_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Responses,
+    GeminiFixtureCapability::Multimodal
+);
+gemini_advanced_cell_test!(
+    anthropic_to_gemini_multimodal_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Anthropic,
+    GeminiFixtureCapability::Multimodal
+);
+gemini_advanced_cell_test!(
+    gemini_to_gemini_multimodal_cell_is_full,
+    DownstreamProtocol::Gemini,
+    GeminiFixtureCapability::Multimodal
+);
+gemini_advanced_cell_test!(
+    openai_to_gemini_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Openai,
+    GeminiFixtureCapability::StructuredOutput
+);
+gemini_advanced_cell_test!(
+    responses_to_gemini_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Responses,
+    GeminiFixtureCapability::StructuredOutput
+);
+gemini_advanced_cell_test!(
+    anthropic_to_gemini_structured_output_cell_has_typed_controlled_loss,
+    DownstreamProtocol::Anthropic,
+    GeminiFixtureCapability::StructuredOutput
+);
+gemini_advanced_cell_test!(
+    gemini_to_gemini_structured_output_cell_is_full,
+    DownstreamProtocol::Gemini,
+    GeminiFixtureCapability::StructuredOutput
+);
+
+#[test]
+fn r3_19_gemini_advanced_evidence_registry_has_16_unique_cells_and_4_full_12_loss() {
+    const EVIDENCE: [(&str, &str, &str, &str); 16] = [
+        (
+            "openai",
+            "tools",
+            "controlled_loss",
+            "proxy::direct_execution_regression::openai_to_gemini_tools_cell_has_typed_controlled_loss",
+        ),
+        (
+            "responses",
+            "tools",
+            "controlled_loss",
+            "proxy::direct_execution_regression::responses_to_gemini_tools_cell_has_typed_controlled_loss",
+        ),
+        (
+            "anthropic",
+            "tools",
+            "controlled_loss",
+            "proxy::direct_execution_regression::anthropic_to_gemini_tools_cell_has_typed_controlled_loss",
+        ),
+        (
+            "gemini",
+            "tools",
+            "full",
+            "proxy::direct_execution_regression::gemini_to_gemini_tools_cell_is_full",
+        ),
+        (
+            "openai",
+            "reasoning",
+            "controlled_loss",
+            "proxy::direct_execution_regression::openai_to_gemini_reasoning_cell_has_typed_controlled_loss",
+        ),
+        (
+            "responses",
+            "reasoning",
+            "controlled_loss",
+            "proxy::direct_execution_regression::responses_to_gemini_reasoning_cell_has_typed_controlled_loss",
+        ),
+        (
+            "anthropic",
+            "reasoning",
+            "controlled_loss",
+            "proxy::direct_execution_regression::anthropic_to_gemini_reasoning_cell_has_typed_controlled_loss",
+        ),
+        (
+            "gemini",
+            "reasoning",
+            "full",
+            "proxy::direct_execution_regression::gemini_to_gemini_reasoning_cell_is_full",
+        ),
+        (
+            "openai",
+            "multimodal",
+            "controlled_loss",
+            "proxy::direct_execution_regression::openai_to_gemini_multimodal_cell_has_typed_controlled_loss",
+        ),
+        (
+            "responses",
+            "multimodal",
+            "controlled_loss",
+            "proxy::direct_execution_regression::responses_to_gemini_multimodal_cell_has_typed_controlled_loss",
+        ),
+        (
+            "anthropic",
+            "multimodal",
+            "controlled_loss",
+            "proxy::direct_execution_regression::anthropic_to_gemini_multimodal_cell_has_typed_controlled_loss",
+        ),
+        (
+            "gemini",
+            "multimodal",
+            "full",
+            "proxy::direct_execution_regression::gemini_to_gemini_multimodal_cell_is_full",
+        ),
+        (
+            "openai",
+            "structured_output",
+            "controlled_loss",
+            "proxy::direct_execution_regression::openai_to_gemini_structured_output_cell_has_typed_controlled_loss",
+        ),
+        (
+            "responses",
+            "structured_output",
+            "controlled_loss",
+            "proxy::direct_execution_regression::responses_to_gemini_structured_output_cell_has_typed_controlled_loss",
+        ),
+        (
+            "anthropic",
+            "structured_output",
+            "controlled_loss",
+            "proxy::direct_execution_regression::anthropic_to_gemini_structured_output_cell_has_typed_controlled_loss",
+        ),
+        (
+            "gemini",
+            "structured_output",
+            "full",
+            "proxy::direct_execution_regression::gemini_to_gemini_structured_output_cell_is_full",
+        ),
+    ];
+
+    let mut cells = BTreeSet::new();
+    let mut references = BTreeSet::new();
+    let mut full = 0;
+    let mut controlled_loss = 0;
+    for (downstream, capability, status, reference) in EVIDENCE {
+        assert!(cells.insert((downstream, capability)));
+        assert!(references.insert(reference));
+        assert!(reference.starts_with("proxy::direct_execution_regression::"));
+        match status {
+            "full" => {
+                assert_eq!(downstream, "gemini");
+                full += 1;
+            }
+            "controlled_loss" => {
+                assert_ne!(downstream, "gemini");
+                controlled_loss += 1;
+            }
+            unexpected => panic!("unexpected Gemini advanced status: {unexpected}"),
+        }
+    }
+    assert_eq!(cells.len(), 16);
+    assert_eq!(references.len(), 16);
+    assert_eq!((full, controlled_loss), (4, 12));
+}
+
+#[test]
+fn r3_19_gemini_tool_and_reasoning_streams_preserve_ids_signatures_and_native_deltas() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini advanced stream fixture");
+    let events = vec![
+        GoldenEvent {
+            event: None,
+            data: json!({
+                "responseId":"gemini-advanced-stream-response",
+                "candidates":[{"index":0,"content":{"role":"model","parts":[
+                    {"text":"plan","thought":true,"thoughtSignature":"sig-reasoning"},
+                    {"functionCall":{"id":"call-provider","name":"lookup","args":{"city":"Shanghai"}},"thoughtSignature":"sig-tool"}
+                ]}}]
+            }),
+        },
+        GoldenEvent {
+            event: None,
+            data: json!({
+                "responseId":"gemini-advanced-stream-response",
+                "candidates":[{"index":0,"content":{"role":"model","parts":[
+                    {"text":" now","thought":true,"thoughtSignature":"sig-reasoning-tail"}
+                ]},"finishReason":"STOP"}],
+                "usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1,"thoughtsTokenCount":2,"totalTokenCount":7}
+            }),
+        },
+    ];
+    run_case(
+        "r3-19-gemini-tool-reasoning-stream-ids-signatures",
+        move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: events.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let request = json!({
+                "model":"$REQUESTED_MODEL","stream":true,
+                "messages":[{"role":"user","content":"plan and call"}],
+                "tools":[{"type":"function","function":{
+                    "name":"lookup","parameters":{"type":"object"},"strict":true
+                }}],
+                "reasoning_effort":"high"
+            });
+
+            let response = router.send(&fixture, true, &request).await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("advanced Gemini stream response should complete");
+            let downstream_events = parse_downstream_events(fixture.protocol, &body);
+            let rendered = downstream_events
+                .iter()
+                .map(|event| event.data.to_string())
+                .collect::<String>();
+            assert!(rendered.contains("plan"));
+            assert!(rendered.contains(" now"));
+            assert!(rendered.contains("call-provider"));
+            assert!(rendered.contains("lookup"));
+            assert!(rendered.contains("Shanghai"));
+            assert!(!rendered.contains("sig-reasoning"));
+            assert!(!rendered.contains("sig-reasoning-tail"));
+            assert!(!rendered.contains("sig-tool"));
+            assert_eq!(
+                downstream_events
+                    .iter()
+                    .filter(|event| event.data == "[DONE]")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                downstream_events
+                    .iter()
+                    .filter(|event| {
+                        event.data.pointer("/choices/0/finish_reason") == Some(&json!("tool_calls"))
+                    })
+                    .count(),
+                1
+            );
+
+            let captured = upstream.requests().await;
+            assert_upstream(
+                "r3-19-gemini-tool-reasoning-stream-ids-signatures",
+                &fixture,
+                &captured,
+                &fixture.stream.upstream_path,
+                fixture.stream.upstream_query.as_deref(),
+                &json!({
+                    "contents":[{"role":"user","parts":[{"text":"plan and call"}]}],
+                    "generationConfig":{"candidateCount":1,"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}},
+                    "tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object"}}]}]
+                }),
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(log.total_input_tokens, Some(4));
+            assert_eq!(log.total_output_tokens, Some(3));
+            assert_eq!(log.total_tokens, Some(7));
+            assert_eq!(log.reasoning_tokens, Some(2));
+            assert!(log.final_error_code.is_none());
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            assert_eq!(captured.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn r3_19_gemini_nonstream_terminal_families_preserve_same_wire_bytes_and_cost_policy() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Gemini)
+        .expect("native Gemini target fixture");
+    let target = gemini_target_golden();
+
+    for terminal_case in target.terminal_cases {
+        let fixture = fixture.clone();
+        let mut upstream_body = terminal_case.response;
+        upstream_body["usageMetadata"] = json!({
+            "promptTokenCount":11,
+            "candidatesTokenCount":7,
+            "totalTokenCount":18
+        });
+        upstream_body["futureResponseField"] = json!({"preserve":true});
+        let raw = serde_json::to_vec_pretty(&upstream_body)
+            .expect("Gemini terminal fixture should serialize");
+        let expected_status = if matches!(
+            terminal_case.terminal,
+            GeminiFixtureTerminal::Stop
+                | GeminiFixtureTerminal::MaxTokens
+                | GeminiFixtureTerminal::Safety
+                | GeminiFixtureTerminal::PromptBlock
+        ) {
+            RequestStatus::Success
+        } else {
+            RequestStatus::Error
+        };
+        let case_name = format!("r3-19-gemini-same-wire-{:?}", terminal_case.terminal);
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+                body: raw.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("same-wire Gemini terminal response should read");
+            assert_eq!(response_body.as_ref(), raw.as_slice(), "{case_name}");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(expected_status.clone()).await;
+            if expected_status == RequestStatus::Success {
+                assert_eq!(log.total_tokens, Some(18), "{case_name}");
+                assert!(log.estimated_cost_nanos.is_some(), "{case_name}");
+            } else {
+                assert_eq!(log.total_input_tokens, None, "{case_name}");
+                assert_eq!(log.total_output_tokens, None, "{case_name}");
+                assert_eq!(log.total_tokens, None, "{case_name}");
+                assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+                assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+                assert_eq!(
+                    log.final_error_code.as_deref(),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
+            }
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+
+    let case_name = "r3-19-gemini-same-wire-malformed-json";
+    run_case(case_name, move |context| async move {
+        let raw = b"{private-gemini-malformed}".to_vec();
+        let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+            status: StatusCode::OK,
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: raw.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router.attach_cost_catalog(Some(100), Some(2)).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("malformed same-wire Gemini response should read");
+        assert_eq!(response_body.as_ref(), raw.as_slice());
+        assert_eq!(upstream.requests().await.len(), 1);
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.total_tokens, None);
+        assert_eq!(log.estimated_cost_nanos, None);
+        assert_eq!(log.cost_snapshot_json, None);
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_response_error")
+        );
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn r3_19_gemini_cross_wire_terminal_mappings_are_committed_once() {
+    for (protocol, upstream_body, pointer, expected) in [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "responseId":"gemini-tool-terminal",
+                "candidates":[{"index":0,"content":{"role":"model","parts":[
+                    {"text":"thinking","thought":true,"thoughtSignature":"sig-thinking"},
+                    {"functionCall":{"name":"lookup","args":{"q":"safe"}},
+                     "thoughtSignature":"sig-tool"}
+                ]},"finishReason":"STOP"}]
+            }),
+            "/choices/0/finish_reason",
+            "tool_calls",
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"promptFeedback":{"blockReason":"JAILBREAK"}}),
+            "/incomplete_details/reason",
+            "content_filter",
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({"candidates":[{"index":0,"finishReason":"MODEL_ARMOR"}]}),
+            "/stop_reason",
+            "refusal",
+        ),
+    ] {
+        let (_, fixture) = gemini_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .expect("cross-wire Gemini fixture");
+        let case_name = format!("r3-19-gemini-terminal-mapping-{protocol:?}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(StatusCode::OK, upstream_body).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("mapped Gemini response should read");
+            let body: Value = serde_json::from_slice(&body).expect("mapped response JSON");
+            assert_eq!(
+                body.pointer(pointer).and_then(Value::as_str),
+                Some(expected),
+                "{case_name}"
+            );
+            if protocol == DownstreamProtocol::Openai {
+                assert_eq!(
+                    body.pointer("/choices/0/message/reasoning_content"),
+                    Some(&json!("thinking"))
+                );
+                assert_eq!(
+                    body.pointer("/choices/0/message/tool_calls/0/function/name"),
+                    Some(&json!("lookup"))
+                );
+                assert!(
+                    body.pointer("/choices/0/message/tool_calls/0/id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.starts_with("gemini-call-"))
+                );
+            }
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            router.wait_for_log(RequestStatus::Success).await;
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_cross_wire_failed_and_unconfirmed_terminals_are_preheader_502_without_cost() {
+    const PRIVATE_MARKER: &str = "private-gemini-terminal-marker";
+    let cases = [
+        (
+            "application-failure",
+            Some(json!({"candidates":[{"index":0,
+                "finishReason":"MALFORMED_FUNCTION_CALL"}],
+                "usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,
+                    "totalTokenCount":18},
+                "futureResponseField":PRIVATE_MARKER})),
+        ),
+        (
+            "unknown",
+            Some(
+                json!({"candidates":[{"index":0,"finishReason":"FUTURE_REASON"}],
+                "usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,
+                    "totalTokenCount":18},
+                "futureResponseField":PRIVATE_MARKER}),
+            ),
+        ),
+        (
+            "missing",
+            Some(json!({"candidates":[{"index":0}],
+                "usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,
+                    "totalTokenCount":18},
+                "futureResponseField":PRIVATE_MARKER})),
+        ),
+        (
+            "multi-candidate",
+            Some(json!({"candidates":[
+                {"index":0,"finishReason":"STOP"},
+                {"index":1,"finishReason":"STOP"}],
+                "futureResponseField":PRIVATE_MARKER})),
+        ),
+        (
+            "invalid-index",
+            Some(json!({"candidates":[{"index":7,"finishReason":"STOP"}],
+                "futureResponseField":PRIVATE_MARKER})),
+        ),
+        ("malformed-json", None),
+    ];
+
+    for (name, fixture) in gemini_target_fixtures()
+        .into_iter()
+        .filter(|(_, fixture)| fixture.protocol != DownstreamProtocol::Gemini)
+    {
+        for (terminal_name, upstream_body) in cases.clone() {
+            let fixture = fixture.clone();
+            let case_name = format!("r3-19-gemini-{name}-{terminal_name}-preheader");
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let upstream = match upstream_body {
+                    Some(body) => TestUpstream::spawn_json(StatusCode::OK, body).await,
+                    None => {
+                        TestUpstream::spawn(ScriptedReply::Raw {
+                            status: StatusCode::OK,
+                            content_type: Some("application/json".to_string()),
+                            content_encoding: None,
+                            body: format!("{{{PRIVATE_MARKER}").into_bytes(),
+                        })
+                        .await
+                    }
+                };
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+
+                let response = router
+                    .send(&fixture, false, &fixture.request.downstream)
+                    .await;
+
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("Gemini terminal error envelope should read");
+                assert_payload_free_transform_bytes(&body, PRIVATE_MARKER);
+                let body: Value = serde_json::from_slice(&body).expect("error envelope JSON");
+                assert_eq!(
+                    downstream_error_code(&body, fixture.protocol),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
+                assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+                let log = router.wait_for_log(RequestStatus::Error).await;
+                assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+                assert_eq!(
+                    log.final_error_code.as_deref(),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
+                assert!(
+                    !log.final_error_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(PRIVATE_MARKER),
+                    "{case_name}"
+                );
+                assert_eq!(log.total_input_tokens, None, "{case_name}");
+                assert_eq!(log.total_output_tokens, None, "{case_name}");
+                assert_eq!(log.total_tokens, None, "{case_name}");
+                assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+                assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn r3_19_gemini_nonstream_and_stream_usage_normalize_to_same_cost_once() {
+    let target = gemini_target_golden();
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini usage fixture");
+
+    for is_stream in [false, true] {
+        let fixture = fixture.clone();
+        let non_stream_response = target.non_stream_response.clone();
+        let stream_events = target.stream_events.clone();
+        let case_name = format!(
+            "r3-19-gemini-usage-{}",
+            if is_stream { "stream" } else { "nonstream" }
+        );
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = if is_stream {
+                TestUpstream::spawn(ScriptedReply::Sse {
+                    events: stream_events,
+                })
+                .await
+            } else {
+                TestUpstream::spawn_json(StatusCode::OK, non_stream_response).await
+            };
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let (catalog_id, catalog_version_id) =
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+            let request = if is_stream {
+                &fixture.stream.downstream_request
+            } else {
+                &fixture.request.downstream
+            };
+
+            let response = router.send(&fixture, is_stream, request).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Gemini usage response should complete");
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_input_tokens, Some(12), "{case_name}");
+            assert_eq!(log.total_output_tokens, Some(9), "{case_name}");
+            assert_eq!(log.total_tokens, Some(21), "{case_name}");
+            assert_eq!(log.input_text_tokens, Some(9), "{case_name}");
+            assert_eq!(log.output_text_tokens, Some(7), "{case_name}");
+            assert_eq!(log.input_image_tokens, Some(0), "{case_name}");
+            assert_eq!(log.output_image_tokens, Some(0), "{case_name}");
+            assert_eq!(log.cache_read_tokens, Some(3), "{case_name}");
+            assert_eq!(log.reasoning_tokens, Some(2), "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, Some(124), "{case_name}");
+            assert_eq!(log.cost_catalog_id, Some(catalog_id), "{case_name}");
+            assert_eq!(
+                log.cost_catalog_version_id,
+                Some(catalog_version_id),
+                "{case_name}"
+            );
+            let snapshot: CostSnapshot = serde_json::from_str(
+                log.cost_snapshot_json
+                    .as_deref()
+                    .expect("Gemini usage cost snapshot should persist"),
+            )
+            .expect("Gemini usage cost snapshot should parse");
+            assert_eq!(snapshot.total_cost_nanos, 124, "{case_name}");
+            assert_eq!(snapshot.detail_lines.len(), 3, "{case_name}");
+            assert_eq!(
+                snapshot.detail_lines[0].meter_key,
+                MeterKey::LlmInputTextTokens
+            );
+            assert_eq!(snapshot.detail_lines[0].quantity, 9);
+            assert_eq!(
+                snapshot.detail_lines[1].meter_key,
+                MeterKey::LlmCacheReadTokens
+            );
+            assert_eq!(snapshot.detail_lines[1].quantity, 3);
+            assert_eq!(
+                snapshot.detail_lines[2].meter_key,
+                MeterKey::InvokeRequestCalls
+            );
+            assert_eq!(snapshot.detail_lines[2].quantity, 1);
+            assert_eq!(
+                snapshot.unmatched_items,
+                vec![
+                    MeterKey::LlmOutputTextTokens.to_string(),
+                    MeterKey::LlmReasoningTokens.to_string(),
+                ],
+                "{case_name}"
+            );
+            assert_eq!(snapshot.warnings.len(), 2, "{case_name}");
+            assert!(
+                snapshot
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("llm.output_text_tokens")),
+                "{case_name}"
+            );
+            assert!(
+                snapshot
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("llm.reasoning_tokens")),
+                "{case_name}"
+            );
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_invalid_usage_is_raw_same_wire_cross_wire_502_and_never_billed() {
+    const PRIVATE_MARKER: &str = "private-gemini-usage-marker";
+    for protocol in [DownstreamProtocol::Gemini, DownstreamProtocol::Openai] {
+        let (_, fixture) = gemini_target_fixtures()
+            .into_iter()
+            .find(|(_, fixture)| fixture.protocol == protocol)
+            .expect("Gemini usage boundary fixture");
+        let upstream_body = json!({
+            "candidates":[{"index":0,"content":{"role":"model","parts":[
+                {"text":"ok"}
+            ]},"finishReason":"STOP"}],
+            "usageMetadata":{
+                "promptTokenCount":3,
+                "candidatesTokenCount":0,
+                "cachedContentTokenCount":4,
+                "totalTokenCount":3
+            },
+            "futureResponseField":PRIVATE_MARKER
+        });
+        let raw = serde_json::to_vec_pretty(&upstream_body)
+            .expect("invalid Gemini usage fixture serializes");
+        let case_name = format!("r3-19-gemini-invalid-usage-{protocol:?}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+                body: raw.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            if protocol == DownstreamProtocol::Gemini {
+                assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("same-wire invalid usage should read");
+                assert_eq!(body.as_ref(), raw.as_slice(), "{case_name}");
+            } else {
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("cross-wire invalid usage error should read");
+                assert_payload_free_transform_bytes(&body, PRIVATE_MARKER);
+                let body: Value = serde_json::from_slice(&body).expect("error envelope JSON");
+                assert_eq!(
+                    downstream_error_code(&body, protocol),
+                    Some("upstream_response_error")
+                );
+            }
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let expected_status = if protocol == DownstreamProtocol::Gemini {
+                RequestStatus::Success
+            } else {
+                RequestStatus::Error
+            };
+            let log = router.wait_for_log(expected_status).await;
+            assert_eq!(log.total_input_tokens, None, "{case_name}");
+            assert_eq!(log.total_output_tokens, None, "{case_name}");
+            assert_eq!(log.total_tokens, None, "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+            assert_eq!(log.cost_catalog_version_id, None, "{case_name}");
+            assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_MARKER),
+                "{case_name}"
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_success_without_usage_charges_only_one_invocation() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini missing usage fixture");
+    run_case(
+        "r3-19-gemini-missing-usage-invocation",
+        move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+                {"text":"partial"}
+            ]},"finishReason":"MAX_TOKENS"}]}),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let (catalog_id, catalog_version_id) =
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("missing usage response should read");
+            assert_eq!(upstream.requests().await.len(), 1);
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, Some(100));
+            assert_eq!(log.cost_catalog_id, Some(catalog_id));
+            assert_eq!(log.cost_catalog_version_id, Some(catalog_version_id));
+            let snapshot: CostSnapshot = serde_json::from_str(
+                log.cost_snapshot_json
+                    .as_deref()
+                    .expect("invocation-only snapshot should persist"),
+            )
+            .expect("invocation-only snapshot should parse");
+            assert_eq!(snapshot.total_cost_nanos, 100);
+            assert_eq!(snapshot.detail_lines.len(), 1);
+            assert_eq!(
+                snapshot.detail_lines[0].meter_key,
+                MeterKey::InvokeRequestCalls
+            );
+            assert_eq!(snapshot.detail_lines[0].quantity, 1);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn r3_19_gemini_reported_total_mismatch_is_preserved_warned_and_costed_from_components() {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini total mismatch fixture");
+    run_case("r3-19-gemini-total-mismatch", move |context| async move {
+        let upstream = TestUpstream::spawn_json(
+            StatusCode::OK,
+            json!({
+                "candidates":[{"index":0,"content":{"role":"model","parts":[
+                    {"text":"ok"}
+                ]},"finishReason":"STOP"}],
+                "usageMetadata":{
+                    "promptTokenCount":11,
+                    "candidatesTokenCount":7,
+                    "thoughtsTokenCount":2,
+                    "toolUsePromptTokenCount":1,
+                    "totalTokenCount":999
+                }
+            }),
+        )
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router.attach_cost_catalog(Some(100), Some(2)).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("total mismatch response should read");
+        let body: Value = serde_json::from_slice(&body).expect("OpenAI response JSON");
+        assert_eq!(body.pointer("/usage/total_tokens"), Some(&json!(999)));
+        assert_eq!(upstream.requests().await.len(), 1);
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.total_input_tokens, Some(12));
+        assert_eq!(log.total_output_tokens, Some(9));
+        assert_eq!(log.total_tokens, Some(21));
+        assert_eq!(log.estimated_cost_nanos, Some(124));
+        let snapshot: CostSnapshot = serde_json::from_str(
+            log.cost_snapshot_json
+                .as_deref()
+                .expect("mismatch cost snapshot should persist"),
+        )
+        .expect("mismatch cost snapshot should parse");
+        assert_eq!(snapshot.total_cost_nanos, 124);
+        assert_eq!(snapshot.warnings.len(), 3);
+        assert!(snapshot.warnings.iter().any(|warning| {
+            warning.contains("reported total_tokens 999") && warning.contains("21")
+        }));
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn r3_19_gemini_same_wire_stream_usage_regression_is_raw_and_unbillable() {
+    const PRIVATE_MARKER: &str = "private-gemini-regressed-usage";
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Gemini)
+        .expect("native Gemini stream usage fixture");
+    run_case(
+        "r3-19-gemini-stream-usage-regression",
+        move |context| async move {
+            let events = vec![
+                GoldenEvent {
+                    event: None,
+                    data: json!({
+                        "responseId":"gemini-regression",
+                        "candidates":[{"index":0,"content":{"role":"model","parts":[
+                            {"text":"ok"}
+                        ]},"finishReason":"STOP"}],
+                        "usageMetadata":{
+                            "promptTokenCount":11,"candidatesTokenCount":7,
+                            "thoughtsTokenCount":2,"toolUsePromptTokenCount":1,
+                            "totalTokenCount":21
+                        }
+                    }),
+                },
+                GoldenEvent {
+                    event: None,
+                    data: json!({
+                        "usageMetadata":{
+                            "promptTokenCount":11,"candidatesTokenCount":6,
+                            "thoughtsTokenCount":2,"toolUsePromptTokenCount":1,
+                            "totalTokenCount":20,
+                            "futureUsageField":PRIVATE_MARKER
+                        }
+                    }),
+                },
+            ];
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse { events }).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("same-wire regressed usage stream should complete");
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains(PRIVATE_MARKER));
+            assert!(!body.contains("[DONE]"));
+            assert_eq!(upstream.requests().await.len(), 1);
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_input_tokens, None);
+            assert_eq!(log.total_output_tokens, None);
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            assert_eq!(log.cost_catalog_version_id, None);
+            assert_eq!(log.cost_snapshot_json, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn r3_19_gemini_stream_state_machine_completes_four_targets_once_after_chunk_split_eof() {
+    let events = vec![
+        GoldenEvent {
+            event: None,
+            data: json!({
+                "responseId":"gemini-direct-state-machine",
+                "candidates":[{"index":0,"content":{"role":"model","parts":[
+                    {"text":"hello "},{"text":"world"}
+                ]}}]
+            }),
+        },
+        GoldenEvent {
+            event: None,
+            data: json!({
+                "responseId":"gemini-direct-state-machine",
+                "candidates":[{"index":0,"finishReason":"STOP"}]
+            }),
+        },
+        GoldenEvent {
+            event: None,
+            data: json!({
+                "responseId":"gemini-direct-state-machine",
+                "usageMetadata":{
+                    "promptTokenCount":3,
+                    "candidatesTokenCount":2,
+                    "totalTokenCount":5
+                }
+            }),
+        },
+    ];
+
+    for (name, fixture) in gemini_target_fixtures() {
+        let case_name = format!("r3-19-gemini-stream-state-machine-{name}");
+        let runtime_name = case_name.clone();
+        let events = events.clone();
+        run_case(&runtime_name, move |context| async move {
+            let wire = events_to_sse_bytes(&events);
+            let chunks = wire.chunks(7).map(<[u8]>::to_vec).collect::<Vec<_>>();
+            let upstream = TestUpstream::spawn(ScriptedReply::ChunkedSse {
+                content_encoding: None,
+                chunks,
+                hang_after_chunks: false,
+                dropped: None,
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("legal Gemini stream should complete after EOF");
+            let downstream_events = parse_downstream_events(fixture.protocol, &body);
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    assert_eq!(
+                        downstream_events
+                            .iter()
+                            .filter(|event| event.data == json!("[DONE]"))
+                            .count(),
+                        1,
+                        "{case_name}: exactly one OpenAI done marker"
+                    );
+                    assert_eq!(
+                        downstream_events
+                            .iter()
+                            .filter(|event| {
+                                event.data.pointer("/choices/0/finish_reason")
+                                    == Some(&json!("stop"))
+                            })
+                            .count(),
+                        1,
+                        "{case_name}: exactly one OpenAI stop"
+                    );
+                }
+                DownstreamProtocol::Responses => assert_eq!(
+                    downstream_events
+                        .iter()
+                        .filter(|event| event.data["type"] == "response.completed")
+                        .count(),
+                    1,
+                    "{case_name}: exactly one Responses terminal"
+                ),
+                DownstreamProtocol::Anthropic => assert_eq!(
+                    downstream_events
+                        .iter()
+                        .filter(|event| event.event.as_deref() == Some("message_stop"))
+                        .count(),
+                    1,
+                    "{case_name}: exactly one Anthropic terminal"
+                ),
+                DownstreamProtocol::Gemini => {
+                    assert_eq!(downstream_events, events, "{case_name}: raw Gemini events");
+                    assert!(
+                        !String::from_utf8_lossy(&body).contains("[DONE]"),
+                        "{case_name}: Gemini must not receive an OpenAI marker"
+                    );
+                }
+            }
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.request_id, request_id, "{case_name}");
+            assert_eq!(log.total_input_tokens, Some(3), "{case_name}");
+            assert_eq!(log.total_output_tokens, Some(2), "{case_name}");
+            assert_eq!(log.total_tokens, Some(5), "{case_name}");
+            assert!(log.final_error_code.is_none(), "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_stream_prompt_block_completes_four_targets_with_one_safety_terminal() {
+    let prompt_block = GoldenEvent {
+        event: None,
+        data: json!({
+            "responseId":"gemini-direct-prompt-block",
+            "promptFeedback":{"blockReason":"SAFETY","safetyRatings":[]},
+            "usageMetadata":{"promptTokenCount":3,"totalTokenCount":3}
+        }),
+    };
+
+    for (name, fixture) in gemini_target_fixtures() {
+        let case_name = format!("r3-19-gemini-stream-prompt-block-{name}");
+        let runtime_name = case_name.clone();
+        let prompt_block = prompt_block.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: vec![prompt_block.clone()],
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Gemini prompt block stream should complete at EOF");
+            let downstream_events = parse_downstream_events(fixture.protocol, &body);
+            match fixture.protocol {
+                DownstreamProtocol::Openai => {
+                    assert_eq!(
+                        downstream_events
+                            .iter()
+                            .filter(|event| {
+                                event.data.pointer("/choices/0/finish_reason")
+                                    == Some(&json!("content_filter"))
+                            })
+                            .count(),
+                        1,
+                        "{case_name}"
+                    );
+                    assert_eq!(
+                        downstream_events
+                            .iter()
+                            .filter(|event| event.data == "[DONE]")
+                            .count(),
+                        1,
+                        "{case_name}"
+                    );
+                }
+                DownstreamProtocol::Responses => assert_eq!(
+                    downstream_events
+                        .iter()
+                        .filter(|event| event.data["type"] == "response.incomplete")
+                        .count(),
+                    1,
+                    "{case_name}"
+                ),
+                DownstreamProtocol::Anthropic => {
+                    assert_eq!(
+                        downstream_events
+                            .iter()
+                            .filter(|event| event.event.as_deref() == Some("message_stop"))
+                            .count(),
+                        1,
+                        "{case_name}"
+                    );
+                    assert!(
+                        downstream_events
+                            .iter()
+                            .any(|event| event.data["delta"]["stop_reason"] == "refusal"),
+                        "{case_name}"
+                    );
+                }
+                DownstreamProtocol::Gemini => {
+                    assert_eq!(downstream_events, vec![prompt_block], "{case_name}");
+                    assert!(!String::from_utf8_lossy(&body).contains("[DONE]"));
+                }
+            }
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_input_tokens, Some(3), "{case_name}");
+            assert_eq!(log.total_output_tokens, Some(0), "{case_name}");
+            assert_eq!(log.total_tokens, Some(3), "{case_name}");
+            assert!(log.final_error_code.is_none(), "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_cross_wire_illegal_stream_sequences_emit_one_fatal_without_success_terminal() {
+    const PRIVATE_MARKER: &str = "private-gemini-illegal-stream-marker";
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Gemini stream state fixture");
+    let finish = GoldenEvent {
+        event: None,
+        data: json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+    };
+    let content = GoldenEvent {
+        event: None,
+        data: json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+            {"text":"partial"}
+        ]}}]}),
+    };
+    let cases = vec![
+        ("empty-stream", Vec::new()),
+        ("missing-terminal-eof", vec![content.clone()]),
+        ("duplicate-terminal", vec![finish.clone(), finish.clone()]),
+        ("post-terminal-content", vec![finish.clone(), content]),
+        (
+            "multiple-candidates",
+            vec![GoldenEvent {
+                event: None,
+                data: json!({"candidates":[{"index":0},{"index":1}]}),
+            }],
+        ),
+        (
+            "candidate-index-conflict",
+            vec![GoldenEvent {
+                event: None,
+                data: json!({"candidates":[{"index":1,"finishReason":"STOP"}]}),
+            }],
+        ),
+        (
+            "unknown-finish",
+            vec![GoldenEvent {
+                event: None,
+                data: json!({"candidates":[{"index":0,"finishReason":"FUTURE_STOP"}]}),
+            }],
+        ),
+        (
+            "unknown-part",
+            vec![GoldenEvent {
+                event: None,
+                data: json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+                    {"futurePart":{"private":PRIVATE_MARKER}}
+                ]}}]}),
+            }],
+        ),
+        (
+            "malformed-json",
+            vec![GoldenEvent {
+                event: None,
+                data: json!("{not-json}"),
+            }],
+        ),
+        (
+            "openai-done-marker",
+            vec![GoldenEvent {
+                event: None,
+                data: json!("[DONE]"),
+            }],
+        ),
+        (
+            "usage-decrease",
+            vec![
+                GoldenEvent {
+                    event: None,
+                    data: json!({"usageMetadata":{
+                        "promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5
+                    }}),
+                },
+                GoldenEvent {
+                    event: None,
+                    data: json!({"usageMetadata":{
+                        "promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4
+                    }}),
+                },
+            ],
+        ),
+    ];
+
+    for (case, events) in cases {
+        let fixture = fixture.clone();
+        let case_name = format!("r3-19-gemini-illegal-stream-{case}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse { events }).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("guarded stream failure should close the body");
+            assert_payload_free_transform_bytes(&body, PRIVATE_MARKER);
+            let downstream_events = parse_downstream_events(fixture.protocol, &body);
+            let terminal = downstream_events.last().expect("native fatal terminal");
+            assert_native_fatal_stream_event(fixture.protocol, terminal, &request_id);
+            assert_eq!(
+                downstream_events
+                    .iter()
+                    .filter(|event| event.data["error"]["code"] == "upstream_response_error")
+                    .count(),
+                1,
+                "{case_name}: exactly one failure terminal"
+            );
+            assert!(
+                downstream_events.iter().all(|event| event.data != "[DONE]"
+                    && event
+                        .data
+                        .pointer("/choices/0/finish_reason")
+                        .is_none_or(Value::is_null)),
+                "{case_name}: illegal sequence must not commit a success terminal"
+            );
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_MARKER),
+                "{case_name}"
+            );
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_same_wire_unknown_stream_is_raw_then_fails_once_without_cost() {
+    const PRIVATE_MARKER: &str = "private-gemini-same-wire-stream-marker";
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Gemini)
+        .expect("native Gemini stream state fixture");
+    run_case(
+        "r3-19-gemini-same-wire-unknown-stream",
+        move |context| async move {
+            let events = vec![
+                GoldenEvent {
+                    event: None,
+                    data: json!({"candidates":[{"index":0,"content":{"role":"model","parts":[
+                        {"futurePart":{"private":PRIVATE_MARKER}}
+                    ]}}]}),
+                },
+                GoldenEvent {
+                    event: None,
+                    data: json!({"candidates":[{"index":0,"finishReason":"STOP"}]}),
+                },
+            ];
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: events.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("same-wire degraded stream should close with one native error");
+            let downstream_events = parse_downstream_events(fixture.protocol, &body);
+            assert_eq!(&downstream_events[..2], events.as_slice());
+            assert!(String::from_utf8_lossy(&body).contains(PRIVATE_MARKER));
+            assert!(!String::from_utf8_lossy(&body).contains("[DONE]"));
+            assert_eq!(downstream_events.len(), 3);
+            assert_native_fatal_stream_event(
+                fixture.protocol,
+                downstream_events.last().expect("one fatal tail"),
+                &request_id,
+            );
+            assert_eq!(upstream.requests().await.len(), 1);
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_stream_failure_has_no_usage_or_cost(
+                &log,
+                "r3-19-gemini-same-wire-unknown-stream",
+            );
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_MARKER)
+            );
+            router.wait_for_api_key_lease_release().await;
+            router
+                .assert_no_api_key_usage_charge("same-wire unknown Gemini stream")
+                .await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn r3_19_gemini_stream_application_failures_are_raw_same_wire_and_safe_cross_wire() {
+    const PRIVATE_MARKER: &str = "private-gemini-stream-application-marker";
+    for (name, fixture) in gemini_target_fixtures() {
+        let case_name = format!("r3-19-gemini-stream-application-failure-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let failed = GoldenEvent {
+                event: None,
+                data: json!({
+                    "responseId":"gemini-stream-application-failure",
+                    "candidates":[{"index":0,"finishReason":"OTHER"}],
+                    "private":PRIVATE_MARKER
+                }),
+            };
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: vec![failed.clone()],
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("application failure stream should close");
+            let downstream_events = parse_downstream_events(fixture.protocol, &body);
+            if fixture.protocol == DownstreamProtocol::Gemini {
+                assert_eq!(
+                    downstream_events,
+                    vec![failed],
+                    "{case_name}: raw same-wire"
+                );
+                assert!(String::from_utf8_lossy(&body).contains(PRIVATE_MARKER));
+            } else {
+                assert_eq!(downstream_events.len(), 1, "{case_name}");
+                assert_native_fatal_stream_event(
+                    fixture.protocol,
+                    &downstream_events[0],
+                    &request_id,
+                );
+                assert_payload_free_transform_bytes(&body, PRIVATE_MARKER);
+            }
+            assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(PRIVATE_MARKER),
+                "{case_name}"
+            );
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+fn gemini_non_stream_text(protocol: DownstreamProtocol, body: &Value) -> Option<&str> {
+    let pointer = match protocol {
+        DownstreamProtocol::Openai => "/choices/0/message/content",
+        DownstreamProtocol::Responses => "/output/0/content/0/text",
+        DownstreamProtocol::Anthropic => "/content/0/text",
+        DownstreamProtocol::Gemini => "/candidates/0/content/parts/0/text",
+    };
+    body.pointer(pointer).and_then(Value::as_str)
+}
+
+fn assert_gemini_non_stream_usage(protocol: DownstreamProtocol, body: &Value, case_name: &str) {
+    match protocol {
+        DownstreamProtocol::Openai => {
+            assert_eq!(
+                body.pointer("/usage/prompt_tokens"),
+                Some(&json!(12)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usage/completion_tokens"),
+                Some(&json!(9)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usage/total_tokens"),
+                Some(&json!(21)),
+                "{case_name}"
+            );
+        }
+        DownstreamProtocol::Responses => {
+            assert_eq!(
+                body.pointer("/usage/input_tokens"),
+                Some(&json!(12)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usage/output_tokens"),
+                Some(&json!(9)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usage/total_tokens"),
+                Some(&json!(21)),
+                "{case_name}"
+            );
+        }
+        DownstreamProtocol::Anthropic => {
+            assert_eq!(
+                body.pointer("/usage/input_tokens"),
+                Some(&json!(9)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usage/output_tokens"),
+                Some(&json!(9)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usage/cache_read_input_tokens"),
+                Some(&json!(3)),
+                "{case_name}"
+            );
+        }
+        DownstreamProtocol::Gemini => {
+            assert_eq!(
+                body.pointer("/usageMetadata/promptTokenCount"),
+                Some(&json!(11)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usageMetadata/toolUsePromptTokenCount"),
+                Some(&json!(1)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usageMetadata/candidatesTokenCount"),
+                Some(&json!(7)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usageMetadata/thoughtsTokenCount"),
+                Some(&json!(2)),
+                "{case_name}"
+            );
+            assert_eq!(
+                body.pointer("/usageMetadata/totalTokenCount"),
+                Some(&json!(21)),
+                "{case_name}"
+            );
+        }
+    }
+}
+
+fn assert_gemini_usage_cost(
+    log: &RequestLogRecord,
+    catalog_id: i64,
+    catalog_version_id: i64,
+    case_name: &str,
+) {
+    assert_eq!(log.total_input_tokens, Some(12), "{case_name}");
+    assert_eq!(log.total_output_tokens, Some(9), "{case_name}");
+    assert_eq!(log.total_tokens, Some(21), "{case_name}");
+    assert_eq!(log.input_text_tokens, Some(9), "{case_name}");
+    assert_eq!(log.output_text_tokens, Some(7), "{case_name}");
+    assert_eq!(log.input_image_tokens, Some(0), "{case_name}");
+    assert_eq!(log.output_image_tokens, Some(0), "{case_name}");
+    assert_eq!(log.cache_read_tokens, Some(3), "{case_name}");
+    assert_eq!(log.reasoning_tokens, Some(2), "{case_name}");
+    assert_eq!(log.cost_catalog_id, Some(catalog_id), "{case_name}");
+    assert_eq!(
+        log.cost_catalog_version_id,
+        Some(catalog_version_id),
+        "{case_name}"
+    );
+    assert_eq!(log.estimated_cost_nanos, Some(124), "{case_name}");
+    let snapshot: CostSnapshot = serde_json::from_str(
+        log.cost_snapshot_json
+            .as_deref()
+            .expect("Gemini base-cell cost snapshot should persist"),
+    )
+    .expect("Gemini base-cell cost snapshot should parse");
+    assert_eq!(snapshot.total_cost_nanos, 124, "{case_name}");
+}
+
+fn assert_gemini_success_stream_terminal(
+    protocol: DownstreamProtocol,
+    events: &[GoldenEvent],
+    raw_body: &[u8],
+    expected_gemini_events: &[GoldenEvent],
+    case_name: &str,
+) {
+    match protocol {
+        DownstreamProtocol::Openai => {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.data == json!("[DONE]"))
+                    .count(),
+                1,
+                "{case_name}: one OpenAI done"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| {
+                        event.data.pointer("/choices/0/finish_reason") == Some(&json!("stop"))
+                    })
+                    .count(),
+                1,
+                "{case_name}: one OpenAI stop"
+            );
+        }
+        DownstreamProtocol::Responses => {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.data["type"] == "response.completed")
+                    .count(),
+                1,
+                "{case_name}: one Responses completion"
+            );
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.data["type"] != "response.error"),
+                "{case_name}"
+            );
+        }
+        DownstreamProtocol::Anthropic => {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.event.as_deref() == Some("message_start"))
+                    .count(),
+                1,
+                "{case_name}: one Anthropic start"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.event.as_deref() == Some("message_stop"))
+                    .count(),
+                1,
+                "{case_name}: one Anthropic stop"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.data.pointer("/delta/stop_reason")
+                        == Some(&json!("end_turn"))),
+                "{case_name}"
+            );
+        }
+        DownstreamProtocol::Gemini => {
+            assert_eq!(
+                events, expected_gemini_events,
+                "{case_name}: raw Gemini stream"
+            );
+            assert!(
+                !String::from_utf8_lossy(raw_body).contains("[DONE]"),
+                "{case_name}: Gemini has no done marker"
+            );
+        }
+    }
+}
+
+fn assert_gemini_base_cell(test_name: &'static str, protocol: DownstreamProtocol) {
+    let (_, fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == protocol)
+        .expect("Gemini target fixture for base cell");
+
+    let non_stream_fixture = fixture.clone();
+    let case_name = format!("{test_name}-non-stream");
+    let runtime_name = case_name.clone();
+    run_case(&runtime_name, move |context| async move {
+        let upstream = TestUpstream::spawn_json(
+            StatusCode::OK,
+            non_stream_fixture.non_stream.upstream_response.clone(),
+        )
+        .await;
+        let router = RouterFixture::new(context, &non_stream_fixture, &upstream.base_url).await;
+        let (catalog_id, catalog_version_id) = router.attach_cost_catalog(Some(100), Some(2)).await;
+        let persisted_sink = router.install_recording_persisted_sink();
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(
+                &non_stream_fixture,
+                false,
+                &non_stream_fixture.request.downstream,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Gemini base non-stream response should read");
+        let body: Value =
+            serde_json::from_slice(&body).expect("Gemini base non-stream response should be JSON");
+        assert_eq!(
+            gemini_non_stream_text(protocol, &body),
+            Some("baseline pong"),
+            "{case_name}"
+        );
+        let (pointer, terminal) = match protocol {
+            DownstreamProtocol::Openai => ("/choices/0/finish_reason", "stop"),
+            DownstreamProtocol::Responses => ("/status", "completed"),
+            DownstreamProtocol::Anthropic => ("/stop_reason", "end_turn"),
+            DownstreamProtocol::Gemini => ("/candidates/0/finishReason", "STOP"),
+        };
+        assert_eq!(
+            body.pointer(pointer).and_then(Value::as_str),
+            Some(terminal),
+            "{case_name}: normal terminal"
+        );
+        assert_gemini_non_stream_usage(protocol, &body, &case_name);
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &non_stream_fixture,
+            &captured,
+            &non_stream_fixture.request.upstream_path,
+            None,
+            &non_stream_fixture.request.upstream,
+            &router.requested_model(),
+            &request_id,
+        );
+        assert_eq!(
+            router.app_state.secret_encryption.decrypt_call_count(),
+            1,
+            "{case_name}: one credential resolution"
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.request_id, request_id, "{case_name}");
+        assert_log_common(&router, &non_stream_fixture, &log);
+        assert_log_timing_order(&log);
+        assert!(!log.is_stream, "{case_name}");
+        assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+        assert!(log.final_error_code.is_none(), "{case_name}");
+        assert_gemini_usage_cost(&log, catalog_id, catalog_version_id, &case_name);
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+        assert_eq!(persisted_sink.contexts.lock().await.len(), 1, "{case_name}");
+        assert_eq!(captured.len(), 1, "{case_name}: no retry");
+        upstream.shutdown().await;
+    });
+
+    let stream_fixture = fixture.clone();
+    let case_name = format!("{test_name}-stream");
+    let runtime_name = case_name.clone();
+    run_case(&runtime_name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+            events: stream_fixture.stream.upstream_events.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &stream_fixture, &upstream.base_url).await;
+        let (catalog_id, catalog_version_id) = router.attach_cost_catalog(Some(100), Some(2)).await;
+        let persisted_sink = router.install_recording_persisted_sink();
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(
+                &stream_fixture,
+                true,
+                &stream_fixture.stream.downstream_request,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = timeout(
+            WAIT_TIMEOUT,
+            axum::body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("Gemini base stream should terminate")
+        .expect("Gemini base stream should read");
+        let events = parse_downstream_events(protocol, &body);
+        assert_eq!(
+            stream_text(protocol, &events),
+            "baseline pong",
+            "{case_name}"
+        );
+        assert_gemini_success_stream_terminal(
+            protocol,
+            &events,
+            &body,
+            &stream_fixture.stream.upstream_events,
+            &case_name,
+        );
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &stream_fixture,
+            &captured,
+            &stream_fixture.stream.upstream_path,
+            stream_fixture.stream.upstream_query.as_deref(),
+            &stream_fixture.stream.upstream_request,
+            &router.requested_model(),
+            &request_id,
+        );
+        assert_eq!(
+            router.app_state.secret_encryption.decrypt_call_count(),
+            1,
+            "{case_name}: one credential resolution"
+        );
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.request_id, request_id, "{case_name}");
+        assert_log_common(&router, &stream_fixture, &log);
+        assert_log_timing_order(&log);
+        assert!(log.is_stream, "{case_name}");
+        assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+        assert!(log.final_error_code.is_none(), "{case_name}");
+        assert_gemini_usage_cost(&log, catalog_id, catalog_version_id, &case_name);
+        router.wait_for_api_key_lease_release().await;
+        assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+        assert_eq!(persisted_sink.contexts.lock().await.len(), 1, "{case_name}");
+        assert_eq!(captured.len(), 1, "{case_name}: no retry");
+        upstream.shutdown().await;
+    });
+
+    let error_fixture = fixture.clone();
+    let error_response = gemini_target_golden().error.http_429.response;
+    let case_name = format!("{test_name}-upstream-error");
+    let runtime_name = case_name.clone();
+    run_case(&runtime_name, move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::TOO_MANY_REQUESTS, error_response.clone()).await;
+        let router = RouterFixture::new(context, &error_fixture, &upstream.base_url).await;
+        router.attach_cost_catalog(Some(100), Some(2)).await;
+        let persisted_sink = router.install_recording_persisted_sink();
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(
+                &error_fixture,
+                false,
+                &error_fixture.error.downstream_request,
+            )
+            .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "{case_name}"
+        );
+        assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Gemini 429 envelope should read");
+        let body: Value = serde_json::from_slice(&body).expect("Gemini 429 envelope JSON");
+        assert_eq!(
+            downstream_error_code(&body, protocol),
+            Some("upstream_rate_limit_error"),
+            "{case_name}"
+        );
+        assert_eq!(
+            body.pointer("/upstream_error/body"),
+            Some(&error_response),
+            "{case_name}: authentic bounded Gemini error"
+        );
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &error_fixture,
+            &captured,
+            &error_fixture.request.upstream_path,
+            None,
+            &error_fixture.request.upstream,
+            &router.requested_model(),
+            &request_id,
+        );
+        assert_eq!(
+            router.app_state.secret_encryption.decrypt_call_count(),
+            1,
+            "{case_name}: one credential resolution"
+        );
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.request_id, request_id, "{case_name}");
+        assert_log_common(&router, &error_fixture, &log);
+        assert_log_timing_order(&log);
+        assert_eq!(log.upstream_http_status, Some(429), "{case_name}");
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_rate_limit_error"),
+            "{case_name}"
+        );
+        assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+        router.wait_for_api_key_lease_release().await;
+        router.assert_no_api_key_usage_charge(&case_name).await;
+        assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+        assert_eq!(persisted_sink.contexts.lock().await.len(), 1, "{case_name}");
+        assert_eq!(captured.len(), 1, "{case_name}: no retry");
+        upstream.shutdown().await;
+    });
+
+    let cancellation_fixture = fixture;
+    let case_name = format!("{test_name}-cancellation");
+    let runtime_name = case_name.clone();
+    run_case(&runtime_name, move |context| async move {
+        let dropped = Arc::new(DropSignal::default());
+        let upstream = TestUpstream::spawn(ScriptedReply::HangingSse {
+            first_event: cancellation_fixture
+                .cancellation
+                .first_upstream_event
+                .clone(),
+            dropped: Arc::clone(&dropped),
+        })
+        .await;
+        let router = RouterFixture::new(context, &cancellation_fixture, &upstream.base_url).await;
+        router.attach_cost_catalog(Some(100), Some(2)).await;
+        let persisted_sink = router.install_recording_persisted_sink();
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(
+                &cancellation_fixture,
+                true,
+                &cancellation_fixture.cancellation.downstream_request,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+        let request_id = assert_downstream_request_identity(&response);
+        let mut body = response.into_body().into_data_stream();
+        let first = timeout(WAIT_TIMEOUT, body.next())
+            .await
+            .expect("Gemini cancellation first frame deadline")
+            .expect("Gemini cancellation first frame")
+            .expect("Gemini cancellation first frame should read");
+        assert!(!first.is_empty(), "{case_name}");
+        drop(body);
+        dropped.wait().await;
+        let captured = upstream.requests().await;
+        assert_upstream(
+            test_name,
+            &cancellation_fixture,
+            &captured,
+            &cancellation_fixture.cancellation.upstream_path,
+            cancellation_fixture.cancellation.upstream_query.as_deref(),
+            &cancellation_fixture.cancellation.upstream_request,
+            &router.requested_model(),
+            &request_id,
+        );
+        assert_eq!(
+            router.app_state.secret_encryption.decrypt_call_count(),
+            1,
+            "{case_name}: one credential resolution"
+        );
+        let log = router.wait_for_log(RequestStatus::Cancelled).await;
+        assert_eq!(log.request_id, request_id, "{case_name}");
+        assert_log_common(&router, &cancellation_fixture, &log);
+        assert_log_timing_order(&log);
+        assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("client_cancelled_error"),
+            "{case_name}"
+        );
+        assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+        router.wait_for_api_key_lease_release().await;
+        router.assert_no_api_key_usage_charge(&case_name).await;
+        assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+        assert_eq!(captured.len(), 1, "{case_name}: no retry");
+        assert_single_persisted_terminal_fact(
+            &persisted_sink,
+            ExecutionStage::DownstreamSend,
+            ResponseVisibility::BodyStarted,
+        )
+        .await;
+        upstream.shutdown().await;
+    });
+}
+
+macro_rules! gemini_base_cell_test {
+    ($name:ident, $protocol:expr) => {
+        #[test]
+        fn $name() {
+            assert_gemini_base_cell(stringify!($name), $protocol);
+        }
+    };
+}
+
+gemini_base_cell_test!(
+    openai_to_gemini_base_cell_is_verified,
+    DownstreamProtocol::Openai
+);
+gemini_base_cell_test!(
+    responses_to_gemini_base_cell_is_verified,
+    DownstreamProtocol::Responses
+);
+gemini_base_cell_test!(
+    anthropic_to_gemini_base_cell_is_verified,
+    DownstreamProtocol::Anthropic
+);
+gemini_base_cell_test!(
+    gemini_to_gemini_base_cell_is_verified,
+    DownstreamProtocol::Gemini
+);
+
+#[test]
+fn r3_19_gemini_target_evidence_registry_covers_exactly_24_base_dimensions() {
+    const DIMENSIONS: [&str; 6] = [
+        "non_stream_text",
+        "stream_text",
+        "usage",
+        "normal_termination",
+        "upstream_error",
+        "cancellation",
+    ];
+    const EVIDENCE: [(&str, &str); 4] = [
+        (
+            "openai",
+            "proxy::direct_execution_regression::openai_to_gemini_base_cell_is_verified",
+        ),
+        (
+            "responses",
+            "proxy::direct_execution_regression::responses_to_gemini_base_cell_is_verified",
+        ),
+        (
+            "anthropic",
+            "proxy::direct_execution_regression::anthropic_to_gemini_base_cell_is_verified",
+        ),
+        (
+            "gemini",
+            "proxy::direct_execution_regression::gemini_to_gemini_base_cell_is_verified",
+        ),
+    ];
+
+    let mut cells = BTreeSet::new();
+    let mut references = BTreeSet::new();
+    for (downstream, reference) in EVIDENCE {
+        assert!(reference.starts_with("proxy::direct_execution_regression::"));
+        assert!(references.insert(reference));
+        for dimension in DIMENSIONS {
+            assert!(cells.insert((downstream, dimension)));
+        }
+    }
+    assert_eq!(cells.len(), 24);
+    assert_eq!(references.len(), 4);
+}
+
+#[test]
+fn r3_19_gemini_repeated_http_errors_do_not_gate_the_next_request() {
+    for (name, fixture) in gemini_target_fixtures() {
+        let case_name = format!("r3-19-gemini-repeated-http-error-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::TOO_MANY_REQUESTS,
+                fixture.error.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            for attempt in 0..2 {
+                let response = router
+                    .send(&fixture, false, &fixture.error.downstream_request)
+                    .await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "{case_name}: attempt {attempt}"
+                );
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("repeated Gemini HTTP error should read");
+                let body: Value = serde_json::from_slice(&body)
+                    .expect("repeated Gemini HTTP error should be JSON");
+                assert_eq!(
+                    downstream_error_code(&body, fixture.protocol),
+                    Some("upstream_rate_limit_error"),
+                    "{case_name}: attempt {attempt}"
+                );
+                router.wait_for_api_key_lease_release().await;
+
+                let deadline = Instant::now() + WAIT_TIMEOUT;
+                loop {
+                    let logs = router.request_logs().await;
+                    if logs.len() == attempt + 1 {
+                        assert!(logs.iter().all(|log| {
+                            log.overall_status == RequestStatus::Error
+                                && log.upstream_http_status == Some(429)
+                                && log.final_error_code.as_deref()
+                                    == Some("upstream_rate_limit_error")
+                                && log.total_tokens.is_none()
+                                && log.estimated_cost_nanos.is_none()
+                        }));
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{case_name}: one log per admitted request"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(
+                    upstream.requests().await.len(),
+                    attempt + 1,
+                    "{case_name}: no hidden retry and next request admitted"
+                );
+            }
+
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_base_cells_body_and_stream_reader_errors_release_once_without_cost() {
+    for (name, fixture) in gemini_target_fixtures() {
+        let non_stream_fixture = fixture.clone();
+        let case_name = format!("r3-19-gemini-body-interruption-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::InterruptedBody {
+                content_type: "application/json".to_string(),
+                first_chunk: br#"{"responseId":"private-partial""#.to_vec(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &non_stream_fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+
+            let response = router
+                .send(
+                    &non_stream_fixture,
+                    false,
+                    &non_stream_fixture.request.downstream,
+                )
+                .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Gemini body interruption envelope should read");
+            let body: Value = serde_json::from_slice(&body)
+                .expect("Gemini body interruption envelope should be JSON");
+            assert_eq!(
+                downstream_error_code(&body, non_stream_fixture.protocol),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert!(!body.to_string().contains("private-partial"), "{case_name}");
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &non_stream_fixture,
+                &captured,
+                &non_stream_fixture.request.upstream_path,
+                None,
+                &non_stream_fixture.request.upstream,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.request_id, request_id, "{case_name}");
+            assert_log_common(&router, &non_stream_fixture, &log);
+            assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(captured.len(), 1, "{case_name}: no retry");
+            upstream.shutdown().await;
+        });
+
+        let case_name = format!("r3-19-gemini-stream-reader-interruption-{name}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::InterruptedSse {
+                first_event: fixture.cancellation.first_upstream_event.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
+            let persisted_sink = router.install_recording_persisted_sink();
+
+            let response = router
+                .send(&fixture, true, &fixture.cancellation.downstream_request)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let mut body = response.into_body().into_data_stream();
+            let mut successful = Vec::new();
+            let mut saw_body_error = false;
+            loop {
+                match timeout(WAIT_TIMEOUT, body.next())
+                    .await
+                    .expect("Gemini stream interruption deadline")
+                {
+                    Some(Ok(chunk)) => successful.extend_from_slice(&chunk),
+                    Some(Err(_)) => {
+                        saw_body_error = true;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            assert!(saw_body_error, "{case_name}: reader error reaches Body");
+            let events = parse_downstream_events(fixture.protocol, &successful);
+            assert_eq!(
+                stream_text(fixture.protocol, &events),
+                "baseline ",
+                "{case_name}: already committed text remains visible"
+            );
+            assert!(
+                events.iter().all(|event| {
+                    event.data != "[DONE]"
+                        && event.data["type"] != "response.completed"
+                        && event.event.as_deref() != Some("message_stop")
+                        && event
+                            .data
+                            .pointer("/choices/0/finish_reason")
+                            .is_none_or(Value::is_null)
+                        && event.data.pointer("/candidates/0/finishReason").is_none()
+                }),
+                "{case_name}: interrupted stream has no success terminal"
+            );
+            let captured = upstream.requests().await;
+            assert_upstream(
+                name,
+                &fixture,
+                &captured,
+                &fixture.cancellation.upstream_path,
+                fixture.cancellation.upstream_query.as_deref(),
+                &fixture.cancellation.upstream_request,
+                &router.requested_model(),
+                &request_id,
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.request_id, request_id, "{case_name}");
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_response_error"),
+                "{case_name}"
+            );
+            assert_stream_failure_has_no_usage_or_cost(&log, &case_name);
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(&case_name).await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(captured.len(), 1, "{case_name}: no retry");
+            assert_single_persisted_terminal_fact(
+                &persisted_sink,
+                ExecutionStage::UpstreamResponse,
+                ResponseVisibility::BodyStarted,
+            )
+            .await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_and_vertex_profiles_execute_equivalent_generate_and_stream_contracts() {
+    let (_, native_fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Gemini)
+        .expect("native Gemini profile-equivalence fixture");
+
+    for (profile_type, profile_name, access_token) in [
+        (UpstreamProfileType::Gemini, "gemini", PROVIDER_SECRET),
+        (
+            UpstreamProfileType::Vertex,
+            "vertex",
+            "vertex-profile-equivalence-token",
+        ),
+    ] {
+        for is_stream in [false, true] {
+            let mut fixture = native_fixture.clone();
+            fixture.profile_type = profile_type.clone();
+            fixture.upstream_headers = match profile_type {
+                UpstreamProfileType::Gemini => {
+                    BTreeMap::from([("x-goog-api-key".to_string(), PROVIDER_SECRET.to_string())])
+                }
+                UpstreamProfileType::Vertex => BTreeMap::from([(
+                    "authorization".to_string(),
+                    format!("Bearer {access_token}"),
+                )]),
+                _ => unreachable!(),
+            };
+            let case_name = format!(
+                "r3-19-profile-equivalence-{profile_name}-{}",
+                if is_stream { "stream" } else { "generate" }
+            );
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let upstream = if is_stream {
+                    TestUpstream::spawn(ScriptedReply::Sse {
+                        events: fixture.stream.upstream_events.clone(),
+                    })
+                    .await
+                } else {
+                    TestUpstream::spawn_json(
+                        StatusCode::OK,
+                        fixture.non_stream.upstream_response.clone(),
+                    )
+                    .await
+                };
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                if profile_type == UpstreamProfileType::Vertex {
+                    router
+                        .replace_default_gemini_profile_in_place(
+                            &upstream.base_url,
+                            UpstreamProfileType::Vertex,
+                        )
+                        .await;
+                    router.prepare_cached_vertex_credential(access_token).await;
+                }
+                let (catalog_id, catalog_version_id) =
+                    router.attach_cost_catalog(Some(100), Some(2)).await;
+                router
+                    .app_state
+                    .admin
+                    .request_patch
+                    .create_source_variant(
+                        router.source_id,
+                        RequestPatchVariantInput {
+                            source_id: router.source_id,
+                            model_id: None,
+                            suffix: None,
+                            enabled: true,
+                            expose_in_models: false,
+                            rules: vec![
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Query,
+                                    target: "trace".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!("profile-equivalent"))),
+                                    description: Some(
+                                        "Gemini/Vertex profile-equivalence query".to_string(),
+                                    ),
+                                },
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Header,
+                                    target: "x-r3-19-profile".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!("equivalent"))),
+                                    description: Some(
+                                        "Gemini/Vertex profile-equivalence header".to_string(),
+                                    ),
+                                },
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Body,
+                                    target: "/profileEvidence".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!(true))),
+                                    description: Some(
+                                        "Gemini/Vertex profile-equivalence body".to_string(),
+                                    ),
+                                },
+                            ],
+                        },
+                    )
+                    .await
+                    .expect("profile-equivalence Patch should save");
+                router
+                    .app_state
+                    .catalog
+                    .invalidate_models_catalog()
+                    .await
+                    .expect("profile-equivalence Patch cache should invalidate");
+                router
+                    .app_state
+                    .secret_encryption
+                    .reset_decrypt_call_count();
+                let request = if is_stream {
+                    &fixture.stream.downstream_request
+                } else {
+                    &fixture.request.downstream
+                };
+
+                let response = router.send(&fixture, is_stream, request).await;
+
+                assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+                assert_no_public_transform_diagnostics(&response);
+                let request_id = assert_downstream_request_identity(&response);
+                let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("profile-equivalence response should complete");
+                if is_stream {
+                    assert_eq!(
+                        parse_downstream_events(fixture.protocol, &response_body),
+                        fixture.stream.upstream_events,
+                        "{case_name}: same Gemini SSE semantics"
+                    );
+                    assert!(!String::from_utf8_lossy(&response_body).contains("[DONE]"));
+                } else {
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&response_body)
+                            .expect("profile-equivalence non-stream JSON"),
+                        fixture.non_stream.upstream_response,
+                        "{case_name}: same Gemini response semantics"
+                    );
+                }
+
+                let captured = upstream.requests().await;
+                assert_eq!(captured.len(), 1, "{case_name}: exactly one call");
+                let request = &captured[0];
+                assert_eq!(request.method, Method::POST, "{case_name}");
+                assert_eq!(
+                    request.path,
+                    match (profile_type.clone(), is_stream) {
+                        (UpstreamProfileType::Gemini, false) => {
+                            format!("/v1beta/models/{UPSTREAM_MODEL}:generateContent")
+                        }
+                        (UpstreamProfileType::Gemini, true) => {
+                            format!("/v1beta/models/{UPSTREAM_MODEL}:streamGenerateContent")
+                        }
+                        (UpstreamProfileType::Vertex, false) => format!(
+                            "/v1/projects/project-fixture/locations/us-central1/publishers/google/models/{UPSTREAM_MODEL}:generateContent"
+                        ),
+                        (UpstreamProfileType::Vertex, true) => format!(
+                            "/v1/projects/project-fixture/locations/us-central1/publishers/google/models/{UPSTREAM_MODEL}:streamGenerateContent"
+                        ),
+                        _ => unreachable!(),
+                    },
+                    "{case_name}: collection URL is the only path difference"
+                );
+                let query = request
+                    .query
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split('&')
+                    .filter(|pair| !pair.is_empty())
+                    .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(query.get("trace"), Some(&"profile-equivalent"));
+                assert_eq!(query.get("alt"), is_stream.then_some(&"sse"));
+                assert_eq!(query.len(), if is_stream { 2 } else { 1 });
+                assert_eq!(
+                    request
+                        .headers
+                        .get("x-r3-19-profile")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("equivalent"),
+                    "{case_name}"
+                );
+                match profile_type {
+                    UpstreamProfileType::Gemini => {
+                        assert_eq!(
+                            request
+                                .headers
+                                .get("x-goog-api-key")
+                                .and_then(|value| value.to_str().ok()),
+                            Some(PROVIDER_SECRET),
+                            "{case_name}"
+                        );
+                        assert!(!request.headers.contains_key("authorization"));
+                    }
+                    UpstreamProfileType::Vertex => {
+                        assert_eq!(
+                            request
+                                .headers
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok()),
+                            Some("Bearer vertex-profile-equivalence-token"),
+                            "{case_name}"
+                        );
+                        assert!(!request.headers.contains_key("x-goog-api-key"));
+                        assert!(vertex_token_is_cached_for_test(router.provider_api_key_id));
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    ["authorization", "x-goog-api-key"]
+                        .into_iter()
+                        .map(|name| request.headers.get_all(name).iter().count())
+                        .sum::<usize>(),
+                    1,
+                    "{case_name}: exactly one auth header"
+                );
+                assert_eq!(
+                    request
+                        .headers
+                        .get(&X_REQUEST_ID)
+                        .and_then(|value| value.to_str().ok()),
+                    Some(request_id.as_str()),
+                    "{case_name}"
+                );
+                let mut expected_body = render_value(
+                    if is_stream {
+                        &fixture.stream.upstream_request
+                    } else {
+                        &fixture.request.upstream
+                    },
+                    &router.requested_model(),
+                );
+                expected_body["profileEvidence"] = json!(true);
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&request.body)
+                        .expect("profile-equivalence upstream body JSON"),
+                    expected_body,
+                    "{case_name}: identical Gemini wire body"
+                );
+                assert_eq!(
+                    router.app_state.secret_encryption.decrypt_call_count(),
+                    1,
+                    "{case_name}: one credential resolution"
+                );
+                let log = router.wait_for_log(RequestStatus::Success).await;
+                assert_eq!(log.request_id, request_id, "{case_name}");
+                assert_log_common(&router, &fixture, &log);
+                assert_eq!(log.source_profile_type_snapshot, Some(profile_type));
+                assert_gemini_usage_cost(&log, catalog_id, catalog_version_id, &case_name);
+                assert!(log.final_error_code.is_none(), "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn r3_19_gemini_and_vertex_unsafe_collection_query_is_precredential_zero_call() {
+    const SENTINEL: &str = "profile-query-private-marker";
+    let (_, native_fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Gemini)
+        .expect("native Gemini unsafe-profile fixture");
+
+    for profile_type in [UpstreamProfileType::Gemini, UpstreamProfileType::Vertex] {
+        let mut fixture = native_fixture.clone();
+        fixture.profile_type = profile_type.clone();
+        let case_name = format!("r3-19-unsafe-profile-query-{profile_type:?}");
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = TestUpstream::spawn_json(
+                StatusCode::OK,
+                fixture.non_stream.upstream_response.clone(),
+            )
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            if profile_type == UpstreamProfileType::Vertex {
+                router
+                    .replace_default_gemini_profile_in_place(
+                        &upstream.base_url,
+                        UpstreamProfileType::Vertex,
+                    )
+                    .await;
+            }
+            let unsafe_base = match profile_type {
+                UpstreamProfileType::Gemini => {
+                    format!("{}/v1beta/models?key={SENTINEL}", upstream.base_url)
+                }
+                UpstreamProfileType::Vertex => format!(
+                    "{}/v1/projects/project-fixture/locations/us-central1/publishers/google/models?trace={SENTINEL}",
+                    upstream.base_url
+                ),
+                _ => unreachable!(),
+            };
+            UpstreamSource::update(
+                router.source_id,
+                router.provider_id,
+                &UpdateUpstreamSourceData {
+                    base_url: Some(unsafe_base),
+                    updated_at: chrono::Utc::now().timestamp_millis(),
+                    ..UpdateUpstreamSourceData::test_defaults()
+                },
+            )
+            .expect("unsafe legacy collection URL should seed");
+            router
+                .app_state
+                .catalog
+                .invalidate_provider(router.provider_id, Some(&router.provider_key))
+                .await
+                .expect("unsafe Source cache should invalidate");
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("unsafe profile rejection should read");
+            assert!(!String::from_utf8_lossy(&body).contains(SENTINEL));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            assert!(
+                profile_type != UpstreamProfileType::Vertex
+                    || !vertex_token_is_cached_for_test(router.provider_api_key_id),
+                "{case_name}: zero Vertex OAuth"
+            );
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("provider_configuration_error"),
+                "{case_name}"
+            );
+            assert!(
+                !log.final_error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(SENTINEL),
+                "{case_name}"
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_vertex_extended_safety_finish_and_usage_use_the_shared_gemini_observer() {
+    let (_, base_fixture) = gemini_target_fixtures()
+        .into_iter()
+        .find(|(_, fixture)| fixture.protocol == DownstreamProtocol::Openai)
+        .expect("OpenAI to Vertex extension fixture");
+
+    for is_stream in [false, true] {
+        let mut fixture = base_fixture.clone();
+        fixture.profile_type = UpstreamProfileType::Vertex;
+        fixture.upstream_headers = BTreeMap::from([(
+            "authorization".to_string(),
+            "Bearer vertex-extension-token".to_string(),
+        )]);
+        let upstream_response = json!({
+            "responseId":"vertex-extension-response",
+            "candidates":[{"index":0,"finishReason":"MODEL_ARMOR"}],
+            "usageMetadata":{"promptTokenCount":3,"totalTokenCount":3}
+        });
+        let upstream_events = vec![GoldenEvent {
+            event: None,
+            data: json!({
+                "responseId":"vertex-extension-stream",
+                "promptFeedback":{"blockReason":"JAILBREAK"},
+                "usageMetadata":{"promptTokenCount":3,"totalTokenCount":3}
+            }),
+        }];
+        let case_name = format!(
+            "r3-19-vertex-extension-{}",
+            if is_stream {
+                "stream-jailbreak"
+            } else {
+                "model-armor"
+            }
+        );
+        let runtime_name = case_name.clone();
+        run_case(&runtime_name, move |context| async move {
+            let upstream = if is_stream {
+                TestUpstream::spawn(ScriptedReply::Sse {
+                    events: upstream_events,
+                })
+                .await
+            } else {
+                TestUpstream::spawn_json(StatusCode::OK, upstream_response).await
+            };
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .replace_default_gemini_profile_in_place(
+                    &upstream.base_url,
+                    UpstreamProfileType::Vertex,
+                )
+                .await;
+            router
+                .prepare_cached_vertex_credential("vertex-extension-token")
+                .await;
+            let (catalog_id, catalog_version_id) =
+                router.attach_cost_catalog(Some(100), Some(2)).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let request_body = if is_stream {
+                &fixture.stream.downstream_request
+            } else {
+                &fixture.request.downstream
+            };
+
+            let response = router.send(&fixture, is_stream, request_body).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let request_id = assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("Vertex extension response should read");
+            if is_stream {
+                let events = parse_downstream_events(fixture.protocol, &body);
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| {
+                            event.data.pointer("/choices/0/finish_reason")
+                                == Some(&json!("content_filter"))
+                        })
+                        .count(),
+                    1,
+                    "{case_name}"
+                );
+                assert_eq!(
+                    events.iter().filter(|event| event.data == "[DONE]").count(),
+                    1,
+                    "{case_name}"
+                );
+            } else {
+                let body: Value = serde_json::from_slice(&body)
+                    .expect("Vertex MODEL_ARMOR response should be JSON");
+                assert_eq!(
+                    body.pointer("/choices/0/finish_reason"),
+                    Some(&json!("content_filter")),
+                    "{case_name}"
+                );
+            }
+
+            let captured = upstream.requests().await;
+            assert_upstream(
+                &case_name,
+                &fixture,
+                &captured,
+                &format!(
+                    "/v1/projects/project-fixture/locations/us-central1/publishers/google/models/{UPSTREAM_MODEL}:{}",
+                    if is_stream {
+                        "streamGenerateContent"
+                    } else {
+                        "generateContent"
+                    }
+                ),
+                is_stream.then_some("alt=sse"),
+                if is_stream {
+                    &fixture.stream.upstream_request
+                } else {
+                    &fixture.request.upstream
+                },
+                &router.requested_model(),
+                &request_id,
+            );
+            assert!(vertex_token_is_cached_for_test(router.provider_api_key_id));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 1);
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_log_common(&router, &fixture, &log);
+            assert_eq!(
+                log.source_profile_type_snapshot,
+                Some(UpstreamProfileType::Vertex)
+            );
+            assert_eq!(log.total_input_tokens, Some(3), "{case_name}");
+            assert_eq!(log.total_output_tokens, Some(0), "{case_name}");
+            assert_eq!(log.total_tokens, Some(3), "{case_name}");
+            assert_eq!(log.estimated_cost_nanos, Some(106), "{case_name}");
+            assert_eq!(log.cost_catalog_id, Some(catalog_id), "{case_name}");
+            assert_eq!(
+                log.cost_catalog_version_id,
+                Some(catalog_version_id),
+                "{case_name}"
+            );
+            assert!(log.final_error_code.is_none(), "{case_name}");
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+            assert_eq!(captured.len(), 1, "{case_name}");
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn r3_19_gemini_vertex_profile_evidence_registry_covers_all_four_operations() {
+    const EVIDENCE: [(&str, &str); 5] = [
+        (
+            "generate_and_stream",
+            "proxy::direct_execution_regression::r3_19_gemini_and_vertex_profiles_execute_equivalent_generate_and_stream_contracts",
+        ),
+        (
+            "count_tokens",
+            "proxy::direct_execution_regression::r3_19_count_tokens_two_legal_shapes_use_gemini_and_vertex_once_without_usage_or_cost",
+        ),
+        (
+            "source_check",
+            "controller::provider::tests::gemini_and_vertex_source_check_send_shared_minimal_contract_once",
+        ),
+        (
+            "precredential_safety",
+            "proxy::direct_execution_regression::r3_19_gemini_and_vertex_unsafe_collection_query_is_precredential_zero_call",
+        ),
+        (
+            "vertex_extensions",
+            "proxy::direct_execution_regression::r3_19_vertex_extended_safety_finish_and_usage_use_the_shared_gemini_observer",
+        ),
+    ];
+    let registry = EVIDENCE.into_iter().collect::<BTreeMap<_, _>>();
+    assert_eq!(registry.len(), EVIDENCE.len());
+    assert_eq!(
+        registry.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "generate_and_stream",
+            "count_tokens",
+            "source_check",
+            "precredential_safety",
+            "vertex_extensions",
+        ])
+    );
+    assert!(
+        registry
+            .values()
+            .all(|reference| reference.contains("::") && !reference.contains("transform::"))
+    );
+}
+
+#[test]
+fn r3_19_count_tokens_two_legal_shapes_use_gemini_and_vertex_once_without_usage_or_cost() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .map(|(_, fixture)| fixture)
+        .expect("Gemini fixture");
+    let target = gemini_target_golden();
+    for (profile_type, profile_name) in [
+        (UpstreamProfileType::Gemini, "gemini"),
+        (UpstreamProfileType::Vertex, "vertex"),
+    ] {
+        for (shape_name, version, request_body) in [
+            (
+                "contents",
+                "v1beta",
+                target.count_tokens.contents_request.clone(),
+            ),
+            (
+                "generate-content-request",
+                "v1",
+                target.count_tokens.generate_content_request.clone(),
+            ),
+        ] {
+            let fixture = fixture.clone();
+            let upstream_response = serde_json::to_vec(&target.count_tokens.response)
+                .expect("CountTokens fixture response should serialize");
+            let case_name = format!("r3-19-count-tokens-{profile_name}-{shape_name}");
+            let runtime_name = case_name.clone();
+            run_case(&runtime_name, move |context| async move {
+                let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                    status: StatusCode::OK,
+                    content_type: Some("application/json; charset=utf-8".to_string()),
+                    content_encoding: None,
+                    body: upstream_response.clone(),
+                })
+                .await;
+                let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+                if profile_type == UpstreamProfileType::Vertex {
+                    router
+                        .replace_default_gemini_profile_in_place(
+                            &upstream.base_url,
+                            UpstreamProfileType::Vertex,
+                        )
+                        .await;
+                    router
+                        .prepare_cached_vertex_credential("vertex-count-tokens-access-token")
+                        .await;
+                }
+                router.attach_cost_catalog(Some(101), Some(3)).await;
+                router
+                    .app_state
+                    .admin
+                    .request_patch
+                    .create_source_variant(
+                        router.source_id,
+                        RequestPatchVariantInput {
+                            source_id: router.source_id,
+                            model_id: None,
+                            suffix: None,
+                            enabled: true,
+                            expose_in_models: false,
+                            rules: vec![
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Query,
+                                    target: "trace".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!("must-not-apply"))),
+                                    description: Some(
+                                        "CountTokens generation-only Patch boundary".to_string(),
+                                    ),
+                                },
+                                RequestPatchRuleInput {
+                                    placement: RequestPatchPlacement::Body,
+                                    target: "/patchMustNotApply".to_string(),
+                                    operation: RequestPatchOperation::Set,
+                                    value_json: Some(Some(json!(true))),
+                                    description: Some(
+                                        "CountTokens body Patch boundary".to_string(),
+                                    ),
+                                },
+                            ],
+                        },
+                    )
+                    .await
+                    .expect("generation Patch fixture should save");
+                router
+                    .app_state
+                    .catalog
+                    .invalidate_models_catalog()
+                    .await
+                    .expect("Patch catalog should invalidate");
+                router
+                    .app_state
+                    .secret_encryption
+                    .reset_decrypt_call_count();
+
+                let uri = format!(
+                    "/gemini/{version}/models/{}:countTokens?key={}&alt=client-owned&trace=client-owned",
+                    router.requested_model(),
+                    router.downstream_key
+                );
+                let response = router
+                    .send_raw_post(uri, request_body.clone(), DownstreamAuth::Bearer)
+                    .await;
+
+                assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+                let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("CountTokens response body should read");
+                assert_eq!(
+                    response_body.as_ref(),
+                    upstream_response.as_slice(),
+                    "{case_name}"
+                );
+                let decoded: Value = serde_json::from_slice(&response_body)
+                    .expect("CountTokens raw response should remain JSON");
+                assert_eq!(decoded["futureCountField"], json!(true), "{case_name}");
+
+                let captured = upstream.requests().await;
+                assert_eq!(captured.len(), 1, "{case_name}");
+                assert_eq!(captured[0].method, Method::POST, "{case_name}");
+                assert_eq!(
+                    captured[0].path,
+                    if profile_type == UpstreamProfileType::Vertex {
+                        format!(
+                            "/v1/projects/project-fixture/locations/us-central1/publishers/google/models/{UPSTREAM_MODEL}:countTokens"
+                        )
+                    } else {
+                        format!("/v1beta/models/{UPSTREAM_MODEL}:countTokens")
+                    },
+                    "{case_name}"
+                );
+                assert_eq!(captured[0].query, None, "{case_name}");
+                let captured_body: Value = serde_json::from_slice(&captured[0].body)
+                    .expect("captured CountTokens request should be JSON");
+                assert_eq!(captured_body, request_body, "{case_name}");
+                if profile_type == UpstreamProfileType::Vertex {
+                    assert_eq!(
+                        captured[0]
+                            .headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("Bearer vertex-count-tokens-access-token"),
+                        "{case_name}"
+                    );
+                    assert!(!captured[0].headers.contains_key("x-goog-api-key"));
+                    assert!(
+                        vertex_token_is_cached_for_test(router.provider_api_key_id),
+                        "{case_name}: cached OAuth token remains the only token source"
+                    );
+                } else {
+                    assert_eq!(
+                        captured[0]
+                            .headers
+                            .get("x-goog-api-key")
+                            .and_then(|value| value.to_str().ok()),
+                        Some(PROVIDER_SECRET),
+                        "{case_name}"
+                    );
+                    assert!(!captured[0].headers.contains_key("authorization"));
+                }
+                assert_eq!(
+                    router.app_state.secret_encryption.decrypt_call_count(),
+                    1,
+                    "{case_name}: one Provider credential resolution"
+                );
+
+                let log = router.wait_for_log(RequestStatus::Success).await;
+                assert_eq!(log.source_id, Some(router.source_id), "{case_name}");
+                assert_eq!(
+                    log.source_profile_type_snapshot,
+                    Some(profile_type),
+                    "{case_name}"
+                );
+                assert_eq!(log.upstream_http_status, Some(200), "{case_name}");
+                assert_eq!(log.total_input_tokens, None, "{case_name}");
+                assert_eq!(log.total_output_tokens, None, "{case_name}");
+                assert_eq!(log.total_tokens, None, "{case_name}");
+                assert_eq!(log.cost_catalog_id, None, "{case_name}");
+                assert_eq!(log.cost_catalog_version_id, None, "{case_name}");
+                assert_eq!(log.estimated_cost_nanos, None, "{case_name}");
+                assert_eq!(log.cost_snapshot_json, None, "{case_name}");
+                router.wait_for_api_key_lease_release().await;
+                router.assert_no_api_key_usage_charge(&case_name).await;
+                assert_eq!(router.request_logs().await.len(), 1, "{case_name}");
+                upstream.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn r3_19_count_tokens_invalid_shapes_and_incompatible_source_are_precredential_zero_call() {
+    let gemini_fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .map(|(_, fixture)| fixture)
+        .expect("Gemini fixture");
+    for (case_name, invalid_body) in [
+        (
+            "both",
+            json!({
+                "contents": [{"parts": [{"text": "private-both"}]}],
+                "generateContentRequest": {"contents": [{"parts": [{"text": "private-both"}]}]}
+            }),
+        ),
+        ("none", json!({"private": "none"})),
+        ("contents-type", json!({"contents": "private-type"})),
+        ("empty-contents", json!({"contents": []})),
+        (
+            "nested-model",
+            json!({
+                "generateContentRequest": {
+                    "model": "models/private-conflict",
+                    "contents": [{"parts": [{"text": "count"}]}]
+                }
+            }),
+        ),
+    ] {
+        let fixture = gemini_fixture.clone();
+        let runtime_name = format!("r3-19-count-tokens-invalid-{case_name}");
+        run_case(&runtime_name, move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"totalTokens": 1})).await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let uri = format!(
+                "/gemini/v1beta/models/{}:countTokens?key={}",
+                router.requested_model(),
+                router.downstream_key
+            );
+
+            let response = router
+                .send_raw_post(uri, invalid_body, DownstreamAuth::Bearer)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case_name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("invalid CountTokens response should read");
+            assert!(!String::from_utf8_lossy(&body).contains("private"));
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty(), "{case_name}");
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("invalid_request_error")
+            );
+            assert_eq!(log.cost_catalog_id, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+
+    let openai_fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("OpenAI fixture");
+    run_case(
+        "r3-19-count-tokens-incompatible-source",
+        move |context| async move {
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, json!({"totalTokens": 1})).await;
+            let router = RouterFixture::new(context, &openai_fixture, &upstream.base_url).await;
+            router
+                .app_state
+                .secret_encryption
+                .reset_decrypt_call_count();
+            let uri = format!(
+                "/gemini/models/{}:countTokens?key={}",
+                router.requested_model(),
+                router.downstream_key
+            );
+
+            let response = router
+                .send_raw_post(
+                    uri,
+                    json!({"contents": [{"parts": [{"text": "count"}]}]}),
+                    DownstreamAuth::Bearer,
+                )
+                .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+            assert!(upstream.requests().await.is_empty());
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("unsupported_capability_error")
+            );
+            assert_eq!(log.cost_catalog_id, None);
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn r3_19_count_tokens_malformed_2xx_is_raw_observation_degraded_without_usage_or_cost() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .map(|(_, fixture)| fixture)
+        .expect("Gemini fixture");
+    run_case(
+        "r3-19-count-tokens-malformed-observation",
+        move |context| async move {
+            let upstream_response =
+                br#"{"totalTokens":"private-invalid-count","futureCountField":true}"#.to_vec();
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: StatusCode::OK,
+                content_type: Some("application/json".to_string()),
+                content_encoding: None,
+                body: upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(101), Some(3)).await;
+            let uri = format!(
+                "/gemini/v1beta/models/{}:countTokens?key={}",
+                router.requested_model(),
+                router.downstream_key
+            );
+
+            let response = router
+                .send_raw_post(
+                    uri,
+                    json!({"contents": [{"parts": [{"text": "count"}]}]}),
+                    DownstreamAuth::Bearer,
+                )
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("malformed CountTokens response should read");
+            assert_eq!(body.as_ref(), upstream_response.as_slice());
+            assert_eq!(upstream.requests().await.len(), 1);
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.total_tokens, None);
+            assert_eq!(log.cost_catalog_id, None);
+            assert_eq!(log.cost_catalog_version_id, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            assert_eq!(log.cost_snapshot_json, None);
+            router.wait_for_api_key_lease_release().await;
+            router
+                .assert_no_api_key_usage_charge("CountTokens malformed 2xx")
+                .await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn r3_19_count_tokens_http_error_and_cancellation_are_single_call_and_release_resources() {
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .map(|(_, fixture)| fixture)
+        .expect("Gemini fixture");
+    let error_fixture = fixture.clone();
+    run_case("r3-19-count-tokens-http-error", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: br#"{"error":{"message":"rate limited"}}"#.to_vec(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &error_fixture, &upstream.base_url).await;
+        router.attach_cost_catalog(Some(101), Some(3)).await;
+        let uri = format!(
+            "/gemini/v1/models/{}:countTokens?key={}",
+            router.requested_model(),
+            router.downstream_key
+        );
+
+        let response = router
+            .send_raw_post(
+                uri,
+                json!({"contents": [{"parts": [{"text": "count"}]}]}),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("CountTokens HTTP error should read");
+        assert_eq!(upstream.requests().await.len(), 1);
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.upstream_http_status, Some(429));
+        assert_eq!(log.cost_catalog_id, None);
+        assert_eq!(log.estimated_cost_nanos, None);
+        router.wait_for_api_key_lease_release().await;
+        router
+            .assert_no_api_key_usage_charge("CountTokens HTTP error")
+            .await;
+        upstream.shutdown().await;
+    });
+
+    run_case(
+        "r3-19-count-tokens-cancellation",
+        move |context| async move {
+            let dropped = Arc::new(DropSignal::default());
+            let upstream = TestUpstream::spawn(ScriptedReply::HangingBody {
+                content_type: "application/json".to_string(),
+                first_chunk: br#"{"totalTokens":"#.to_vec(),
+                dropped: Arc::clone(&dropped),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(101), Some(3)).await;
+            let cancellation = ProxyCancellationContext::new();
+            let cancellation_trigger = cancellation.clone();
+            let captured = Arc::clone(&upstream.captured);
+            let cancel_task = tokio::spawn(async move {
+                let deadline = Instant::now() + WAIT_TIMEOUT;
+                loop {
+                    if !captured.lock().await.is_empty() {
+                        cancellation_trigger.cancel_now("CountTokens client disconnected");
+                        return;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "CountTokens should reach upstream"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+            let uri = format!(
+                "/gemini/v1beta/models/{}:countTokens?key={}",
+                router.requested_model(),
+                router.downstream_key
+            );
+
+            let response = timeout(
+                WAIT_TIMEOUT,
+                router.send_raw_post_with_cancellation(
+                    uri,
+                    json!({"contents": [{"parts": [{"text": "count"}]}]}),
+                    DownstreamAuth::Bearer,
+                    cancellation,
+                ),
+            )
+            .await
+            .expect("cancelled CountTokens request should finish");
+            cancel_task.await.expect("cancellation trigger should join");
+
+            assert_eq!(response.status().as_u16(), 499);
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("CountTokens cancellation response should read");
+            dropped.wait().await;
+            assert_eq!(upstream.requests().await.len(), 1);
+            let log = router.wait_for_log(RequestStatus::Cancelled).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("client_cancelled_error")
+            );
+            assert_eq!(log.upstream_http_status, Some(200));
+            assert_eq!(log.cost_catalog_id, None);
+            assert_eq!(log.estimated_cost_nanos, None);
+            router.wait_for_api_key_lease_release().await;
+            router
+                .assert_no_api_key_usage_charge("CountTokens cancellation")
+                .await;
+            assert_eq!(router.request_logs().await.len(), 1);
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
 fn anthropic_target_evidence_registry_covers_24_base_dimensions_and_16_advanced_cells() {
     const BASE_DIMENSIONS: [&str; 6] = [
         "non_stream_text",
@@ -3004,10 +8471,7 @@ fn assert_portable_tool_response(protocol: DownstreamProtocol, body: &Value, cas
             assert_eq!(body["content"][2]["id"], "up-call-time");
         }
         DownstreamProtocol::Gemini => {
-            assert_eq!(
-                body["candidates"][0]["finishReason"], "TOOL_USE",
-                "{case_name}"
-            );
+            assert_eq!(body["candidates"][0]["finishReason"], "STOP", "{case_name}");
             assert_eq!(
                 body["candidates"][0]["content"]["parts"][1]["functionCall"]["name"],
                 "weather"
@@ -3549,20 +9013,10 @@ fn assert_anthropic_portable_tools_stream_cell(
         .expect("portable tool stream should read");
         let stream_body = String::from_utf8_lossy(&body);
         assert!(stream_body.contains("weather"), "{test_name}: tool name");
-        if protocol != DownstreamProtocol::Gemini {
-            assert!(
-                stream_body.contains("up-stream-weather"),
-                "{test_name}: stable upstream tool ID"
-            );
-        }
-        if protocol == DownstreamProtocol::Gemini {
-            assert_eq!(stream_body.matches("up-stream-weather").count(), 0);
-        } else {
-            assert!(
-                stream_body.matches("up-stream-weather").count() >= 1,
-                "{test_name}: tool stream keeps the source correlation ID"
-            );
-        }
+        assert!(
+            stream_body.matches("up-stream-weather").count() >= 1,
+            "{test_name}: tool stream keeps the source correlation ID"
+        );
 
         let captured = upstream.requests().await;
         assert_eq!(captured.len(), 1, "{test_name}: exactly one upstream call");
@@ -3832,7 +9286,11 @@ fn assert_anthropic_reasoning_cell(test_name: &'static str, protocol: Downstream
             assert!(encoded.contains("private direct reasoning"), "{test_name}");
             assert!(encoded.contains("direct-signature-secret"), "{test_name}");
         } else if protocol == DownstreamProtocol::Openai {
-            assert!(!encoded.contains("private direct reasoning"), "{test_name}");
+            assert_eq!(
+                body.pointer("/choices/0/message/reasoning_content"),
+                Some(&json!("private direct reasoning")),
+                "{test_name}: reasoning uses the dedicated OpenAI field"
+            );
             assert!(!encoded.contains("direct-signature-secret"), "{test_name}");
         } else {
             assert!(encoded.contains("private direct reasoning"), "{test_name}");
@@ -4004,8 +9462,8 @@ fn assert_anthropic_reasoning_stream_cell(test_name: &'static str, protocol: Dow
             );
         } else if protocol == DownstreamProtocol::Openai {
             assert!(
-                !encoded.contains("private direct stream reasoning"),
-                "{test_name}"
+                encoded.contains("private direct stream reasoning"),
+                "{test_name}: reasoning uses the dedicated OpenAI delta field"
             );
             assert!(
                 !encoded.contains("direct-stream-signature-secret"),
@@ -10095,9 +15553,17 @@ fn all_public_downstream_reasoning_controls_reach_the_responses_target() {
             let public = String::from_utf8_lossy(&response_body);
             assert!(public.contains("reasoned answer"), "{name}: {public}");
             if fixture.protocol == DownstreamProtocol::Openai {
-                assert!(
-                    !public.contains("visible summary"),
-                    "{name}: reasoning must not be relabeled as answer text"
+                let public: Value = serde_json::from_slice(&response_body)
+                    .expect("OpenAI reasoning response should be JSON");
+                assert_eq!(
+                    public.pointer("/choices/0/message/content"),
+                    Some(&json!("reasoned answer")),
+                    "{name}: answer text remains distinct"
+                );
+                assert_eq!(
+                    public.pointer("/choices/0/message/reasoning_content"),
+                    Some(&json!("visible summary")),
+                    "{name}: reasoning uses the dedicated field"
                 );
             } else {
                 assert!(
@@ -12646,6 +18112,7 @@ fn direct_execution_regression_upstream_429_is_authentic_logged_and_never_retrie
             })
             .await;
             let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
             let response = router
                 .send(&fixture, false, &fixture.error.downstream_request)
                 .await;
@@ -12697,6 +18164,10 @@ fn direct_execution_regression_upstream_429_is_authentic_logged_and_never_retrie
                     .unwrap_or_default()
                     .contains("baseline throttled")
             );
+            assert_stream_failure_has_no_usage_or_cost(&log, name);
+            router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(name).await;
+            assert_eq!(captured.len(), 1, "{name}: HTTP failure must not retry");
             upstream.shutdown().await;
         });
     }
@@ -14271,6 +19742,7 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
             })
             .await;
             let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.attach_cost_catalog(Some(100), Some(2)).await;
             let persisted_sink = router.install_recording_persisted_sink();
             let response = router
                 .send(&fixture, true, &fixture.cancellation.downstream_request)
@@ -14321,7 +19793,9 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
                     .is_some_and(|message| message.contains("Client disconnected")),
                 "{name}: cancelled stream must persist a bounded operator diagnostic"
             );
+            assert_stream_failure_has_no_usage_or_cost(&log, name);
             router.wait_for_api_key_lease_release().await;
+            router.assert_no_api_key_usage_charge(name).await;
             assert_eq!(
                 router.request_logs().await.len(),
                 1,

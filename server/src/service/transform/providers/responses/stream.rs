@@ -694,6 +694,15 @@ pub(crate) fn try_transform_unified_chunk_to_responses_events(
                         text,
                     });
                 }
+                UnifiedContentPartDelta::ReasoningDelta { index, text } => {
+                    stream_events.push(UnifiedStreamEvent::ReasoningDelta {
+                        index,
+                        item_index: None,
+                        item_id: None,
+                        part_index: None,
+                        text,
+                    });
+                }
                 UnifiedContentPartDelta::ImageDelta { index, url, data } => {
                     stream_events.push(UnifiedStreamEvent::BlobDelta {
                         index: Some(index),

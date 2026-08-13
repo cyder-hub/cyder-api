@@ -449,6 +449,7 @@ async fn finalize_guarded_stream_success(
 ) {
     await_cleanup_with_total_watchdog(cancellation, coordinator, async {
         let completed_at = Utc::now().timestamp_millis();
+        let usage_is_billable = transformer.usage_is_billable();
         let usage = transformer.parse_usage_info();
         let usage_normalization = transformer.parse_usage_normalization();
         let transform_summary = transformer.diagnostics_snapshot();
@@ -459,13 +460,22 @@ async fn finalize_guarded_stream_success(
                 url,
                 status_code,
                 completed_at,
-                cost_catalog_version,
+                if usage_is_billable {
+                    cost_catalog_version
+                } else {
+                    None
+                },
                 RequestStatus::Success,
                 None,
             );
             context.usage = usage;
             context.usage_normalization = usage_normalization;
             log_transform_summary(TransformLogStage::Stream, &context, &transform_summary);
+            crate::proxy::logging::log_usage_normalization_warnings(
+                &context,
+                model_str,
+                status_code,
+            );
             if context.usage_normalization.is_none() {
                 crate::proxy::logging::log_upstream_usage_missing(&context, model_str, status_code);
             }
@@ -875,8 +885,77 @@ async fn run_guarded_stream_worker(
         .await;
         return;
     }
+    let eof_events = match transformer.finalize_source_eof_events() {
+        Ok(success) => success.value,
+        Err(failure) => {
+            let proxy_error =
+                transform_failure_to_proxy_error(&failure, response_visibility.current());
+            log_stream_transform_failure_once(&log_context, &transformer, &failure).await;
+            finalize_guarded_transform_failure(
+                &app_state,
+                &cancellation,
+                &coordinator,
+                &sender,
+                &log_context,
+                &url,
+                status_code,
+                cost_catalog_version.as_ref(),
+                &response_visibility,
+                &mut api_key_request_lease,
+                downstream_protocol,
+                &request_id,
+                &proxy_error,
+            )
+            .await;
+            return;
+        }
+    };
+    let eof_emitted_openai_done = eof_events
+        .iter()
+        .any(|event| is_downstream_openai_done_event(downstream_protocol, event));
+    for event in eof_events {
+        let delivery = send_body_frame(
+            &sender,
+            Ok(event.to_bytes().freeze()),
+            &cancellation,
+            &coordinator,
+        )
+        .await;
+        if let Err(delivery_error) = delivery {
+            match delivery_error {
+                FrameDeliveryError::ClientCancelled | FrameDeliveryError::DownstreamDropped => {
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    cancellation.cancel_now("downstream stopped consuming the guarded stream body");
+                }
+                FrameDeliveryError::Timeout { phase } => {
+                    let proxy_error = ProxyError::upstream_timeout(
+                        phase,
+                        ExecutionStage::DownstreamSend,
+                        response_visibility.current(),
+                        format!("guarded stream body exceeded the {phase:?} timeout"),
+                    );
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    coordinator.try_terminate_error(&proxy_error);
+                    finalize_streaming_error_and_release(
+                        &app_state,
+                        &cancellation,
+                        &coordinator,
+                        &log_context,
+                        &url,
+                        status_code,
+                        cost_catalog_version.as_ref(),
+                        &mut api_key_request_lease,
+                        &proxy_error,
+                    )
+                    .await;
+                }
+            }
+            return;
+        }
+    }
     if downstream_protocol == DownstreamProtocol::Openai
         && upstream_protocol == UpstreamProtocol::Gemini
+        && !eof_emitted_openai_done
     {
         crate::debug_event!(
             "proxy.stream_done_synthesized",

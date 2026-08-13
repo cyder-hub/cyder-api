@@ -50,8 +50,6 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 | Upstream protocol | Owner |
 | --- | --- |
-| Anthropic | `R3.18` |
-| Gemini | `R3.19` |
 | Ollama | `R3.20` |
 
 Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contract, r3-15-same-wire-passthrough, r3-15-minor-loss-runtime, r3-15-four-protocol-stream-failure, r3-15-target-stream-failure.
@@ -85,6 +83,26 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | OpenAICompatible | `required` | — | `true` | `bearer_api_key` | configurable (default enabled) | `core_fields_validated_vendor_extensions_passthrough` | configurable (default disabled) | `core_fields_validated_vendor_extensions_passthrough` | configurable (default disabled) | `opaque_envelope_passthrough` | r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-direct |
 | GeminiOpenAI | `optional_with_default` | https://generativelanguage.googleapis.com/v1beta/openai | `true` | `bearer_api_key` | configurable (default enabled) | `recursive_closed_allowlist` | configurable (default enabled) | `model_input_closed_contract` | unsupported (default disabled) | `unsupported` | r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-gemini-openai-closed-policy, r3-16-embeddings-direct, r3-16-rerank-profile-guard |
 
+## Gemini-wire Profile and surface contract
+
+| Profile | Auth | Model collection |
+| --- | --- | --- |
+| Gemini | `x_goog_api_key` | `normalized_model_collection` |
+| Vertex | `oauth_bearer` | `vertex_publisher_model_collection` |
+
+### Model operations
+
+| Action | Suffix | Query |
+| --- | --- | --- |
+| `generate_content` | `:generateContent` | `—` |
+| `stream_generate_content` | `:streamGenerateContent` | `alt=sse` |
+| `count_tokens` | `:countTokens` | `—` |
+
+- Exposed Gemini downstream surface: models, generate_content, stream_generate_content, count_tokens.
+- Prohibited Gemini downstream products: interactions, live, batch, files, caching, embeddings, media_generation, remote_model_discovery.
+- Models execution: `local_catalog`; countTokens allowed upstreams: Gemini.
+- Evidence: r3-19-profile-equivalence, r3-19-profile-registry, r3-19-source-check, r3-19-route-boundary, r3-19-count-tokens, r3-19-count-tokens-reject.
+
 ## Public downstream routes
 
 | Protocol | Prefix | Versions | Endpoint | Method | Kind |
@@ -109,22 +127,22 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | OpenAI | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
 | OpenAI | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-body-limit, r3-17-cancellation, r3-17-http-error, r3-17-materializer, r3-17-openai-base, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | OpenAI | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-cancellation, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-openai-base, r3-18-openai-upstream-error, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
-| OpenAI | Gemini | not_verified | not_verified | not_verified | not_verified | not_verified | not_verified | R3.19 | reachable-materializers-without-cell-regression |
+| OpenAI | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-openai-base |
 | OpenAI | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 | Responses | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
 | Responses | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-body-limit, r3-17-cancellation, r3-17-http-error, r3-17-materializer, r3-17-responses-base, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | Responses | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-cancellation, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-responses-base, r3-18-responses-upstream-error, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
-| Responses | Gemini | not_verified | not_verified | not_verified | not_verified | not_verified | not_verified | R3.19 | reachable-materializers-without-cell-regression |
+| Responses | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-responses-base |
 | Responses | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 | Anthropic | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
 | Anthropic | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-anthropic-base, r3-17-body-limit, r3-17-cancellation, r3-17-http-error, r3-17-materializer, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | Anthropic | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-anthropic-base, r3-18-anthropic-upstream-error, r3-18-cancellation, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
-| Anthropic | Gemini | not_verified | not_verified | not_verified | not_verified | not_verified | not_verified | R3.19 | reachable-materializers-without-cell-regression |
+| Anthropic | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-anthropic-base |
 | Anthropic | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 | Gemini | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
 | Gemini | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-body-limit, r3-17-cancellation, r3-17-gemini-base, r3-17-http-error, r3-17-materializer, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | Gemini | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-cancellation, r3-18-gemini-base, r3-18-gemini-upstream-error, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
-| Gemini | Gemini | verified | verified | verified | verified | verified | verified | — | direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
+| Gemini | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-gemini-base |
 | Gemini | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 
 ## Generation advanced dimensions
@@ -134,22 +152,22 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | OpenAI | OpenAI | full | full | full | full | — | r3-16-multimodal-direct, r3-16-reasoning-direct, r3-16-structured-direct, r3-16-tools-direct |
 | OpenAI | Responses | full | controlled_loss | full | full | — | r3-17-openai-multimodal-cell, r3-17-openai-reasoning-cell, r3-17-openai-structured-cell, r3-17-openai-tools-cell, r3-17-reasoning-reject |
 | OpenAI | Anthropic | full | controlled_loss | controlled_loss | controlled_loss | — | r3-18-multimodal-reject, r3-18-openai-multimodal-cell, r3-18-openai-reasoning-cell, r3-18-openai-structured-cell, r3-18-openai-tools-cell, r3-18-reasoning-reject, r3-18-structured-reject |
-| OpenAI | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| OpenAI | Gemini | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-19-multimodal-reject, r3-19-openai-multimodal-cell, r3-19-openai-reasoning-cell, r3-19-openai-structured-cell, r3-19-openai-tools-cell, r3-19-reasoning-reject, r3-19-structured-reject, r3-19-tools-reject |
 | OpenAI | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 | Responses | OpenAI | controlled_loss | controlled_loss | controlled_loss | full | — | r3-16-multimodal-direct, r3-16-multimodal-reject, r3-16-multimodal-responses-diagnostic, r3-16-reasoning-direct, r3-16-reasoning-responses-diagnostic, r3-16-reasoning-responses-reject, r3-16-structured-direct, r3-16-structured-responses-transform, r3-16-tools-cross-wire-transform, r3-16-tools-direct, r3-16-tools-reject, r3-16-tools-stable-results |
 | Responses | Responses | full | full | full | full | — | r3-17-responses-multimodal-cell, r3-17-responses-reasoning-cell, r3-17-responses-structured-cell, r3-17-responses-tools-cell |
 | Responses | Anthropic | full | controlled_loss | controlled_loss | controlled_loss | — | r3-18-multimodal-reject, r3-18-reasoning-reject, r3-18-responses-multimodal-cell, r3-18-responses-reasoning-cell, r3-18-responses-structured-cell, r3-18-responses-tools-cell, r3-18-structured-reject |
-| Responses | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| Responses | Gemini | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-19-multimodal-reject, r3-19-reasoning-reject, r3-19-responses-multimodal-cell, r3-19-responses-reasoning-cell, r3-19-responses-structured-cell, r3-19-responses-tools-cell, r3-19-structured-reject, r3-19-tools-reject |
 | Responses | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 | Anthropic | OpenAI | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-16-multimodal-anthropic-diagnostic, r3-16-multimodal-direct, r3-16-multimodal-reject, r3-16-reasoning-anthropic-diagnostic, r3-16-reasoning-direct, r3-16-structured-anthropic-diagnostic, r3-16-structured-direct, r3-16-structured-reject, r3-16-tools-cross-wire-transform, r3-16-tools-direct, r3-16-tools-reject, r3-16-tools-stable-results |
 | Anthropic | Responses | full | controlled_loss | full | controlled_loss | — | r3-17-anthropic-multimodal-cell, r3-17-anthropic-reasoning-cell, r3-17-anthropic-structured-cell, r3-17-anthropic-tools-cell, r3-17-reasoning-reject, r3-17-structured-reject |
 | Anthropic | Anthropic | full | full | full | full | — | r3-18-anthropic-multimodal-cell, r3-18-anthropic-reasoning-cell, r3-18-anthropic-structured-cell, r3-18-anthropic-tools-cell |
-| Anthropic | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| Anthropic | Gemini | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-19-anthropic-multimodal-cell, r3-19-anthropic-reasoning-cell, r3-19-anthropic-structured-cell, r3-19-anthropic-tools-cell, r3-19-multimodal-reject, r3-19-reasoning-reject, r3-19-structured-reject, r3-19-tools-reject |
 | Anthropic | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 | Gemini | OpenAI | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-16-multimodal-direct, r3-16-multimodal-gemini-diagnostic, r3-16-multimodal-reject, r3-16-reasoning-conflict-reject, r3-16-reasoning-direct, r3-16-reasoning-gemini-diagnostic, r3-16-structured-direct, r3-16-structured-gemini-diagnostic, r3-16-structured-reject, r3-16-tools-cross-wire-transform, r3-16-tools-direct, r3-16-tools-reject, r3-16-tools-stable-results |
 | Gemini | Responses | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-17-gemini-multimodal-cell, r3-17-gemini-reasoning-cell, r3-17-gemini-structured-cell, r3-17-gemini-tools-cell, r3-17-multimodal-reject, r3-17-reasoning-reject, r3-17-structured-reject, r3-17-tools-reject |
 | Gemini | Anthropic | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-18-gemini-multimodal-cell, r3-18-gemini-reasoning-cell, r3-18-gemini-structured-cell, r3-18-gemini-tools-cell, r3-18-multimodal-reject, r3-18-reasoning-reject, r3-18-structured-reject, r3-18-tools-reject |
-| Gemini | Gemini | not_verified | not_verified | not_verified | not_verified | R3.19 | advanced-transform-only |
+| Gemini | Gemini | full | full | full | full | — | r3-19-gemini-multimodal-cell, r3-19-gemini-reasoning-cell, r3-19-gemini-structured-cell, r3-19-gemini-tools-cell |
 | Gemini | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 
 ## Utility contracts
@@ -159,7 +177,7 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | models | `/models` | GET | OpenAI, Responses, Anthropic, Gemini | — | local | — | not_applicable | verified | — | router-contract, router-method-contract, r3-11-model-catalog-selector, r3-11-ollama-discovery-boundary, r3-17-models-boundary |
 | embeddings | `/embeddings` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | verified | — | router-contract, router-method-contract, utility-pre-send-reject, r3-16-embeddings-direct, r3-16-embeddings-reject |
 | rerank | `/rerank` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | verified | — | router-contract, router-method-contract, utility-pre-send-reject, r3-16-rerank-direct, r3-16-rerank-profile-guard |
-| countTokens | `/models/{model}:countTokens` | POST | Gemini | OpenAI, Responses, Anthropic | upstream | Gemini | pre_send_reject | partial | R3.19 | gemini-utility-exposure, router-method-contract, utility-pre-send-reject |
+| countTokens | `/models/{model}:countTokens` | POST | Gemini | OpenAI, Responses, Anthropic | upstream | Gemini | pre_send_reject | verified | — | r3-19-count-tokens, r3-19-count-tokens-reject, r3-19-route-boundary |
 
 ## Evidence registry
 
@@ -259,6 +277,38 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | `r3-18-reasoning-reject` | test | `proxy::direct_execution_regression::gemini_positive_thinking_budget_to_anthropic_is_zero_call` | Pins unportable positive Gemini thinking budgets to payload-safe rejection before credentials and network. |
 | `r3-18-multimodal-reject` | test | `proxy::direct_execution_regression::unportable_multimodal_inputs_to_anthropic_are_zero_call` | Pins unportable media, invalid text, and executable content to payload-safe zero-call rejection. |
 | `r3-18-structured-reject` | test | `proxy::direct_execution_regression::invalid_structured_outputs_to_anthropic_are_zero_call` | Pins non-schema, conflicting, and invalid structured controls to payload-safe rejection before credentials and network. |
+| `r3-19-base-registry` | test | `proxy::direct_execution_regression::r3_19_gemini_target_evidence_registry_covers_exactly_24_base_dimensions` | Freezes four unique Gemini target base-cell references and all 24 base-dimension mappings. |
+| `r3-19-openai-base` | test | `proxy::direct_execution_regression::openai_to_gemini_base_cell_is_verified` | Executes OpenAI non-stream, stream, usage, terminal, 429, and cancellation paths through one Gemini Source. |
+| `r3-19-responses-base` | test | `proxy::direct_execution_regression::responses_to_gemini_base_cell_is_verified` | Executes Responses non-stream, stream, usage, terminal, 429, and cancellation paths through one Gemini Source. |
+| `r3-19-anthropic-base` | test | `proxy::direct_execution_regression::anthropic_to_gemini_base_cell_is_verified` | Executes Anthropic non-stream, stream, usage, terminal, 429, and cancellation paths through one Gemini Source. |
+| `r3-19-gemini-base` | test | `proxy::direct_execution_regression::gemini_to_gemini_base_cell_is_verified` | Executes same-wire Gemini non-stream, stream, usage, terminal, 429, and cancellation paths with native fidelity. |
+| `r3-19-advanced-registry` | test | `proxy::direct_execution_regression::r3_19_gemini_advanced_evidence_registry_has_16_unique_cells_and_4_full_12_loss` | Freezes 16 unique Gemini advanced cell references and the exact 4 full / 12 controlled-loss split. |
+| `r3-19-openai-tools-cell` | test | `proxy::direct_execution_regression::openai_to_gemini_tools_cell_has_typed_controlled_loss` | Executes OpenAI tools through one Gemini request and asserts payload-free strictness loss. |
+| `r3-19-responses-tools-cell` | test | `proxy::direct_execution_regression::responses_to_gemini_tools_cell_has_typed_controlled_loss` | Executes Responses tools through one Gemini request and asserts payload-free strictness loss. |
+| `r3-19-anthropic-tools-cell` | test | `proxy::direct_execution_regression::anthropic_to_gemini_tools_cell_has_typed_controlled_loss` | Executes Anthropic tools through one Gemini request and asserts payload-free parallel-policy loss. |
+| `r3-19-gemini-tools-cell` | test | `proxy::direct_execution_regression::gemini_to_gemini_tools_cell_is_full` | Executes native Gemini tool IDs, calls, results, and thought signatures with zero controlled loss. |
+| `r3-19-openai-reasoning-cell` | test | `proxy::direct_execution_regression::openai_to_gemini_reasoning_cell_has_typed_controlled_loss` | Executes OpenAI reasoning through one Gemini request and asserts payload-free high-end effort clamping. |
+| `r3-19-responses-reasoning-cell` | test | `proxy::direct_execution_regression::responses_to_gemini_reasoning_cell_has_typed_controlled_loss` | Executes Responses reasoning through one Gemini request and asserts payload-free high-end effort clamping. |
+| `r3-19-anthropic-reasoning-cell` | test | `proxy::direct_execution_regression::anthropic_to_gemini_reasoning_cell_has_typed_controlled_loss` | Executes Anthropic adaptive reasoning through one Gemini request and asserts payload-free effort clamping. |
+| `r3-19-gemini-reasoning-cell` | test | `proxy::direct_execution_regression::gemini_to_gemini_reasoning_cell_is_full` | Executes native Gemini thinking controls and future fields with zero controlled loss. |
+| `r3-19-openai-multimodal-cell` | test | `proxy::direct_execution_regression::openai_to_gemini_multimodal_cell_has_typed_controlled_loss` | Executes OpenAI inline image input through one Gemini request and asserts payload-free detail loss. |
+| `r3-19-responses-multimodal-cell` | test | `proxy::direct_execution_regression::responses_to_gemini_multimodal_cell_has_typed_controlled_loss` | Executes Responses inline image input through one Gemini request and asserts payload-free detail loss. |
+| `r3-19-anthropic-multimodal-cell` | test | `proxy::direct_execution_regression::anthropic_to_gemini_multimodal_cell_has_typed_controlled_loss` | Executes Anthropic inline document input through one Gemini request and asserts payload-free filename loss. |
+| `r3-19-gemini-multimodal-cell` | test | `proxy::direct_execution_regression::gemini_to_gemini_multimodal_cell_is_full` | Executes native Gemini inlineData, fileData, and future media fields with zero controlled loss. |
+| `r3-19-openai-structured-cell` | test | `proxy::direct_execution_regression::openai_to_gemini_structured_output_cell_has_typed_controlled_loss` | Executes OpenAI JSON Schema output through one Gemini request and asserts payload-free envelope metadata loss. |
+| `r3-19-responses-structured-cell` | test | `proxy::direct_execution_regression::responses_to_gemini_structured_output_cell_has_typed_controlled_loss` | Executes Responses JSON Schema output through one Gemini request and asserts payload-free envelope metadata loss. |
+| `r3-19-anthropic-structured-cell` | test | `proxy::direct_execution_regression::anthropic_to_gemini_structured_output_cell_has_typed_controlled_loss` | Executes Anthropic JSON Schema output through one Gemini request and asserts payload-free envelope loss. |
+| `r3-19-gemini-structured-cell` | test | `proxy::direct_execution_regression::gemini_to_gemini_structured_output_cell_is_full` | Executes native Gemini structured-output controls and future schema fields with zero controlled loss. |
+| `r3-19-tools-reject` | test | `proxy::direct_execution_regression::r3_19_invalid_tools_and_unsigned_history_are_precredential_zero_call` | Pins invalid tools and unsigned tool history to payload-safe rejection before credentials and network. |
+| `r3-19-reasoning-reject` | test | `proxy::direct_execution_regression::r3_19_invalid_reasoning_controls_are_precredential_zero_call` | Pins invalid and conflicting reasoning controls to payload-safe rejection before credentials and network. |
+| `r3-19-multimodal-reject` | test | `proxy::direct_execution_regression::r3_19_invalid_multimodal_inputs_are_precredential_zero_call` | Pins remote, foreign, invalid, or wrong-role media to payload-safe rejection before credentials and network. |
+| `r3-19-structured-reject` | test | `proxy::direct_execution_regression::r3_19_invalid_structured_outputs_are_precredential_zero_call` | Pins invalid or unrepresentable structured outputs to payload-safe rejection before credentials and network. |
+| `r3-19-profile-equivalence` | test | `proxy::direct_execution_regression::r3_19_gemini_and_vertex_profiles_execute_equivalent_generate_and_stream_contracts` | Executes equivalent Gemini and Vertex generate/stream requests with profile-specific collection URL and authentication. |
+| `r3-19-profile-registry` | test | `proxy::direct_execution_regression::r3_19_gemini_vertex_profile_evidence_registry_covers_all_four_operations` | Freezes Gemini and Vertex evidence for generate, stream, countTokens, and Source Check operations. |
+| `r3-19-source-check` | test | `controller::provider::tests::gemini_and_vertex_source_check_send_shared_minimal_contract_once` | Pins both Gemini-family Source Checks to one shared safe URL, body, query, header, and response contract. |
+| `r3-19-route-boundary` | test | `proxy::router::tests::r3_19_gemini_public_surface_aliases_methods_and_prohibited_products_are_closed` | Pins Gemini aliases, methods, local Models, generation, countTokens, and all prohibited product routes. |
+| `r3-19-count-tokens` | test | `proxy::direct_execution_regression::r3_19_count_tokens_two_legal_shapes_use_gemini_and_vertex_once_without_usage_or_cost` | Executes both legal CountTokens shapes once through Gemini and Vertex without generation usage or cost settlement. |
+| `r3-19-count-tokens-reject` | test | `proxy::direct_execution_regression::r3_19_count_tokens_invalid_shapes_and_incompatible_source_are_precredential_zero_call` | Pins invalid CountTokens shapes and non-Gemini targets to precredential zero-call rejection. |
 | `r3-16-reasoning-direct` | test | `proxy::direct_execution_regression::all_public_downstream_reasoning_controls_reach_the_openai_target` | Executes the representative reasoning main path from every public downstream through one frozen OpenAI Source. |
 | `r3-16-reasoning-responses-diagnostic` | test | `service::transform::facade::tests::responses_reasoning_effort_maps_to_openai_and_summary_is_safely_ignored` | Pins Responses effort mapping and the typed controlled-loss fact for ignored summary semantics. |
 | `r3-16-reasoning-anthropic-diagnostic` | test | `service::transform::facade::tests::anthropic_qualitative_reasoning_maps_to_openai_without_injecting_cot` | Pins Anthropic qualitative reasoning mapping and proves no chain-of-thought text is synthesized. |

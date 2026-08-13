@@ -698,11 +698,13 @@ pub struct UnifiedAnthropicRequestExtension {
     pub metadata: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub structured_output_envelope_present: bool,
 }
 
 impl UnifiedAnthropicRequestExtension {
     pub fn is_empty(&self) -> bool {
-        self.metadata.is_none() && self.top_k.is_none()
+        self.metadata.is_none() && self.top_k.is_none() && !self.structured_output_envelope_present
     }
 }
 
@@ -718,6 +720,29 @@ pub struct UnifiedResponsesRequestExtension {
     pub reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnifiedGeminiToolAssociation {
+    pub unified_tool_call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnifiedGeminiRequestExtension {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_associations: Vec<UnifiedGeminiToolAssociation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+}
+
+impl UnifiedGeminiRequestExtension {
+    pub fn is_empty(&self) -> bool {
+        self.tool_associations.is_empty() && self.top_k.is_none()
+    }
 }
 
 impl UnifiedResponsesRequestExtension {
@@ -738,6 +763,8 @@ pub struct UnifiedRequestExtensions {
     pub anthropic: Option<UnifiedAnthropicRequestExtension>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<UnifiedResponsesRequestExtension>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini: Option<UnifiedGeminiRequestExtension>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -761,6 +788,8 @@ pub struct UnifiedRequest {
     pub frequency_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<UnifiedReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<UnifiedStructuredOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -788,6 +817,8 @@ pub struct UnifiedRequestCore {
     pub frequency_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<UnifiedReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<UnifiedStructuredOutput>,
 }
@@ -833,6 +864,10 @@ impl UnifiedRequest {
             .and_then(|ext| ext.responses.as_ref())
     }
 
+    pub fn gemini_extension(&self) -> Option<&UnifiedGeminiRequestExtension> {
+        self.extensions.as_ref().and_then(|ext| ext.gemini.as_ref())
+    }
+
     pub fn core(&self) -> UnifiedRequestCore {
         UnifiedRequestCore {
             model: self.model.clone(),
@@ -850,6 +885,7 @@ impl UnifiedRequest {
             presence_penalty: self.presence_penalty,
             frequency_penalty: self.frequency_penalty,
             reasoning_effort: self.reasoning_effort,
+            reasoning_budget_tokens: self.reasoning_budget_tokens,
             structured_output: self.structured_output.clone(),
         }
     }
@@ -874,6 +910,7 @@ impl UnifiedRequest {
                 presence_penalty: self.presence_penalty,
                 frequency_penalty: self.frequency_penalty,
                 reasoning_effort: self.reasoning_effort,
+                reasoning_budget_tokens: self.reasoning_budget_tokens,
                 structured_output: self.structured_output,
             },
             self.extensions,
@@ -900,12 +937,15 @@ impl UnifiedRequest {
             presence_penalty: core.presence_penalty,
             frequency_penalty: core.frequency_penalty,
             reasoning_effort: core.reasoning_effort,
+            reasoning_budget_tokens: core.reasoning_budget_tokens,
             structured_output: core.structured_output,
             extensions,
         }
     }
 
     pub fn top_k(&self) -> Option<u32> {
-        self.anthropic_extension().and_then(|ext| ext.top_k)
+        self.gemini_extension()
+            .and_then(|ext| ext.top_k)
+            .or_else(|| self.anthropic_extension().and_then(|ext| ext.top_k))
     }
 }

@@ -27,7 +27,9 @@ pub struct ResponseTransformValue {
 pub enum ResponseApplicationOutcome {
     #[default]
     Success,
+    SuccessUnbillable,
     Failed,
+    Indeterminate,
 }
 
 fn protocols_share_wire_format(
@@ -61,7 +63,7 @@ pub(in crate::service::transform) fn transform_result_with_cost(
     upstream_protocol: UpstreamProtocol,
     downstream_protocol: DownstreamProtocol,
 ) -> TransformResult<ResponseTransformValue> {
-    let application_outcome =
+    let mut application_outcome =
         observe_application_outcome(&data, upstream_protocol, downstream_protocol)?;
 
     if protocols_share_wire_format(upstream_protocol, downstream_protocol) {
@@ -74,26 +76,55 @@ pub(in crate::service::transform) fn transform_result_with_cost(
                     UpstreamProtocol::Anthropic => observe_anthropic_usage(&data).ok().flatten(),
                     _ => decoded.value.usage,
                 };
-                let usage_info = observed_usage
-                    .as_ref()
-                    .and_then(|usage| UsageInfo::try_from(usage).ok());
-                let usage_normalization = observed_usage.as_ref().map(Into::into);
-                let observation_summary = if observed_usage.is_some() {
-                    transform_success(
-                        (),
-                        TransformPhase::ResponseObserve,
-                        TransformSemanticUnit::Usage,
-                        TransformOutcomeKind::Lossless,
-                        TransformAction::PassThrough,
-                        TransformReasonCode::LosslessConversion,
-                    )
-                    .summary
-                } else {
-                    upstream_usage_missing_summary(TransformPhase::ResponseObserve)
-                };
-                (usage_info, usage_normalization, observation_summary)
+                match observed_usage.as_ref() {
+                    Some(usage) => match UsageInfo::try_from(usage) {
+                        Ok(usage_info) => (
+                            Some(usage_info),
+                            Some(usage.into()),
+                            transform_success(
+                                (),
+                                TransformPhase::ResponseObserve,
+                                TransformSemanticUnit::Usage,
+                                TransformOutcomeKind::Lossless,
+                                TransformAction::PassThrough,
+                                TransformReasonCode::LosslessConversion,
+                            )
+                            .summary,
+                        ),
+                        Err(_) => {
+                            if upstream_protocol == UpstreamProtocol::Gemini {
+                                application_outcome = ResponseApplicationOutcome::SuccessUnbillable;
+                            }
+                            let mut collector = TransformDiagnosticCollector::default();
+                            collector.record(TransformDiagnosticFact {
+                                sequence: 0,
+                                phase: TransformPhase::ResponseObserve,
+                                semantic_unit: TransformSemanticUnit::Usage,
+                                outcome: TransformOutcomeKind::ObservationDegraded,
+                                action: TransformAction::PassThrough,
+                                reason_code: TransformReasonCode::UsageOverflow,
+                                safe_summary: None,
+                            });
+                            (None, None, collector.into_summary())
+                        }
+                    },
+                    None => (
+                        None,
+                        None,
+                        upstream_usage_missing_summary(TransformPhase::ResponseObserve),
+                    ),
+                }
             }
             Err(failure) => {
+                if upstream_protocol == UpstreamProtocol::Gemini
+                    && application_outcome == ResponseApplicationOutcome::Success
+                {
+                    application_outcome = if failure.semantic_unit == TransformSemanticUnit::Usage {
+                        ResponseApplicationOutcome::SuccessUnbillable
+                    } else {
+                        ResponseApplicationOutcome::Indeterminate
+                    };
+                }
                 let mut collector = TransformDiagnosticCollector::default();
                 collector.record(TransformDiagnosticFact {
                     sequence: 0,
@@ -294,6 +325,36 @@ fn observe_application_outcome(
             Some(TransformSafeSummary::from_json(data)),
         )
     };
+
+    if upstream_protocol == UpstreamProtocol::Gemini {
+        let classification = super::providers::gemini::classify_gemini_terminal(data);
+        return match classification.kind {
+            super::providers::gemini::GeminiTerminalKind::Stop
+            | super::providers::gemini::GeminiTerminalKind::MaxTokens
+            | super::providers::gemini::GeminiTerminalKind::Safety
+            | super::providers::gemini::GeminiTerminalKind::PromptBlock => {
+                Ok(ResponseApplicationOutcome::Success)
+            }
+            super::providers::gemini::GeminiTerminalKind::ApplicationFailure
+                if downstream_protocol == DownstreamProtocol::Gemini =>
+            {
+                Ok(ResponseApplicationOutcome::Failed)
+            }
+            super::providers::gemini::GeminiTerminalKind::ApplicationFailure => {
+                Err(fail(TransformReasonCode::UpstreamApplicationFailed))
+            }
+            super::providers::gemini::GeminiTerminalKind::ObservationDegraded
+                if downstream_protocol == DownstreamProtocol::Gemini =>
+            {
+                Ok(ResponseApplicationOutcome::Indeterminate)
+            }
+            super::providers::gemini::GeminiTerminalKind::ObservationDegraded => Err(fail(
+                classification
+                    .reason_code
+                    .unwrap_or(TransformReasonCode::IllegalUpstreamTerminal),
+            )),
+        };
+    }
 
     if upstream_protocol == UpstreamProtocol::Anthropic {
         if downstream_protocol == DownstreamProtocol::Anthropic {

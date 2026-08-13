@@ -55,7 +55,7 @@ fn test_transform_request_data_openai_to_gemini_facade_smoke() {
     assert_eq!(
         transformed,
         json!({
-            "system_instruction": {
+            "systemInstruction": {
                 "parts": [{"text": "You are a helpful assistant."}]
             },
             "contents": [
@@ -65,6 +65,7 @@ fn test_transform_request_data_openai_to_gemini_facade_smoke() {
                 }
             ],
             "generationConfig": {
+                "candidateCount": 1,
                 "temperature": 0.5,
                 "maxOutputTokens": 100,
                 "topP": 0.9,
@@ -72,6 +73,914 @@ fn test_transform_request_data_openai_to_gemini_facade_smoke() {
             }
         })
     );
+}
+
+#[test]
+fn three_cross_wire_requests_preserve_order_merge_roles_and_map_portable_gemini_controls() {
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"openai-source",
+                "messages":[
+                    {"role":"system","content":"system-one"},
+                    {"role":"developer","content":"developer-two"},
+                    {"role":"user","content":"user-one"},
+                    {"role":"user","content":"user-two"},
+                    {"role":"assistant","content":"assistant-three"},
+                    {"role":"user","content":"user-four"}
+                ],
+                "temperature":0.7,
+                "max_tokens":64,
+                "top_p":0.8,
+                "stop":["STOP"],
+                "seed":7,
+                "presence_penalty":0.25,
+                "frequency_penalty":-0.5,
+                "n":1,
+                "logprobs":false
+            }),
+            json!({
+                "candidateCount":1,
+                "temperature":0.7,
+                "maxOutputTokens":64,
+                "topP":0.8,
+                "seed":7,
+                "presencePenalty":0.25,
+                "frequencyPenalty":-0.5,
+                "stopSequences":["STOP"]
+            }),
+            vec!["system-one", "developer-two"],
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"responses-source",
+                "instructions":"system-one",
+                "input":[
+                    {"role":"developer","content":"developer-two"},
+                    {"role":"user","content":"user-one"},
+                    {"role":"user","content":"user-two"},
+                    {"role":"assistant","content":"assistant-three"},
+                    {"role":"user","content":"user-four"}
+                ],
+                "temperature":0.6,
+                "max_output_tokens":63,
+                "top_p":0.75
+            }),
+            json!({
+                "candidateCount":1,
+                "temperature":0.6,
+                "maxOutputTokens":63,
+                "topP":0.75
+            }),
+            vec!["system-one", "developer-two"],
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"anthropic-source",
+                "system":"system-one",
+                "messages":[
+                    {"role":"user","content":"user-one"},
+                    {"role":"user","content":"user-two"},
+                    {"role":"assistant","content":"assistant-three"},
+                    {"role":"user","content":"user-four"}
+                ],
+                "temperature":0.5,
+                "max_tokens":62,
+                "top_p":0.7,
+                "top_k":31,
+                "stop_sequences":["STOP"]
+            }),
+            json!({
+                "candidateCount":1,
+                "temperature":0.5,
+                "maxOutputTokens":62,
+                "topP":0.7,
+                "topK":31,
+                "stopSequences":["STOP"]
+            }),
+            vec!["system-one"],
+        ),
+    ];
+
+    for (protocol, request, expected_config, expected_system) in cases {
+        let transformed =
+            transform_request_data(request, protocol, UpstreamProtocol::Gemini, false)
+                .expect("portable Gemini request should transform");
+        let target = transformed.value;
+        let system_parts = target["systemInstruction"]["parts"]
+            .as_array()
+            .expect("systemInstruction parts");
+        assert_eq!(
+            system_parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            expected_system,
+            "{protocol:?}"
+        );
+        assert_eq!(
+            target["contents"],
+            json!([
+                {"role":"user","parts":[{"text":"user-one"},{"text":"user-two"}]},
+                {"role":"model","parts":[{"text":"assistant-three"}]},
+                {"role":"user","parts":[{"text":"user-four"}]}
+            ]),
+            "{protocol:?}"
+        );
+        assert_eq!(target["generationConfig"], expected_config, "{protocol:?}");
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.semantic_unit == TransformSemanticUnit::Role
+                && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                && fact.reason_code == TransformReasonCode::ConsecutiveRoleMerged
+        }));
+        if protocol != DownstreamProtocol::Anthropic {
+            assert!(transformed.summary.facts.iter().any(|fact| {
+                fact.semantic_unit == TransformSemanticUnit::Role
+                    && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                    && fact.reason_code == TransformReasonCode::SystemInstructionMerged
+            }));
+        }
+    }
+}
+
+#[test]
+fn openai_to_gemini_single_candidate_and_known_control_rejections_are_explicit() {
+    let accepted = transform_request_data(
+        json!({
+            "model":"source",
+            "messages":[{"role":"user","content":"hello"}],
+            "n":1,
+            "logprobs":false,
+            "top_logprobs":0,
+            "logit_bias":{},
+            "max_completion_tokens":33,
+            "modalities":["text"]
+        }),
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Gemini,
+        false,
+    )
+    .expect("semantic no-op controls and n=1 should be accepted");
+    assert_eq!(accepted.value["generationConfig"]["candidateCount"], 1);
+    assert_eq!(accepted.value["generationConfig"]["maxOutputTokens"], 33);
+
+    for request in [
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"n":2}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"logprobs":true}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"logit_bias":{"1":1}}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"prediction":{"type":"content","content":"private"}}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"modalities":["text","audio"]}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"audio":{"format":"wav","voice":"alloy"}}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"web_search_options":{}}),
+    ] {
+        let failure = transform_request_data(
+            request,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Gemini,
+            false,
+        )
+        .expect_err("unrepresentable Gemini request control must reject");
+        assert_eq!(failure.reason_code, TransformReasonCode::UnsupportedContent);
+        assert!(failure.summary.control_fact().is_some());
+    }
+
+    for request in [
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"temperature":-0.1}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"top_p":1.1}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"max_tokens":0}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"max_tokens":1,"max_completion_tokens":1}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"stop":[]}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"presence_penalty":2.1}),
+        json!({"model":"source","messages":[{"role":"user","content":"hello"}],"modalities":"text"}),
+    ] {
+        let failure = transform_request_data(
+            request,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Gemini,
+            false,
+        )
+        .expect_err("invalid generation control must reject");
+        assert_eq!(failure.origin, TransformFailureOrigin::DownstreamInput);
+        assert_eq!(
+            failure.reason_code,
+            TransformReasonCode::InvalidProtocolShape
+        );
+    }
+
+    let failure = transform_request_data(
+        json!({
+            "model":"source",
+            "messages":[{"role":"user","content":"hello"}],
+            "seed":2147483648_i64
+        }),
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Gemini,
+        false,
+    )
+    .expect_err("Gemini seed outside signed 32-bit range must reject");
+    assert_eq!(failure.origin, TransformFailureOrigin::TargetCapability);
+    assert_eq!(
+        failure.reason_code,
+        TransformReasonCode::InvalidProtocolShape
+    );
+}
+
+#[test]
+fn gemini_cross_wire_response_rejects_multiple_or_nonzero_candidates_but_same_wire_is_raw() {
+    let multiple = json!({
+        "candidates":[
+            {"index":0,"content":{"role":"model","parts":[{"text":"first"}]},"finishReason":"STOP"},
+            {"index":1,"content":{"role":"model","parts":[{"text":"second"}]},"finishReason":"STOP"}
+        ]
+    });
+    let same_wire = transform_result(
+        multiple.clone(),
+        UpstreamProtocol::Gemini,
+        DownstreamProtocol::Gemini,
+    )
+    .expect("same-wire Gemini multiple candidates must remain transparent");
+    assert_eq!(same_wire.value.0, multiple);
+
+    for response in [
+        multiple,
+        json!({
+            "candidates":[
+                {"index":1,"content":{"role":"model","parts":[{"text":"only"}]},"finishReason":"STOP"}
+            ]
+        }),
+    ] {
+        let failure = transform_result(
+            response,
+            UpstreamProtocol::Gemini,
+            DownstreamProtocol::Openai,
+        )
+        .expect_err("cross-wire Gemini response must contain only candidate index zero");
+        assert_eq!(failure.origin, TransformFailureOrigin::UpstreamPayload);
+        assert_eq!(failure.reason_code, TransformReasonCode::UnsupportedContent);
+    }
+}
+
+#[test]
+fn gemini_tool_id_and_signature_boundaries_are_deterministic_and_payload_free() {
+    const SIGNATURE: &str = "private-thought-signature-marker";
+    let provider_id_response = json!({
+        "responseId":"response-tool-real",
+        "candidates":[{
+            "index":0,
+            "content":{"role":"model","parts":[{
+                "functionCall":{"id":"provider-call-real","name":"weather","args":{"city":"Shanghai"}},
+                "thoughtSignature":SIGNATURE
+            }]},
+            "finishReason":"STOP"
+        }]
+    });
+    for (downstream, id_pointer) in [
+        (
+            DownstreamProtocol::Openai,
+            "/choices/0/message/tool_calls/0/id",
+        ),
+        (DownstreamProtocol::Responses, "/output/0/call_id"),
+        (DownstreamProtocol::Anthropic, "/content/0/id"),
+    ] {
+        let transformed = transform_result(
+            provider_id_response.clone(),
+            UpstreamProtocol::Gemini,
+            downstream,
+        )
+        .expect("Gemini provider tool id should transform");
+        assert_eq!(
+            transformed.value.0.pointer(id_pointer),
+            Some(&json!("provider-call-real")),
+            "{downstream:?}"
+        );
+        assert!(!transformed.value.0.to_string().contains(SIGNATURE));
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.semantic_unit == TransformSemanticUnit::Metadata
+                && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                && fact.reason_code == TransformReasonCode::ThoughtSignatureNotPortable
+                && fact.safe_summary.is_none()
+        }));
+    }
+
+    let legacy = json!({
+        "responseId":"response-tool-legacy",
+        "candidates":[{
+            "index":0,
+            "content":{"role":"model","parts":[{
+                "functionCall":{"name":"weather","args":{}},
+                "thoughtSignature":SIGNATURE
+            }]},
+            "finishReason":"STOP"
+        }]
+    });
+    let first = transform_result(
+        legacy.clone(),
+        UpstreamProtocol::Gemini,
+        DownstreamProtocol::Openai,
+    )
+    .expect("legacy Gemini tool response should synthesize a stable id");
+    let second = transform_result(legacy, UpstreamProtocol::Gemini, DownstreamProtocol::Openai)
+        .expect("repeated legacy Gemini tool response should synthesize the same id");
+    let first_id = first.value.0["choices"][0]["message"]["tool_calls"][0]["id"]
+        .as_str()
+        .expect("synthetic tool id");
+    assert_eq!(
+        Some(first_id),
+        second.value.0["choices"][0]["message"]["tool_calls"][0]["id"].as_str()
+    );
+    assert!(first_id.starts_with("gemini-call-"));
+    assert!(!first_id.contains(SIGNATURE));
+
+    let missing_seed = transform_result(
+        json!({
+            "candidates":[{
+                "index":0,
+                "content":{"role":"model","parts":[{"functionCall":{"name":"weather","args":{}}}]},
+                "finishReason":"STOP"
+            }]
+        }),
+        UpstreamProtocol::Gemini,
+        DownstreamProtocol::Openai,
+    )
+    .expect_err("legacy tool response without provider id or responseId must reject");
+    assert_eq!(missing_seed.origin, TransformFailureOrigin::UpstreamPayload);
+    assert_eq!(
+        missing_seed.reason_code,
+        TransformReasonCode::ToolCorrelationSeedRequired
+    );
+}
+
+#[test]
+fn cross_wire_tool_history_requires_a_gemini_thought_signature() {
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"source",
+                "messages":[
+                    {"role":"assistant","tool_calls":[{
+                        "id":"call-weather","type":"function",
+                        "function":{"name":"weather","arguments":"{}"}
+                    }]},
+                    {"role":"tool","tool_call_id":"call-weather","content":"ok"}
+                ]
+            }),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"source",
+                "input":[
+                    {"type":"function_call","id":"fc-weather","call_id":"call-weather","name":"weather","arguments":"{}"},
+                    {"type":"function_call_output","id":"fco-weather","call_id":"call-weather","output":"ok"}
+                ]
+            }),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"source","max_tokens":64,
+                "messages":[
+                    {"role":"assistant","content":[{"type":"tool_use","id":"call-weather","name":"weather","input":{}}]},
+                    {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-weather","content":"ok"}]}
+                ]
+            }),
+        ),
+    ];
+    for (protocol, request) in cases {
+        let failure = transform_request_data(request, protocol, UpstreamProtocol::Gemini, false)
+            .expect_err("cross-wire Gemini tool history without signature must reject");
+        assert_eq!(failure.origin, TransformFailureOrigin::TargetCapability);
+        assert_eq!(
+            failure.reason_code,
+            TransformReasonCode::ThoughtSignatureRequired
+        );
+        assert!(failure.summary.control_fact().is_some());
+    }
+
+    const SIGNATURE: &str = "private-history-signature";
+    let source = json!({
+        "contents":[
+            {"role":"model","parts":[{
+                "functionCall":{"id":"provider-call","name":"weather","args":{}},
+                "thoughtSignature":SIGNATURE
+            }]},
+            {"role":"user","parts":[{
+                "functionResponse":{"id":"provider-call","name":"weather","response":{"ok":true}}
+            }]}
+        ]
+    });
+    let transformed = transform_request_data(
+        source.clone(),
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Openai,
+        false,
+    )
+    .expect("signed Gemini history can map away from Gemini with explicit loss");
+    assert!(!transformed.value.to_string().contains(SIGNATURE));
+    assert!(transformed.summary.facts.iter().any(|fact| {
+        fact.reason_code == TransformReasonCode::ThoughtSignatureNotPortable
+            && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+            && fact.safe_summary.is_none()
+    }));
+
+    let same_wire = transform_request_data(
+        source.clone(),
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Gemini,
+        false,
+    )
+    .expect("native Gemini tool history must remain raw");
+    assert_eq!(same_wire.value, source);
+}
+
+#[test]
+fn cross_wire_tool_definitions_and_choices_reach_gemini_with_explicit_policy_loss() {
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"source","messages":[{"role":"user","content":"weather"}],
+                "tools":[{"type":"function","function":{
+                    "name":"weather","description":"lookup","parameters":{"type":"object"},"strict":true
+                }}],
+                "tool_choice":"auto","parallel_tool_calls":false
+            }),
+            "AUTO",
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"source","input":"weather",
+                "tools":[{"type":"function","name":"weather","description":"lookup","parameters":{"type":"object"},"strict":true}],
+                "tool_choice":"required","parallel_tool_calls":false
+            }),
+            "ANY",
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"source","max_tokens":64,"messages":[{"role":"user","content":"weather"}],
+                "tools":[{"name":"weather","description":"lookup","input_schema":{"type":"object"},"strict":true}],
+                "tool_choice":{"type":"tool","name":"weather","disable_parallel_tool_use":true}
+            }),
+            "ANY",
+        ),
+    ];
+    for (protocol, request, expected_mode) in cases {
+        let transformed =
+            transform_request_data(request, protocol, UpstreamProtocol::Gemini, false)
+                .expect("portable first-round tool request should reach Gemini");
+        assert_eq!(
+            transformed.value["tools"][0]["functionDeclarations"][0]["name"],
+            "weather"
+        );
+        assert_eq!(
+            transformed.value["tools"][0]["functionDeclarations"][0]["parameters"],
+            json!({"type":"object"})
+        );
+        assert_eq!(
+            transformed.value["toolConfig"]["functionCallingConfig"]["mode"],
+            expected_mode
+        );
+        for reason_code in [
+            TransformReasonCode::ToolStrictnessNotPortable,
+            TransformReasonCode::ParallelToolPolicyNotPortable,
+        ] {
+            assert!(transformed.summary.facts.iter().any(|fact| {
+                fact.semantic_unit == TransformSemanticUnit::ToolDefinitions
+                    && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                    && fact.reason_code == reason_code
+                    && fact.safe_summary.is_none()
+            }));
+        }
+    }
+
+    let native = json!({
+        "contents":[{"role":"user","parts":[{"text":"weather"}]}],
+        "tools":[{"functionDeclarations":[{"name":"weather","parametersJsonSchema":{"type":"object","x-future":true}}]}],
+        "toolConfig":{"functionCallingConfig":{"mode":"VALIDATED","allowedFunctionNames":["weather"],"futureChoice":true}},
+        "futureToolRoot":true
+    });
+    let same_wire = transform_request_data(
+        native.clone(),
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Gemini,
+        false,
+    )
+    .expect("native Gemini tools must remain raw");
+    assert_eq!(same_wire.value, native);
+}
+
+#[test]
+fn gemini_target_final_validation_is_future_tolerant_same_wire_and_fail_closed_cross_wire() {
+    const PRIVATE_MARKER: &str = "gemini-target-private-marker";
+    validate_final_generation_request_for_downstream(
+        &json!({
+            "contents":[{"role":"future-role","parts":[{"futurePart":{"opaque":PRIVATE_MARKER}}]}],
+            "generationConfig":{"candidateCount":3,"futureConfig":true},
+            "cachedContent":"cachedContents/future",
+            "futureRoot":true
+        }),
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Gemini,
+        &UpstreamProfileType::Gemini,
+    )
+    .expect("same-wire future Gemini fields must remain transparent");
+
+    validate_final_generation_request_for_downstream(
+        &json!({
+            "contents":[{"role":"user","parts":[{"text":"hello","futureMetadata":true}]}],
+            "generationConfig":{"candidateCount":1},
+            "futureRoot":true
+        }),
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Gemini,
+        &UpstreamProfileType::Gemini,
+    )
+    .expect("ordinary unknown fields must not form a recursive closed schema");
+
+    for (payload, expected_path) in [
+        (
+            json!({"contents":[{"role":"user","parts":[{"futurePart":PRIVATE_MARKER}]}],"generationConfig":{"candidateCount":1}}),
+            "/contents/*/parts/*",
+        ),
+        (
+            json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":{"candidateCount":1,"thinkingConfig":{"thinkingBudget":1,"thinkingLevel":"low"}}}),
+            "/generationConfig/thinkingConfig",
+        ),
+        (
+            json!({"model":PRIVATE_MARKER,"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":{"candidateCount":1}}),
+            "/model",
+        ),
+    ] {
+        let error = validate_final_generation_request_for_downstream(
+            &payload,
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Gemini,
+            &UpstreamProfileType::Gemini,
+        )
+        .expect_err("registered Gemini target conflict must fail closed");
+        assert_eq!(error.path, expected_path);
+        assert!(!error.to_string().contains(PRIVATE_MARKER));
+    }
+}
+
+#[test]
+fn anthropic_exact_reasoning_budget_survives_unified_ir_to_gemini_target() {
+    let source: crate::service::transform::providers::anthropic::AnthropicRequestPayload =
+        serde_json::from_value(json!({
+            "model":"claude-source",
+            "max_tokens":4096,
+            "messages":[{"role":"user","content":"reason"}],
+            "thinking":{"type":"enabled","budget_tokens":2048}
+        }))
+        .expect("Anthropic request");
+    let unified: crate::service::transform::unified::UnifiedRequest = source.into();
+    assert_eq!(unified.reasoning_budget_tokens, Some(2048));
+    let target: crate::service::transform::providers::gemini::GeminiRequestPayload = unified.into();
+    let target = serde_json::to_value(target).expect("Gemini target JSON");
+
+    assert_eq!(
+        target["generationConfig"],
+        json!({
+            "candidateCount":1,
+            "maxOutputTokens":4096,
+            "thinkingConfig":{"thinkingBudget":2048,"includeThoughts":true}
+        })
+    );
+    validate_final_generation_request_for_downstream(
+        &target,
+        DownstreamProtocol::Anthropic,
+        UpstreamProtocol::Gemini,
+        &UpstreamProfileType::Gemini,
+    )
+    .expect("typed exact budget must produce one legal Gemini thinking form");
+}
+
+#[test]
+fn three_reasoning_controls_map_to_one_legal_gemini_thinking_form() {
+    for (effort, expected) in [
+        ("none", json!({"thinkingBudget":0})),
+        (
+            "minimal",
+            json!({"thinkingLevel":"minimal","includeThoughts":true}),
+        ),
+        ("low", json!({"thinkingLevel":"low","includeThoughts":true})),
+        (
+            "medium",
+            json!({"thinkingLevel":"medium","includeThoughts":true}),
+        ),
+        (
+            "high",
+            json!({"thinkingLevel":"high","includeThoughts":true}),
+        ),
+        (
+            "xhigh",
+            json!({"thinkingLevel":"high","includeThoughts":true}),
+        ),
+    ] {
+        let transformed = transform_request_data(
+            json!({
+                "model":"gpt-5","messages":[{"role":"user","content":"reason"}],
+                "reasoning_effort":effort
+            }),
+            DownstreamProtocol::Openai,
+            UpstreamProtocol::Gemini,
+            false,
+        )
+        .expect("OpenAI reasoning effort must map to Gemini");
+        assert_eq!(
+            transformed.value["generationConfig"]["thinkingConfig"], expected,
+            "{effort}"
+        );
+        let has_cap_fact = transformed.summary.facts.iter().any(|fact| {
+            fact.reason_code == TransformReasonCode::ReasoningEffortClampedToHigh
+                && fact.semantic_unit == TransformSemanticUnit::ReasoningContent
+                && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                && fact.action == TransformAction::Synthesize
+                && fact.safe_summary.is_none()
+        });
+        assert_eq!(has_cap_fact, effort == "xhigh", "{effort}");
+    }
+
+    let responses = transform_request_data(
+        json!({
+            "model":"gpt-5","input":"reason",
+            "reasoning":{"effort":"xhigh","summary":"auto"}
+        }),
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Gemini,
+        false,
+    )
+    .expect("Responses xhigh reasoning must map to Gemini high");
+    assert_eq!(
+        responses.value["generationConfig"]["thinkingConfig"],
+        json!({"thinkingLevel":"high","includeThoughts":true})
+    );
+    assert!(responses.summary.facts.iter().any(|fact| {
+        fact.reason_code == TransformReasonCode::ReasoningEffortClampedToHigh
+            && fact.safe_summary.is_none()
+    }));
+
+    for budget in [1_u64, u64::from(u32::MAX)] {
+        let anthropic = transform_request_data(
+            json!({
+                "model":"claude","max_tokens":4096,
+                "messages":[{"role":"user","content":"reason"}],
+                "thinking":{"type":"enabled","budget_tokens":budget}
+            }),
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Gemini,
+            false,
+        )
+        .expect("Anthropic exact budget must map to Gemini");
+        assert_eq!(
+            anthropic.value["generationConfig"]["thinkingConfig"],
+            json!({"thinkingBudget":budget,"includeThoughts":true})
+        );
+    }
+
+    for effort in ["xhigh", "max"] {
+        let anthropic = transform_request_data(
+            json!({
+                "model":"claude","max_tokens":4096,
+                "messages":[{"role":"user","content":"reason"}],
+                "thinking":{"type":"adaptive"},
+                "output_config":{"effort":effort}
+            }),
+            DownstreamProtocol::Anthropic,
+            UpstreamProtocol::Gemini,
+            false,
+        )
+        .expect("Anthropic high-end effort must clamp to Gemini high");
+        assert_eq!(
+            anthropic.value["generationConfig"]["thinkingConfig"],
+            json!({"thinkingLevel":"high","includeThoughts":true})
+        );
+        assert!(anthropic.summary.facts.iter().any(|fact| {
+            fact.reason_code == TransformReasonCode::ReasoningEffortClampedToHigh
+                && fact.safe_summary.is_none()
+        }));
+    }
+}
+
+#[test]
+fn reasoning_range_conflicts_and_dynamic_gemini_budget_fail_closed() {
+    const PRIVATE_MARKER: &str = "private-reasoning-request-marker";
+    for (protocol, request) in [
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":PRIVATE_MARKER}],"reasoning_effort":"future"}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":PRIVATE_MARKER,"reasoning":{"effort":"future"}}),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":PRIVATE_MARKER}],"thinking":{"type":"enabled","budget_tokens":0}}),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":PRIVATE_MARKER}],"thinking":{"type":"enabled","budget_tokens":-1}}),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":PRIVATE_MARKER}],"thinking":{"type":"enabled","budget_tokens":4294967296_u64}}),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":PRIVATE_MARKER}],"thinking":{"type":"enabled","budget_tokens":1024},"output_config":{"effort":"high"}}),
+        ),
+    ] {
+        let failure = transform_request_data(request, protocol, UpstreamProtocol::Gemini, false)
+            .expect_err("invalid or unportable reasoning control must reject");
+        assert_eq!(failure.origin, TransformFailureOrigin::DownstreamInput);
+        assert_eq!(
+            failure.semantic_unit,
+            TransformSemanticUnit::ReasoningContent
+        );
+        assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+    }
+
+    for thinking_config in [
+        json!({"thinkingBudget":-1}),
+        json!({"thinkingLevel":"high","futureThinking":true}),
+    ] {
+        let failure = transform_request_data(
+            json!({
+                "contents":[{"role":"user","parts":[{"text":PRIVATE_MARKER}]}],
+                "generationConfig":{"thinkingConfig":thinking_config}
+            }),
+            DownstreamProtocol::Gemini,
+            UpstreamProtocol::Openai,
+            false,
+        )
+        .expect_err("dynamic or unknown Gemini reasoning must reject cross-wire");
+        assert_eq!(failure.origin, TransformFailureOrigin::DownstreamInput);
+        assert_eq!(
+            failure.semantic_unit,
+            TransformSemanticUnit::ReasoningContent
+        );
+        assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+    }
+
+    let native = json!({
+        "contents":[{"role":"user","parts":[{"text":"reason"}]}],
+        "generationConfig":{"thinkingConfig":{
+            "thinkingBudget":-1,"includeThoughts":true,"futureThinking":true
+        }}
+    });
+    let same_wire = transform_request_data(
+        native.clone(),
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Gemini,
+        false,
+    )
+    .expect("native dynamic/future Gemini thinking config must remain raw");
+    assert_eq!(same_wire.value, native);
+    assert_eq!(
+        same_wire.summary.facts[0].outcome,
+        TransformOutcomeKind::Passthrough
+    );
+}
+
+#[test]
+fn gemini_thought_responses_use_reasoning_channels_without_text_downgrade() {
+    const REASONING: &str = "private-gemini-reasoning-marker";
+    const SIGNATURE: &str = "private-gemini-reasoning-signature";
+    let source = json!({
+        "responseId":"gemini-reasoning-response",
+        "candidates":[{"index":0,"content":{"role":"model","parts":[
+            {"text":REASONING,"thought":true,"thoughtSignature":SIGNATURE},{"text":"public answer"}
+        ]},"finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}
+    });
+
+    let openai = transform_result(
+        source.clone(),
+        UpstreamProtocol::Gemini,
+        DownstreamProtocol::Openai,
+    )
+    .expect("Gemini thought must reach OpenAI reasoning_content");
+    assert_eq!(
+        openai
+            .value
+            .0
+            .pointer("/choices/0/message/reasoning_content"),
+        Some(&json!(REASONING))
+    );
+    assert_eq!(
+        openai.value.0.pointer("/choices/0/message/content"),
+        Some(&json!("public answer"))
+    );
+
+    let responses = transform_result(
+        source.clone(),
+        UpstreamProtocol::Gemini,
+        DownstreamProtocol::Responses,
+    )
+    .expect("Gemini thought must reach a Responses reasoning item");
+    assert!(responses.value.0.to_string().contains(REASONING));
+    assert!(
+        responses
+            .value
+            .0
+            .to_string()
+            .contains("\"type\":\"reasoning\"")
+    );
+
+    let anthropic = transform_result(
+        source.clone(),
+        UpstreamProtocol::Gemini,
+        DownstreamProtocol::Anthropic,
+    )
+    .expect("Gemini thought must reach an Anthropic thinking block");
+    assert_eq!(
+        anthropic.value.0.pointer("/content/0/type"),
+        Some(&json!("thinking"))
+    );
+    assert_eq!(
+        anthropic.value.0.pointer("/content/0/thinking"),
+        Some(&json!(REASONING))
+    );
+
+    for transformed in [openai, responses, anthropic] {
+        assert!(!transformed.value.0.to_string().contains(SIGNATURE));
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.reason_code == TransformReasonCode::ThoughtSignatureNotPortable
+                && fact.safe_summary.is_none()
+        }));
+        assert!(!transformed.summary.facts.iter().any(|fact| {
+            fact.semantic_unit == TransformSemanticUnit::ReasoningContent
+                && matches!(
+                    fact.outcome,
+                    TransformOutcomeKind::ControlledLossMajor | TransformOutcomeKind::FatalError
+                )
+        }));
+    }
+
+    let same_wire = transform_result(
+        source.clone(),
+        UpstreamProtocol::Gemini,
+        DownstreamProtocol::Gemini,
+    )
+    .expect("Gemini thought response must remain raw same-wire");
+    assert_eq!(same_wire.value.0, source);
+}
+
+#[test]
+fn request_reasoning_history_uses_openai_reasoning_content_without_prompt_corruption() {
+    const REASONING: &str = "private-request-reasoning-marker";
+
+    let cases = [
+        (
+            DownstreamProtocol::Gemini,
+            json!({
+                "contents":[{"role":"model","parts":[
+                    {"text":REASONING,"thought":true},
+                    {"text":"visible history"}
+                ]}]
+            }),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"reasoning-model",
+                "input":[{
+                    "type":"reasoning","id":"rs_history",
+                    "content":[{"type":"reasoning_text","text":REASONING}],
+                    "summary":[],"encrypted_content":null
+                }]
+            }),
+        ),
+    ];
+
+    for (source, request) in cases {
+        let transformed = transform_request_data(request, source, UpstreamProtocol::Openai, false)
+            .unwrap_or_else(|failure| panic!("{source:?}: {failure:?}"));
+        let messages = transformed.value["messages"]
+            .as_array()
+            .expect("OpenAI messages");
+        assert!(
+            messages
+                .iter()
+                .any(|message| { message.get("reasoning_content") == Some(&json!(REASONING)) }),
+            "{source:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| {
+                message.get("content").is_some_and(|content| {
+                    content == REASONING || content.to_string().contains(REASONING)
+                })
+            }),
+            "{source:?}"
+        );
+    }
 }
 
 #[test]
@@ -576,7 +1485,6 @@ fn gemini_reasoning_controls_map_to_openai_with_budget_sentinels() {
             Some("low"),
         ),
         (json!({"thinkingBudget": 0}), Some("none")),
-        (json!({"thinkingBudget": -1}), None),
     ] {
         let expects_include_thoughts_loss =
             thinking_config.get("includeThoughts") == Some(&json!(true));
@@ -689,7 +1597,6 @@ fn qualitative_reasoning_controls_from_all_public_wires_reach_responses_with_exp
             Some("high"),
         ),
         (json!({"thinkingBudget":0}), Some("none")),
-        (json!({"thinkingBudget":-1}), None),
     ] {
         let gemini = transform_request_data(
             json!({
@@ -882,11 +1789,7 @@ fn anthropic_thinking_response_preserves_text_but_never_leaks_signature_cross_wi
             .expect("portable Anthropic thinking text must transform cross-wire");
         let encoded = transformed.value.0.to_string();
         assert!(!encoded.contains(SIGNATURE), "{downstream:?}");
-        if downstream == DownstreamProtocol::Openai {
-            assert!(!encoded.contains(THINKING));
-        } else {
-            assert!(encoded.contains(THINKING), "{downstream:?}");
-        }
+        assert!(encoded.contains(THINKING), "{downstream:?}");
         if downstream == DownstreamProtocol::Gemini {
             assert!(encoded.contains("\"thought\":true"));
         }
@@ -1045,12 +1948,8 @@ fn responses_visible_reasoning_maps_without_leaking_encrypted_content() {
         assert!(transformed.summary.facts.iter().any(|fact| {
             fact.outcome == TransformOutcomeKind::ControlledLossMinor && fact.safe_summary.is_none()
         }));
-        if downstream == DownstreamProtocol::Openai {
-            assert!(!serialized.contains("visible summary"));
-            assert!(serialized.contains("answer"));
-        } else {
-            assert!(serialized.contains("visible summary"), "{downstream:?}");
-        }
+        assert!(serialized.contains("visible summary"), "{downstream:?}");
+        assert!(serialized.contains("answer"));
     }
 }
 
@@ -1204,6 +2103,166 @@ fn gemini_multimodal_input_classifies_inline_media_for_openai() {
             && fact.action == TransformAction::Drop
             && fact.semantic_unit == TransformSemanticUnit::Metadata
     }));
+}
+
+#[test]
+fn portable_cross_wire_media_maps_to_exact_gemini_inline_data() {
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"gpt-5","messages":[{"role":"user","content":[
+                    {"type":"image_url","image_url":{"url":"data:image/jpg;charset=utf-8;base64,ZmFrZQ==","detail":"high"}},
+                    {"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}},
+                    {"type":"file","file":{"filename":"report.pdf","file_data":"JVBERi0="}}
+                ]}]
+            }),
+            vec!["image/jpeg", "audio/wav", "application/pdf"],
+            vec![
+                TransformReasonCode::MediaDetailNotPortable,
+                TransformReasonCode::MediaDataUrlParametersNotPortable,
+                TransformReasonCode::MediaFilenameNotPortable,
+            ],
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"gpt-5","input":[{"role":"user","content":[
+                    {"type":"input_image","image_url":"data:image/gif;base64,ZmFrZQ==","detail":"low"},
+                    {"type":"input_audio","input_audio":{"data":"SUQz","format":"mp3"}},
+                    {"type":"input_file","filename":"report.pdf","file_data":"data:application/pdf;name=report.pdf;base64,JVBERi0="}
+                ]}]
+            }),
+            vec!["image/gif", "audio/mpeg", "application/pdf"],
+            vec![
+                TransformReasonCode::MediaDetailNotPortable,
+                TransformReasonCode::MediaFilenameNotPortable,
+            ],
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"claude","max_tokens":64,"messages":[{"role":"user","content":[
+                    {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"ZmFrZQ=="}},
+                    {"type":"image","source":{"type":"base64","media_type":"image/webp","data":"ZmFrZQ=="}},
+                    {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="},"title":"report.pdf"}
+                ]}]
+            }),
+            vec!["image/jpeg", "image/webp", "application/pdf"],
+            vec![TransformReasonCode::MediaFilenameNotPortable],
+        ),
+    ];
+
+    for (source, request, expected_mimes, expected_losses) in cases {
+        let transformed = transform_request_data(request, source, UpstreamProtocol::Gemini, false)
+            .expect("portable user media must reach Gemini inlineData");
+        validate_final_generation_request_for_downstream(
+            &transformed.value,
+            source,
+            UpstreamProtocol::Gemini,
+            &UpstreamProfileType::Gemini,
+        )
+        .expect("portable media must pass the Gemini final boundary");
+
+        let inline_parts = transformed.value["contents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|content| content["parts"].as_array().into_iter().flatten())
+            .filter_map(|part| part.get("inlineData"))
+            .collect::<Vec<_>>();
+        assert_eq!(inline_parts.len(), expected_mimes.len(), "{source:?}");
+        assert_eq!(
+            inline_parts
+                .iter()
+                .filter_map(|part| part["mimeType"].as_str())
+                .collect::<Vec<_>>(),
+            expected_mimes,
+            "{source:?}"
+        );
+        assert!(inline_parts.iter().all(|part| {
+            part.as_object().is_some_and(|object| {
+                object.len() == 2 && object.contains_key("mimeType") && object.contains_key("data")
+            })
+        }));
+        for reason in expected_losses {
+            assert!(
+                transformed.summary.facts.iter().any(|fact| {
+                    fact.reason_code == reason
+                        && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                        && fact.action == TransformAction::Drop
+                        && fact.safe_summary.is_none()
+                }),
+                "{source:?}/{reason:?}: {:?}",
+                transformed.summary.facts
+            );
+        }
+    }
+}
+
+#[test]
+fn gemini_target_media_rejects_remote_video_unknown_mime_and_illegal_roles() {
+    const PRIVATE_MARKER: &str = "gemini-media-private-marker";
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":format!("https://private.invalid/{PRIVATE_MARKER}.png")}}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":[{"role":"user","content":[
+                {"type":"input_video","video_url":format!("https://private.invalid/{PRIVATE_MARKER}.mp4")}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":[{"role":"user","content":[
+                {"type":"input_file","filename":"blob.bin","file_data":"data:application/octet-stream;base64,AA=="}
+            ]}]}),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({"model":"claude","max_tokens":64,"messages":[{"role":"assistant","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}
+            ]}]}),
+        ),
+    ];
+
+    for (source, request) in cases {
+        let failure = transform_request_data(request, source, UpstreamProtocol::Gemini, false)
+            .expect_err("unportable or illegally positioned media must fail closed");
+        assert!(matches!(
+            failure.origin,
+            TransformFailureOrigin::DownstreamInput | TransformFailureOrigin::TargetCapability
+        ));
+        assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+    }
+}
+
+#[test]
+fn gemini_same_wire_media_and_future_parts_remain_raw() {
+    let request = json!({"contents":[{"role":"user","parts":[
+        {"inlineData":{"mimeType":"video/mp4","data":"aGVsbG8=","displayName":"clip.mp4"}},
+        {"fileData":{"mimeType":"video/mp4","fileUri":"files/native-fixture"}},
+        {"futureMedia":{"opaque":true}}
+    ]}]});
+    let transformed = transform_request_data(
+        request.clone(),
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Gemini,
+        false,
+    )
+    .expect("same-wire Gemini media must bypass cross-wire classification");
+    assert_eq!(transformed.value, request);
+    validate_final_generation_request_for_downstream(
+        &transformed.value,
+        DownstreamProtocol::Gemini,
+        UpstreamProtocol::Gemini,
+        &UpstreamProfileType::Gemini,
+    )
+    .expect("same-wire native media must pass the raw final boundary");
 }
 
 #[test]
@@ -2380,6 +3439,186 @@ fn grammar_non_json_and_conflicting_structured_formats_fail_closed() {
 }
 
 #[test]
+fn three_cross_wire_structured_outputs_use_only_gemini_response_json_schema() {
+    let schema = json!({
+        "$defs":{"answer":{"type":"string","x-future":{"keep":true}}},
+        "type":"object",
+        "properties":{"answer":{"$ref":"#/$defs/answer"}},
+        "required":["answer"],
+        "additionalProperties":false
+    });
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({
+                "model":"gpt-5","messages":[{"role":"user","content":"json"}],
+                "response_format":{"type":"json_schema","json_schema":{
+                    "name":"answer_contract","description":"private outer description",
+                    "schema":schema,"strict":true
+                }}
+            }),
+            TransformReasonCode::StructuredOutputOuterMetadataNotPortable,
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({
+                "model":"gpt-5","input":"json","text":{"format":{
+                    "type":"json_schema","name":"answer_contract",
+                    "description":"private outer description","schema":schema,"strict":true
+                }}
+            }),
+            TransformReasonCode::StructuredOutputOuterMetadataNotPortable,
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({
+                "model":"claude","max_tokens":64,"messages":[{"role":"user","content":"json"}],
+                "output_config":{"format":{"type":"json_schema","schema":schema}}
+            }),
+            TransformReasonCode::StructuredOutputEnvelopeNotPortable,
+        ),
+    ];
+
+    for (source, request, expected_reason) in cases {
+        let transformed = transform_request_data(request, source, UpstreamProtocol::Gemini, false)
+            .expect("portable schema must reach Gemini");
+        validate_final_generation_request_for_downstream(
+            &transformed.value,
+            source,
+            UpstreamProtocol::Gemini,
+            &UpstreamProfileType::Gemini,
+        )
+        .expect("structured Gemini body must pass final validation");
+        let config = &transformed.value["generationConfig"];
+        assert_eq!(config["responseMimeType"], "application/json", "{source:?}");
+        assert_eq!(config["responseJsonSchema"], schema, "{source:?}");
+        assert!(config.get("responseSchema").is_none(), "{source:?}");
+        assert!(config.get("responseFormat").is_none(), "{source:?}");
+        assert!(
+            !transformed
+                .value
+                .to_string()
+                .contains("private outer description")
+        );
+        assert!(
+            transformed.summary.facts.iter().any(|fact| {
+                fact.reason_code == expected_reason
+                    && fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                    && fact.action == TransformAction::Drop
+                    && fact.safe_summary.is_none()
+            }),
+            "{source:?}/{expected_reason:?}"
+        );
+    }
+
+    for (source, request) in [
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":"json"}],
+                "response_format":{"type":"json_object"}}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":"json","text":{"format":{"type":"json_object"}}}),
+        ),
+    ] {
+        let transformed = transform_request_data(request, source, UpstreamProtocol::Gemini, false)
+            .expect("JSON object mode must reach Gemini");
+        let config = &transformed.value["generationConfig"];
+        assert_eq!(config["responseMimeType"], "application/json");
+        assert!(config.get("responseJsonSchema").is_none());
+    }
+}
+
+#[test]
+fn gemini_structured_output_combines_with_tools_reasoning_media_and_stream() {
+    let schema = json!({
+        "type":"object",
+        "properties":{"answer":{"type":"string","x-future":true}},
+        "required":["answer"]
+    });
+    let transformed = transform_request_data(
+        json!({
+            "model":"gpt-5","stream":true,
+            "messages":[{"role":"user","content":[
+                {"type":"text","text":"inspect"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ=="}}
+            ]}],
+            "tools":[{"type":"function","function":{
+                "name":"lookup","parameters":{"type":"object"},"strict":true
+            }}],
+            "reasoning_effort":"high",
+            "response_format":{"type":"json_schema","json_schema":{
+                "name":"answer_contract","schema":schema,"strict":true
+            }}
+        }),
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Gemini,
+        true,
+    )
+    .expect("registered advanced controls must compose structurally");
+    validate_final_generation_request_for_downstream(
+        &transformed.value,
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Gemini,
+        &UpstreamProfileType::Gemini,
+    )
+    .expect("combined advanced request must pass Gemini final validation");
+    assert_eq!(
+        transformed.value["generationConfig"]["responseJsonSchema"],
+        schema
+    );
+    assert_eq!(
+        transformed.value["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high"
+    );
+    assert!(transformed.value["tools"].is_array());
+    assert!(
+        transformed.value["contents"][0]["parts"]
+            .as_array()
+            .is_some_and(|parts| { parts.iter().any(|part| part.get("inlineData").is_some()) })
+    );
+}
+
+#[test]
+fn gemini_structured_target_rejects_unknown_outer_metadata_and_legacy_forms() {
+    const PRIVATE_MARKER: &str = "gemini-structured-private-marker";
+    let cases = [
+        (
+            DownstreamProtocol::Openai,
+            json!({"model":"gpt-5","messages":[{"role":"user","content":"json"}],
+            "response_format":{"type":"json_schema","json_schema":{
+                "name":"answer","schema":{"type":"object"},"strict":true,
+                "future":PRIVATE_MARKER
+            }}}),
+        ),
+        (
+            DownstreamProtocol::Responses,
+            json!({"model":"gpt-5","input":"json","text":{"format":{
+                "type":"json_schema","name":"answer","schema":{"type":"object"},
+                "strict":true,"future":PRIVATE_MARKER
+            }}}),
+        ),
+        (
+            DownstreamProtocol::Anthropic,
+            json!({"model":"claude","max_tokens":64,"messages":[{"role":"user","content":"json"}],
+                "output_config":{"format":{"type":"json_schema","schema":{"type":"object"},
+                    "future":PRIVATE_MARKER}}}),
+        ),
+    ];
+    for (source, request) in cases {
+        let failure = transform_request_data(request, source, UpstreamProtocol::Gemini, false)
+            .expect_err("unknown structured envelope metadata must fail closed");
+        assert_eq!(failure.origin, TransformFailureOrigin::DownstreamInput);
+        assert_eq!(
+            failure.semantic_unit,
+            TransformSemanticUnit::StructuredOutput
+        );
+        assert!(!format!("{failure:?}").contains(PRIVATE_MARKER));
+    }
+}
+
+#[test]
 fn structured_outputs_from_all_public_wires_reach_responses_with_stable_names_and_loss() {
     let schema = json!({
         "type":"object",
@@ -2856,6 +4095,7 @@ fn test_transform_result_openai_to_gemini_facade_smoke() {
     assert_eq!(
         transformed,
         json!({
+          "responseId": "chatcmpl-123",
           "candidates": [
             {
               "index": 0,

@@ -368,6 +368,69 @@ mod tests {
     }
 
     #[test]
+    fn classify_every_upstream_5xx_status_with_only_504_as_timeout() {
+        for raw_status in 500..=599 {
+            let status = StatusCode::from_u16(raw_status).expect("5xx status should be valid");
+            let error = classify_upstream_status(
+                status,
+                None,
+                b"provider failure",
+                65_536,
+                ResponseVisibility::NotVisible,
+            );
+            let expected_code = if raw_status == 504 {
+                ProxyErrorCode::UpstreamTimeoutError
+            } else {
+                ProxyErrorCode::UpstreamServiceError
+            };
+            let expected_status = if raw_status == 504 {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+
+            assert_eq!(
+                error.code(),
+                expected_code,
+                "classification for {raw_status}"
+            );
+            assert_eq!(
+                error.status_code(),
+                expected_status,
+                "downstream status for {raw_status}"
+            );
+            assert_eq!(
+                error.stage(),
+                ExecutionStage::UpstreamResponse,
+                "stage for {raw_status}"
+            );
+            assert_eq!(
+                error.response_visibility(),
+                ResponseVisibility::NotVisible,
+                "visibility for {raw_status}"
+            );
+            assert_eq!(
+                error.timeout_phase(),
+                None,
+                "provider status {raw_status} must not carry a local timeout phase"
+            );
+            assert_eq!(
+                error.response_hints().retry_after(),
+                None,
+                "provider Retry-After must not become a gateway hint for {raw_status}"
+            );
+            assert_eq!(
+                error
+                    .upstream_error()
+                    .expect("explicit upstream status should preserve payload")
+                    .status(),
+                status.as_u16(),
+                "upstream status payload for {raw_status}"
+            );
+        }
+    }
+
+    #[test]
     fn upstream_operator_summary_never_copies_complete_body_fallbacks() {
         for (body, expected_summary) in [
             (

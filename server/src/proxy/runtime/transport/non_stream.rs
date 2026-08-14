@@ -72,9 +72,14 @@ pub(super) async fn handle_non_streaming_response(
     let response_builder = build_response_builder(status_code, &response_headers);
 
     let body = if status_code.is_success() {
-        read_complete_response_with_cancellation(response, cancellation, non_stream_response_limits)
-            .await
-            .map(NonStreamResponseBody::Complete)
+        read_complete_response_with_cancellation(
+            response,
+            cancellation,
+            non_stream_response_limits,
+            proxy_timeouts,
+        )
+        .await
+        .map(NonStreamResponseBody::Complete)
     } else {
         capture_error_response_with_deadline(
             response,

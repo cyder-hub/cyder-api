@@ -1016,6 +1016,12 @@ enum ScriptedReply {
         content_encoding: Option<String>,
         body: Vec<u8>,
     },
+    RawWithRetryAfter {
+        status: StatusCode,
+        content_type: Option<String>,
+        body: Vec<u8>,
+        retry_after: String,
+    },
     Sse {
         events: Vec<GoldenEvent>,
     },
@@ -1115,6 +1121,20 @@ impl TestUpstream {
                             }
                             if let Some(content_encoding) = content_encoding {
                                 builder = builder.header("content-encoding", content_encoding);
+                            }
+                            builder.body(Body::from(body)).unwrap()
+                        }
+                        ScriptedReply::RawWithRetryAfter {
+                            status,
+                            content_type,
+                            body,
+                            retry_after,
+                        } => {
+                            let mut builder = Response::builder()
+                                .status(status)
+                                .header("retry-after", retry_after);
+                            if let Some(content_type) = content_type {
+                                builder = builder.header(CONTENT_TYPE, content_type);
                             }
                             builder.body(Body::from(body)).unwrap()
                         }
@@ -18470,6 +18490,28 @@ fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodi
             truncated: false,
         },
         ErrorCase {
+            name: "upstream-404-json",
+            upstream_status: StatusCode::NOT_FOUND,
+            content_type: Some("application/json"),
+            upstream_body: br#"{"error":"model not found"}"#.to_vec(),
+            downstream_status: StatusCode::BAD_REQUEST,
+            downstream_code: "upstream_invalid_request_error",
+            downstream_message: "Upstream provider rejected the request.",
+            expected_body: ExpectedBody::Json(json!({"error":"model not found"})),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-409-text",
+            upstream_status: StatusCode::CONFLICT,
+            content_type: Some("text/plain; charset=utf-8"),
+            upstream_body: b"provider request conflict".to_vec(),
+            downstream_status: StatusCode::BAD_REQUEST,
+            downstream_code: "upstream_invalid_request_error",
+            downstream_message: "Upstream provider rejected the request.",
+            expected_body: ExpectedBody::Text("provider request conflict".to_string()),
+            truncated: false,
+        },
+        ErrorCase {
             name: "upstream-500-binary",
             upstream_status: StatusCode::INTERNAL_SERVER_ERROR,
             content_type: Some("application/octet-stream"),
@@ -18478,6 +18520,39 @@ fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodi
             downstream_code: "upstream_service_error",
             downstream_message: "Upstream provider service failed.",
             expected_body: ExpectedBody::Base64(vec![0xff, 0x00, 0x01, 0xfe]),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-502-text",
+            upstream_status: StatusCode::BAD_GATEWAY,
+            content_type: Some("text/plain"),
+            upstream_body: b"provider gateway failure".to_vec(),
+            downstream_status: StatusCode::SERVICE_UNAVAILABLE,
+            downstream_code: "upstream_service_error",
+            downstream_message: "Upstream provider service failed.",
+            expected_body: ExpectedBody::Text("provider gateway failure".to_string()),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-503-json",
+            upstream_status: StatusCode::SERVICE_UNAVAILABLE,
+            content_type: Some("application/json"),
+            upstream_body: br#"{"error":"temporarily unavailable"}"#.to_vec(),
+            downstream_status: StatusCode::SERVICE_UNAVAILABLE,
+            downstream_code: "upstream_service_error",
+            downstream_message: "Upstream provider service failed.",
+            expected_body: ExpectedBody::Json(json!({"error":"temporarily unavailable"})),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-504-text",
+            upstream_status: StatusCode::GATEWAY_TIMEOUT,
+            content_type: Some("text/plain"),
+            upstream_body: b"provider timeout".to_vec(),
+            downstream_status: StatusCode::GATEWAY_TIMEOUT,
+            downstream_code: "upstream_timeout_error",
+            downstream_message: "Upstream provider timed out.",
+            expected_body: ExpectedBody::Text("provider timeout".to_string()),
             truncated: false,
         },
         ErrorCase {
@@ -18513,11 +18588,11 @@ fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodi
     for case in cases {
         let fixture = fixture.clone();
         run_case(case.name, move |context| async move {
-            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+            let upstream = TestUpstream::spawn(ScriptedReply::RawWithRetryAfter {
                 status: case.upstream_status,
                 content_type: case.content_type.map(str::to_string),
-                content_encoding: None,
                 body: case.upstream_body.clone(),
+                retry_after: "7".to_string(),
             })
             .await;
             let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
@@ -18526,6 +18601,11 @@ fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodi
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
             assert_eq!(response.status(), case.downstream_status, "{}", case.name);
+            assert!(
+                response.headers().get("retry-after").is_none(),
+                "{}: provider Retry-After must not pass through",
+                case.name
+            );
             assert_downstream_request_identity(&response);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
@@ -18612,6 +18692,12 @@ fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodi
                 "{}",
                 case.name
             );
+            assert_eq!(
+                log.source_id,
+                Some(router.source_id),
+                "{}: no source switch",
+                case.name
+            );
             if let Ok(upstream_text) = std::str::from_utf8(&case.upstream_body)
                 && !upstream_text.is_empty()
             {
@@ -18624,6 +18710,8 @@ fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodi
                     case.name
                 );
             }
+            assert_eq!(router.request_logs().await.len(), 1, "{}", case.name);
+            router.wait_for_api_key_lease_release().await;
             upstream.shutdown().await;
         });
     }

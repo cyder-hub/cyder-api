@@ -68,6 +68,49 @@ impl HttpClientBundle {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn build_with_test_resolver(
+        outbound_http: OutboundHttpConfig,
+        proxy_request: ProxyRequestConfig,
+        proxy: Option<String>,
+        resolver: Arc<dyn reqwest::dns::Resolve>,
+    ) -> Result<HttpClientBundle, String> {
+        outbound_http.validate()?;
+        proxy_request.validate()?;
+        let proxy_url = proxy
+            .as_deref()
+            .map(parse_proxy_url)
+            .transpose()
+            .map_err(|error| format!("invalid proxy URL in configuration: {error}"))?;
+        let client = Arc::new(build_http_client_with_resolver(
+            "default",
+            &outbound_http,
+            &proxy_request,
+            None,
+            Arc::clone(&resolver),
+        )?);
+        let proxy_client = proxy_url
+            .as_ref()
+            .map(|proxy_url| {
+                build_http_client_with_resolver(
+                    "proxy",
+                    &outbound_http,
+                    &proxy_request,
+                    Some(proxy_url),
+                    Arc::clone(&resolver),
+                )
+            })
+            .transpose()?
+            .map(Arc::new);
+
+        Ok(HttpClientBundle {
+            client,
+            proxy_client,
+            outbound_http,
+            proxy_request,
+        })
+    }
+
     pub(crate) fn provider_client(
         &self,
         use_proxy: bool,
@@ -120,6 +163,35 @@ impl AppInfra {
             http_clients,
             log_manager,
             #[cfg(test)]
+            test_db_context,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_with_config_and_test_resolver(
+        outbound_http: OutboundHttpConfig,
+        proxy_request: ProxyRequestConfig,
+        proxy: Option<String>,
+        resolver: Arc<dyn reqwest::dns::Resolve>,
+        test_db_context: Option<TestDbContext>,
+    ) -> Self {
+        let http_clients = Arc::new(
+            HttpClientBundle::build_with_test_resolver(
+                outbound_http,
+                proxy_request,
+                proxy,
+                resolver,
+            )
+            .expect("failed to build initial test HTTP client bundle"),
+        );
+        let log_manager = Arc::new(match test_db_context.clone() {
+            Some(test_db_context) => LogManager::new_for_test(test_db_context),
+            None => LogManager::new(),
+        });
+
+        Self {
+            http_clients,
+            log_manager,
             test_db_context,
         }
     }
@@ -178,12 +250,12 @@ fn duration_to_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
 
-fn build_http_client(
+fn configured_http_client_builder(
     client_kind: &'static str,
     outbound_http: &OutboundHttpConfig,
     proxy_request_config: &ProxyRequestConfig,
     proxy_url: Option<&Url>,
-) -> Result<Client, String> {
+) -> Result<reqwest::ClientBuilder, String> {
     let connect_timeout = outbound_http.connect_timeout();
 
     let mut builder = Client::builder()
@@ -213,18 +285,50 @@ fn build_http_client(
         total_timeout_ms = duration_to_millis(proxy_request_config.timeouts.total()),
     );
 
-    builder.build().map_err(|_| {
-        if proxy_url.is_some() {
-            "failed to build proxy reqwest client".to_string()
-        } else {
-            "failed to build default reqwest client".to_string()
-        }
-    })
+    Ok(builder)
+}
+
+fn build_http_client(
+    client_kind: &'static str,
+    outbound_http: &OutboundHttpConfig,
+    proxy_request_config: &ProxyRequestConfig,
+    proxy_url: Option<&Url>,
+) -> Result<Client, String> {
+    configured_http_client_builder(client_kind, outbound_http, proxy_request_config, proxy_url)?
+        .build()
+        .map_err(|_| {
+            if proxy_url.is_some() {
+                "failed to build proxy reqwest client".to_string()
+            } else {
+                "failed to build default reqwest client".to_string()
+            }
+        })
+}
+
+#[cfg(test)]
+fn build_http_client_with_resolver(
+    client_kind: &'static str,
+    outbound_http: &OutboundHttpConfig,
+    proxy_request_config: &ProxyRequestConfig,
+    proxy_url: Option<&Url>,
+    resolver: Arc<dyn reqwest::dns::Resolve>,
+) -> Result<Client, String> {
+    configured_http_client_builder(client_kind, outbound_http, proxy_request_config, proxy_url)?
+        .dns_resolver2(resolver)
+        .build()
+        .map_err(|_| {
+            if proxy_url.is_some() {
+                "failed to build proxy reqwest client".to_string()
+            } else {
+                "failed to build default reqwest client".to_string()
+            }
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::{
@@ -242,6 +346,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+    use crate::proxy::runtime::transport::test_support::ControlledResolver;
 
     #[test]
     fn http_client_bundle_rejects_invalid_proxy_url() {
@@ -296,6 +401,28 @@ mod tests {
                 .expect_err("proxy requirement must not fall back to direct"),
             ProviderHttpClientError::ProxyNotConfigured
         );
+    }
+
+    #[tokio::test]
+    async fn test_only_dns_resolver_is_injected_without_changing_client_policy() {
+        let resolver = Arc::new(ControlledResolver::immediate_failure());
+        let bundle = HttpClientBundle::build_with_test_resolver(
+            OutboundHttpConfig::default(),
+            ProxyRequestConfig::default(),
+            None,
+            Arc::clone(&resolver) as Arc<dyn reqwest::dns::Resolve>,
+        )
+        .expect("test resolver client bundle should build");
+
+        let error = bundle
+            .client
+            .get("http://r3-dns-failure.invalid/")
+            .send()
+            .await
+            .expect_err("controlled DNS failure should fail before connecting");
+
+        assert!(error.is_connect());
+        assert_eq!(resolver.resolve_call_count(), 1);
     }
 
     async fn redirect_response(

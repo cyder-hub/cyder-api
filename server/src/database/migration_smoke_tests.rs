@@ -29,6 +29,7 @@ const R310_PROVIDER_MULTI_SOURCE_VERSION: &str = "20260806090000";
 const R311_MODEL_SOURCE_SELECTION_VERSION: &str = "20260807090000";
 const R312_SOURCE_BOUND_REQUEST_PATCH_VARIANTS_VERSION: &str = "20260810090000";
 const R316_OPENAI_UPSTREAM_CONTRACT_VERSION: &str = "20260812090000";
+const R320_RETIRE_NATIVE_OLLAMA_VERSION: &str = "20260813120000";
 
 const LEGACY_SQLITE_API_KEY_SCHEMA: &str = r#"
 CREATE TABLE api_key (
@@ -249,6 +250,14 @@ fn migrate_sqlite_to_before_r39(
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite upgrade migrations should load");
+    let r320 = migrations
+        .pop()
+        .expect("R3.20 sqlite migration should exist");
+    assert_eq!(
+        r320.name().version().to_string(),
+        R320_RETIRE_NATIVE_OLLAMA_VERSION,
+        "R3.20 must be the final sqlite migration in this release"
+    );
     let r316 = migrations
         .pop()
         .expect("R3.16 sqlite migration should exist");
@@ -305,6 +314,14 @@ fn migrate_postgres_to_before_r39(connection: &mut PgConnection) -> Box<dyn Migr
     let mut migrations = connection
         .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
         .expect("pending postgres upgrade migrations should load");
+    let r320 = migrations
+        .pop()
+        .expect("R3.20 postgres migration should exist");
+    assert_eq!(
+        r320.name().version().to_string(),
+        R320_RETIRE_NATIVE_OLLAMA_VERSION,
+        "R3.20 must be the final postgres migration in this release"
+    );
     let r316 = migrations
         .pop()
         .expect("R3.16 postgres migration should exist");
@@ -363,6 +380,9 @@ fn migrate_sqlite_to_before_r316(
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite upgrade migrations should load");
+    let _r320 = migrations
+        .pop()
+        .expect("R3.20 sqlite migration should exist");
     let r316 = migrations
         .pop()
         .expect("R3.16 sqlite migration should exist");
@@ -386,6 +406,9 @@ fn migrate_postgres_to_before_r316(connection: &mut PgConnection) -> Box<dyn Mig
     let mut migrations = connection
         .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
         .expect("pending postgres upgrade migrations should load");
+    let _r320 = migrations
+        .pop()
+        .expect("R3.20 postgres migration should exist");
     let r316 = migrations
         .pop()
         .expect("R3.16 postgres migration should exist");
@@ -471,7 +494,10 @@ fn assert_sqlite_request_log_timing_schema(connection: &mut diesel::SqliteConnec
     }
 }
 
-fn assert_postgres_request_log_protocol_schema(connection: &mut PgConnection) {
+fn assert_postgres_request_log_protocol_schema(
+    connection: &mut PgConnection,
+    expects_historical_upstream_ollama: bool,
+) {
     let downstream_column = diesel::sql_query(
         "SELECT COUNT(*) AS count
          FROM information_schema.columns
@@ -540,12 +566,26 @@ fn assert_postgres_request_log_protocol_schema(connection: &mut PgConnection) {
          FROM pg_type t
          JOIN pg_enum e ON e.enumtypid = t.oid
          WHERE t.typname = 'upstream_protocol_enum'
-           AND e.enumlabel IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI', 'OLLAMA')",
+           AND e.enumlabel IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI')",
     )
     .get_result::<CountRow>(connection)
     .expect("PostgreSQL upstream enum should query")
     .count;
-    assert_eq!(upstream_values, 5);
+    assert_eq!(upstream_values, 4);
+    let upstream_ollama = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'upstream_protocol_enum'
+           AND e.enumlabel = 'OLLAMA'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL historical upstream OLLAMA enum value should query")
+    .count;
+    assert_eq!(
+        upstream_ollama,
+        i64::from(expects_historical_upstream_ollama)
+    );
     let upstream_extra = diesel::sql_query(
         "SELECT COUNT(*) AS count
          FROM pg_type t
@@ -1343,6 +1383,98 @@ fn assert_postgres_r316_openai_upstream_schema(connection: &mut PgConnection) {
     assert_eq!(profile_values, 1, "only OPENAI_COMPATIBLE should remain");
 }
 
+fn assert_sqlite_r320_retire_native_ollama_schema(connection: &mut diesel::SqliteConnection) {
+    assert_sqlite_r316_openai_upstream_schema(connection);
+
+    let active_ollama_mentions = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM sqlite_master
+         WHERE type IN ('table', 'index')
+           AND sql LIKE '%OLLAMA%'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.20 SQLite active schema should query")
+    .count;
+    assert_eq!(active_ollama_mentions, 0);
+
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
+            .get_result::<CountRow>(connection)
+            .expect("R3.20 SQLite foreign key check should query")
+            .count,
+        0,
+        "R3.20 SQLite schema must have no foreign key violations"
+    );
+}
+
+fn assert_postgres_r320_retire_native_ollama_schema(connection: &mut PgConnection) {
+    assert_postgres_r316_openai_upstream_schema(connection);
+
+    let profile_values = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'upstream_profile_type_enum'
+           AND e.enumlabel IN (
+               'OPENAI', 'OPENAI_COMPATIBLE', 'GEMINI', 'VERTEX',
+               'ANTHROPIC', 'RESPONSES', 'GEMINI_OPENAI'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.20 PostgreSQL profile enum should query")
+    .count;
+    assert_eq!(profile_values, 7);
+
+    let profile_extra = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'upstream_profile_type_enum'
+           AND e.enumlabel NOT IN (
+               'OPENAI', 'OPENAI_COMPATIBLE', 'GEMINI', 'VERTEX',
+               'ANTHROPIC', 'RESPONSES', 'GEMINI_OPENAI'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.20 PostgreSQL profile enum extras should query")
+    .count;
+    assert_eq!(profile_extra, 0);
+
+    let upstream_values = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'upstream_protocol_enum'
+           AND e.enumlabel IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.20 PostgreSQL upstream enum should query")
+    .count;
+    assert_eq!(upstream_values, 4);
+
+    let upstream_extra = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'upstream_protocol_enum'
+           AND e.enumlabel NOT IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.20 PostgreSQL upstream enum extras should query")
+    .count;
+    assert_eq!(upstream_extra, 0);
+
+    let temporary_types = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type
+         WHERE typname IN ('upstream_profile_type_enum_r320', 'upstream_protocol_enum_r320')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("R3.20 PostgreSQL temporary enum types should query")
+    .count;
+    assert_eq!(temporary_types, 0);
+}
+
 fn seed_sqlite_r39_boundary_fixture(connection: &mut diesel::SqliteConnection) {
     connection
         .batch_execute(
@@ -1938,6 +2070,264 @@ fn seed_postgres_r316_boundary_fixture(connection: &mut PgConnection) {
         .expect("PostgreSQL pre-R3.16 boundary fixture should insert");
 }
 
+fn seed_sqlite_r320_boundary_fixture(connection: &mut diesel::SqliteConnection) {
+    connection
+        .batch_execute(
+            r#"
+            INSERT INTO provider (
+                id, provider_key, name, is_enabled, created_at, updated_at,
+                provider_api_key_mode
+            ) VALUES
+                (100, 'ollama-only-provider', 'Ollama Only Provider', 1, 1, 1, 'QUEUE'),
+                (101, 'mixed-provider', 'Mixed Provider', 1, 1, 1, 'QUEUE'),
+                (102, 'preserved-provider', 'Preserved Provider', 1, 1, 1, 'QUEUE');
+            INSERT INTO provider_api_key (
+                id, provider_id, description, key_prefix, key_last4,
+                secret_ciphertext, secret_nonce, secret_format_version,
+                secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+            ) VALUES
+                (1000, 100, 'ollama credential', 'sk-ollama', '0001',
+                 X'01', X'000000000000000000000000000000000000000000000000', 1,
+                 '1000000000000000000000000000000000000000000000000000000000000001',
+                 '2000000000000000000000000000000000000000000000000000000000000001',
+                 1, 1, 1),
+                (1001, 101, 'mixed credential', 'sk-mixed', '0002',
+                 X'02', X'000000000000000000000000000000000000000000000000', 1,
+                 '1000000000000000000000000000000000000000000000000000000000000002',
+                 '2000000000000000000000000000000000000000000000000000000000000002',
+                 1, 1, 1),
+                (1002, 102, 'preserved credential', 'sk-preserved', '0003',
+                 X'03', X'000000000000000000000000000000000000000000000000', 1,
+                 '1000000000000000000000000000000000000000000000000000000000000003',
+                 '2000000000000000000000000000000000000000000000000000000000000003',
+                 1, 1, 1);
+            INSERT INTO upstream_source (
+                id, provider_id, profile_type, base_url, use_proxy,
+                chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                is_enabled, is_default, deleted_at, created_at, updated_at
+            ) VALUES
+                (1000, 100, 'OLLAMA', 'http://ollama-only:11434', 0,
+                 NULL, NULL, NULL, 1, 1, NULL, 1, 1),
+                (1001, 100, 'OLLAMA', 'http://ollama-only:11434/old', 0,
+                 NULL, NULL, NULL, 0, 0, 99, 1, 99),
+                (1010, 101, 'OLLAMA', 'http://mixed:11434', 0,
+                 NULL, NULL, NULL, 1, 1, NULL, 1, 1),
+                (1011, 101, 'OPENAI_COMPATIBLE', 'https://mixed.example/v1', 0,
+                 1, 1, 0, 1, 0, NULL, 1, 1),
+                (1020, 102, 'ANTHROPIC', 'https://anthropic.example', 0,
+                 NULL, NULL, NULL, 1, 1, NULL, 1, 1);
+            INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name,
+                model_kind, source_selection_mode, is_enabled, created_at, updated_at
+            ) VALUES
+                (1100, 100, 100, 'ollama-chat', 'llama3',
+                 'CHAT', 'EXPLICIT', 1, 1, 1),
+                (1101, 101, 100, 'mixed-embedding', 'nomic-embed-text',
+                 'EMBEDDING', 'EXPLICIT', 1, 1, 1),
+                (1102, 100, 100, 'inherit-chat', 'llama3-inherit',
+                 'CHAT', 'INHERIT_ALL', 1, 1, 1);
+            INSERT INTO model_source_binding (
+                model_id, source_id, is_default, created_at, updated_at
+            ) VALUES
+                (1100, 1000, 1, 1, 1),
+                (1101, 1010, 0, 1, 1),
+                (1101, 1011, 1, 1, 1);
+            INSERT INTO api_key_acl_rule (
+                id, api_key_id, effect, scope, provider_id, priority,
+                is_enabled, description, created_at, updated_at
+            ) VALUES
+                (1400, 1, 'ALLOW', 'PROVIDER', 100, 0, 1,
+                 'preserved API key governance', 1, 1);
+            INSERT INTO request_patch_variant (
+                id, source_id, model_id, suffix, enabled, expose_in_models,
+                created_at, updated_at
+            ) VALUES
+                (1200, 1000, 1100, 'native', 1, 1, 1, 1),
+                (1202, 1011, 1101, 'vendor', 1, 1, 1, 1);
+            INSERT INTO request_patch_rule (
+                id, variant_id, placement, target, operation, value_json,
+                description, created_at, updated_at
+            ) VALUES
+                (1201, 1200, 'BODY', '/temperature', 'SET', '0.3',
+                 'deleted Ollama patch', 1, 1),
+                (1203, 1202, 'BODY', '/input_type', 'SET', '"query"',
+                 'preserved non-Ollama patch', 1, 1);
+            INSERT INTO request_log (
+                id, request_id, api_key_id, requested_model_name,
+                downstream_protocol, overall_status, request_received_at,
+                completed_at, is_stream, provider_id, provider_api_key_id,
+                model_id, source_id, source_selection_reason,
+                provider_key_snapshot, provider_name_snapshot,
+                model_name_snapshot, real_model_name_snapshot,
+                model_kind_snapshot, source_profile_type_snapshot,
+                source_base_url_snapshot, upstream_protocol,
+                cost_catalog_id, cost_catalog_version_id, created_at, updated_at
+            ) VALUES (
+                1300, '018fa7d8-6a00-4c9a-8f7e-000000000001', 1,
+                'ollama-chat', 'OPENAI', 'SUCCESS', 10, 15, 0,
+                100, 1000, 1100, 1000, 'model_default_transform',
+                'ollama-secret-snapshot', 'Ollama Only Provider',
+                'ollama-chat', 'llama3', 'CHAT', 'OLLAMA',
+                'http://ollama-only:11434', 'OLLAMA', 100, 101, 10, 15
+            );
+            INSERT INTO metric_ingested_request_log (
+                request_log_id, request_received_at, completed_at, ingested_at
+            ) VALUES (1300, 10, 15, 16);
+            INSERT INTO metric_request_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, scope_label,
+                request_count, success_count, error_count, cancelled_count,
+                time_to_first_response_body_sum_ms,
+                time_to_first_response_body_count, ttft_sum_ms, ttft_count,
+                total_latency_sum_ms, total_latency_count,
+                input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                created_at, updated_at
+            ) VALUES (
+                0, 'provider', '100', 'Ollama Only Provider',
+                1, 1, 0, 0, 3, 1, 4, 1, 5, 1, 2, 3, 1, 6, 1, 1
+            );
+            INSERT INTO metric_http_status_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, http_status,
+                count, created_at, updated_at
+            ) VALUES (0, 'provider', '100', 200, 1, 1, 1);
+            INSERT INTO metric_cost_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, currency,
+                amount_nanos, created_at, updated_at
+            ) VALUES (0, 'provider', '100', 'USD', 100, 1, 1);
+            "#,
+        )
+        .expect("SQLite R3.20 mixed boundary fixture should insert");
+}
+
+fn seed_postgres_r320_boundary_fixture(connection: &mut PgConnection) {
+    connection
+        .batch_execute(
+            r#"
+            INSERT INTO provider (
+                id, provider_key, name, is_enabled, created_at, updated_at,
+                provider_api_key_mode
+            ) VALUES
+                (100, 'ollama-only-provider', 'Ollama Only Provider', TRUE, 1, 1, 'QUEUE'),
+                (101, 'mixed-provider', 'Mixed Provider', TRUE, 1, 1, 'QUEUE'),
+                (102, 'preserved-provider', 'Preserved Provider', TRUE, 1, 1, 'QUEUE');
+            INSERT INTO provider_api_key (
+                id, provider_id, description, key_prefix, key_last4,
+                secret_ciphertext, secret_nonce, secret_format_version,
+                secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+            ) VALUES
+                (1000, 100, 'ollama credential', 'sk-ollama', '0001',
+                 decode('01', 'hex'), decode('000000000000000000000000000000000000000000000000', 'hex'), 1,
+                 '1000000000000000000000000000000000000000000000000000000000000001',
+                 '2000000000000000000000000000000000000000000000000000000000000001',
+                 TRUE, 1, 1),
+                (1001, 101, 'mixed credential', 'sk-mixed', '0002',
+                 decode('02', 'hex'), decode('000000000000000000000000000000000000000000000000', 'hex'), 1,
+                 '1000000000000000000000000000000000000000000000000000000000000002',
+                 '2000000000000000000000000000000000000000000000000000000000000002',
+                 TRUE, 1, 1),
+                (1002, 102, 'preserved credential', 'sk-preserved', '0003',
+                 decode('03', 'hex'), decode('000000000000000000000000000000000000000000000000', 'hex'), 1,
+                 '1000000000000000000000000000000000000000000000000000000000000003',
+                 '2000000000000000000000000000000000000000000000000000000000000003',
+                 TRUE, 1, 1);
+            INSERT INTO upstream_source (
+                id, provider_id, profile_type, base_url, use_proxy,
+                chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                is_enabled, is_default, deleted_at, created_at, updated_at
+            ) VALUES
+                (1000, 100, 'OLLAMA', 'http://ollama-only:11434', FALSE,
+                 NULL, NULL, NULL, TRUE, TRUE, NULL, 1, 1),
+                (1001, 100, 'OLLAMA', 'http://ollama-only:11434/old', FALSE,
+                 NULL, NULL, NULL, FALSE, FALSE, 99, 1, 99),
+                (1010, 101, 'OLLAMA', 'http://mixed:11434', FALSE,
+                 NULL, NULL, NULL, TRUE, TRUE, NULL, 1, 1),
+                (1011, 101, 'OPENAI_COMPATIBLE', 'https://mixed.example/v1', FALSE,
+                 TRUE, TRUE, FALSE, TRUE, FALSE, NULL, 1, 1),
+                (1020, 102, 'ANTHROPIC', 'https://anthropic.example', FALSE,
+                 NULL, NULL, NULL, TRUE, TRUE, NULL, 1, 1);
+            INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name,
+                model_kind, source_selection_mode, is_enabled, created_at, updated_at
+            ) VALUES
+                (1100, 100, 100, 'ollama-chat', 'llama3',
+                 'CHAT', 'EXPLICIT', TRUE, 1, 1),
+                (1101, 101, 100, 'mixed-embedding', 'nomic-embed-text',
+                 'EMBEDDING', 'EXPLICIT', TRUE, 1, 1),
+                (1102, 100, 100, 'inherit-chat', 'llama3-inherit',
+                 'CHAT', 'INHERIT_ALL', TRUE, 1, 1);
+            INSERT INTO model_source_binding (
+                model_id, source_id, is_default, created_at, updated_at
+            ) VALUES
+                (1100, 1000, TRUE, 1, 1),
+                (1101, 1010, FALSE, 1, 1),
+                (1101, 1011, TRUE, 1, 1);
+            INSERT INTO api_key_acl_rule (
+                id, api_key_id, effect, scope, provider_id, priority,
+                is_enabled, description, created_at, updated_at
+            ) VALUES
+                (1400, 1, 'ALLOW', 'PROVIDER', 100, 0, TRUE,
+                 'preserved API key governance', 1, 1);
+            INSERT INTO request_patch_variant (
+                id, source_id, model_id, suffix, enabled, expose_in_models,
+                created_at, updated_at
+            ) VALUES
+                (1200, 1000, 1100, 'native', TRUE, TRUE, 1, 1),
+                (1202, 1011, 1101, 'vendor', TRUE, TRUE, 1, 1);
+            INSERT INTO request_patch_rule (
+                id, variant_id, placement, target, operation, value_json,
+                description, created_at, updated_at
+            ) VALUES
+                (1201, 1200, 'BODY', '/temperature', 'SET', '0.3',
+                 'deleted Ollama patch', 1, 1),
+                (1203, 1202, 'BODY', '/input_type', 'SET', '"query"',
+                 'preserved non-Ollama patch', 1, 1);
+            INSERT INTO request_log (
+                id, request_id, api_key_id, requested_model_name,
+                downstream_protocol, overall_status, request_received_at,
+                completed_at, is_stream, provider_id, provider_api_key_id,
+                model_id, source_id, source_selection_reason,
+                provider_key_snapshot, provider_name_snapshot,
+                model_name_snapshot, real_model_name_snapshot,
+                model_kind_snapshot, source_profile_type_snapshot,
+                source_base_url_snapshot, upstream_protocol,
+                cost_catalog_id, cost_catalog_version_id, created_at, updated_at
+            ) VALUES (
+                1300, '018fa7d8-6a00-4c9a-8f7e-000000000001', 1,
+                'ollama-chat', 'OPENAI', 'SUCCESS', 10, 15, FALSE,
+                100, 1000, 1100, 1000, 'model_default_transform',
+                'ollama-secret-snapshot', 'Ollama Only Provider',
+                'ollama-chat', 'llama3', 'CHAT', 'OLLAMA',
+                'http://ollama-only:11434', 'OLLAMA', 100, 101, 10, 15
+            );
+            INSERT INTO metric_ingested_request_log (
+                request_log_id, request_received_at, completed_at, ingested_at
+            ) VALUES (1300, 10, 15, 16);
+            INSERT INTO metric_request_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, scope_label,
+                request_count, success_count, error_count, cancelled_count,
+                time_to_first_response_body_sum_ms,
+                time_to_first_response_body_count, ttft_sum_ms, ttft_count,
+                total_latency_sum_ms, total_latency_count,
+                input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                created_at, updated_at
+            ) VALUES (
+                0, 'provider', '100', 'Ollama Only Provider',
+                1, 1, 0, 0, 3, 1, 4, 1, 5, 1, 2, 3, 1, 6, 1, 1
+            );
+            INSERT INTO metric_http_status_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, http_status,
+                count, created_at, updated_at
+            ) VALUES (0, 'provider', '100', 200, 1, 1, 1);
+            INSERT INTO metric_cost_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, currency,
+                amount_nanos, created_at, updated_at
+            ) VALUES (0, 'provider', '100', 'USD', 100, 1, 1);
+            "#,
+        )
+        .expect("PostgreSQL R3.20 mixed boundary fixture should insert");
+}
+
 #[test]
 fn sqlite_clean_upgrade_chain_from_empty() {
     let (_temp_dir, mut connection) = open_test_sqlite_connection("r1-migration-smoke.sqlite");
@@ -1951,7 +2341,7 @@ fn sqlite_clean_upgrade_chain_from_empty() {
     run_sqlite_migrations(&mut connection).expect("sqlite clean + upgrade migrations should run");
     assert_sqlite_request_log_timing_schema(&mut connection);
     assert_sqlite_r312_request_patch_schema(&mut connection);
-    assert_sqlite_r316_openai_upstream_schema(&mut connection);
+    assert_sqlite_r320_retire_native_ollama_schema(&mut connection);
 
     let applied_versions = connection
         .applied_migrations()
@@ -2151,6 +2541,280 @@ fn sqlite_r316_destructive_upgrade_enforces_openai_upstream_contract() {
 }
 
 #[test]
+fn sqlite_r320_failed_cutover_rolls_back_sources_logs_and_schema() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("r320-retire-native-ollama-rollback.sqlite");
+    let r316 = migrate_sqlite_to_before_r316(&mut connection);
+    seed_sqlite_r316_boundary_fixture(&mut connection);
+    connection
+        .run_migration(r316.as_ref())
+        .expect("R3.16 SQLite migration should run before R3.20 rollback fixture");
+    seed_sqlite_r320_boundary_fixture(&mut connection);
+    connection
+        .batch_execute(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE upstream_source SET profile_type = 'BROKEN' WHERE id = 1011;
+             PRAGMA ignore_check_constraints = OFF;",
+        )
+        .expect("rollback fixture should inject a retained row rejected by the R3.20 schema");
+
+    let source_count_before = diesel::sql_query("SELECT COUNT(*) AS count FROM upstream_source")
+        .get_result::<CountRow>(&mut connection)
+        .expect("pre-failure Source count should query")
+        .count;
+    let request_log_count_before = diesel::sql_query("SELECT COUNT(*) AS count FROM request_log")
+        .get_result::<CountRow>(&mut connection)
+        .expect("pre-failure request-log count should query")
+        .count;
+
+    let mut pending = connection
+        .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
+        .expect("pending SQLite migrations should load");
+    let r320 = pending
+        .pop()
+        .expect("R3.20 SQLite migration should be pending");
+    assert_eq!(
+        r320.name().version().to_string(),
+        R320_RETIRE_NATIVE_OLLAMA_VERSION
+    );
+    assert!(
+        connection.run_migration(r320.as_ref()).is_err(),
+        "the retained invalid Source must fail after the destructive cutover starts"
+    );
+    connection
+        .batch_execute("ROLLBACK; PRAGMA foreign_keys = ON;")
+        .expect("failed R3.20 cutover should leave one transaction that can be rolled back");
+
+    let source_count_after = diesel::sql_query("SELECT COUNT(*) AS count FROM upstream_source")
+        .get_result::<CountRow>(&mut connection)
+        .expect("rolled-back Source count should query")
+        .count;
+    assert_eq!(source_count_after, source_count_before);
+    let request_log_count_after = diesel::sql_query("SELECT COUNT(*) AS count FROM request_log")
+        .get_result::<CountRow>(&mut connection)
+        .expect("rolled-back request-log count should query")
+        .count;
+    assert_eq!(request_log_count_after, request_log_count_before);
+    assert_eq!(
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM upstream_source
+             WHERE id = 1011 AND profile_type = 'BROKEN'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("retained pre-migration Source should query")
+        .count,
+        1
+    );
+    assert!(
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('upstream_source', 'request_log')
+               AND sql LIKE '%OLLAMA%'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("rolled-back historical schemas should query")
+        .count
+            > 0,
+        "rollback must restore the pre-R3.20 tables that still admit historical OLLAMA values"
+    );
+    assert_eq!(
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM sqlite_temp_master
+             WHERE name = 'upstream_source_r320_keep'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("temporary cutover table should query")
+        .count,
+        0,
+        "rollback must remove the connection-local cutover copy"
+    );
+}
+
+#[test]
+fn sqlite_r320_destructive_upgrade_retires_ollama_and_preserves_mixed_business_data() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("r320-retire-native-ollama.sqlite");
+    let r316 = migrate_sqlite_to_before_r316(&mut connection);
+    seed_sqlite_r316_boundary_fixture(&mut connection);
+    connection
+        .run_migration(r316.as_ref())
+        .expect("R3.16 SQLite migration should run before R3.20 fixture");
+    seed_sqlite_r320_boundary_fixture(&mut connection);
+
+    let mut pending = connection
+        .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
+        .expect("pending SQLite migrations should load");
+    let r320 = pending
+        .pop()
+        .expect("R3.20 SQLite migration should be pending");
+    assert_eq!(
+        r320.name().version().to_string(),
+        R320_RETIRE_NATIVE_OLLAMA_VERSION
+    );
+    connection
+        .run_migration(r320.as_ref())
+        .expect("R3.20 SQLite migration should run");
+
+    assert_sqlite_r320_retire_native_ollama_schema(&mut connection);
+    for (table, expected) in [
+        ("provider", 3),
+        ("provider_api_key", 3),
+        ("upstream_source", 2),
+        ("model", 3),
+        ("model_source_binding", 1),
+        ("api_key_acl_rule", 1),
+        ("request_patch_variant", 1),
+        ("request_patch_rule", 1),
+        ("request_log", 0),
+        ("metric_ingested_request_log", 0),
+        ("metric_request_rollup_minute", 0),
+        ("metric_http_status_rollup_minute", 0),
+        ("metric_cost_rollup_minute", 0),
+        ("manager_credential", 1),
+        ("manager_auth_instance", 1),
+        ("manager_totp_recovery_code", 1),
+        ("api_key", 1),
+        ("api_key_rollup_daily", 1),
+        ("api_key_rollup_monthly", 1),
+        ("cost_catalogs", 1),
+        ("cost_catalog_versions", 1),
+    ] {
+        let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+            .get_result::<CountRow>(&mut connection)
+            .expect("SQLite R3.20 boundary count should query")
+            .count;
+        assert_eq!(count, expected, "unexpected SQLite R3.20 count for {table}");
+    }
+    assert_eq!(
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM provider
+             WHERE id = 100 AND name = 'Ollama Only Provider'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("SQLite zero-Source Provider should query")
+        .count,
+        1
+    );
+    assert_eq!(
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM model
+             WHERE id = 1100 AND source_selection_mode = 'EXPLICIT'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("SQLite unbound explicit Model should query")
+        .count,
+        1
+    );
+    assert_eq!(
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM model_source_binding
+             WHERE model_id = 1101 AND source_id = 1011 AND is_default = 1",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("SQLite preserved binding should query")
+        .count,
+        1
+    );
+
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, base_url, use_proxy,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (
+                    1900, 100, 'OLLAMA', 'http://rejected', 0, 1, 1, 1, 1
+                 );",
+            )
+            .is_err(),
+        "R3.20 SQLite must reject OLLAMA Source values"
+    );
+
+    let valid_profiles = [
+        ("OPENAI", true),
+        ("OPENAI_COMPATIBLE", true),
+        ("GEMINI_OPENAI", true),
+        ("GEMINI", false),
+        ("VERTEX", false),
+        ("ANTHROPIC", false),
+        ("RESPONSES", false),
+    ];
+    for (offset, (profile, has_operations)) in valid_profiles.into_iter().enumerate() {
+        let id = 1901 + offset as i64;
+        let operation_columns = if has_operations {
+            "1, 1, 0"
+        } else {
+            "NULL, NULL, NULL"
+        };
+        connection
+            .batch_execute(&format!(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, base_url, use_proxy,
+                    chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES ({id}, 100, '{profile}', 'https://valid.example/{id}', 0,
+                    {operation_columns}, 1, 1, 1, 1);"
+            ))
+            .expect("R3.20 SQLite valid Profile should insert");
+        connection
+            .batch_execute(&format!("DELETE FROM upstream_source WHERE id = {id};"))
+            .expect("R3.20 SQLite valid Profile cleanup should run");
+    }
+
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, request_id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, is_stream, upstream_protocol, created_at, updated_at
+                 ) VALUES (
+                    1910, '018fa7d8-6a00-4c9a-8f7e-000000000010',
+                    1, 'OPENAI', 'SUCCESS', 1, 0, 'OLLAMA', 1, 1
+                 );",
+            )
+            .is_err(),
+        "R3.20 SQLite must reject OLLAMA upstream protocol values"
+    );
+    for (offset, protocol) in ["OPENAI", "RESPONSES", "ANTHROPIC", "GEMINI"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = 1911 + offset as i64;
+        let request_id = format!("018fa7d8-6a00-4c9a-8f7e-{:012x}", offset + 1);
+        connection
+            .batch_execute(&format!(
+                "INSERT INTO request_log (
+                    id, request_id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, is_stream, upstream_protocol, created_at, updated_at
+                 ) VALUES (
+                    {id}, '{request_id}',
+                    1, 'OPENAI', 'SUCCESS', 1, 0, '{protocol}', 1, 1
+                 );"
+            ))
+            .expect("R3.20 SQLite valid upstream protocol should insert");
+    }
+    connection
+        .batch_execute("DELETE FROM request_log WHERE id >= 1911;")
+        .expect("R3.20 SQLite protocol fixture cleanup should run");
+
+    run_sqlite_migrations(&mut connection)
+        .expect("R3.20 SQLite migration chain should be safe to run again");
+    assert!(
+        !connection
+            .has_pending_migration(SQLITE_UPGRADE_MIGRATIONS)
+            .expect("R3.20 SQLite pending migrations should query"),
+        "R3.20 SQLite migration should remain fully applied"
+    );
+}
+
+#[test]
 fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
     let (_temp_dir, mut connection) =
         open_test_sqlite_connection("r310-provider-multi-source.sqlite");
@@ -2223,6 +2887,9 @@ fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
     let mut pending = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite migrations should load");
+    let _r320 = pending
+        .pop()
+        .expect("R3.20 sqlite migration should be pending");
     let _r316 = pending
         .pop()
         .expect("R3.16 sqlite migration should be pending");
@@ -2850,6 +3517,9 @@ fn sqlite_request_log_timing_upgrade_preserves_body_timing_and_round_trips() {
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("sqlite upgrade migrations should load");
+    let _r320 = migrations
+        .pop()
+        .expect("R3.20 sqlite migration should exist");
     let _r316 = migrations
         .pop()
         .expect("R3.16 sqlite migration should exist");
@@ -3586,11 +4256,11 @@ fn postgres_clean_upgrade_chain_from_empty() {
 
         run_postgres_migrations(&mut connection)
             .expect("postgres clean + upgrade migrations should run");
-        assert_postgres_request_log_protocol_schema(&mut connection);
+        assert_postgres_request_log_protocol_schema(&mut connection, false);
         assert_postgres_request_identity_schema(&mut connection);
         assert_postgres_request_log_timing_schema(&mut connection);
         assert_postgres_r312_request_patch_schema(&mut connection);
-        assert_postgres_r316_openai_upstream_schema(&mut connection);
+        assert_postgres_r320_retire_native_ollama_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -3794,6 +4464,207 @@ fn postgres_r316_destructive_upgrade_enforces_openai_upstream_contract() {
 }
 
 #[test]
+#[ignore = "requires the dedicated PostgreSQL 17 R3.20 migration smoke database"]
+fn postgres_r320_destructive_upgrade_retires_ollama_and_preserves_mixed_business_data() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        let r316 = migrate_postgres_to_before_r316(&mut connection);
+        seed_postgres_r316_boundary_fixture(&mut connection);
+        connection
+            .run_migration(r316.as_ref())
+            .expect("R3.16 PostgreSQL migration should run before R3.20 fixture");
+        seed_postgres_r320_boundary_fixture(&mut connection);
+
+        let mut pending = connection
+            .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
+            .expect("pending PostgreSQL migrations should load");
+        let r320 = pending
+            .pop()
+            .expect("R3.20 PostgreSQL migration should be pending");
+        assert_eq!(
+            r320.name().version().to_string(),
+            R320_RETIRE_NATIVE_OLLAMA_VERSION
+        );
+        connection
+            .run_migration(r320.as_ref())
+            .expect("R3.20 PostgreSQL migration should run");
+
+        assert_postgres_r320_retire_native_ollama_schema(&mut connection);
+        for (table, expected) in [
+            ("provider", 3),
+            ("provider_api_key", 3),
+            ("upstream_source", 2),
+            ("model", 3),
+            ("model_source_binding", 1),
+            ("api_key_acl_rule", 1),
+            ("request_patch_variant", 1),
+            ("request_patch_rule", 1),
+            ("request_log", 0),
+            ("metric_ingested_request_log", 0),
+            ("metric_request_rollup_minute", 0),
+            ("metric_http_status_rollup_minute", 0),
+            ("metric_cost_rollup_minute", 0),
+            ("manager_credential", 1),
+            ("manager_auth_instance", 1),
+            ("manager_totp_recovery_code", 1),
+            ("api_key", 1),
+            ("api_key_rollup_daily", 1),
+            ("api_key_rollup_monthly", 1),
+            ("cost_catalogs", 1),
+            ("cost_catalog_versions", 1),
+        ] {
+            let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+                .get_result::<CountRow>(&mut connection)
+                .expect("PostgreSQL R3.20 boundary count should query")
+                .count;
+            assert_eq!(
+                count, expected,
+                "unexpected PostgreSQL R3.20 count for {table}"
+            );
+        }
+        assert_eq!(
+            diesel::sql_query(
+                "SELECT COUNT(*) AS count
+                 FROM provider
+                 WHERE id = 100 AND name = 'Ollama Only Provider'",
+            )
+            .get_result::<CountRow>(&mut connection)
+            .expect("PostgreSQL zero-Source Provider should query")
+            .count,
+            1
+        );
+        assert_eq!(
+            diesel::sql_query(
+                "SELECT COUNT(*) AS count
+                 FROM model
+                 WHERE id = 1100 AND source_selection_mode = 'EXPLICIT'",
+            )
+            .get_result::<CountRow>(&mut connection)
+            .expect("PostgreSQL unbound explicit Model should query")
+            .count,
+            1
+        );
+        assert_eq!(
+            diesel::sql_query(
+                "SELECT COUNT(*) AS count
+                 FROM model_source_binding
+                 WHERE model_id = 1101 AND source_id = 1011 AND is_default = TRUE",
+            )
+            .get_result::<CountRow>(&mut connection)
+            .expect("PostgreSQL preserved binding should query")
+            .count,
+            1
+        );
+
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, base_url, use_proxy,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES (
+                        1900, 100, 'OLLAMA', 'http://rejected', FALSE, TRUE, TRUE, 1, 1
+                     );",
+                )
+                .is_err(),
+            "R3.20 PostgreSQL must reject OLLAMA Source values"
+        );
+
+        let valid_profiles = [
+            ("OPENAI", true),
+            ("OPENAI_COMPATIBLE", true),
+            ("GEMINI_OPENAI", true),
+            ("GEMINI", false),
+            ("VERTEX", false),
+            ("ANTHROPIC", false),
+            ("RESPONSES", false),
+        ];
+        for (offset, (profile, has_operations)) in valid_profiles.into_iter().enumerate() {
+            let id = 1901 + offset as i64;
+            let operation_columns = if has_operations {
+                "TRUE, TRUE, FALSE"
+            } else {
+                "NULL, NULL, NULL"
+            };
+            connection
+                .batch_execute(&format!(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, base_url, use_proxy,
+                        chat_completions_enabled, embeddings_enabled, rerank_enabled,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES ({id}, 100, '{profile}', 'https://valid.example/{id}', FALSE,
+                        {operation_columns}, TRUE, TRUE, 1, 1);"
+                ))
+                .expect("R3.20 PostgreSQL valid Profile should insert");
+            connection
+                .batch_execute(&format!("DELETE FROM upstream_source WHERE id = {id};"))
+                .expect("R3.20 PostgreSQL valid Profile cleanup should run");
+        }
+
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_log (
+                        id, request_id, api_key_id, downstream_protocol, overall_status,
+                        request_received_at, is_stream, upstream_protocol, created_at, updated_at
+                     ) VALUES (
+                        1910, '018fa7d8-6a00-4c9a-8f7e-000000000010',
+                        1, 'OPENAI', 'SUCCESS', 1, FALSE, 'OLLAMA', 1, 1
+                     );",
+                )
+                .is_err(),
+            "R3.20 PostgreSQL must reject OLLAMA upstream protocol values"
+        );
+        for (offset, protocol) in ["OPENAI", "RESPONSES", "ANTHROPIC", "GEMINI"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = 1911 + offset as i64;
+            let request_id = format!("018fa7d8-6a00-4c9a-8f7e-{:012x}", offset + 1);
+            connection
+                .batch_execute(&format!(
+                    "INSERT INTO request_log (
+                        id, request_id, api_key_id, downstream_protocol, overall_status,
+                        request_received_at, is_stream, upstream_protocol, created_at, updated_at
+                     ) VALUES (
+                        {id}, '{request_id}',
+                        1, 'OPENAI', 'SUCCESS', 1, FALSE, '{protocol}', 1, 1
+                     );"
+                ))
+                .expect("R3.20 PostgreSQL valid upstream protocol should insert");
+        }
+        connection
+            .batch_execute("DELETE FROM request_log WHERE id >= 1911;")
+            .expect("R3.20 PostgreSQL protocol fixture cleanup should run");
+
+        run_postgres_migrations(&mut connection)
+            .expect("R3.20 PostgreSQL migration chain should be safe to run again");
+        assert!(
+            !connection
+                .has_pending_migration(POSTGRES_UPGRADE_MIGRATIONS)
+                .expect("R3.20 PostgreSQL pending migrations should query"),
+            "R3.20 PostgreSQL migration should remain fully applied"
+        );
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
 #[ignore = "requires the dedicated PostgreSQL 17 R3.10 migration smoke database"]
 fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() {
     let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
@@ -3877,6 +4748,9 @@ fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() 
         let mut pending = connection
             .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
             .expect("pending postgres migrations should load");
+        let _r320 = pending
+            .pop()
+            .expect("R3.20 postgres migration should be pending");
         let _r316 = pending
             .pop()
             .expect("R3.16 postgres migration should be pending");
@@ -4294,7 +5168,7 @@ fn postgres_request_log_protocol_boundary_upgrade_clears_history() {
             ))
             .expect("request log protocol up migration should run");
 
-        assert_postgres_request_log_protocol_schema(&mut connection);
+        assert_postgres_request_log_protocol_schema(&mut connection, true);
         let rows = diesel::sql_query("SELECT COUNT(*) AS count FROM request_log")
             .get_result::<CountRow>(&mut connection)
             .expect("PostgreSQL request log count should query")

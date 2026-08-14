@@ -4,7 +4,6 @@
 
 pub(crate) mod anthropic;
 pub(crate) mod gemini;
-pub(crate) mod ollama;
 pub(crate) mod openai;
 pub(crate) mod responses;
 
@@ -81,10 +80,6 @@ mod tests {
         assert_upstream_response_decoder::<gemini::GeminiResponse>();
         assert_downstream_legacy_chunk_encoder::<gemini::GeminiChunkResponse>();
         assert_upstream_legacy_chunk_decoder::<gemini::GeminiChunkResponse>();
-
-        assert_upstream_request_encoder::<ollama::OllamaRequestPayload>();
-        assert_upstream_response_decoder::<ollama::OllamaResponse>();
-        assert_upstream_legacy_chunk_decoder::<ollama::OllamaChunkResponse>();
 
         assert_downstream_request_decoder::<anthropic::AnthropicRequestPayload>();
         assert_upstream_request_encoder::<anthropic::AnthropicRequestPayload>();

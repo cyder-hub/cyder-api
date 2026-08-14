@@ -5,8 +5,7 @@ export type UpstreamProtocol =
   | "OPENAI"
   | "RESPONSES"
   | "ANTHROPIC"
-  | "GEMINI"
-  | "OLLAMA";
+  | "GEMINI";
 
 export interface RecordListItem {
   id: number;

@@ -270,7 +270,7 @@ impl StreamTransformer {
         match self.upstream_protocol {
             UpstreamProtocol::Gemini | UpstreamProtocol::Responses => UsageMergeStrategy::Replace,
             UpstreamProtocol::Anthropic => UsageMergeStrategy::AnthropicFields,
-            UpstreamProtocol::Openai | UpstreamProtocol::Ollama => UsageMergeStrategy::FinalOnly,
+            UpstreamProtocol::Openai => UsageMergeStrategy::FinalOnly,
         }
     }
 
@@ -306,7 +306,7 @@ impl StreamTransformer {
                     .ok()
                     .and_then(|v| usage::parse_usage_info(&v, self.upstream_protocol))
             }),
-            UpstreamProtocol::Gemini | UpstreamProtocol::Ollama | UpstreamProtocol::Responses => {
+            UpstreamProtocol::Gemini | UpstreamProtocol::Responses => {
                 self.session.original_events().iter().rev().find_map(|e| {
                     serde_json::from_str::<Value>(&e.data)
                         .ok()
@@ -405,7 +405,7 @@ impl StreamTransformer {
             UpstreamProtocol::Responses => self.session.responses_source_terminal_seen(),
             UpstreamProtocol::Anthropic => self.session.anthropic_source_terminal_seen(),
             UpstreamProtocol::Gemini => self.session.gemini_source_terminal_seen(),
-            UpstreamProtocol::Openai | UpstreamProtocol::Ollama => true,
+            UpstreamProtocol::Openai => true,
         };
         if terminal_is_valid {
             return Ok(transform_success(

@@ -33,10 +33,6 @@ impl TransformProtocol {
                 | Self::Upstream(UpstreamProtocol::Responses)
         )
     }
-
-    fn is_ollama(self) -> bool {
-        matches!(self, Self::Upstream(UpstreamProtocol::Ollama))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,14 +64,6 @@ impl PolicyDecision {
             outcome: TransformOutcomeKind::ExplicitReject,
             action: TransformAction::Reject,
             reason_code,
-        }
-    }
-
-    const fn deterministic_text_downgrade() -> Self {
-        Self {
-            outcome: TransformOutcomeKind::ControlledLossMajor,
-            action: TransformAction::Send,
-            reason_code: TransformReasonCode::DeterministicTextDowngrade,
         }
     }
 }
@@ -167,17 +155,6 @@ impl PolicyEngine {
             {
                 PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
-            (_, target, TransformValueKind::ToolRoleMessage)
-            | (_, target, TransformValueKind::ToolCall)
-            | (_, target, TransformValueKind::ToolResult)
-            | (_, target, TransformValueKind::ImageUrl)
-            | (_, target, TransformValueKind::FileUrl)
-            | (_, target, TransformValueKind::FileData)
-            | (_, target, TransformValueKind::ExecutableCode)
-                if target.is_ollama() =>
-            {
-                PolicyDecision::deterministic_text_downgrade()
-            }
             (source, TransformProtocol::Unified, TransformValueKind::ResponsesUnknownItem)
                 if source.is_responses() =>
             {
@@ -201,9 +178,7 @@ impl PolicyEngine {
             {
                 PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
-            (_, target, TransformValueKind::AudioData)
-                if target.is_anthropic() || target.is_ollama() =>
-            {
+            (_, target, TransformValueKind::AudioData) if target.is_anthropic() => {
                 PolicyDecision::major_reject(TransformReasonCode::UnsupportedContent)
             }
             (_, target, TransformValueKind::ImageDelta)
@@ -230,25 +205,6 @@ mod tests {
         assert_eq!(decision.outcome, TransformOutcomeKind::ControlledLossMinor);
         assert_eq!(decision.action, TransformAction::Drop);
         assert_eq!(decision.reason_code, TransformReasonCode::UnsupportedTopK);
-    }
-
-    #[test]
-    fn unsupported_major_capabilities_reject_by_default() {
-        for kind in [
-            TransformValueKind::ToolDefinitions,
-            TransformValueKind::ToolRoleMessage,
-            TransformValueKind::ReasoningHistory,
-            TransformValueKind::ReasoningContent,
-            TransformValueKind::BlobDelta,
-        ] {
-            let decision = PolicyEngine::evaluate(
-                TransformProtocol::Unified,
-                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
-                kind,
-            );
-            assert_eq!(decision.outcome, TransformOutcomeKind::ExplicitReject);
-            assert_eq!(decision.action, TransformAction::Reject);
-        }
     }
 
     #[test]
@@ -283,38 +239,6 @@ mod tests {
         );
         assert_eq!(rejected.outcome, TransformOutcomeKind::ExplicitReject);
         assert_eq!(rejected.action, TransformAction::Reject);
-    }
-
-    #[test]
-    fn ollama_rejects_media_that_its_encoder_cannot_represent() {
-        for kind in [TransformValueKind::AudioData, TransformValueKind::FileId] {
-            let decision = PolicyEngine::evaluate(
-                TransformProtocol::Unified,
-                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
-                kind,
-            );
-            assert_eq!(decision.outcome, TransformOutcomeKind::ExplicitReject);
-            assert_eq!(decision.action, TransformAction::Reject);
-            assert_eq!(
-                decision.reason_code,
-                TransformReasonCode::UnsupportedContent
-            );
-        }
-
-        let recoverable_file_data = PolicyEngine::evaluate(
-            TransformProtocol::Unified,
-            TransformProtocol::Upstream(UpstreamProtocol::Ollama),
-            TransformValueKind::FileData,
-        );
-        assert_eq!(
-            recoverable_file_data.outcome,
-            TransformOutcomeKind::ControlledLossMajor
-        );
-        assert_eq!(recoverable_file_data.action, TransformAction::Send);
-        assert_eq!(
-            recoverable_file_data.reason_code,
-            TransformReasonCode::DeterministicTextDowngrade
-        );
     }
 
     #[test]

@@ -323,7 +323,6 @@ fn upstream_protocol_name(protocol: UpstreamProtocol) -> &'static str {
         UpstreamProtocol::Responses => "responses",
         UpstreamProtocol::Anthropic => "anthropic",
         UpstreamProtocol::Gemini => "gemini",
-        UpstreamProtocol::Ollama => "ollama",
     }
 }
 
@@ -333,7 +332,6 @@ fn upstream_profile_type_name(profile_type: UpstreamProfileType) -> &'static str
         UpstreamProfileType::OpenaiCompatible => "openai_compatible",
         UpstreamProfileType::Gemini => "gemini",
         UpstreamProfileType::Vertex => "vertex",
-        UpstreamProfileType::Ollama => "ollama",
         UpstreamProfileType::Anthropic => "anthropic",
         UpstreamProfileType::Responses => "responses",
         UpstreamProfileType::GeminiOpenai => "gemini_openai",

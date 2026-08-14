@@ -85,7 +85,6 @@ fn select_generation_prepare_kind(
         UpstreamProtocol::Anthropic => Ok(GenerationPrepareKind::Llm {
             path: ANTHROPIC_MESSAGES_OPERATION,
         }),
-        UpstreamProtocol::Ollama => Ok(GenerationPrepareKind::Llm { path: "api/chat" }),
         UpstreamProtocol::Gemini => Ok(GenerationPrepareKind::Gemini {
             operation: if is_stream {
                 GeminiModelOperation::StreamGenerateContent

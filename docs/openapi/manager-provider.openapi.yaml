@@ -525,7 +525,7 @@ components:
   schemas:
     UpstreamProfileType:
       type: string
-      enum: [OPENAI, OPENAI_COMPATIBLE, GEMINI, VERTEX, OLLAMA, ANTHROPIC, RESPONSES, GEMINI_OPENAI]
+      enum: [OPENAI, OPENAI_COMPATIBLE, GEMINI, VERTEX, ANTHROPIC, RESPONSES, GEMINI_OPENAI]
     SourceLifecycleInput:
       type: object
       properties:
@@ -579,7 +579,7 @@ components:
         - type: object
           required: [profile_type, base_url]
           properties:
-            profile_type: { type: string, enum: [GEMINI, VERTEX, OLLAMA, ANTHROPIC, RESPONSES] }
+            profile_type: { type: string, enum: [GEMINI, VERTEX, ANTHROPIC, RESPONSES] }
             base_url: { type: string, format: uri, minLength: 1 }
       unevaluatedProperties: false
     UpstreamSourceInput:
@@ -596,7 +596,6 @@ components:
           GEMINI_OPENAI: "#/components/schemas/GeminiOpenAiSourceInput"
           GEMINI: "#/components/schemas/NativeSourceInput"
           VERTEX: "#/components/schemas/NativeSourceInput"
-          OLLAMA: "#/components/schemas/NativeSourceInput"
           ANTHROPIC: "#/components/schemas/NativeSourceInput"
           RESPONSES: "#/components/schemas/NativeSourceInput"
     UpstreamSourceUpdate:
@@ -672,7 +671,7 @@ components:
         - type: object
           required: [profile_type]
           properties:
-            profile_type: { type: string, enum: [GEMINI, VERTEX, OLLAMA, ANTHROPIC, RESPONSES] }
+            profile_type: { type: string, enum: [GEMINI, VERTEX, ANTHROPIC, RESPONSES] }
       unevaluatedProperties: false
     UpstreamSource:
       oneOf:
@@ -795,7 +794,7 @@ components:
       enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI]
     UpstreamProtocol:
       type: string
-      enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI, OLLAMA]
+      enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI]
     ModelSourceSelectionMode:
       type: string
       enum: [INHERIT_ALL, EXPLICIT]

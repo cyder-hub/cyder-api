@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 
 downstream_protocols:
   - OPENAI
@@ -11,13 +11,11 @@ upstream_protocols:
   - RESPONSES
   - ANTHROPIC
   - GEMINI
-  - OLLAMA
 
 downstream_error_contracts:
   scope:
     before_headers_committed: true
     after_headers_committed_owners: [R3.7, R3.8, R3.15-R3.21]
-    ollama_downstream_contract: absent
     upstream_error_location: top_level
   router_rejections:
     - { code: route_not_found_error, http_status: 404 }
@@ -64,7 +62,7 @@ evidence:
   - id: error-contract-router
     kind: test
     reference: "proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts"
-    summary: "Exercises four-protocol ingress, extractor, utility, 404, 405, CORS, and Ollama boundaries through the real router."
+    summary: "Exercises four-protocol ingress, extractor, utility, 404, 405, CORS, and retired-protocol boundaries through the real router."
   - id: response-limit-raw-four-protocol
     kind: test
     reference: "proxy::direct_execution_regression::four_public_protocols_use_existing_envelopes_for_non_stream_response_limit"
@@ -116,19 +114,11 @@ evidence:
   - id: representative-fixture-scope
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols"
-    summary: "Proves that the R3.16 baseline evidence contains exactly four public-downstream-to-OpenAI cells and no downstream Ollama fixture."
+    summary: "Proves that the R3.16 baseline evidence contains exactly four public-downstream-to-OpenAI cells."
   - id: reachable-materializers-without-cell-regression
     kind: code
     reference: "server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind"
     summary: "OpenAI and Gemini upstream materializers exist, but cells outside the representative suite lack complete direct-execution evidence."
-  - id: ollama-upstream-incomplete
-    kind: code
-    reference: "server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind"
-    summary: "An Ollama /api/chat materialization path exists, but no complete direct-execution cell proves native behavior; model directories are local configured Models and are not discovered through /api/tags."
-  - id: ollama-stream-incomplete
-    kind: code
-    reference: "server/src/proxy/runtime/transport/stream.rs"
-    summary: "The transport does not provide a complete native Ollama NDJSON streaming contract."
   - id: advanced-transform-only
     kind: test
     reference: "cargo run -p cyder-api --bin transform_quality_gate -- --quick"
@@ -725,10 +715,6 @@ evidence:
     kind: test
     reference: "proxy::models::tests::models_listing_uses_the_protocol_selector_for_source_visibility"
     summary: "Pins local model directory visibility to the shared protocol Source selector and enabled Source state."
-  - id: r3-11-ollama-discovery-boundary
-    kind: code
-    reference: "server/src/proxy/models.rs::get_accessible_models"
-    summary: "The public model directory is built from saved local Model records; no Ollama /api/tags discovery or import route is part of the R3.11 contract."
   - id: r3-12-request-patch-contract
     kind: test
     reference: "controller::request_patch::tests::request_patch_openapi_matches_aggregate_routes_and_current_detail_shapes"
@@ -755,7 +741,7 @@ evidence:
     summary: "Pins byte-preserving same-wire response passthrough when best-effort observation degrades."
   - id: r3-15-minor-loss-runtime
     kind: test
-    reference: "proxy::direct_execution_regression::cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata"
+    reference: "proxy::direct_execution_regression::retained_cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata"
     summary: "Pins cross-wire controlled minor loss, one upstream call, internal-only diagnostics, Request Log success, and resource release."
   - id: r3-15-four-protocol-stream-failure
     kind: test
@@ -765,6 +751,18 @@ evidence:
     kind: test
     reference: "proxy::direct_execution_regression::cross_wire_target_stream_rejection_emits_one_native_terminal_and_releases_resources"
     summary: "Pins target transform rejection after headers to one native terminal, an error Request Log, one upstream call, and released resources."
+  - id: r3-20-openai-compatible-chat
+    kind: test
+    reference: "proxy::direct_execution_regression::ollama_openai_compatible_recipe_targets_v1_chat_with_placeholder_bearer"
+    summary: "Proves a regular OPENAI_COMPATIBLE Source reaches /v1/chat/completions once with a placeholder Bearer credential, usage, and Request Log."
+  - id: r3-20-openai-compatible-stream
+    kind: test
+    reference: "proxy::direct_execution_regression::ollama_openai_compatible_recipe_streams_v1_chat_once"
+    summary: "Proves the regular OPENAI_COMPATIBLE Source uses the existing OpenAI SSE and [DONE] lifecycle at /v1/chat/completions without a native stream dialect."
+  - id: r3-20-openai-compatible-embeddings
+    kind: test
+    reference: "proxy::direct_execution_regression::ollama_openai_compatible_recipe_targets_v1_embeddings_once"
+    summary: "Proves explicitly enabled Embeddings on a regular OPENAI_COMPATIBLE Source reaches /v1/embeddings once and records OpenAI usage."
 
 transform_runtime_contract:
   owner: R3.15
@@ -795,8 +793,7 @@ transform_runtime_contract:
   persistence:
     enabled: false
     owner: R4.6
-  advanced_cell_owners:
-    - { upstream_protocol: OLLAMA, owner: R3.20 }
+  advanced_cell_owners: []
   final_matrix_owner: R3.21
   evidence: [r3-15-transform-quality-contract, r3-15-transform-payload-free-contract, r3-15-same-wire-passthrough, r3-15-minor-loss-runtime, r3-15-four-protocol-stream-failure, r3-15-target-stream-failure]
 
@@ -843,11 +840,6 @@ upstream_source_profiles:
     dialect: standard
     auth: bearer_api_key
     endpoint: base_url
-  - profile_type: OLLAMA
-    upstream_protocol: OLLAMA
-    dialect: standard
-    auth: bearer_api_key
-    endpoint: base_url
   - profile_type: ANTHROPIC
     upstream_protocol: ANTHROPIC
     dialect: standard
@@ -882,7 +874,7 @@ openai_wire_profiles:
     chat: { availability: configurable, default_enabled: true, field_policy: core_fields_validated_vendor_extensions_passthrough }
     embeddings: { availability: configurable, default_enabled: false, field_policy: core_fields_validated_vendor_extensions_passthrough }
     rerank: { availability: configurable, default_enabled: false, field_policy: opaque_envelope_passthrough }
-    evidence: [r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-direct]
+    evidence: [r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-direct, r3-20-openai-compatible-chat, r3-20-openai-compatible-stream, r3-20-openai-compatible-embeddings]
   - profile_type: GEMINI_OPENAI
     base_url_requirement: optional_with_default
     default_base_url: https://generativelanguage.googleapis.com/v1beta/openai
@@ -999,21 +991,6 @@ generation_cells:
       reasoning: { status: controlled_loss, evidence: [r3-19-openai-reasoning-cell, r3-19-reasoning-reject] }
       multimodal: { status: controlled_loss, evidence: [r3-19-openai-multimodal-cell, r3-19-multimodal-reject] }
       structured_output: { status: controlled_loss, evidence: [r3-19-openai-structured-cell, r3-19-structured-reject] }
-  - downstream: OPENAI
-    upstream: OLLAMA
-    base:
-      non_stream_text: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      stream_text: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      usage: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      normal_termination: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-    advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-
   - downstream: RESPONSES
     upstream: OPENAI
     base:
@@ -1070,21 +1047,6 @@ generation_cells:
       reasoning: { status: controlled_loss, evidence: [r3-19-responses-reasoning-cell, r3-19-reasoning-reject] }
       multimodal: { status: controlled_loss, evidence: [r3-19-responses-multimodal-cell, r3-19-multimodal-reject] }
       structured_output: { status: controlled_loss, evidence: [r3-19-responses-structured-cell, r3-19-structured-reject] }
-  - downstream: RESPONSES
-    upstream: OLLAMA
-    base:
-      non_stream_text: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      stream_text: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      usage: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      normal_termination: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-    advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-
   - downstream: ANTHROPIC
     upstream: OPENAI
     base:
@@ -1141,21 +1103,6 @@ generation_cells:
       reasoning: { status: controlled_loss, evidence: [r3-19-anthropic-reasoning-cell, r3-19-reasoning-reject] }
       multimodal: { status: controlled_loss, evidence: [r3-19-anthropic-multimodal-cell, r3-19-multimodal-reject] }
       structured_output: { status: controlled_loss, evidence: [r3-19-anthropic-structured-cell, r3-19-structured-reject] }
-  - downstream: ANTHROPIC
-    upstream: OLLAMA
-    base:
-      non_stream_text: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      stream_text: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      usage: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      normal_termination: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-    advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-
   - downstream: GEMINI
     upstream: OPENAI
     base:
@@ -1212,21 +1159,6 @@ generation_cells:
       reasoning: { status: full, evidence: [r3-19-gemini-reasoning-cell] }
       multimodal: { status: full, evidence: [r3-19-gemini-multimodal-cell] }
       structured_output: { status: full, evidence: [r3-19-gemini-structured-cell] }
-  - downstream: GEMINI
-    upstream: OLLAMA
-    base:
-      non_stream_text: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      stream_text: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      usage: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      normal_termination: { status: partial, evidence: [ollama-upstream-incomplete, ollama-stream-incomplete], owner: R3.20 }
-      upstream_error: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-      cancellation: { status: not_verified, evidence: [ollama-upstream-incomplete], owner: R3.20 }
-    advanced:
-      tools: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      reasoning: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      multimodal: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-      structured_output: { status: not_verified, evidence: [advanced-transform-only], owner: R3.20 }
-
 utilities:
   - name: models
     route_suffix: /models
@@ -1238,7 +1170,7 @@ utilities:
     incompatible_upstream_behavior: not_applicable
     verification:
       status: verified
-      evidence: [router-contract, router-method-contract, r3-11-model-catalog-selector, r3-11-ollama-discovery-boundary, r3-17-models-boundary]
+      evidence: [router-contract, router-method-contract, r3-11-model-catalog-selector, r3-17-models-boundary]
   - name: embeddings
     route_suffix: /embeddings
     method: POST

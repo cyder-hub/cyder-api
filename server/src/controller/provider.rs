@@ -128,11 +128,6 @@ enum UpstreamSourceResponse {
         #[serde(flatten)]
         common: SourceCommonResponse,
     },
-    #[serde(rename = "OLLAMA")]
-    Ollama {
-        #[serde(flatten)]
-        common: SourceCommonResponse,
-    },
     #[serde(rename = "ANTHROPIC")]
     Anthropic {
         #[serde(flatten)]
@@ -185,7 +180,6 @@ impl From<UpstreamSource> for UpstreamSourceResponse {
             },
             UpstreamProfileType::Gemini => Self::Gemini { common },
             UpstreamProfileType::Vertex => Self::Vertex { common },
-            UpstreamProfileType::Ollama => Self::Ollama { common },
             UpstreamProfileType::Anthropic => Self::Anthropic { common },
             UpstreamProfileType::Responses => Self::Responses { common },
         }
@@ -314,8 +308,6 @@ enum UpstreamSourcePayload {
     Gemini(NativeSourcePayload),
     #[serde(rename = "VERTEX")]
     Vertex(NativeSourcePayload),
-    #[serde(rename = "OLLAMA")]
-    Ollama(NativeSourcePayload),
     #[serde(rename = "ANTHROPIC")]
     Anthropic(NativeSourcePayload),
     #[serde(rename = "RESPONSES")]
@@ -344,7 +336,6 @@ impl UpstreamSourcePayload {
             },
             Self::Gemini(payload) => native_source_input(UpstreamProfileType::Gemini, payload),
             Self::Vertex(payload) => native_source_input(UpstreamProfileType::Vertex, payload),
-            Self::Ollama(payload) => native_source_input(UpstreamProfileType::Ollama, payload),
             Self::Anthropic(payload) => {
                 native_source_input(UpstreamProfileType::Anthropic, payload)
             }
@@ -929,20 +920,6 @@ async fn build_provider_check_request_pre_auth(
                 }),
             }
         }
-        UpstreamProfileType::Ollama => ProviderCheckRequest {
-            url: format!("{}/api/chat", source.base_url.trim_end_matches('/')),
-            headers,
-            body: json!({
-                "model": model_name,
-                "stream": false,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "hi"
-                    }
-                ]
-            }),
-        },
         UpstreamProfileType::Openai | UpstreamProfileType::GeminiOpenai => ProviderCheckRequest {
             url: resolve_source_operation_url(&cache_source, UpstreamOperation::ChatCompletions)
                 .map_err(source_chat_check_error)?,
@@ -1102,7 +1079,6 @@ fn profile_type_label(profile_type: &UpstreamProfileType) -> &'static str {
         UpstreamProfileType::Gemini => "Gemini",
         UpstreamProfileType::Vertex => "Vertex",
         UpstreamProfileType::OpenaiCompatible => "OpenAI Compatible",
-        UpstreamProfileType::Ollama => "Ollama",
         UpstreamProfileType::Anthropic => "Anthropic",
         UpstreamProfileType::Responses => "Responses",
         UpstreamProfileType::GeminiOpenai => "Gemini OpenAI",
@@ -2611,25 +2587,6 @@ mod tests {
                 );
             })
             .await;
-    }
-
-    #[tokio::test]
-    async fn ollama_check_request_uses_api_chat() {
-        let provider = sample_provider(UpstreamProfileType::Ollama, "http://localhost:11434");
-        let request = super::build_provider_check_request(
-            &provider,
-            &provider.upstream_sources[0],
-            &credential("ollama-key"),
-            "llama3.1",
-            &[],
-        )
-        .await
-        .expect("request should build");
-
-        assert_eq!(request.url, "http://localhost:11434/api/chat");
-        assert_eq!(request.body["model"], "llama3.1");
-        assert_eq!(request.body["stream"], false);
-        assert_eq!(request.body["messages"][0]["content"], "hi");
     }
 
     #[tokio::test]
@@ -4758,7 +4715,7 @@ mod tests {
         let profile_values = document["components"]["schemas"]["UpstreamProfileType"]["enum"]
             .as_sequence()
             .expect("upstream Profile enum should exist");
-        assert_eq!(profile_values.len(), 8);
+        assert_eq!(profile_values.len(), 7);
         assert!(profile_values.contains(&serde_yaml::Value::from("OPENAI_COMPATIBLE")));
         assert!(!profile_values.contains(&serde_yaml::Value::from("VERTEX_OPENAI")));
 

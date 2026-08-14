@@ -2449,71 +2449,6 @@ pub(in crate::service::transform) fn validate_upstream_response(
             }
             Ok(())
         }
-        UpstreamProtocol::Ollama => {
-            require_non_empty_string(data, "model", TransformSemanticUnit::Model)?;
-            if data
-                .get("message")
-                .and_then(|message| message.get("role"))
-                .and_then(Value::as_str)
-                != Some("assistant")
-            {
-                return Err(SourceSemanticError::unknown(TransformSemanticUnit::Role));
-            }
-            if data.get("message").is_some_and(|message| {
-                message.get("thinking").is_some()
-                    || message.get("tool_calls").is_some()
-                    || message
-                        .get("images")
-                        .and_then(Value::as_array)
-                        .is_some_and(|images| !images.is_empty())
-            }) {
-                return Err(SourceSemanticError::unknown(
-                    TransformSemanticUnit::ResponseEnvelope,
-                ));
-            }
-            if data.get("done").and_then(Value::as_bool) != Some(true) {
-                return Err(SourceSemanticError::invalid(
-                    TransformSemanticUnit::Lifecycle,
-                ));
-            }
-            if data.get("done_reason").is_none() {
-                record_synthesis(
-                    TransformPhase::ResponseDecode,
-                    TransformSemanticUnit::Lifecycle,
-                    TransformReasonCode::SyntheticEnvelope,
-                );
-            }
-            if data
-                .get("created_at")
-                .and_then(Value::as_str)
-                .is_none_or(|created_at| chrono::DateTime::parse_from_rfc3339(created_at).is_err())
-            {
-                return Err(SourceSemanticError::invalid(
-                    TransformSemanticUnit::Metadata,
-                ));
-            }
-            let has_prompt_tokens = data.get("prompt_eval_count").is_some();
-            let has_completion_tokens = data.get("eval_count").is_some();
-            if has_prompt_tokens != has_completion_tokens {
-                record_minor_drop(TransformPhase::ResponseDecode, TransformSemanticUnit::Usage);
-            }
-            record_synthesis(
-                TransformPhase::ResponseDecode,
-                TransformSemanticUnit::Metadata,
-                TransformReasonCode::SyntheticCorrelationId,
-            );
-            record_synthesis(
-                TransformPhase::ResponseDecode,
-                TransformSemanticUnit::Metadata,
-                TransformReasonCode::SyntheticIndex,
-            );
-            record_synthesis(
-                TransformPhase::ResponseDecode,
-                TransformSemanticUnit::ResponseEnvelope,
-                TransformReasonCode::SyntheticEnvelope,
-            );
-            Ok(())
-        }
     }
 }
 
@@ -2999,7 +2934,7 @@ pub(in crate::service::transform) fn audit_target_request(
                     part,
                     UnifiedContentPart::Text { .. } | UnifiedContentPart::Reasoning { .. }
                 ),
-                UpstreamProtocol::Responses | UpstreamProtocol::Ollama => true,
+                UpstreamProtocol::Responses => true,
             };
             if !supported {
                 record_rejection(
@@ -3901,91 +3836,6 @@ mod tests {
         )
         .expect("missing Gemini role and body model have legal synthesis contracts");
         assert!(has_action(&synthesis.summary, TransformAction::Synthesize));
-    }
-
-    #[test]
-    fn adapter_audit_ollama_covers_all_non_stream_outcome_classes() {
-        let lossless = transform_request_data(
-            json!({
-                "model": "gpt-4.1",
-                "messages": [{"role": "user", "content": "hello"}]
-            }),
-            DownstreamProtocol::Openai,
-            UpstreamProtocol::Ollama,
-            false,
-        )
-        .expect("ordinary text must convert to Ollama");
-        assert_eq!(lossless.value["messages"][0]["content"], "hello");
-
-        let minor = transform_request_data(
-            json!({
-                "model": "claude-sonnet",
-                "max_tokens": 64,
-                "top_k": 16,
-                "messages": [{"role": "user", "content": "hello"}]
-            }),
-            DownstreamProtocol::Anthropic,
-            UpstreamProtocol::Ollama,
-            false,
-        )
-        .expect("unsupported top_k is an explicit minor drop");
-        assert!(has_reason(
-            &minor.summary,
-            TransformReasonCode::UnsupportedTopK
-        ));
-
-        let major = transform_request_data(
-            json!({
-                "model": "gpt-4.1",
-                "messages": [{"role": "user", "content": "hello"}],
-                "tools": [{
-                    "type": "function",
-                    "function": {"name": "lookup", "parameters": {"type": "object"}}
-                }]
-            }),
-            DownstreamProtocol::Openai,
-            UpstreamProtocol::Ollama,
-            false,
-        )
-        .expect_err("unimplemented Ollama tool definitions must reject");
-        assert_eq!(
-            major.reason_code,
-            TransformReasonCode::UnsupportedToolDefinitions
-        );
-
-        let unknown = transform_result(
-            json!({
-                "model": "llama3",
-                "created_at": "2026-08-11T12:00:00Z",
-                "message": {"role": "assistant", "content": "hello", "thinking": "private"},
-                "done": true,
-                "done_reason": "stop"
-            }),
-            UpstreamProtocol::Ollama,
-            DownstreamProtocol::Openai,
-        )
-        .expect_err("unsupported Ollama thinking must reject instead of disappearing");
-        assert_eq!(
-            unknown.reason_code,
-            TransformReasonCode::UnknownSemanticUnit
-        );
-
-        let synthesis = transform_result(
-            json!({
-                "model": "llama3",
-                "created_at": "2026-08-11T12:00:00Z",
-                "message": {"role": "assistant", "content": "hello"},
-                "done": true,
-                "done_reason": "stop"
-            }),
-            UpstreamProtocol::Ollama,
-            DownstreamProtocol::Openai,
-        )
-        .expect("Ollama response ID/index/envelope synthesis is legal and explicit");
-        assert!(has_reason(
-            &synthesis.summary,
-            TransformReasonCode::SyntheticCorrelationId
-        ));
     }
 
     #[test]

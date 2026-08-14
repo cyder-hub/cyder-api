@@ -25,7 +25,7 @@ import {
   sourceSupportsOperation,
 } from "../src/pages/provider-edit/composables/sourceProfileContract.ts";
 
-test("Source profile contract exposes the eight supported profiles and profile-specific fields", () => {
+test("Source profile contract exposes the seven supported profiles and profile-specific fields", () => {
   assert.deepEqual(providerProfileTypes, [
     "OPENAI",
     "OPENAI_COMPATIBLE",
@@ -34,7 +34,6 @@ test("Source profile contract exposes the eight supported profiles and profile-s
     "VERTEX",
     "ANTHROPIC",
     "RESPONSES",
-    "OLLAMA",
   ]);
   assert.equal(sourceBaseUrlMayBeEmpty("OPENAI"), true);
   assert.equal(sourceBaseUrlMayBeEmpty("GEMINI_OPENAI"), true);

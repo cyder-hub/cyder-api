@@ -7,7 +7,7 @@ use super::audit::{
     validate_downstream_request, validate_upstream_response,
 };
 use super::diagnostics::{record_captured_transform_fact, transform_failure, transform_success};
-use super::providers::{anthropic, gemini, ollama, openai, responses};
+use super::providers::{anthropic, gemini, openai, responses};
 use super::stream::StreamTransformContext;
 use super::stream_audit::{
     SourceStreamSemanticError, audit_target_legacy_chunk, audit_target_stream_events,
@@ -233,15 +233,6 @@ fn encode_gemini_request(unified: UnifiedRequest) -> TransformResult<Value> {
     )
 }
 
-fn encode_ollama_request(unified: UnifiedRequest) -> TransformResult<Value> {
-    audit_target_request(UpstreamProtocol::Ollama, &unified);
-    encode_json(
-        ollama::OllamaRequestPayload::from(unified),
-        TransformPhase::RequestEncode,
-        TransformSemanticUnit::RequestEnvelope,
-    )
-}
-
 fn decode_anthropic_request(mut data: Value) -> TransformResult<UnifiedRequest> {
     normalize_portable_tool_request(DownstreamProtocol::Anthropic, &mut data)
         .map_err(|error| source_request_failure(error, &data))?;
@@ -331,16 +322,6 @@ fn encode_gemini_response(unified: UnifiedResponse) -> TransformResult<Value> {
     encode_json(
         gemini::GeminiResponse::from(unified),
         TransformPhase::ResponseEncode,
-        TransformSemanticUnit::ResponseEnvelope,
-    )
-}
-
-fn decode_ollama_response(data: Value) -> TransformResult<UnifiedResponse> {
-    validate_response_source(UpstreamProtocol::Ollama, &data)?;
-    decode_json::<ollama::OllamaResponse, _>(
-        data,
-        TransformFailureOrigin::UpstreamPayload,
-        TransformPhase::ResponseDecode,
         TransformSemanticUnit::ResponseEnvelope,
     )
 }
@@ -500,19 +481,6 @@ fn decode_gemini_stream_frame(
     decode_stream_result(
         raw,
         serde_json::from_str::<gemini::GeminiChunkResponse>(raw)
-            .map(Into::into)
-            .map(DecodedSourceStreamFrame::LegacyChunk),
-    )
-}
-
-fn decode_ollama_stream_frame(
-    raw: &str,
-    context: &mut StreamTransformContext<'_>,
-) -> TransformResult<DecodedSourceStreamFrame> {
-    validate_stream_source(UpstreamProtocol::Ollama, raw, context)?;
-    decode_stream_result(
-        raw,
-        serde_json::from_str::<ollama::OllamaChunkResponse>(raw)
             .map(Into::into)
             .map(DecodedSourceStreamFrame::LegacyChunk),
     )
@@ -868,21 +836,6 @@ const GEMINI_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
     },
 };
 
-const OLLAMA_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
-    protocol: UpstreamProtocol::Ollama,
-    name: "ollama",
-    request: UpstreamRequestCodec {
-        encode: encode_ollama_request,
-        finalize: Some(noop_finalize_request),
-    },
-    response: UpstreamResponseCodec {
-        decode: decode_ollama_response,
-    },
-    stream: UpstreamStreamCodec {
-        decode_source: decode_ollama_stream_frame,
-    },
-};
-
 const ANTHROPIC_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
     protocol: UpstreamProtocol::Anthropic,
     name: "anthropic",
@@ -930,7 +883,6 @@ pub(in crate::service::transform) fn upstream_adapter_for(
     match protocol {
         UpstreamProtocol::Openai => &OPENAI_UPSTREAM_ADAPTER,
         UpstreamProtocol::Gemini => &GEMINI_UPSTREAM_ADAPTER,
-        UpstreamProtocol::Ollama => &OLLAMA_UPSTREAM_ADAPTER,
         UpstreamProtocol::Anthropic => &ANTHROPIC_UPSTREAM_ADAPTER,
         UpstreamProtocol::Responses => &RESPONSES_UPSTREAM_ADAPTER,
     }
@@ -938,7 +890,6 @@ pub(in crate::service::transform) fn upstream_adapter_for(
 
 #[cfg(test)]
 mod tests {
-    use super::super::capability::ProtocolCapabilityMatrix;
     use super::*;
 
     #[test]
@@ -956,11 +907,10 @@ mod tests {
     }
 
     #[test]
-    fn upstream_registry_contains_exactly_the_five_wire_protocols() {
+    fn upstream_registry_contains_exactly_the_four_wire_protocols() {
         for (protocol, expected_name) in [
             (UpstreamProtocol::Openai, "openai"),
             (UpstreamProtocol::Gemini, "gemini"),
-            (UpstreamProtocol::Ollama, "ollama"),
             (UpstreamProtocol::Anthropic, "anthropic"),
             (UpstreamProtocol::Responses, "responses"),
         ] {
@@ -968,18 +918,5 @@ mod tests {
             assert_eq!(adapter.protocol, protocol);
             assert_eq!(adapter.name, expected_name);
         }
-    }
-
-    #[test]
-    fn capability_registry_keeps_upstream_ollama_without_downstream_ollama() {
-        assert!(
-            !ProtocolCapabilityMatrix::for_upstream(UpstreamProtocol::Ollama)
-                .request
-                .tool_definitions
-        );
-        assert_eq!(
-            downstream_adapter_for(DownstreamProtocol::Openai).name,
-            "openai"
-        );
     }
 }

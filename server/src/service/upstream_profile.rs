@@ -201,12 +201,6 @@ pub const fn upstream_runtime_profile(
             auth: UpstreamAuthProfile::BearerApiKey,
             endpoint: UpstreamEndpointProfile::BaseUrl,
         },
-        UpstreamProfileType::Ollama => UpstreamRuntimeProfile {
-            upstream_protocol: UpstreamProtocol::Ollama,
-            dialect: UpstreamDialect::Standard,
-            auth: UpstreamAuthProfile::BearerApiKey,
-            endpoint: UpstreamEndpointProfile::BaseUrl,
-        },
         UpstreamProfileType::Anthropic => UpstreamRuntimeProfile {
             upstream_protocol: UpstreamProtocol::Anthropic,
             dialect: UpstreamDialect::Standard,
@@ -336,15 +330,6 @@ mod tests {
                 UpstreamProfileType::OpenaiCompatible,
                 (
                     UpstreamProtocol::Openai,
-                    UpstreamDialect::Standard,
-                    UpstreamAuthProfile::BearerApiKey,
-                    UpstreamEndpointProfile::BaseUrl,
-                ),
-            ),
-            (
-                UpstreamProfileType::Ollama,
-                (
-                    UpstreamProtocol::Ollama,
                     UpstreamDialect::Standard,
                     UpstreamAuthProfile::BearerApiKey,
                     UpstreamEndpointProfile::BaseUrl,

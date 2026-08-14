@@ -35,11 +35,12 @@ Do not prioritize multi-tenant account systems unless explicitly required.
 Current code already provides:
 
 - four public downstream protocol families: OpenAI, Responses, Anthropic, and Gemini
-- five upstream wire families: OpenAI, Responses, Anthropic, Gemini, and Ollama
+- four upstream wire families: OpenAI, Responses, Anthropic, and Gemini
+- Ollama deployments connect through the ordinary `OPENAI_COMPATIBLE` Source recipe; native Ollama endpoints are not a Cyder gateway contract
 - deep request/response transformation, including streaming, tool calls, reasoning, and multimodal content
 - provider, model, and downstream API key management
 - API key governance: expiry, RPM, concurrency, daily/monthly quota, daily/monthly budget
-- provider circuit governance and runtime status views
+- provider runtime aggregation and operational status views
 - request patch rules with inheritance, conflict detection, and runtime trace
 - request-level log persistence with status, timing, token, and cost summaries
 - dashboard, provider runtime, record, API key, and cost management pages
@@ -331,6 +332,24 @@ R2.7 is intentionally destructive for pre-1.0 Provider credentials. Its paired S
 
 Historical Provider secrets are not migrated or recoverable after this migration. The final pre-1.0-to-1.0 upgrade will require a clean database as described in the roadmap. The previous Portable Config import/export implementation has also been removed; no current endpoint, UI, file format, or compatibility path can be used to preserve or transfer these credentials. Portable Config will be redesigned from a new 1.0 domain contract in R7.9.
 
+### R3.20 Ollama boundary and upgrade warning
+
+R3.20 removes the unfinished native Ollama wire family. The current gateway
+has four upstream wire families and four downstream protocol families. An
+Ollama deployment can still be used through a regular `OPENAI_COMPATIBLE`
+Source pointed at its OpenAI-compatible `/v1` root; this is a deployment recipe,
+not a special Ollama Profile or transport.
+
+The R3.20 migration is destructive and has no down migration. Back up the
+database before upgrading. It clears all Request Logs and the four derived
+metric tables, and deletes Ollama Sources (including soft-deleted rows) plus
+their Source-bound model bindings and Request Patch variants/rules. It retains
+Providers, Provider Keys, Models, non-Ollama Sources, downstream API Keys and
+their governance rollups, Cost Catalog data, and Manager data. It does not
+convert base URLs, defaults, bindings, or patches; rebuild those explicitly
+after the upgrade. The full procedure and manual Chat/Embeddings smoke steps
+are in [Ollama through OpenAI-Compatible](docs/ollama-openai-compatible.md).
+
 ## Common Commands
 
 Human local shortcuts are available through `just` from the repository root:
@@ -374,11 +393,13 @@ Assuming `base_path: /ai`:
 - Gemini-compatible: `/ai/gemini/*`, `/ai/gemini/v1/*`, and `/ai/gemini/v1beta/*`
 
 The unversioned routes are direct compatibility aliases for the current `/v1`
-semantics, not redirects or a permanent protocol-version claim. Ollama is
-upstream-only and has no public downstream route. See the generated
-[Protocol Compatibility Matrix](docs/protocol-compatibility.md) for exact
-routes, provider profiles, current generation cells, utility boundaries, and
-evidence.
+semantics, not redirects or a permanent protocol-version claim. There is no
+public `/ai/ollama/*` route and no native `/api/chat`, `/api/embed`,
+`/api/generate`, or `/api/tags` gateway contract. See [Ollama through
+OpenAI-Compatible](docs/ollama-openai-compatible.md) for the supported
+`OPENAI_COMPATIBLE` recipe and the generated [Protocol Compatibility
+Matrix](docs/protocol-compatibility.md) for exact routes, profiles, current
+generation cells, utility boundaries, and evidence.
 
 ### System Endpoints
 

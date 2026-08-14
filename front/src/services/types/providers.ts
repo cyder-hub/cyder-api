@@ -7,7 +7,6 @@ export type UpstreamProfileType =
   | "GEMINI_OPENAI"
   | "GEMINI"
   | "VERTEX"
-  | "OLLAMA"
   | "ANTHROPIC"
   | "RESPONSES";
 
@@ -57,7 +56,7 @@ export type UpstreamSource =
       rerank_path_override: string | null;
     })
   | (UpstreamSourceCommon & {
-      profile_type: "GEMINI" | "VERTEX" | "OLLAMA" | "ANTHROPIC" | "RESPONSES";
+      profile_type: "GEMINI" | "VERTEX" | "ANTHROPIC" | "RESPONSES";
       chat_completions_enabled?: never;
       chat_completions_path_override?: never;
       embeddings_enabled?: never;
@@ -92,7 +91,7 @@ export type UpstreamSourcePayload =
       rerank_path_override?: string;
     })
   | (SourceLifecyclePayload & {
-      profile_type: "GEMINI" | "VERTEX" | "OLLAMA" | "ANTHROPIC" | "RESPONSES";
+      profile_type: "GEMINI" | "VERTEX" | "ANTHROPIC" | "RESPONSES";
       base_url: string;
     });
 

@@ -663,7 +663,7 @@ mod tests {
                 (DownstreamProtocol::Openai, Some(UpstreamProtocol::Gemini)),
                 (
                     DownstreamProtocol::Responses,
-                    Some(UpstreamProtocol::Ollama),
+                    Some(UpstreamProtocol::Openai),
                 ),
             ];
             for (index, (downstream, upstream)) in cases.into_iter().enumerate() {
@@ -684,10 +684,6 @@ mod tests {
             .list;
             assert_eq!(logs.len(), cases.len());
             assert!(logs.iter().any(|log| log.upstream_protocol.is_none()));
-            assert!(
-                logs.iter()
-                    .any(|log| { log.upstream_protocol == Some(UpstreamProtocol::Ollama) })
-            );
         });
     }
 

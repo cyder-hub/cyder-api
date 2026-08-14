@@ -80,7 +80,6 @@ pub(crate) struct StructuredContentCapabilityMatrix {
 enum CapabilityProtocol {
     Openai,
     Gemini,
-    Ollama,
     Anthropic,
     Responses,
 }
@@ -101,7 +100,6 @@ impl From<UpstreamProtocol> for CapabilityProtocol {
         match protocol {
             UpstreamProtocol::Openai => Self::Openai,
             UpstreamProtocol::Gemini => Self::Gemini,
-            UpstreamProtocol::Ollama => Self::Ollama,
             UpstreamProtocol::Anthropic => Self::Anthropic,
             UpstreamProtocol::Responses => Self::Responses,
         }
@@ -259,41 +257,6 @@ impl ProtocolCapabilityMatrix {
                     json_schema_strict: true,
                 },
             },
-            CapabilityProtocol::Ollama => Self {
-                request: RequestCapabilityMatrix {
-                    tool_definitions: false,
-                    tool_role_messages: false,
-                    reasoning_history: false,
-                    top_k_parameter: false,
-                    image_url_input: false,
-                    image_inline_input: false,
-                    file_url_input: false,
-                    file_inline_input: false,
-                    executable_code_input: false,
-                },
-                response: ResponseCapabilityMatrix {
-                    reasoning_content: false,
-                    refusal: false,
-                    citations: false,
-                    file_output: false,
-                },
-                stream: StreamCapabilityMatrix {
-                    tool_call_deltas: false,
-                    reasoning_deltas: false,
-                    reasoning_summary_parts: false,
-                    image_deltas: false,
-                    blob_deltas: false,
-                    structured_errors: false,
-                },
-                structured_content: StructuredContentCapabilityMatrix {
-                    images: false,
-                    tool_results: false,
-                    refusal: false,
-                    citations: false,
-                    file_references: false,
-                    json_schema_strict: false,
-                },
-            },
         }
     }
 }
@@ -366,9 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn test_capability_matrix_reports_expected_gemini_and_ollama_boundaries() {
+    fn test_capability_matrix_reports_expected_gemini_boundaries() {
         let gemini = ProtocolCapabilityMatrix::for_downstream(DownstreamProtocol::Gemini);
-        let ollama = ProtocolCapabilityMatrix::for_upstream(UpstreamProtocol::Ollama);
 
         assert!(gemini.request.image_url_input);
         assert!(gemini.request.reasoning_history);
@@ -380,14 +342,6 @@ mod tests {
         assert!(gemini.stream.reasoning_deltas);
         assert!(!gemini.stream.reasoning_summary_parts);
         assert!(gemini.structured_content.citations);
-
-        assert!(!ollama.request.tool_definitions);
-        assert!(!ollama.request.reasoning_history);
-        assert!(!ollama.request.image_inline_input);
-        assert!(!ollama.response.refusal);
-        assert!(!ollama.stream.tool_call_deltas);
-        assert!(!ollama.stream.reasoning_deltas);
-        assert!(!ollama.structured_content.json_schema_strict);
     }
 
     #[test]
@@ -405,7 +359,6 @@ mod tests {
         for protocol in [
             UpstreamProtocol::Openai,
             UpstreamProtocol::Gemini,
-            UpstreamProtocol::Ollama,
             UpstreamProtocol::Anthropic,
             UpstreamProtocol::Responses,
         ] {

@@ -13,7 +13,6 @@ export const providerProfileTypes: readonly UpstreamProfileType[] = [
   "VERTEX",
   "ANTHROPIC",
   "RESPONSES",
-  "OLLAMA",
 ];
 
 export type SourceOperation = "chat_completions" | "embeddings" | "rerank";

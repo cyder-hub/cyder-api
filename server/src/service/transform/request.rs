@@ -49,21 +49,6 @@ fn require_non_empty_string(
     }
 }
 
-fn require_array(
-    data: &Value,
-    path: &'static str,
-    field: &str,
-) -> Result<(), FinalRequestValidationError> {
-    if data.get(field).is_some_and(Value::is_array) {
-        Ok(())
-    } else {
-        Err(FinalRequestValidationError {
-            path,
-            reason: "must be an array",
-        })
-    }
-}
-
 fn responses_state_control_is_active(data: &Value, field: &str) -> bool {
     match data.get(field) {
         None | Some(Value::Null) => false,
@@ -1177,10 +1162,6 @@ pub(in crate::service::transform) fn validate_final_generation_request_for_downs
             path: error.path,
             reason: error.reason,
         }),
-        UpstreamProtocol::Ollama => {
-            require_non_empty_string(data, "/model", "model")?;
-            require_array(data, "/messages", "messages")
-        }
     }
 }
 
@@ -1437,13 +1418,6 @@ mod final_validation_tests {
                     "generationConfig":{"candidateCount":1}
                 }),
             ),
-            (
-                UpstreamProtocol::Ollama,
-                json!({
-                    "model": "llama",
-                    "messages": [{"role": "user", "content": "hi"}]
-                }),
-            ),
         ] {
             assert!(
                 validate_final_generation_request(
@@ -1454,7 +1428,6 @@ mod final_validation_tests {
                         UpstreamProtocol::Responses => UpstreamProfileType::Responses,
                         UpstreamProtocol::Anthropic => UpstreamProfileType::Anthropic,
                         UpstreamProtocol::Gemini => UpstreamProfileType::Gemini,
-                        UpstreamProtocol::Ollama => UpstreamProfileType::Ollama,
                     },
                 )
                 .is_ok(),

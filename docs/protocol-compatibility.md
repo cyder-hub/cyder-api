@@ -7,16 +7,15 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 ## Protocol boundaries
 
-- Matrix schema: v5
+- Matrix schema: v6
 - Downstream: OpenAI, Responses, Anthropic, Gemini
-- Upstream: OpenAI, Responses, Anthropic, Gemini, Ollama
-- Ollama is an upstream-only protocol and has no public downstream router.
+- Upstream: OpenAI, Responses, Anthropic, Gemini
 
 ## Downstream error contracts
 
 - Scope: HTTP error envelopes apply before response headers are committed: `true`.
 - After headers are committed, stream/error ownership remains with R3.7, R3.8, R3.15-R3.21.
-- Ollama downstream contract: `absent`; Provider error extension location: `top_level`.
+- Provider error extension location: `top_level`.
 - Every pre-commit error is JSON with `X-Request-ID`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`; Anthropic also returns `request-id`.
 - OpenAI, Responses, and Anthropic 401 responses use `WWW-Authenticate: Bearer`; Gemini does not. `Retry-After` appears only when an exact producer fact exists.
 
@@ -50,7 +49,6 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 | Upstream protocol | Owner |
 | --- | --- |
-| Ollama | `R3.20` |
 
 Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contract, r3-15-same-wire-passthrough, r3-15-minor-loss-runtime, r3-15-four-protocol-stream-failure, r3-15-target-stream-failure.
 
@@ -70,7 +68,6 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | Gemini | Gemini | `standard` | `gemini_api_key` | `base_url` |
 | Vertex | Gemini | `standard` | `vertex_oauth` | `vertex_gemini` |
 | OpenAICompatible | OpenAI | `standard` | `bearer_api_key` | `base_url` |
-| Ollama | Ollama | `standard` | `bearer_api_key` | `base_url` |
 | Anthropic | Anthropic | `standard` | `anthropic_api_key` | `base_url` |
 | Responses | Responses | `standard` | `bearer_api_key` | `base_url` |
 | GeminiOpenAI | OpenAI | `gemini_openai_compatibility` | `bearer_api_key` | `base_url` |
@@ -80,7 +77,7 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | Profile | Base URL requirement | Default Base URL | Customizable | Auth | Chat | Chat field policy | Embeddings | Embeddings field policy | Rerank | Rerank field policy | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenAI | `optional_with_default` | https://api.openai.com/v1 | `true` | `bearer_api_key` | configurable (default enabled) | `official_fields_validated_unknown_extensions_passthrough` | configurable (default enabled) | `official_fields_validated_unknown_extensions_passthrough` | unsupported (default disabled) | `unsupported` | r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-profile-guard |
-| OpenAICompatible | `required` | — | `true` | `bearer_api_key` | configurable (default enabled) | `core_fields_validated_vendor_extensions_passthrough` | configurable (default disabled) | `core_fields_validated_vendor_extensions_passthrough` | configurable (default disabled) | `opaque_envelope_passthrough` | r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-direct |
+| OpenAICompatible | `required` | — | `true` | `bearer_api_key` | configurable (default enabled) | `core_fields_validated_vendor_extensions_passthrough` | configurable (default disabled) | `core_fields_validated_vendor_extensions_passthrough` | configurable (default disabled) | `opaque_envelope_passthrough` | r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-embeddings-direct, r3-16-rerank-direct, r3-20-openai-compatible-chat, r3-20-openai-compatible-stream, r3-20-openai-compatible-embeddings |
 | GeminiOpenAI | `optional_with_default` | https://generativelanguage.googleapis.com/v1beta/openai | `true` | `bearer_api_key` | configurable (default enabled) | `recursive_closed_allowlist` | configurable (default enabled) | `model_input_closed_contract` | unsupported (default disabled) | `unsupported` | r3-16-profile-field-policy, r3-16-profile-source-contract, r3-16-gemini-openai-closed-policy, r3-16-embeddings-direct, r3-16-rerank-profile-guard |
 
 ## Gemini-wire Profile and surface contract
@@ -128,22 +125,18 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | OpenAI | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-body-limit, r3-17-cancellation, r3-17-http-error, r3-17-materializer, r3-17-openai-base, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | OpenAI | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-cancellation, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-openai-base, r3-18-openai-upstream-error, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
 | OpenAI | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-openai-base |
-| OpenAI | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 | Responses | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
 | Responses | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-body-limit, r3-17-cancellation, r3-17-http-error, r3-17-materializer, r3-17-responses-base, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | Responses | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-cancellation, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-responses-base, r3-18-responses-upstream-error, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
 | Responses | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-responses-base |
-| Responses | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 | Anthropic | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
 | Anthropic | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-anthropic-base, r3-17-body-limit, r3-17-cancellation, r3-17-http-error, r3-17-materializer, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | Anthropic | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-anthropic-base, r3-18-anthropic-upstream-error, r3-18-cancellation, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
 | Anthropic | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-anthropic-base |
-| Anthropic | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 | Gemini | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
 | Gemini | Responses | verified | verified | verified | verified | verified | verified | — | r3-17-body-limit, r3-17-cancellation, r3-17-gemini-base, r3-17-http-error, r3-17-materializer, r3-17-stream-eof, r3-17-stream-terminal-error, r3-17-terminal-cost |
 | Gemini | Anthropic | verified | verified | verified | verified | verified | verified | — | r3-18-cancellation, r3-18-gemini-base, r3-18-gemini-upstream-error, r3-18-materializer, r3-18-non-stream-fail-closed, r3-18-stream-eof, r3-18-stream-success-terminal, r3-18-stream-terminal-error |
 | Gemini | Gemini | verified | verified | verified | verified | verified | verified | — | r3-19-gemini-base |
-| Gemini | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.20 | ollama-stream-incomplete, ollama-upstream-incomplete |
 
 ## Generation advanced dimensions
 
@@ -153,28 +146,24 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | OpenAI | Responses | full | controlled_loss | full | full | — | r3-17-openai-multimodal-cell, r3-17-openai-reasoning-cell, r3-17-openai-structured-cell, r3-17-openai-tools-cell, r3-17-reasoning-reject |
 | OpenAI | Anthropic | full | controlled_loss | controlled_loss | controlled_loss | — | r3-18-multimodal-reject, r3-18-openai-multimodal-cell, r3-18-openai-reasoning-cell, r3-18-openai-structured-cell, r3-18-openai-tools-cell, r3-18-reasoning-reject, r3-18-structured-reject |
 | OpenAI | Gemini | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-19-multimodal-reject, r3-19-openai-multimodal-cell, r3-19-openai-reasoning-cell, r3-19-openai-structured-cell, r3-19-openai-tools-cell, r3-19-reasoning-reject, r3-19-structured-reject, r3-19-tools-reject |
-| OpenAI | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 | Responses | OpenAI | controlled_loss | controlled_loss | controlled_loss | full | — | r3-16-multimodal-direct, r3-16-multimodal-reject, r3-16-multimodal-responses-diagnostic, r3-16-reasoning-direct, r3-16-reasoning-responses-diagnostic, r3-16-reasoning-responses-reject, r3-16-structured-direct, r3-16-structured-responses-transform, r3-16-tools-cross-wire-transform, r3-16-tools-direct, r3-16-tools-reject, r3-16-tools-stable-results |
 | Responses | Responses | full | full | full | full | — | r3-17-responses-multimodal-cell, r3-17-responses-reasoning-cell, r3-17-responses-structured-cell, r3-17-responses-tools-cell |
 | Responses | Anthropic | full | controlled_loss | controlled_loss | controlled_loss | — | r3-18-multimodal-reject, r3-18-reasoning-reject, r3-18-responses-multimodal-cell, r3-18-responses-reasoning-cell, r3-18-responses-structured-cell, r3-18-responses-tools-cell, r3-18-structured-reject |
 | Responses | Gemini | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-19-multimodal-reject, r3-19-reasoning-reject, r3-19-responses-multimodal-cell, r3-19-responses-reasoning-cell, r3-19-responses-structured-cell, r3-19-responses-tools-cell, r3-19-structured-reject, r3-19-tools-reject |
-| Responses | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 | Anthropic | OpenAI | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-16-multimodal-anthropic-diagnostic, r3-16-multimodal-direct, r3-16-multimodal-reject, r3-16-reasoning-anthropic-diagnostic, r3-16-reasoning-direct, r3-16-structured-anthropic-diagnostic, r3-16-structured-direct, r3-16-structured-reject, r3-16-tools-cross-wire-transform, r3-16-tools-direct, r3-16-tools-reject, r3-16-tools-stable-results |
 | Anthropic | Responses | full | controlled_loss | full | controlled_loss | — | r3-17-anthropic-multimodal-cell, r3-17-anthropic-reasoning-cell, r3-17-anthropic-structured-cell, r3-17-anthropic-tools-cell, r3-17-reasoning-reject, r3-17-structured-reject |
 | Anthropic | Anthropic | full | full | full | full | — | r3-18-anthropic-multimodal-cell, r3-18-anthropic-reasoning-cell, r3-18-anthropic-structured-cell, r3-18-anthropic-tools-cell |
 | Anthropic | Gemini | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-19-anthropic-multimodal-cell, r3-19-anthropic-reasoning-cell, r3-19-anthropic-structured-cell, r3-19-anthropic-tools-cell, r3-19-multimodal-reject, r3-19-reasoning-reject, r3-19-structured-reject, r3-19-tools-reject |
-| Anthropic | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 | Gemini | OpenAI | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-16-multimodal-direct, r3-16-multimodal-gemini-diagnostic, r3-16-multimodal-reject, r3-16-reasoning-conflict-reject, r3-16-reasoning-direct, r3-16-reasoning-gemini-diagnostic, r3-16-structured-direct, r3-16-structured-gemini-diagnostic, r3-16-structured-reject, r3-16-tools-cross-wire-transform, r3-16-tools-direct, r3-16-tools-reject, r3-16-tools-stable-results |
 | Gemini | Responses | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-17-gemini-multimodal-cell, r3-17-gemini-reasoning-cell, r3-17-gemini-structured-cell, r3-17-gemini-tools-cell, r3-17-multimodal-reject, r3-17-reasoning-reject, r3-17-structured-reject, r3-17-tools-reject |
 | Gemini | Anthropic | controlled_loss | controlled_loss | controlled_loss | controlled_loss | — | r3-18-gemini-multimodal-cell, r3-18-gemini-reasoning-cell, r3-18-gemini-structured-cell, r3-18-gemini-tools-cell, r3-18-multimodal-reject, r3-18-reasoning-reject, r3-18-structured-reject, r3-18-tools-reject |
 | Gemini | Gemini | full | full | full | full | — | r3-19-gemini-multimodal-cell, r3-19-gemini-reasoning-cell, r3-19-gemini-structured-cell, r3-19-gemini-tools-cell |
-| Gemini | Ollama | not_verified | not_verified | not_verified | not_verified | R3.20 | advanced-transform-only |
 
 ## Utility contracts
 
 | Utility | Route suffix | Method | Exposed on | Not exposed on | Execution | Allowed upstreams | Incompatible upstream | Verification | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| models | `/models` | GET | OpenAI, Responses, Anthropic, Gemini | — | local | — | not_applicable | verified | — | router-contract, router-method-contract, r3-11-model-catalog-selector, r3-11-ollama-discovery-boundary, r3-17-models-boundary |
+| models | `/models` | GET | OpenAI, Responses, Anthropic, Gemini | — | local | — | not_applicable | verified | — | router-contract, router-method-contract, r3-11-model-catalog-selector, r3-17-models-boundary |
 | embeddings | `/embeddings` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | verified | — | router-contract, router-method-contract, utility-pre-send-reject, r3-16-embeddings-direct, r3-16-embeddings-reject |
 | rerank | `/rerank` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | verified | — | router-contract, router-method-contract, utility-pre-send-reject, r3-16-rerank-direct, r3-16-rerank-profile-guard |
 | countTokens | `/models/{model}:countTokens` | POST | Gemini | OpenAI, Responses, Anthropic | upstream | Gemini | pre_send_reject | verified | — | r3-19-count-tokens, r3-19-count-tokens-reject, r3-19-route-boundary |
@@ -185,7 +174,7 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | --- | --- | --- | --- |
 | `error-contract-unit` | test | `proxy::error::response::tests::protocol_error_contracts_cover_all_116_proxy_and_8_router_combinations` | Exhaustively pins all 116 ProxyError and 8 Router Rejection protocol envelopes, code paths, headers, and upstream extensions. |
 | `error-contract-golden` | test | `proxy::error_contract_regression::four_downstream_error_contracts_match_golden_fixtures` | Exercises authentic Provider 429 responses through all four real downstream routers with complete protocol bodies and one upstream call. |
-| `error-contract-router` | test | `proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts` | Exercises four-protocol ingress, extractor, utility, 404, 405, CORS, and Ollama boundaries through the real router. |
+| `error-contract-router` | test | `proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts` | Exercises four-protocol ingress, extractor, utility, 404, 405, CORS, and retired-protocol boundaries through the real router. |
 | `response-limit-raw-four-protocol` | test | `proxy::direct_execution_regression::four_public_protocols_use_existing_envelopes_for_non_stream_response_limit` | Exercises raw response hard-limit failures through all four real downstream routers with stable pre-commit envelopes, one request log, and one upstream call. |
 | `response-limit-decoded-four-protocol` | test | `proxy::direct_execution_regression::four_public_protocols_use_existing_envelopes_for_decoded_response_limit` | Exercises gzip decoded-body hard-limit failures through all four real downstream routers without exposing an upstream_error extension. |
 | `response-encoding-four-protocol` | test | `proxy::direct_execution_regression::four_public_protocols_reject_sse_encoding_before_headers` | Exercises unsupported SSE response encoding before header commit through all four protocol adapters, including request identity and lifecycle assertions. |
@@ -198,10 +187,8 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | `direct-call-count` | test | `proxy::direct_execution_regression::four_public_downstream_generation_paths_call_upstream_at_most_once` | Pins each of the four public downstream generation paths to one frozen OpenAI Source and exactly one real Chat Completions request. |
 | `r3-9-primary-source-aggregate` | test | `database::provider::tests::provider_aggregate_reads_fail_closed_for_missing_or_ambiguous_source` | Pins every readable Logical Provider to exactly one active primary Upstream Source and fails closed for zero or multiple Sources. |
 | `r3-9-source-runtime-evidence` | test | `controller::provider_runtime::tests::snapshot_builds_summary_and_filtered_items_from_one_provider_set` | Pins Provider Runtime aggregation to the selected Source identity, Profile, safe endpoint snapshot, and Source-scoped circuit health. |
-| `representative-fixture-scope` | test | `proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols` | Proves that the R3.16 baseline evidence contains exactly four public-downstream-to-OpenAI cells and no downstream Ollama fixture. |
+| `representative-fixture-scope` | test | `proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols` | Proves that the R3.16 baseline evidence contains exactly four public-downstream-to-OpenAI cells. |
 | `reachable-materializers-without-cell-regression` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | OpenAI and Gemini upstream materializers exist, but cells outside the representative suite lack complete direct-execution evidence. |
-| `ollama-upstream-incomplete` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | An Ollama /api/chat materialization path exists, but no complete direct-execution cell proves native behavior; model directories are local configured Models and are not discovered through /api/tags. |
-| `ollama-stream-incomplete` | code | `server/src/proxy/runtime/transport/stream.rs` | The transport does not provide a complete native Ollama NDJSON streaming contract. |
 | `advanced-transform-only` | test | `cargo run -p cyder-api --bin transform_quality_gate -- --quick` | Transform quality evidence exists, but it does not satisfy the router-to-upstream direct-execution bar for advanced dimensions. |
 | `r3-17-fixture-scope` | test | `proxy::direct_execution_regression::responses_target_fixtures_define_four_complete_protocols_and_native_evidence` | Freezes exactly four public-downstream-to-Responses fixtures with complete native request, response, stream, error, usage, and cancellation evidence. |
 | `r3-17-stateless-policy` | test | `proxy::direct_execution_regression::responses_stateful_controls_are_rejected_before_credential_or_upstream_use` | Pins store, previous-response, conversation, and background state controls to payload-safe rejection before Provider credentials and network access. |
@@ -351,16 +338,18 @@ Evidence: r3-15-transform-quality-contract, r3-15-transform-payload-free-contrac
 | `r3-11-source-impact-and-check` | test | `controller::provider::tests::source_impact_http_preview_covers_all_actions_without_side_effects` | Pins bounded DISABLE, DELETE, SET_DEFAULT, and UNSET_DEFAULT impact previews without mutation or Model ID disclosure. |
 | `r3-11-request-log-reason` | test | `proxy::direct_execution_regression::direct_execution_model_default_selection_reason_is_persisted_after_flush` | Pins model-default Source selection reason persistence after request-log flush while retaining one selected Source. |
 | `r3-11-model-catalog-selector` | test | `proxy::models::tests::models_listing_uses_the_protocol_selector_for_source_visibility` | Pins local model directory visibility to the shared protocol Source selector and enabled Source state. |
-| `r3-11-ollama-discovery-boundary` | code | `server/src/proxy/models.rs::get_accessible_models` | The public model directory is built from saved local Model records; no Ollama /api/tags discovery or import route is part of the R3.11 contract. |
 | `r3-12-request-patch-contract` | test | `controller::request_patch::tests::request_patch_openapi_matches_aggregate_routes_and_current_detail_shapes` | Pins Source and Model+Source aggregate Request Patch routes, current DTO shapes, old route negatives, no-store responses, and ownership errors. |
 | `r3-12-request-patch-execution` | test | `proxy::direct_execution_regression::request_patch_query_value_reaches_upstream_but_not_request_log` | Pins the Source-bound Variant through real request materialization and upstream execution while keeping patched values out of the persisted request log. |
 | `r3-12-request-patch-migration` | test | `database::migration_smoke_tests::sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract` | Pins the R3.11-to-R3.12 destructive migration, historical suffix rename, preserved governance/metrics, removed configuration tables, and new Source-bound constraints. |
 | `r3-15-transform-quality-contract` | test | `service::transform::quality::tests::test_transform_contract_summary_covers_failures_outcomes_and_accounting` | Pins eleven production-entry transform outcomes, failure origins, semantic accounting, diagnostic overflow, and Gate closure. |
 | `r3-15-transform-payload-free-contract` | test | `service::transform::quality::tests::test_transform_contract_report_omits_payload_and_safe_summary` | Pins the quality report to payload-free aggregate facts without fixture content, hashes, or per-payload safe summaries. |
 | `r3-15-same-wire-passthrough` | test | `proxy::direct_execution_regression::same_wire_non_stream_observation_failure_preserves_upstream_bytes` | Pins byte-preserving same-wire response passthrough when best-effort observation degrades. |
-| `r3-15-minor-loss-runtime` | test | `proxy::direct_execution_regression::cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata` | Pins cross-wire controlled minor loss, one upstream call, internal-only diagnostics, Request Log success, and resource release. |
+| `r3-15-minor-loss-runtime` | test | `proxy::direct_execution_regression::retained_cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata` | Pins cross-wire controlled minor loss, one upstream call, internal-only diagnostics, Request Log success, and resource release. |
 | `r3-15-four-protocol-stream-failure` | test | `proxy::direct_execution_regression::four_public_protocols_emit_one_native_terminal_on_cross_wire_stream_decode_failure` | Pins one protocol-native terminal after headers for source transform failure across all four public downstream protocols. |
 | `r3-15-target-stream-failure` | test | `proxy::direct_execution_regression::cross_wire_target_stream_rejection_emits_one_native_terminal_and_releases_resources` | Pins target transform rejection after headers to one native terminal, an error Request Log, one upstream call, and released resources. |
+| `r3-20-openai-compatible-chat` | test | `proxy::direct_execution_regression::ollama_openai_compatible_recipe_targets_v1_chat_with_placeholder_bearer` | Proves a regular OPENAI_COMPATIBLE Source reaches /v1/chat/completions once with a placeholder Bearer credential, usage, and Request Log. |
+| `r3-20-openai-compatible-stream` | test | `proxy::direct_execution_regression::ollama_openai_compatible_recipe_streams_v1_chat_once` | Proves the regular OPENAI_COMPATIBLE Source uses the existing OpenAI SSE and [DONE] lifecycle at /v1/chat/completions without a native stream dialect. |
+| `r3-20-openai-compatible-embeddings` | test | `proxy::direct_execution_regression::ollama_openai_compatible_recipe_targets_v1_embeddings_once` | Proves explicitly enabled Embeddings on a regular OPENAI_COMPATIBLE Source reaches /v1/embeddings once and records OpenAI usage. |
 
 ## Status semantics
 

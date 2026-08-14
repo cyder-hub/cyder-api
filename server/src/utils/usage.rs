@@ -152,33 +152,6 @@ pub fn parse_usage_info(
                 None
             }
         }
-        UpstreamProtocol::Ollama => {
-            let prompt_tokens = response_body
-                .get("prompt_eval_count")
-                .and_then(Value::as_i64)
-                .map(|v| v as i32);
-            let completion_tokens = response_body
-                .get("eval_count")
-                .and_then(Value::as_i64)
-                .map(|v| v as i32);
-
-            if prompt_tokens.is_some() || completion_tokens.is_some() {
-                let p_tokens = prompt_tokens.unwrap_or(0);
-                let c_tokens = completion_tokens.unwrap_or(0);
-                Some(UsageInfo {
-                    input_tokens: p_tokens,
-                    output_tokens: c_tokens,
-                    input_image_tokens: 0,
-                    output_image_tokens: 0,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                    reasoning_tokens: 0,
-                    total_tokens: p_tokens + c_tokens,
-                })
-            } else {
-                None
-            }
-        }
     }
 }
 

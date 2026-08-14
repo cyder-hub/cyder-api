@@ -15,8 +15,8 @@ import {
 const sources = [
   {
     id: 20,
-    profile_type: "OLLAMA",
-    base_url: "http://ollama",
+    profile_type: "RESPONSES",
+    base_url: "http://responses",
     use_proxy: false,
     is_enabled: false,
     is_default: false,
@@ -47,7 +47,7 @@ test("source config hydrate hides deleted bindings and keeps explicit defaults",
     {
       source_selection_mode: "EXPLICIT",
       bindings: [
-        { source_id: 20, is_default: true, profile_type: "OLLAMA", is_enabled: false },
+        { source_id: 20, is_default: true, profile_type: "RESPONSES", is_enabled: false },
         { source_id: 30, is_default: false, profile_type: "GEMINI", is_enabled: true },
       ],
       declared_source_count: 2,

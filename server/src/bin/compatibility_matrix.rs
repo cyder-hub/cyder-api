@@ -13,7 +13,7 @@ use cyder_api::{
 };
 use serde::Deserialize;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const SOURCE_RELATIVE_PATH: &str = "docs/protocol-compatibility.yaml";
 const GENERATED_RELATIVE_PATH: &str = "docs/protocol-compatibility.md";
 
@@ -48,14 +48,7 @@ struct DownstreamErrorContracts {
 struct ErrorContractScope {
     before_headers_committed: bool,
     after_headers_committed_owners: Vec<String>,
-    ollama_downstream_contract: ContractPresence,
     upstream_error_location: ExtensionLocation,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ContractPresence {
-    Absent,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -574,7 +567,7 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
         );
     }
     if matrix.upstream_protocols != UpstreamProtocol::ALL {
-        return Err("upstream_protocols must declare the exact five runtime protocols".to_string());
+        return Err("upstream_protocols must declare the exact four runtime protocols".to_string());
     }
 
     let evidence = validate_evidence(&matrix.evidence)?;
@@ -609,7 +602,7 @@ const REQUIRED_TRANSFORM_RUNTIME_EVIDENCE: [(&str, &str); 6] = [
     ),
     (
         "r3-15-minor-loss-runtime",
-        "proxy::direct_execution_regression::cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata",
+        "proxy::direct_execution_regression::retained_cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata",
     ),
     (
         "r3-15-four-protocol-stream-failure",
@@ -1227,7 +1220,7 @@ fn validate_transform_runtime_contract(
 ) -> Result<(), String> {
     if contract != &expected_transform_runtime_contract() {
         return Err(
-            "transform_runtime_contract must pin the R3.15 passthrough, fail-closed, loss, header-boundary, internal-only diagnostic, R4.6 persistence, and R3.16-R3.21 owner contract"
+            "transform_runtime_contract must pin the R3.15 passthrough, fail-closed, loss, header-boundary, internal-only diagnostic, R4.6 persistence, and R3.21 final-owner contract"
                 .to_string(),
         );
     }
@@ -1283,10 +1276,7 @@ fn expected_transform_runtime_contract() -> TransformRuntimeContract {
             enabled: false,
             owner: "R4.6".to_string(),
         },
-        advanced_cell_owners: vec![TransformAdvancedCellOwner {
-            upstream_protocol: UpstreamProtocol::Ollama,
-            owner: "R3.20".to_string(),
-        }],
+        advanced_cell_owners: Vec::new(),
         final_matrix_owner: "R3.21".to_string(),
         evidence: REQUIRED_TRANSFORM_RUNTIME_EVIDENCE
             .iter()
@@ -1337,7 +1327,7 @@ fn validate_downstream_error_contracts(
     let expected = expected_downstream_error_contracts();
     if contracts.scope != expected.scope {
         return Err(
-            "downstream error scope must pin pre-commit handling, stream owners, absent Ollama downstream, and top-level upstream_error"
+            "downstream error scope must pin pre-commit handling, stream owners, and top-level upstream_error"
                 .to_string(),
         );
     }
@@ -1405,7 +1395,6 @@ fn expected_downstream_error_contracts() -> DownstreamErrorContracts {
                 "R3.8".to_string(),
                 "R3.15-R3.21".to_string(),
             ],
-            ollama_downstream_contract: ContractPresence::Absent,
             upstream_error_location: ExtensionLocation::TopLevel,
         },
         router_rejections: vec![
@@ -1662,6 +1651,9 @@ fn expected_openai_wire_profiles() -> Vec<OpenAiWireProfileContract> {
                 "r3-16-profile-source-contract".to_string(),
                 "r3-16-embeddings-direct".to_string(),
                 "r3-16-rerank-direct".to_string(),
+                "r3-20-openai-compatible-chat".to_string(),
+                "r3-20-openai-compatible-stream".to_string(),
+                "r3-20-openai-compatible-embeddings".to_string(),
             ],
         },
         OpenAiWireProfileContract {
@@ -1877,7 +1869,7 @@ fn validate_generation_cells(
     let expected_count = DownstreamProtocol::ALL.len() * UpstreamProtocol::ALL.len();
     if cells.len() != expected_count {
         return Err(format!(
-            "generation_cells must contain exactly 4x5={expected_count} entries, found {}",
+            "generation_cells must contain exactly 4x4={expected_count} entries, found {}",
             cells.len()
         ));
     }
@@ -2425,7 +2417,6 @@ fn generation_owner(upstream: UpstreamProtocol) -> &'static str {
         UpstreamProtocol::Responses => "R3.17",
         UpstreamProtocol::Anthropic => "R3.18",
         UpstreamProtocol::Gemini => "R3.19",
-        UpstreamProtocol::Ollama => "R3.20",
     }
 }
 
@@ -2435,7 +2426,6 @@ fn utility_owner(utility: &UtilityContract) -> &'static str {
         Some(UpstreamProtocol::Responses) => "R3.17",
         Some(UpstreamProtocol::Anthropic) => "R3.18",
         Some(UpstreamProtocol::Gemini) => "R3.19",
-        Some(UpstreamProtocol::Ollama) => "R3.20",
         None => "R3.21",
     }
 }
@@ -2676,11 +2666,6 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
         join_upstream(&matrix.upstream_protocols)
     )
     .unwrap();
-    writeln!(
-        output,
-        "- Ollama is an upstream-only protocol and has no public downstream router."
-    )
-    .unwrap();
 
     let error_contracts = &matrix.downstream_error_contracts;
     writeln!(output, "\n## Downstream error contracts\n").unwrap();
@@ -2701,8 +2686,7 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
     .unwrap();
     writeln!(
         output,
-        "- Ollama downstream contract: `{}`; Provider error extension location: `{}`.",
-        contract_presence_label(error_contracts.scope.ollama_downstream_contract),
+        "- Provider error extension location: `{}`.",
         extension_location_label(error_contracts.scope.upstream_error_location)
     )
     .unwrap();
@@ -3215,7 +3199,6 @@ const fn upstream_label(value: UpstreamProtocol) -> &'static str {
         UpstreamProtocol::Responses => "Responses",
         UpstreamProtocol::Anthropic => "Anthropic",
         UpstreamProtocol::Gemini => "Gemini",
-        UpstreamProtocol::Ollama => "Ollama",
     }
 }
 
@@ -3225,7 +3208,6 @@ const fn profile_label(value: UpstreamProfileType) -> &'static str {
         UpstreamProfileType::Gemini => "Gemini",
         UpstreamProfileType::Vertex => "Vertex",
         UpstreamProfileType::OpenaiCompatible => "OpenAICompatible",
-        UpstreamProfileType::Ollama => "Ollama",
         UpstreamProfileType::Anthropic => "Anthropic",
         UpstreamProfileType::Responses => "Responses",
         UpstreamProfileType::GeminiOpenai => "GeminiOpenAI",
@@ -3270,12 +3252,6 @@ const fn evidence_kind_label(value: EvidenceKind) -> &'static str {
     match value {
         EvidenceKind::Test => "test",
         EvidenceKind::Code => "code",
-    }
-}
-
-const fn contract_presence_label(value: ContractPresence) -> &'static str {
-    match value {
-        ContractPresence::Absent => "absent",
     }
 }
 
@@ -3345,13 +3321,35 @@ mod tests {
     }
 
     #[test]
-    fn ollama_downstream_error_protocol_is_rejected_during_yaml_parse() {
-        let invalid = CANONICAL_SOURCE.replacen(
-            "    - downstream_protocol: GEMINI\n      envelope: google_rpc_error",
-            "    - downstream_protocol: OLLAMA\n      envelope: google_rpc_error",
+    fn retired_ollama_values_and_fifth_upstream_are_rejected() {
+        let invalid_upstream = CANONICAL_SOURCE.replacen(
+            "  - GEMINI\n\ndownstream_error_contracts:",
+            "  - GEMINI\n  - OLLAMA\n\ndownstream_error_contracts:",
             1,
         );
-        assert!(serde_yaml::from_str::<CompatibilityMatrix>(&invalid).is_err());
+        assert!(serde_yaml::from_str::<CompatibilityMatrix>(&invalid_upstream).is_err());
+
+        let invalid_profile = CANONICAL_SOURCE.replacen(
+            "  - profile_type: OPENAI\n    upstream_protocol: OPENAI",
+            "  - profile_type: OLLAMA\n    upstream_protocol: OPENAI",
+            1,
+        );
+        assert!(serde_yaml::from_str::<CompatibilityMatrix>(&invalid_profile).is_err());
+
+        let invalid_cell = CANONICAL_SOURCE.replacen(
+            "  - downstream: OPENAI\n    upstream: OPENAI",
+            "  - downstream: OPENAI\n    upstream: OLLAMA",
+            1,
+        );
+        assert!(serde_yaml::from_str::<CompatibilityMatrix>(&invalid_cell).is_err());
+
+        let mut matrix = canonical_matrix();
+        matrix.upstream_protocols.push(UpstreamProtocol::Openai);
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("exact four runtime protocols")
+        );
     }
 
     #[test]
@@ -3444,7 +3442,7 @@ mod tests {
     fn missing_generation_cell_is_rejected() {
         let mut matrix = canonical_matrix();
         matrix.generation_cells.pop();
-        assert!(validate_matrix(&matrix).unwrap_err().contains("4x5=20"));
+        assert!(validate_matrix(&matrix).unwrap_err().contains("4x4=16"));
     }
 
     #[test]
@@ -3480,13 +3478,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_owner_is_rejected() {
+    fn retired_owner_is_rejected_and_final_owner_is_preserved() {
         let mut matrix = canonical_matrix();
-        matrix.generation_cells[4].advanced.tools.owner = None;
+        matrix.generation_cells[0].base.non_stream_text.owner = Some("R3.20".to_string());
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.20")
+                .contains("complete and must not have an owner")
+        );
+
+        let matrix = canonical_matrix();
+        assert!(
+            matrix
+                .transform_runtime_contract
+                .advanced_cell_owners
+                .is_empty()
+        );
+        assert_eq!(
+            matrix.transform_runtime_contract.final_matrix_owner,
+            "R3.21"
         );
     }
 
@@ -3643,7 +3653,7 @@ mod tests {
         );
 
         let mut matrix = canonical_matrix();
-        matrix.generation_cells[16].advanced.tools.evidence.pop();
+        matrix.generation_cells[13].advanced.tools.evidence.pop();
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
@@ -3692,7 +3702,7 @@ mod tests {
         );
 
         let mut matrix = canonical_matrix();
-        matrix.generation_cells[17].advanced.tools.evidence.pop();
+        matrix.generation_cells[14].advanced.tools.evidence.pop();
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
@@ -3837,16 +3847,13 @@ mod tests {
     }
 
     #[test]
-    fn protocol_and_advanced_owners_follow_r3_16_to_r3_20() {
+    fn generation_cells_have_no_retired_owner_and_utility_completion_has_no_owner() {
         let mut matrix = canonical_matrix();
         matrix.generation_cells[4].base.non_stream_text.owner = Some("R3.20".to_string());
-        assert!(validate_matrix(&matrix).is_ok());
-
-        matrix.generation_cells[4].advanced.tools.owner = Some("R3.17".to_string());
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.20")
+                .contains("complete and must not have an owner")
         );
 
         let mut matrix = canonical_matrix();
@@ -3860,10 +3867,10 @@ mod tests {
 
     #[test]
     fn schema_v4_and_provider_profile_fields_are_not_accepted() {
-        let v4 = CANONICAL_SOURCE.replacen("schema_version: 5", "schema_version: 4", 1);
-        let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v4)
+        let v5 = CANONICAL_SOURCE.replacen("schema_version: 6", "schema_version: 5", 1);
+        let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v5)
             .expect("schema number should parse before validation");
-        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 5"));
+        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 6"));
 
         let legacy = CANONICAL_SOURCE
             .replacen("upstream_source_profiles:", "provider_profiles:", 1)

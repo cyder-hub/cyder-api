@@ -834,7 +834,7 @@ impl<'a> StreamTransformContext<'a> {
         match self.upstream_protocol {
             UpstreamProtocol::Gemini | UpstreamProtocol::Responses => UsageMergeStrategy::Replace,
             UpstreamProtocol::Anthropic => UsageMergeStrategy::AnthropicFields,
-            UpstreamProtocol::Openai | UpstreamProtocol::Ollama => UsageMergeStrategy::FinalOnly,
+            UpstreamProtocol::Openai => UsageMergeStrategy::FinalOnly,
         }
     }
 

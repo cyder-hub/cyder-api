@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use chrono::DateTime;
 use serde_json::Value;
 
 use super::capability::TransformValueKind;
@@ -1431,85 +1430,6 @@ fn validate_gemini_stream_frame(
     Ok(())
 }
 
-fn validate_ollama_stream_frame(value: &Value) -> Result<(), SourceStreamSemanticError> {
-    require_object(value, TransformSemanticUnit::StreamFrame)?;
-    require_non_empty_string(value, "model", TransformSemanticUnit::Model)?;
-    let created_at =
-        require_non_empty_string(value, "created_at", TransformSemanticUnit::Lifecycle)?;
-    DateTime::parse_from_rfc3339(created_at)
-        .map_err(|_| SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle))?;
-    let done = value
-        .get("done")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| SourceStreamSemanticError::invalid(TransformSemanticUnit::Lifecycle))?;
-    if let Some(message) = value.get("message").filter(|value| !value.is_null()) {
-        require_object(message, TransformSemanticUnit::StreamFrame)?;
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            return Err(SourceStreamSemanticError::unknown(
-                TransformSemanticUnit::Role,
-            ));
-        }
-        if message.get("content").and_then(Value::as_str).is_none() {
-            return Err(SourceStreamSemanticError::invalid(
-                TransformSemanticUnit::Text,
-            ));
-        }
-        if message
-            .get("images")
-            .and_then(Value::as_array)
-            .is_some_and(|images| !images.is_empty())
-            || message
-                .get("thinking")
-                .is_some_and(|value| !value.is_null())
-            || message
-                .get("tool_calls")
-                .is_some_and(|value| !value.is_null())
-        {
-            return Err(SourceStreamSemanticError::unknown(
-                TransformSemanticUnit::StreamFrame,
-            ));
-        }
-    }
-    let done_reason = value.get("done_reason").and_then(Value::as_str);
-    if done {
-        if done_reason.is_none() {
-            record_source_synthesis(
-                TransformSemanticUnit::Lifecycle,
-                TransformReasonCode::SyntheticEnvelope,
-            );
-        } else if !matches!(done_reason, Some("stop" | "length")) {
-            return Err(SourceStreamSemanticError::unknown(
-                TransformSemanticUnit::Lifecycle,
-            ));
-        }
-    } else if done_reason.is_some() {
-        return Err(SourceStreamSemanticError::invalid(
-            TransformSemanticUnit::Lifecycle,
-        ));
-    }
-    let prompt = value
-        .get("prompt_eval_count")
-        .filter(|value| !value.is_null());
-    let completion = value.get("eval_count").filter(|value| !value.is_null());
-    if prompt.is_some() != completion.is_some() || (!done && prompt.is_some()) {
-        return Err(SourceStreamSemanticError::invalid(
-            TransformSemanticUnit::Usage,
-        ));
-    }
-    if let Some(prompt) = prompt {
-        if prompt.as_u64().is_none() || completion.and_then(Value::as_u64).is_none() {
-            return Err(SourceStreamSemanticError::invalid(
-                TransformSemanticUnit::Usage,
-            ));
-        }
-    }
-    record_source_synthesis(
-        TransformSemanticUnit::Lifecycle,
-        TransformReasonCode::SyntheticCorrelationId,
-    );
-    Ok(())
-}
-
 pub(in crate::service::transform) fn validate_openai_stream_chunk(
     chunk: &openai::OpenAiChunkResponse,
     context: &mut StreamTransformContext<'_>,
@@ -2617,7 +2537,6 @@ pub(in crate::service::transform) fn validate_upstream_stream_frame(
         UpstreamProtocol::Responses => validate_responses_stream_frame(&value, context),
         UpstreamProtocol::Anthropic => validate_anthropic_stream_frame(&value, context),
         UpstreamProtocol::Gemini => validate_gemini_stream_frame(&value, context),
-        UpstreamProtocol::Ollama => validate_ollama_stream_frame(&value),
     }
 }
 
@@ -3278,10 +3197,6 @@ mod tests {
                 UpstreamProtocol::Gemini,
                 json!({"candidates":[{"index":0,"content":{"role":"model","parts":[{"futurePart":{}}]}}]}),
             ),
-            (
-                UpstreamProtocol::Ollama,
-                json!({"model":"m","created_at":"2026-08-11T00:00:00Z","message":{"role":"assistant","content":"","thinking":"secret"},"done":false}),
-            ),
         ];
         for (protocol, value) in cases {
             assert_eq!(
@@ -3394,18 +3309,6 @@ mod tests {
                     ]
                 }),
                 TransformSemanticUnit::Lifecycle,
-            ),
-            (
-                UpstreamProtocol::Ollama,
-                json!({
-                    "model":"m",
-                    "created_at":"2026-08-11T00:00:00Z",
-                    "message":{"role":"assistant","content":""},
-                    "done":true,
-                    "done_reason":"stop",
-                    "prompt_eval_count":1
-                }),
-                TransformSemanticUnit::Usage,
             ),
         ];
         for (protocol, value, semantic_unit) in cases {

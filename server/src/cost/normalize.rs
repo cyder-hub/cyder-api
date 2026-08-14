@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_ollama_usage_as_text_only() {
+    fn normalizes_usage_as_text_only() {
         let usage = UnifiedUsage {
             input_tokens: 9,
             output_tokens: 4,

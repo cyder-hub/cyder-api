@@ -167,19 +167,18 @@ fn build_contract_cases() -> Vec<TransformContractCaseReport> {
                 success: false,
                 origin: Some(TransformFailureOrigin::TargetCapability),
                 phase: TransformPhase::RequestEncode,
-                semantic_unit: TransformSemanticUnit::ToolDefinitions,
+                semantic_unit: TransformSemanticUnit::ImageUrl,
                 outcome: TransformOutcomeKind::ExplicitReject,
                 action: TransformAction::Reject,
-                reason_code: TransformReasonCode::UnsupportedToolDefinitions,
+                reason_code: TransformReasonCode::UnsupportedContent,
             },
             ContractExecution::from_result(transform_request_data(
                 json!({
                     "model":"gpt-4.1",
-                    "messages":[{"role":"user","content":"hello"}],
-                    "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]
+                    "messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/private.png"}}]}]
                 }),
                 DownstreamProtocol::Openai,
-                UpstreamProtocol::Ollama,
+                UpstreamProtocol::Gemini,
                 false,
             )),
         ),

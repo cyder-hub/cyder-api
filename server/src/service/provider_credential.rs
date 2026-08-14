@@ -337,12 +337,6 @@ mod tests {
                 "Bearer provider-secret",
             ),
             (
-                UpstreamProfileType::Ollama,
-                UpstreamProtocol::Ollama,
-                "authorization",
-                "Bearer provider-secret",
-            ),
-            (
                 UpstreamProfileType::Gemini,
                 UpstreamProtocol::Gemini,
                 "x-goog-api-key",

@@ -14,19 +14,17 @@ pub enum UpstreamProfileType {
     OpenaiCompatible,
     Gemini,
     Vertex,
-    Ollama,
     Anthropic,
     Responses,
     GeminiOpenai,
 }
 
 impl UpstreamProfileType {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Openai,
         Self::OpenaiCompatible,
         Self::Gemini,
         Self::Vertex,
-        Self::Ollama,
         Self::Anthropic,
         Self::Responses,
         Self::GeminiOpenai,
@@ -83,17 +81,10 @@ pub enum UpstreamProtocol {
     Responses,
     Anthropic,
     Gemini,
-    Ollama,
 }
 
 impl UpstreamProtocol {
-    pub const ALL: [Self; 5] = [
-        Self::Openai,
-        Self::Responses,
-        Self::Anthropic,
-        Self::Gemini,
-        Self::Ollama,
-    ];
+    pub const ALL: [Self; 4] = [Self::Openai, Self::Responses, Self::Anthropic, Self::Gemini];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
@@ -187,4 +178,21 @@ pub enum RequestStatus {
     Success,
     Error,
     Cancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UpstreamProfileType, UpstreamProtocol};
+
+    #[test]
+    fn upstream_domains_expose_only_the_retained_protocols() {
+        assert_eq!(UpstreamProfileType::ALL.len(), 7);
+        assert_eq!(UpstreamProtocol::ALL.len(), 4);
+    }
+
+    #[test]
+    fn serde_rejects_retired_ollama_values() {
+        assert!(serde_json::from_str::<UpstreamProfileType>("\"OLLAMA\"").is_err());
+        assert!(serde_json::from_str::<UpstreamProtocol>("\"OLLAMA\"").is_err());
+    }
 }

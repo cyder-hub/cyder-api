@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::StreamTransformer;
-use crate::service::transform::providers::{anthropic, gemini, ollama, openai, responses};
+use crate::service::transform::providers::{anthropic, gemini, openai, responses};
 use crate::service::transform::unified::{
     UnifiedChunkResponse, UnifiedContentPartDelta, UnifiedStreamEvent,
 };
@@ -318,16 +318,6 @@ pub(super) fn source_fixture_to_semantics(
                 .map(|event| {
                     let parsed: openai::OpenAiChunkResponse =
                         serde_json::from_str(&event.data).expect("valid openai fixture");
-                    UnifiedChunkResponse::from(parsed)
-                }),
-        ),
-        UpstreamProtocol::Ollama => semantic_snapshot_from_unified_chunks(
-            fixture
-                .iter()
-                .filter(|event| event.event.is_none())
-                .map(|event| {
-                    let parsed: ollama::OllamaChunkResponse =
-                        serde_json::from_str(&event.data).expect("valid ollama fixture");
                     UnifiedChunkResponse::from(parsed)
                 }),
         ),

@@ -509,7 +509,7 @@ mod tests {
                 "https://api.example.com/v1",
             ),
             ("http://127.0.0.1:11434/", "http://127.0.0.1:11434"),
-            ("http://ollama:11434/api/", "http://ollama:11434/api"),
+            ("http://api.example.com/api/", "http://api.example.com/api"),
             ("http://[::1]:11434/v1/", "http://[::1]:11434/v1"),
         ];
 

@@ -68,7 +68,7 @@ use crate::{
         admin::provider::{BootstrapProviderCommand, ReplaceProviderApiKeyInput},
         app_state::{AppState, create_test_app_state},
         infra::AppInfra,
-        transform::{StreamTransformer, TransformOutcomeKind},
+        transform::{StreamTransformer, TransformOutcomeKind, TransformSemanticUnit},
         upstream_profile::upstream_runtime_profile,
         vertex::{cache_vertex_token_for_test, vertex_token_is_cached_for_test},
     },
@@ -400,6 +400,19 @@ pub(super) fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
             (*name, fixture)
         })
         .collect()
+}
+
+fn ollama_openai_compatible_fixture() -> DirectExecutionFixture {
+    let (_, mut fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("OpenAI direct execution fixture");
+    fixture.profile_type = UpstreamProfileType::OpenaiCompatible;
+    fixture.upstream_headers.insert(
+        "authorization".to_string(),
+        "Bearer ollama-local".to_string(),
+    );
+    fixture
 }
 
 fn openai_target_fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
@@ -856,18 +869,6 @@ fn generation_evidence_fixtures() -> Vec<(&'static str, DirectExecutionFixture)>
         .expect("native Gemini direct execution fixture");
     fixtures.push(("gemini-native", native_gemini));
     fixtures
-}
-
-fn ollama_non_stream_response() -> Value {
-    json!({
-        "model": UPSTREAM_MODEL,
-        "created_at": "2026-08-11T00:00:00Z",
-        "message": {"role": "assistant", "content": "baseline pong"},
-        "done": true,
-        "done_reason": "stop",
-        "prompt_eval_count": 11,
-        "eval_count": 7
-    })
 }
 
 fn validate_fixture(name: &str, fixture: &DirectExecutionFixture) {
@@ -1519,7 +1520,6 @@ impl RouterFixture {
             UpstreamProfileType::Vertex => format!(
                 "{base_url}/v1/projects/project-fixture/locations/us-central1/publishers/google/models"
             ),
-            UpstreamProfileType::Ollama => base_url.to_string(),
             _ => format!("{base_url}/v1"),
         };
         let now = chrono::Utc::now().timestamp_millis();
@@ -2099,6 +2099,26 @@ impl RouterFixture {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn replace_provider_secret(&self, secret: &str) {
+        self.app_state
+            .admin
+            .provider
+            .replace_provider_api_key(
+                self.provider_id,
+                self.provider_api_key_id,
+                ReplaceProviderApiKeyInput {
+                    api_key: secret.to_string(),
+                },
+            )
+            .await
+            .expect("recipe Provider credential should be replaced");
+        self.app_state
+            .catalog
+            .invalidate_provider(self.provider_id, Some(&self.provider_key))
+            .await
+            .expect("recipe Provider credential replacement should invalidate catalog");
     }
 
     async fn assert_no_api_key_usage_charge(&self, case_name: &str) {
@@ -12928,115 +12948,6 @@ fn gemini_openai_profile_revalidates_patch_output_before_credentials() {
 }
 
 #[test]
-fn major_capability_rejection_is_zero_call_and_precedes_credential_use() {
-    let (name, fixture) = fixtures()
-        .into_iter()
-        .find(|(name, _)| *name == "openai")
-        .expect("openai fixture");
-    run_case(name, move |context| async move {
-        let upstream = TestUpstream::spawn(ScriptedReply::Json {
-            status: StatusCode::OK,
-            body: fixture.non_stream.upstream_response.clone(),
-        })
-        .await;
-        let router = RouterFixture::new_deepseek(context, &fixture, &upstream.base_url).await;
-        let ollama_source = UpstreamSource::create(&NewUpstreamSource {
-            id: ID_GENERATOR.generate_id(),
-            provider_id: router.provider_id,
-            profile_type: UpstreamProfileType::Ollama,
-            base_url: upstream.base_url.clone(),
-            use_proxy: false,
-            is_enabled: true,
-            is_default: false,
-            created_at: 2,
-            updated_at: 2,
-            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
-        })
-        .expect("Ollama default Source should be created");
-        let mutation_time = chrono::Utc::now().timestamp_millis();
-        UpstreamSource::update(
-            router.source_id,
-            router.provider_id,
-            &UpdateUpstreamSourceData {
-                base_url: None,
-                use_proxy: None,
-                is_enabled: Some(false),
-                is_default: Some(false),
-                updated_at: mutation_time,
-                ..UpdateUpstreamSourceData::test_defaults()
-            },
-        )
-        .expect("exact OpenAI Source should be disabled");
-        UpstreamSource::update(
-            ollama_source.id,
-            router.provider_id,
-            &UpdateUpstreamSourceData {
-                base_url: None,
-                use_proxy: None,
-                is_enabled: Some(true),
-                is_default: Some(true),
-                updated_at: mutation_time,
-                ..UpdateUpstreamSourceData::test_defaults()
-            },
-        )
-        .expect("Ollama Source should become default");
-        router
-            .app_state
-            .catalog
-            .invalidate_provider(router.provider_id, Some(&router.provider_key))
-            .await
-            .expect("Source mutation should invalidate catalog");
-        let persisted_sink = router.install_recording_persisted_sink();
-        router
-            .app_state
-            .secret_encryption
-            .reset_decrypt_call_count();
-        let mut body = fixture.request.downstream.clone();
-        body.as_object_mut().expect("request object").insert(
-            "tools".to_string(),
-            json!([{
-                "type": "function",
-                "function": {"name": "lookup", "parameters": {"type": "object"}}
-            }]),
-        );
-
-        let response = router.send(&fixture, false, &body).await;
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("capability rejection response should read");
-        let response_body: Value =
-            serde_json::from_slice(&response_body).expect("response should be JSON");
-        assert_eq!(
-            downstream_error_code(&response_body, fixture.protocol),
-            Some("unsupported_capability_error")
-        );
-        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
-        assert!(upstream.requests().await.is_empty());
-        let log = router
-            .wait_for_log_for_source(ollama_source.id, RequestStatus::Error)
-            .await;
-        assert_eq!(
-            log.final_error_code.as_deref(),
-            Some("unsupported_capability_error")
-        );
-        assert_eq!(
-            log.source_selection_reason.as_deref(),
-            Some("provider_default_transform")
-        );
-        assert_single_persisted_terminal_fact(
-            &persisted_sink,
-            ExecutionStage::Capability,
-            ResponseVisibility::NotVisible,
-        )
-        .await;
-        router.wait_for_api_key_lease_release().await;
-        upstream.shutdown().await;
-    });
-}
-
-#[test]
 fn model_resolution_preserves_parse_and_capability_error_codes() {
     let (name, fixture) = fixtures()
         .into_iter()
@@ -13204,50 +13115,66 @@ fn cross_wire_non_stream_decode_failure_returns_502_without_provider_body() {
 }
 
 #[test]
-fn cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata() {
+fn retained_cross_wire_minor_loss_succeeds_once_and_drops_only_audited_metadata() {
     let (name, fixture) = fixtures()
         .into_iter()
-        .find(|(name, _)| *name == "openai")
-        .expect("openai fixture");
+        .find(|(name, _)| *name == "anthropic")
+        .expect("anthropic fixture");
     run_case(name, move |context| async move {
         const PRIVATE_MARKER: &str = "minor-loss-private-operator-tag";
         let upstream = TestUpstream::spawn(ScriptedReply::Json {
             status: StatusCode::OK,
-            body: ollama_non_stream_response(),
+            body: fixture.non_stream.upstream_response.clone(),
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
-        let source_id = router
-            .replace_default_source_profile(&upstream.base_url, UpstreamProfileType::Ollama)
-            .await;
         let persisted_sink = router.install_recording_persisted_sink();
         let mut request = fixture.request.downstream.clone();
         request
             .as_object_mut()
-            .expect("OpenAI request fixture must be an object")
-            .insert("user".to_string(), json!(PRIVATE_MARKER));
+            .expect("Anthropic request fixture must be an object")
+            .insert("metadata".to_string(), json!({"user_id": PRIVATE_MARKER}));
+        let transformed = crate::service::transform::transform_request_data(
+            request.clone(),
+            fixture.protocol,
+            UpstreamProtocol::Openai,
+            false,
+        )
+        .expect("Anthropic metadata should be an explicit minor drop for OpenAI");
+        assert!(transformed.summary.facts.iter().any(|fact| {
+            fact.outcome == TransformOutcomeKind::ControlledLossMinor
+                && fact.semantic_unit == TransformSemanticUnit::Metadata
+                && fact.safe_summary.is_none()
+        }));
 
         let response = router.send(&fixture, false, &request).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_no_public_transform_diagnostics(&response);
+        let request_id = assert_downstream_request_identity(&response);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("minor-loss response should be readable");
         assert_payload_free_transform_bytes(&body, PRIVATE_MARKER);
         let captured = upstream.requests().await;
-        assert_eq!(captured.len(), 1, "minor loss must not retry or fall back");
-        assert_eq!(captured[0].path, "/api/chat");
+        assert_upstream(
+            "retained-cross-wire-minor-loss",
+            &fixture,
+            &captured,
+            &fixture.request.upstream_path,
+            fixture.request.upstream_query.as_deref(),
+            &fixture.request.upstream,
+            &router.requested_model(),
+            &request_id,
+        );
         let upstream_body: Value = serde_json::from_slice(&captured[0].body)
-            .expect("Ollama upstream request should be JSON");
-        assert!(upstream_body.get("user").is_none());
+            .expect("OpenAI upstream request should be JSON");
+        assert!(upstream_body.get("metadata").is_none());
         assert!(
             !String::from_utf8_lossy(&captured[0].body).contains(PRIVATE_MARKER),
             "the audited metadata field must be dropped before upstream send"
         );
-        let log = router
-            .wait_for_log_for_source(source_id, RequestStatus::Success)
-            .await;
+        let log = router.wait_for_log(RequestStatus::Success).await;
         assert_eq!(
             log.source_selection_reason.as_deref(),
             Some("provider_default_transform")
@@ -13978,10 +13905,10 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
     for (name, fixture) in fixtures() {
         run_case(name, move |context| async move {
             let alternate_profile = match fixture.protocol {
+                DownstreamProtocol::Openai => UpstreamProfileType::Responses,
+                DownstreamProtocol::Responses => UpstreamProfileType::Anthropic,
+                DownstreamProtocol::Anthropic => UpstreamProfileType::Responses,
                 DownstreamProtocol::Gemini => UpstreamProfileType::Openai,
-                DownstreamProtocol::Openai
-                | DownstreamProtocol::Responses
-                | DownstreamProtocol::Anthropic => UpstreamProfileType::Ollama,
             };
             let (alternate_path, alternate_response) = match alternate_profile {
                 UpstreamProfileType::Openai => (
@@ -13992,10 +13919,15 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                         .map(|(_, fixture)| fixture.non_stream.upstream_response)
                         .expect("OpenAI response fixture"),
                 ),
-                UpstreamProfileType::Ollama => {
-                    ("/api/chat".to_string(), ollama_non_stream_response())
-                }
-                _ => unreachable!("the DeepSeek regression uses OpenAI/Ollama alternates"),
+                UpstreamProfileType::Responses => (
+                    "/v1/responses".to_string(),
+                    responses_target_golden().non_stream_response,
+                ),
+                UpstreamProfileType::Anthropic => (
+                    "/v1/messages".to_string(),
+                    anthropic_target_golden().non_stream_response,
+                ),
+                _ => unreachable!("the DeepSeek regression uses four-wire alternates"),
             };
             let upstream = TestUpstream::spawn(ScriptedReply::JsonByPath {
                 status: StatusCode::OK,
@@ -14005,9 +13937,12 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
             .await;
             let router = RouterFixture::new_deepseek(context, &fixture, &upstream.base_url).await;
             let alternate_endpoint = match alternate_profile {
-                UpstreamProfileType::Openai => format!("{}/v1", upstream.base_url),
-                UpstreamProfileType::Ollama => upstream.base_url.clone(),
-                _ => unreachable!("the DeepSeek regression uses OpenAI/Ollama alternates"),
+                UpstreamProfileType::Openai
+                | UpstreamProfileType::Responses
+                | UpstreamProfileType::Anthropic => {
+                    format!("{}/v1", upstream.base_url)
+                }
+                _ => unreachable!("the DeepSeek regression uses four-wire alternates"),
             };
             let alternate_source = UpstreamSource::create(&NewUpstreamSource {
                 id: ID_GENERATOR.generate_id(),
@@ -14107,8 +14042,11 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                 UpstreamProfileType::Openai => {
                     assert_eq!(requests[1].path, "/v1/chat/completions", "{name}");
                 }
-                UpstreamProfileType::Ollama => {
-                    assert_eq!(requests[1].path, "/api/chat", "{name}");
+                UpstreamProfileType::Responses => {
+                    assert_eq!(requests[1].path, "/v1/responses", "{name}");
+                }
+                UpstreamProfileType::Anthropic => {
+                    assert_eq!(requests[1].path, "/v1/messages", "{name}");
                 }
                 _ => unreachable!(),
             }
@@ -14181,9 +14119,13 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
         .find(|(name, _)| *name == "openai")
         .expect("openai fixture");
     run_case(name, move |context| async move {
-        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+        let upstream = TestUpstream::spawn(ScriptedReply::JsonByPath {
             status: StatusCode::OK,
-            body: fixture.non_stream.upstream_response.clone(),
+            default_body: fixture.non_stream.upstream_response.clone(),
+            path_bodies: BTreeMap::from([(
+                "/v1/responses".to_string(),
+                responses_target_golden().non_stream_response,
+            )]),
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
@@ -14216,14 +14158,14 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
         let default_source = UpstreamSource::create(&NewUpstreamSource {
             id: ID_GENERATOR.generate_id(),
             provider_id: router.provider_id,
-            profile_type: UpstreamProfileType::Ollama,
-            base_url: upstream.base_url.clone(),
+            profile_type: UpstreamProfileType::Responses,
+            base_url: format!("{}/v1", upstream.base_url),
             use_proxy: false,
             is_enabled: true,
             is_default: true,
             created_at: mutation_time,
             updated_at: mutation_time,
-            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
         })
         .expect("default fallback Source should be created");
         router
@@ -14245,7 +14187,7 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
             2,
             "default fallback should still issue exactly one request"
         );
-        assert_eq!(requests[1].path, "/api/chat");
+        assert_eq!(requests[1].path, "/v1/responses");
         assert_eq!(
             requests[1]
                 .headers
@@ -14300,14 +14242,14 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
         let alternate_source = UpstreamSource::create(&NewUpstreamSource {
             id: ID_GENERATOR.generate_id(),
             provider_id: router.provider_id,
-            profile_type: UpstreamProfileType::Ollama,
-            base_url: upstream.base_url.clone(),
+            profile_type: UpstreamProfileType::Responses,
+            base_url: "not-a-url".to_string(),
             use_proxy: false,
             is_enabled: true,
             is_default: false,
             created_at: mutation_time,
             updated_at: mutation_time,
-            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
         })
         .expect("explicit-scope alternate Source should be created");
 
@@ -14426,21 +14368,21 @@ fn direct_execution_model_default_selection_reason_is_persisted_after_flush() {
     run_case(name, move |context| async move {
         let upstream = TestUpstream::spawn(ScriptedReply::Json {
             status: StatusCode::OK,
-            body: ollama_non_stream_response(),
+            body: responses_target_golden().non_stream_response,
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
         let model_default_source = UpstreamSource::create(&NewUpstreamSource {
             id: ID_GENERATOR.generate_id(),
             provider_id: router.provider_id,
-            profile_type: UpstreamProfileType::Ollama,
-            base_url: upstream.base_url.clone(),
+            profile_type: UpstreamProfileType::Responses,
+            base_url: format!("{}/v1", upstream.base_url),
             use_proxy: false,
             is_enabled: true,
             is_default: false,
             created_at: 1,
             updated_at: 1,
-            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Ollama)
+            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
         })
         .expect("model default Source should be created");
         replace_for_model(
@@ -14467,7 +14409,7 @@ fn direct_execution_model_default_selection_reason_is_persisted_after_flush() {
             .expect("model default response should be consumed");
         let requests = upstream.requests().await;
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].path, "/api/chat");
+        assert_eq!(requests[0].path, "/v1/responses");
         let log = router
             .wait_for_log_for_source(model_default_source.id, RequestStatus::Success)
             .await;
@@ -14521,6 +14463,240 @@ fn direct_execution_openai_utility_exact_source_issues_one_call() {
         router.wait_for_api_key_lease_release().await;
         upstream.shutdown().await;
     });
+}
+
+#[test]
+fn ollama_openai_compatible_recipe_targets_v1_chat_with_placeholder_bearer() {
+    let fixture = ollama_openai_compatible_fixture();
+    run_case("ollama-openai-compatible-chat", move |context| async move {
+        let upstream =
+            TestUpstream::spawn_json(StatusCode::OK, fixture.non_stream.upstream_response.clone())
+                .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        router.replace_provider_secret("ollama-local").await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = assert_downstream_request_identity(&response);
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("OpenAI-compatible Chat response should be readable");
+        let actual: Value = serde_json::from_slice(&response_body)
+            .expect("OpenAI-compatible Chat response should be JSON");
+        assert_eq!(
+            normalized(actual),
+            normalized(fixture.non_stream.downstream_response.clone())
+        );
+
+        let captured = upstream.requests().await;
+        assert_upstream(
+            "ollama-openai-compatible-chat",
+            &fixture,
+            &captured,
+            "/v1/chat/completions",
+            None,
+            &fixture.request.upstream,
+            &router.requested_model(),
+            &request_id,
+        );
+        assert_eq!(
+            captured[0].headers.get_all("authorization").iter().count(),
+            1
+        );
+        assert_eq!(
+            captured[0]
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer ollama-local")
+        );
+
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.upstream_protocol, Some(UpstreamProtocol::Openai));
+        assert_eq!(
+            log.source_profile_type_snapshot,
+            Some(UpstreamProfileType::OpenaiCompatible)
+        );
+        assert_eq!(log.model_kind_snapshot, Some(ModelKind::Chat));
+        assert_usage(&log, &fixture.usage);
+        let serialized_log = serde_json::to_string(&log).expect("request log should serialize");
+        assert!(!serialized_log.contains("ollama-local"));
+        assert!(!serialized_log.contains("ollama-openai-compatible"));
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn ollama_openai_compatible_recipe_streams_v1_chat_once() {
+    let fixture = ollama_openai_compatible_fixture();
+    run_case(
+        "ollama-openai-compatible-stream",
+        move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Sse {
+                events: fixture.stream.upstream_events.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            router.replace_provider_secret("ollama-local").await;
+
+            let response = router
+                .send(&fixture, true, &fixture.stream.downstream_request)
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("text/event-stream"))
+            );
+            let request_id = assert_downstream_request_identity(&response);
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("OpenAI-compatible Chat stream should be readable");
+            let actual_events = parse_downstream_events(fixture.protocol, &response_body);
+            assert_eq!(
+                normalized_events(actual_events),
+                normalized_events(fixture.stream.downstream_events.clone())
+            );
+
+            let captured = upstream.requests().await;
+            assert_upstream(
+                "ollama-openai-compatible-stream",
+                &fixture,
+                &captured,
+                "/v1/chat/completions",
+                None,
+                &fixture.stream.upstream_request,
+                &router.requested_model(),
+                &request_id,
+            );
+            assert_eq!(
+                captured[0].headers.get_all("authorization").iter().count(),
+                1
+            );
+            assert_eq!(
+                captured[0]
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer ollama-local")
+            );
+            let upstream_body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("OpenAI-compatible stream request should be JSON");
+            assert_eq!(upstream_body["stream"], true);
+
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.upstream_protocol, Some(UpstreamProtocol::Openai));
+            assert_eq!(
+                log.source_profile_type_snapshot,
+                Some(UpstreamProfileType::OpenaiCompatible)
+            );
+            assert!(log.is_stream);
+            assert_usage(&log, &fixture.usage);
+            let serialized_log = serde_json::to_string(&log).expect("stream log should serialize");
+            assert!(!serialized_log.contains("ollama-local"));
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
+}
+
+#[test]
+fn ollama_openai_compatible_recipe_targets_v1_embeddings_once() {
+    let fixture = ollama_openai_compatible_fixture();
+    run_case(
+        "ollama-openai-compatible-embeddings",
+        move |context| async move {
+            let upstream_response = json!({
+                "object": "list",
+                "data": [{
+                    "object": "embedding",
+                    "index": 0,
+                    "embedding": [0.1, 0.2, 0.3]
+                }],
+                "model": UPSTREAM_MODEL,
+                "usage": {"prompt_tokens": 6, "total_tokens": 6}
+            });
+            let upstream =
+                TestUpstream::spawn_json(StatusCode::OK, upstream_response.clone()).await;
+            let router = RouterFixture::new_with_model_kind(
+                context,
+                &fixture,
+                &upstream.base_url,
+                ModelKind::Embedding,
+            )
+            .await;
+            router.replace_provider_secret("ollama-local").await;
+            router
+                .update_source_operation(UpdateUpstreamSourceData {
+                    embeddings_enabled: Some(true),
+                    updated_at: chrono::Utc::now().timestamp_millis(),
+                    ..UpdateUpstreamSourceData::test_defaults()
+                })
+                .await;
+
+            let request = json!({
+                "model": router.requested_model(),
+                "input": ["hello", "world"],
+                "encoding_format": "float"
+            });
+            let response = router
+                .send_raw_post(
+                    "/openai/v1/embeddings".to_string(),
+                    request.clone(),
+                    DownstreamAuth::Bearer,
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("OpenAI-compatible Embeddings response should be readable");
+            let actual: Value = serde_json::from_slice(&response_body)
+                .expect("OpenAI-compatible Embeddings response should be JSON");
+            assert_eq!(actual, upstream_response);
+
+            let captured = upstream.requests().await;
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].method, Method::POST);
+            assert_eq!(captured[0].path, "/v1/embeddings");
+            assert_eq!(
+                captured[0].headers.get_all("authorization").iter().count(),
+                1
+            );
+            assert_eq!(
+                captured[0]
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer ollama-local")
+            );
+            let upstream_body: Value = serde_json::from_slice(&captured[0].body)
+                .expect("OpenAI-compatible Embeddings request should be JSON");
+            assert_eq!(upstream_body["model"], UPSTREAM_MODEL);
+            assert_eq!(upstream_body["input"], request["input"]);
+            assert_eq!(upstream_body["encoding_format"], "float");
+
+            let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(log.upstream_protocol, Some(UpstreamProtocol::Openai));
+            assert_eq!(
+                log.source_profile_type_snapshot,
+                Some(UpstreamProfileType::OpenaiCompatible)
+            );
+            assert_eq!(log.model_kind_snapshot, Some(ModelKind::Embedding));
+            assert_eq!(log.total_input_tokens, Some(6));
+            assert_eq!(log.total_output_tokens, None);
+            assert_eq!(log.total_tokens, Some(6));
+            let serialized_log =
+                serde_json::to_string(&log).expect("embedding log should serialize");
+            assert!(!serialized_log.contains("ollama-local"));
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        },
+    );
 }
 
 #[test]

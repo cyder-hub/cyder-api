@@ -107,22 +107,12 @@ pub fn load_effective_config(
     paths: &ConfigPaths,
     options: ConfigLoadOptions,
 ) -> Result<FinalConfig, ConfigLoadError> {
-    load_effective_config_inner(paths, options, None)
-}
-
-#[cfg(test)]
-pub(crate) fn load_effective_config_with_environment_source(
-    paths: &ConfigPaths,
-    options: ConfigLoadOptions,
-    environment_source: super::env::EnvironmentConfigSource,
-) -> Result<FinalConfig, ConfigLoadError> {
-    load_effective_config_inner(paths, options, Some(environment_source))
+    load_effective_config_inner(paths, options)
 }
 
 fn load_effective_config_inner(
     paths: &ConfigPaths,
     options: ConfigLoadOptions,
-    runtime_environment_source: Option<super::env::EnvironmentConfigSource>,
 ) -> Result<FinalConfig, ConfigLoadError> {
     let default = load_default_config(paths)?;
 
@@ -147,12 +137,7 @@ fn load_effective_config_inner(
     }
 
     let environment_source = if options.include_environment {
-        Some(match runtime_environment_source {
-            Some(environment_source) => environment_source,
-            None => {
-                env::EnvironmentConfigSource::current().map_err(ConfigLoadError::Environment)?
-            }
-        })
+        Some(env::EnvironmentConfigSource::current().map_err(ConfigLoadError::Environment)?)
     } else {
         None
     };
@@ -171,6 +156,9 @@ fn load_effective_config_inner(
         .map_err(ConfigLoadError::DeserializeEffective)?;
     final_config
         .validate_manager_auth()
+        .map_err(ConfigLoadError::DeserializeEffective)?;
+    final_config
+        .validate_database()
         .map_err(ConfigLoadError::DeserializeEffective)?;
     final_config
         .outbound_http
@@ -423,6 +411,73 @@ mod tests {
             load_user_yaml("").expect("omitted client identity config should use defaults");
         assert!(config.client_identity.trusted_proxy_cidrs.is_empty());
         assert_eq!(config.client_identity.max_forwarded_hops, 8);
+    }
+
+    #[test]
+    fn database_io_uses_generated_defaults_and_validates_all_boundaries() {
+        let programmatic = crate::config::programmatic_default_config();
+        assert_eq!(programmatic.db_pool_size, 5);
+        assert_eq!(programmatic.database_io.max_waiters, 64);
+        assert_eq!(programmatic.database_io.queue_wait_timeout_seconds, 1);
+        assert_eq!(programmatic.database_io.operation_deadline_seconds, 30);
+        assert_eq!(programmatic.database_io.sqlite_busy_timeout_seconds, 5);
+
+        let temp_dir = tempfile::tempdir().expect("config test directory should be created");
+        let paths = ConfigPaths::new(
+            temp_dir.path().join("config.default.yaml"),
+            temp_dir.path().join("config.yaml"),
+        );
+        let generated = load_default_config(&paths).expect("default snapshot should serialize");
+        for expected in [
+            "database_io:",
+            "max_waiters: 64",
+            "queue_wait_timeout_seconds: 1",
+            "operation_deadline_seconds: 30",
+            "sqlite_busy_timeout_seconds: 5",
+        ] {
+            assert!(
+                generated.merged_yaml.contains(expected),
+                "missing {expected}"
+            );
+        }
+
+        let sample = include_str!("../../../config.sample.yaml");
+        let sample: serde_yaml::Value =
+            serde_yaml::from_str(sample).expect("tracked config sample should parse");
+        assert_eq!(sample["db_pool_size"], 5);
+        assert_eq!(sample["database_io"]["max_waiters"], 64);
+        assert_eq!(sample["database_io"]["queue_wait_timeout_seconds"], 1);
+        assert_eq!(sample["database_io"]["operation_deadline_seconds"], 30);
+        assert_eq!(sample["database_io"]["sqlite_busy_timeout_seconds"], 5);
+
+        let boundary = load_user_yaml(
+            "db_pool_size: 128\ndatabase_io:\n  max_waiters: 4096\n  queue_wait_timeout_seconds: 60\n  operation_deadline_seconds: 300\n  sqlite_busy_timeout_seconds: 60\n",
+        )
+        .expect("inclusive database boundaries should load");
+        assert_eq!(boundary.db_pool_size, 128);
+        assert_eq!(boundary.database_io.max_waiters, 4_096);
+
+        for yaml in [
+            "db_pool_size: 0\n",
+            "db_pool_size: 129\n",
+            "database_io:\n  max_waiters: 4097\n",
+            "database_io:\n  queue_wait_timeout_seconds: 0\n",
+            "database_io:\n  queue_wait_timeout_seconds: 61\n",
+            "database_io:\n  operation_deadline_seconds: 0\n",
+            "database_io:\n  operation_deadline_seconds: 301\n",
+            "database_io:\n  sqlite_busy_timeout_seconds: 0\n",
+            "database_io:\n  sqlite_busy_timeout_seconds: 61\n",
+            "database_io:\n  operation_deadline_seconds: 4\n  sqlite_busy_timeout_seconds: 5\n",
+            "database_io: null\n",
+            "database_io:\n  max_waiters: null\n",
+        ] {
+            let error = load_user_yaml(yaml).expect_err("invalid database config must fail");
+            assert!(
+                error.to_string().contains("database_io")
+                    || error.to_string().contains("db_pool_size"),
+                "unexpected error for {yaml:?}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -427,8 +427,10 @@ impl ProviderAdminService {
             .initial_source
             .map(|source| new_upstream_source(provider_id, source, current_time))
             .transpose()?;
+        let database = self.mutation_runner.database();
         let created_provider =
-            Provider::create_optional(&new_provider_data, new_source_data.as_ref())?;
+            Provider::create_optional(&database, &new_provider_data, new_source_data.as_ref())
+                .await?;
 
         self.run_post_commit_effects(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
@@ -453,7 +455,8 @@ impl ProviderAdminService {
             is_enabled: input.is_enabled,
             provider_api_key_mode: input.provider_api_key_mode,
         };
-        let updated_provider = Provider::update(id, &update_data)?;
+        let database = self.mutation_runner.database();
+        let updated_provider = Provider::update(&database, id, &update_data).await?;
 
         self.run_post_commit_effects(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
@@ -474,7 +477,8 @@ impl ProviderAdminService {
     ) -> Result<UpstreamSource, BaseError> {
         let now = Utc::now().timestamp_millis();
         let new_source = new_upstream_source(provider_id, input, now)?;
-        let source = UpstreamSource::create(&new_source)?;
+        let database = self.mutation_runner.database();
+        let source = UpstreamSource::create(&database, &new_source).await?;
         self.run_runtime_refresh_post_commit(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
                 id: provider_id,
@@ -492,12 +496,16 @@ impl ProviderAdminService {
         source_id: i64,
         input: UpstreamSourceUpdateInput,
     ) -> Result<UpstreamSource, BaseError> {
-        let before = UpstreamSource::get_active_by_id_for_provider(source_id, provider_id)?;
+        let database = self.mutation_runner.database();
+        let before =
+            UpstreamSource::get_active_by_id_for_provider(&database, source_id, provider_id)
+                .await?;
         if input.is_enabled == Some(true) && !before.is_enabled {
-            RequestPatchVariantRepository::validate_source_reactivation(source_id)?;
+            RequestPatchVariantRepository::validate_source_reactivation(&database, source_id)
+                .await?;
         }
         let update = normalize_source_update(&before, input)?;
-        let source = UpstreamSource::update(source_id, provider_id, &update)?;
+        let source = UpstreamSource::update(&database, source_id, provider_id, &update).await?;
         let effects = vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
                 id: provider_id,
@@ -510,7 +518,8 @@ impl ProviderAdminService {
     }
 
     pub async fn delete_source(&self, provider_id: i64, source_id: i64) -> Result<(), BaseError> {
-        let source = UpstreamSource::delete(source_id, provider_id)?;
+        let database = self.mutation_runner.database();
+        let source = UpstreamSource::delete(&database, source_id, provider_id).await?;
         self.run_runtime_refresh_post_commit(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
                 id: provider_id,
@@ -522,13 +531,14 @@ impl ProviderAdminService {
         Ok(())
     }
 
-    pub fn preview_source_impact(
+    pub async fn preview_source_impact(
         &self,
         provider_id: i64,
         source_id: i64,
         action: SourceImpactAction,
     ) -> Result<SourceImpactReport, BaseError> {
-        let provider = Provider::get_by_id(provider_id)?;
+        let database = self.mutation_runner.database();
+        let provider = Provider::get_by_id(&database, provider_id).await?;
         if !provider
             .upstream_sources
             .iter()
@@ -539,15 +549,18 @@ impl ProviderAdminService {
             ))));
         }
 
-        let models = Model::list_by_provider_id(provider_id)?;
-        let source_variants = RequestPatchVariantRepository::list_by_source(source_id)?;
+        let models = Model::list_by_provider_id(&database, provider_id).await?;
+        let source_variants =
+            RequestPatchVariantRepository::list_by_source_ids(&database, &[source_id]).await?;
         let model_variants = RequestPatchVariantRepository::list_by_model_ids(
+            &database,
             &models.iter().map(|model| model.id).collect::<Vec<_>>(),
-        )?
+        )
+        .await?
         .into_iter()
         .filter(|variant| variant.variant.source_id == source_id)
         .collect::<Vec<_>>();
-        let snapshots = load_cache_model_snapshots(&models)?;
+        let snapshots = load_cache_model_snapshots(&database, &models).await?;
         let cache_provider = CacheProvider::from(provider.clone());
         let mut simulated_sources = cache_provider.upstream_sources.clone();
         let mut simulated_snapshots = snapshots.clone();
@@ -660,7 +673,8 @@ impl ProviderAdminService {
         provider_id: i64,
         input: CreateProviderApiKeyInput,
     ) -> Result<ProviderApiKeySummary, BaseError> {
-        let _provider = Provider::get_by_id(provider_id)?;
+        let database = self.mutation_runner.database();
+        let _provider = Provider::get_by_id(&database, provider_id).await?;
         let current_time = Utc::now().timestamp_millis();
         let key_id = ID_GENERATOR.generate_id();
         let secret = validate_provider_secret(input.api_key)?;
@@ -685,7 +699,7 @@ impl ProviderAdminService {
             created_at: current_time,
             updated_at: current_time,
         };
-        let created_key = ProviderApiKeyRepository::insert(&new_key_data)?;
+        let created_key = ProviderApiKeyRepository::insert(&database, &new_key_data).await?;
 
         self.run_provider_key_post_commit(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::ProviderApiKeys {
@@ -704,13 +718,17 @@ impl ProviderAdminService {
         key_id: i64,
         input: UpdateProviderApiKeyInput,
     ) -> Result<ProviderApiKeySummary, BaseError> {
-        let key_to_update = self.validate_provider_key_membership(provider_id, key_id)?;
+        let key_to_update = self
+            .validate_provider_key_membership(provider_id, key_id)
+            .await?;
         let update_data = UpdateProviderApiKeyMetadata {
             description: input.description,
             is_enabled: input.is_enabled,
         };
+        let database = self.mutation_runner.database();
         let updated_key =
-            ProviderApiKeyRepository::update_metadata(provider_id, key_id, &update_data)?;
+            ProviderApiKeyRepository::update_metadata(&database, provider_id, key_id, &update_data)
+                .await?;
 
         invalidate_vertex_token(key_id);
         self.run_provider_key_post_commit(vec![
@@ -732,8 +750,11 @@ impl ProviderAdminService {
         provider_id: i64,
         key_id: i64,
     ) -> Result<(), BaseError> {
-        let key_to_delete = self.validate_provider_key_membership(provider_id, key_id)?;
-        ProviderApiKeyRepository::soft_delete(provider_id, key_id)?;
+        let key_to_delete = self
+            .validate_provider_key_membership(provider_id, key_id)
+            .await?;
+        let database = self.mutation_runner.database();
+        ProviderApiKeyRepository::soft_delete(&database, provider_id, key_id).await?;
 
         invalidate_vertex_token(key_id);
         self.run_provider_key_post_commit(vec![
@@ -747,13 +768,15 @@ impl ProviderAdminService {
         Ok(())
     }
 
-    pub(crate) fn decrypt_provider_api_key(
+    pub(crate) async fn decrypt_provider_api_key(
         &self,
         provider_id: i64,
         key_id: i64,
     ) -> Result<SensitiveSecret, BaseError> {
-        let _provider = Provider::get_by_id(provider_id)?;
-        let stored = ProviderApiKeyRepository::get_stored_by_id(provider_id, key_id)?;
+        let database = self.mutation_runner.database();
+        let _provider = Provider::get_by_id(&database, provider_id).await?;
+        let stored =
+            ProviderApiKeyRepository::get_stored_by_id(&database, provider_id, key_id).await?;
         let encrypted = stored
             .encrypted_secret()
             .map_err(|_| BaseError::ProviderApiKeySecretUnavailable)?;
@@ -762,20 +785,22 @@ impl ProviderAdminService {
             .map_err(|_| BaseError::ProviderApiKeySecretUnavailable)
     }
 
-    pub fn list_provider_api_keys(
+    pub async fn list_provider_api_keys(
         &self,
         provider_id: i64,
     ) -> Result<Vec<ProviderApiKeySummary>, BaseError> {
-        let _provider = Provider::get_by_id(provider_id)?;
-        ProviderApiKeyRepository::list_summaries_by_provider_id(provider_id)
+        let database = self.mutation_runner.database();
+        let _provider = Provider::get_by_id(&database, provider_id).await?;
+        ProviderApiKeyRepository::list_summaries_by_provider_id(&database, provider_id).await
     }
 
-    pub fn get_provider_api_key(
+    pub async fn get_provider_api_key(
         &self,
         provider_id: i64,
         key_id: i64,
     ) -> Result<ProviderApiKeySummary, BaseError> {
         self.validate_provider_key_membership(provider_id, key_id)
+            .await
     }
 
     pub async fn replace_provider_api_key(
@@ -784,8 +809,11 @@ impl ProviderAdminService {
         key_id: i64,
         input: ReplaceProviderApiKeyInput,
     ) -> Result<ProviderApiKeySummary, BaseError> {
-        let _provider = Provider::get_by_id(provider_id)?;
-        let _existing = self.validate_provider_key_membership(provider_id, key_id)?;
+        let database = self.mutation_runner.database();
+        let _provider = Provider::get_by_id(&database, provider_id).await?;
+        let _existing = self
+            .validate_provider_key_membership(provider_id, key_id)
+            .await?;
         let secret = validate_provider_secret(input.api_key)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
         let encrypted = self
@@ -797,13 +825,15 @@ impl ProviderAdminService {
             .provider_secret_fingerprint(provider_id, &secret)
             .map_err(|_| BaseError::ProviderApiKeySecretUnavailable)?;
         let updated = ProviderApiKeyRepository::replace_secret(
+            &database,
             provider_id,
             key_id,
             key_prefix,
             key_last4,
             &encrypted,
             &hmac,
-        )?;
+        )
+        .await?;
         invalidate_vertex_token(key_id);
         self.run_provider_key_post_commit(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::ProviderApiKeys {
@@ -820,8 +850,10 @@ impl ProviderAdminService {
         provider_id: i64,
         key_id: i64,
     ) -> Result<ProviderApiKeyReveal, BaseError> {
-        let summary = self.validate_provider_key_membership(provider_id, key_id)?;
-        let secret = self.decrypt_provider_api_key(provider_id, key_id)?;
+        let summary = self
+            .validate_provider_key_membership(provider_id, key_id)
+            .await?;
+        let secret = self.decrypt_provider_api_key(provider_id, key_id).await?;
         self.run_post_commit_effects(vec![AdminMutationEffect::audit(
             provider_api_key_audit_event("reveal", &summary),
         )])
@@ -833,12 +865,15 @@ impl ProviderAdminService {
     }
 
     pub async fn delete_provider(&self, id: i64) -> Result<(), BaseError> {
-        let provider_to_delete = Provider::get_by_id(id)?;
-        let provider_key_ids = ProviderApiKeyRepository::list_summaries_by_provider_id(id)?
-            .into_iter()
-            .map(|key| key.id)
-            .collect::<Vec<_>>();
-        let num_deleted_db = Provider::delete_with_dependents(id)?;
+        let database = self.mutation_runner.database();
+        let provider_to_delete = Provider::get_by_id(&database, id).await?;
+        let provider_key_ids =
+            ProviderApiKeyRepository::list_summaries_by_provider_id(&database, id)
+                .await?
+                .into_iter()
+                .map(|key| key.id)
+                .collect::<Vec<_>>();
+        let num_deleted_db = Provider::delete_with_dependents(&database, id).await?;
 
         if num_deleted_db == 0 {
             return Ok(());
@@ -886,22 +921,27 @@ impl ProviderAdminService {
             .secret_encryption
             .provider_secret_fingerprint(input.provider_id, &secret)
             .map_err(|_| BaseError::ProviderApiKeySecretUnavailable)?;
-        let created = Provider::bootstrap(&BootstrapProviderInput {
-            provider_id: input.provider_id,
-            provider_key: input.provider_key,
-            name: input.name,
-            source,
-            provider_api_key_mode: input.provider_api_key_mode,
-            provider_api_key_id: key_id,
-            api_key_description: input.api_key_description,
-            key_prefix,
-            key_last4,
-            encrypted_secret,
-            secret_hmac,
-            model_name: input.model_name,
-            real_model_name: input.real_model_name,
-            model_kind: input.model_kind,
-        })?;
+        let database = self.mutation_runner.database();
+        let created = Provider::bootstrap(
+            &database,
+            &BootstrapProviderInput {
+                provider_id: input.provider_id,
+                provider_key: input.provider_key,
+                name: input.name,
+                source,
+                provider_api_key_mode: input.provider_api_key_mode,
+                provider_api_key_id: key_id,
+                api_key_description: input.api_key_description,
+                key_prefix,
+                key_last4,
+                encrypted_secret,
+                secret_hmac,
+                model_name: input.model_name,
+                real_model_name: input.real_model_name,
+                model_kind: input.model_kind,
+            },
+        )
+        .await?;
 
         self.run_provider_key_post_commit(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
@@ -928,13 +968,14 @@ impl ProviderAdminService {
         .await;
     }
 
-    fn validate_provider_key_membership(
+    async fn validate_provider_key_membership(
         &self,
         provider_id: i64,
         key_id: i64,
     ) -> Result<ProviderApiKeySummary, BaseError> {
-        let _provider = Provider::get_by_id(provider_id)?;
-        ProviderApiKeyRepository::get_summary_by_id(provider_id, key_id)
+        let database = self.mutation_runner.database();
+        let _provider = Provider::get_by_id(&database, provider_id).await?;
+        ProviderApiKeyRepository::get_summary_by_id(&database, provider_id, key_id).await
     }
 
     async fn run_post_commit_effects(&self, effects: Vec<AdminMutationEffect>) {
@@ -1080,7 +1121,7 @@ mod tests {
 
     use super::*;
     use crate::config::SecretEncryptionConfig;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::request_patch::{
         RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
@@ -1153,34 +1194,38 @@ mod tests {
 
     #[tokio::test]
     async fn source_reactivation_validates_variants_and_refreshes_catalog() {
-        let database = TestDbContext::new_sqlite("admin-source-reactivation.sqlite");
-        database
-            .run_async(async {
-                Provider::create(
-                    &NewProvider {
-                        id: 9201,
-                        provider_key: "source-reactivation".to_string(),
-                        name: "Source Reactivation".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &NewUpstreamSource {
-                        id: 9202,
-                        provider_id: 9201,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: "https://source-reactivation.example/v1".to_string(),
-                        use_proxy: false,
-                        is_enabled: false,
-                        is_default: false,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
-                    },
-                )
-                .expect("provider should be seeded");
-                RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+        let database = TestDatabase::new_sqlite_default("admin-source-reactivation.sqlite").await;
+        let runtime = database.runtime();
+        (async {
+            Provider::create(
+                &runtime,
+                &NewProvider {
+                    id: 9201,
+                    provider_key: "source-reactivation".to_string(),
+                    name: "Source Reactivation".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &NewUpstreamSource {
+                    id: 9202,
+                    provider_id: 9201,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: "https://source-reactivation.example/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: false,
+                    is_default: false,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
+                },
+            )
+            .await
+            .expect("provider should be seeded");
+            RequestPatchVariantRepository::create(
+                &runtime,
+                &RequestPatchVariantInput {
                     source_id: 9202,
                     model_id: None,
                     suffix: Some("fast".to_string()),
@@ -1193,54 +1238,56 @@ mod tests {
                         value_json: Some(Some(json!(0.2))),
                         description: None,
                     }],
-                })
-                .expect("disabled source should accept preconfigured Variant");
+                },
+            )
+            .await
+            .expect("disabled source should accept preconfigured Variant");
 
-                let catalog = Arc::new(CatalogService::new(true).await);
-                let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
-                let service = ProviderAdminService::new(
-                    Arc::clone(&runner),
-                    Arc::new(SecretEncryptionService::from_config(
-                        &SecretEncryptionConfig::default(),
-                    )),
-                );
-                let source = service
-                    .update_source(
-                        9201,
-                        9202,
-                        UpstreamSourceUpdateInput {
-                            base_url: None,
-                            use_proxy: None,
-                            chat_completions_enabled: None,
-                            chat_completions_path_override: None,
-                            embeddings_enabled: None,
-                            embeddings_path_override: None,
-                            rerank_enabled: None,
-                            rerank_path_override: None,
-                            is_enabled: Some(true),
-                            is_default: Some(true),
-                        },
-                    )
+            let catalog = Arc::new(CatalogService::new(runtime, true).await);
+            let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
+            let service = ProviderAdminService::new(
+                Arc::clone(&runner),
+                Arc::new(SecretEncryptionService::from_config(
+                    &SecretEncryptionConfig::default(),
+                )),
+            );
+            let source = service
+                .update_source(
+                    9201,
+                    9202,
+                    UpstreamSourceUpdateInput {
+                        base_url: None,
+                        use_proxy: None,
+                        chat_completions_enabled: None,
+                        chat_completions_path_override: None,
+                        embeddings_enabled: None,
+                        embeddings_path_override: None,
+                        rerank_enabled: None,
+                        rerank_path_override: None,
+                        is_enabled: Some(true),
+                        is_default: Some(true),
+                    },
+                )
+                .await
+                .expect("source reactivation should validate and commit");
+            assert!(source.is_enabled && source.is_default);
+            assert!(
+                runner
+                    .drain_audit_events()
+                    .iter()
+                    .any(|event| { event.event_name() == "manager.provider_source_updated" })
+            );
+            assert_eq!(
+                catalog
+                    .get_models_catalog()
                     .await
-                    .expect("source reactivation should validate and commit");
-                assert!(source.is_enabled && source.is_default);
-                assert!(
-                    runner
-                        .drain_audit_events()
-                        .iter()
-                        .any(|event| { event.event_name() == "manager.provider_source_updated" })
-                );
-                assert_eq!(
-                    catalog
-                        .get_models_catalog()
-                        .await
-                        .expect("catalog should reload after source update")
-                        .request_patch_variants
-                        .len(),
-                    1
-                );
-            })
-            .await;
+                    .expect("catalog should reload after source update")
+                    .request_patch_variants
+                    .len(),
+                1
+            );
+        })
+        .await;
     }
 
     #[test]

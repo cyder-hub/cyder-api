@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::sync::Arc;
 
 use crate::{
     config::MetricsConfig,
@@ -10,6 +11,7 @@ use crate::{
             list_request_log_ids_in_range_after, list_uningested_request_log_ids,
         },
         request_log::RequestLog,
+        runtime::DatabaseRuntime,
     },
     proxy::logging::{RequestLogPersistedContext, RequestLogPersistedSink},
 };
@@ -25,16 +27,21 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub struct MetricsService {
+    database: Arc<DatabaseRuntime>,
     config: MetricsConfig,
 }
 
 impl MetricsService {
-    pub fn new(config: MetricsConfig) -> Self {
-        Self { config }
+    pub fn new(database: Arc<DatabaseRuntime>, config: MetricsConfig) -> Self {
+        Self { database, config }
     }
 
     pub fn config(&self) -> &MetricsConfig {
         &self.config
+    }
+
+    pub(crate) fn database(&self) -> &DatabaseRuntime {
+        &self.database
     }
 
     pub async fn tick_reconciliation_worker(&self) -> MetricsWorkerTickResult {
@@ -43,10 +50,13 @@ impl MetricsService {
         }
 
         let now_ms = Utc::now().timestamp_millis();
-        self.tick_reconciliation_worker_at(now_ms)
+        self.tick_reconciliation_worker_at(now_ms).await
     }
 
-    pub(crate) fn tick_reconciliation_worker_at(&self, now_ms: i64) -> MetricsWorkerTickResult {
+    pub(crate) async fn tick_reconciliation_worker_at(
+        &self,
+        now_ms: i64,
+    ) -> MetricsWorkerTickResult {
         if !self.config.enabled {
             return MetricsWorkerTickResult::default();
         }
@@ -64,12 +74,15 @@ impl MetricsService {
             return MetricsWorkerTickResult::default();
         }
 
-        match self.reconcile_request_logs(MetricsReconciliationParams {
-            start_time,
-            end_time,
-            limit: self.config.reconciliation_batch_size.max(1),
-            dry_run: false,
-        }) {
+        match self
+            .reconcile_request_logs(MetricsReconciliationParams {
+                start_time,
+                end_time,
+                limit: self.config.reconciliation_batch_size.max(1),
+                dry_run: false,
+            })
+            .await
+        {
             Ok(summary) => MetricsWorkerTickResult {
                 processed: summary.ingested as u64,
                 skipped: summary.skipped as u64,
@@ -90,16 +103,16 @@ impl MetricsService {
         }
     }
 
-    pub fn ingest_status(&self) -> Result<MetricsIngestStatus, BaseError> {
+    pub async fn ingest_status(&self) -> Result<MetricsIngestStatus, BaseError> {
         let generated_at = Utc::now().timestamp_millis();
         Ok(MetricsIngestStatus {
-            ingested_request_log_count: count_ingested_request_log_markers()?,
+            ingested_request_log_count: count_ingested_request_log_markers(&self.database).await?,
             pending_reconciliation_count: None,
             generated_at,
         })
     }
 
-    pub fn record_request_log(
+    pub async fn record_request_log(
         &self,
         request_log: &RequestLog,
     ) -> Result<MetricsIngestOutcome, BaseError> {
@@ -121,11 +134,14 @@ impl MetricsService {
         };
         let deltas = build_rollup_deltas(request_log, self.config.rollup_bucket_seconds, now_ms);
         if !ingest_metric_rollups(
+            &self.database,
             &marker,
             &deltas.request_rollups,
             &deltas.http_status_rollups,
             &deltas.cost_rollups,
-        )? {
+        )
+        .await?
+        {
             return Ok(MetricsIngestOutcome {
                 request_log_id: request_log.id,
                 ingested: false,
@@ -144,15 +160,16 @@ impl MetricsService {
         })
     }
 
-    pub fn ingest_request_log_id(
+    pub async fn ingest_request_log_id(
         &self,
         request_log_id: i64,
     ) -> Result<MetricsIngestOutcome, BaseError> {
-        let request_log = RequestLog::get_by_id(request_log_id)?;
-        self.record_request_log(&request_log)
+        let request_log =
+            RequestLog::get_by_id_for_metrics_runtime(&self.database, request_log_id).await?;
+        self.record_request_log(&request_log).await
     }
 
-    pub fn reconcile_request_logs(
+    pub async fn reconcile_request_logs(
         &self,
         params: MetricsReconciliationParams,
     ) -> Result<MetricsReconciliationSummary, BaseError> {
@@ -169,10 +186,12 @@ impl MetricsService {
         }
 
         let rows = list_uningested_request_log_ids(
+            &self.database,
             params.start_time,
             params.end_time,
             params.limit as i64,
-        )?;
+        )
+        .await?;
         let mut summary = MetricsReconciliationSummary {
             scanned: rows.len(),
             oldest_uningested: rows.first().map(|row| row.request_received_at),
@@ -186,7 +205,7 @@ impl MetricsService {
         }
 
         for row in rows {
-            match self.ingest_request_log_id(row.id) {
+            match self.ingest_request_log_id(row.id).await {
                 Ok(outcome) if outcome.ingested => summary.ingested += 1,
                 Ok(_) => summary.skipped += 1,
                 Err(err) => {
@@ -199,7 +218,7 @@ impl MetricsService {
         Ok(summary)
     }
 
-    pub fn repair_request_logs(
+    pub async fn repair_request_logs(
         &self,
         params: MetricsRepairParams,
     ) -> Result<MetricsRepairSummary, BaseError> {
@@ -219,8 +238,9 @@ impl MetricsService {
         let bucket_end = align_bucket_end(params.end_time, self.config.rollup_bucket_seconds);
 
         if params.dry_run {
-            let reconciliation =
-                self.reingest_request_logs_in_range(bucket_start, bucket_end, params.limit, true)?;
+            let reconciliation = self
+                .reingest_request_logs_in_range(bucket_start, bucket_end, params.limit, true)
+                .await?;
             return Ok(MetricsRepairSummary {
                 requested_start_time: params.start_time,
                 requested_end_time: params.end_time,
@@ -231,10 +251,17 @@ impl MetricsService {
             });
         }
 
-        let deleted =
-            delete_metrics_data_in_range(bucket_start, bucket_end, bucket_start, bucket_end)?;
-        let reconciliation =
-            self.reingest_request_logs_in_range(bucket_start, bucket_end, params.limit, false)?;
+        let deleted = delete_metrics_data_in_range(
+            &self.database,
+            bucket_start,
+            bucket_end,
+            bucket_start,
+            bucket_end,
+        )
+        .await?;
+        let reconciliation = self
+            .reingest_request_logs_in_range(bucket_start, bucket_end, params.limit, false)
+            .await?;
 
         Ok(MetricsRepairSummary {
             requested_start_time: params.start_time,
@@ -249,15 +276,15 @@ impl MetricsService {
         })
     }
 
-    pub fn count_pending_reconciliation(
+    pub async fn count_pending_reconciliation(
         &self,
         start_time: i64,
         end_time: i64,
     ) -> Result<i64, BaseError> {
-        count_uningested_request_logs_in_range(start_time, end_time)
+        count_uningested_request_logs_in_range(&self.database, start_time, end_time).await
     }
 
-    fn reingest_request_logs_in_range(
+    async fn reingest_request_logs_in_range(
         &self,
         start_time: i64,
         end_time: i64,
@@ -270,12 +297,14 @@ impl MetricsService {
 
         loop {
             let rows = list_request_log_ids_in_range_after(
+                &self.database,
                 start_time,
                 end_time,
                 cursor_received_at,
                 cursor_id,
                 limit as i64,
-            )?;
+            )
+            .await?;
             let batch_len = rows.len();
             if batch_len == 0 {
                 break;
@@ -291,7 +320,7 @@ impl MetricsService {
                 summary.skipped += batch_len;
             } else {
                 for row in &rows {
-                    match self.ingest_request_log_id(row.id) {
+                    match self.ingest_request_log_id(row.id).await {
                         Ok(outcome) if outcome.ingested => summary.ingested += 1,
                         Ok(_) => summary.skipped += 1,
                         Err(err) => {
@@ -331,7 +360,7 @@ fn align_bucket_end(timestamp_ms: i64, bucket_seconds: u64) -> i64 {
 #[async_trait::async_trait]
 impl RequestLogPersistedSink for MetricsService {
     async fn on_request_log_persisted(&self, context: RequestLogPersistedContext) {
-        match self.ingest_request_log_id(context.request_log_id) {
+        match self.ingest_request_log_id(context.request_log_id).await {
             Ok(outcome) => {
                 crate::debug_event!(
                     "metrics.request_log_ingest_completed",

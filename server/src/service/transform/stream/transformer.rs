@@ -594,11 +594,6 @@ impl StreamTransformer {
             .get_or_generate_stream_id(self.upstream_protocol)
     }
 
-    pub(crate) fn get_or_default_stream_model(&self) -> String {
-        self.session
-            .get_or_default_stream_model(self.upstream_protocol)
-    }
-
     pub(in crate::service::transform) fn normalize_unified_chunk_session_state(
         &mut self,
         unified_chunk: &mut UnifiedChunkResponse,

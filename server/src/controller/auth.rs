@@ -1559,7 +1559,7 @@ mod tests {
         config::{ClientIdentityConfig, SecretEncryptionConfig},
         controller::create_manager_router,
         database::{
-            DbConnection, TestDbContext, get_connection,
+            TestDatabase,
             manager_auth_instance::ManagerAuthInstance,
             manager_credential::{ManagerCredential, NewManagerCredential},
             manager_totp_recovery_code::ManagerTotpRecoveryCode,
@@ -1586,7 +1586,6 @@ mod tests {
         create_auth_router, deleted_mediator_cookie_value_for, mediator_cookie_policy_for,
         mediator_cookie_value_for,
     };
-    use diesel::RunQueryDsl;
 
     const INITIAL_PASSWORD: &str = "correct horse battery staple";
     const ROTATED_PASSWORD: &str = "correct horse battery staple rotated";
@@ -1791,7 +1790,7 @@ mod tests {
     }
 
     async fn create_totp_test_app_state(
-        test_db_context: TestDbContext,
+        test_db_context: TestDatabase,
     ) -> (Arc<AppState>, Arc<AtomicI64>) {
         let mut app_state = AppState::new_for_test(test_db_context).await;
         let now = Arc::new(AtomicI64::new(get_current_timestamp()));
@@ -1800,17 +1799,24 @@ mod tests {
         ))
         .expect("test secret encryption config should parse");
         let secret_encryption = Arc::new(SecretEncryptionService::from_config(&config));
-        app_state.admin = Arc::new(AdminServices::new(
-            Arc::clone(&app_state.catalog),
-            Arc::clone(&secret_encryption),
-        ));
+        app_state.admin = Arc::new(
+            AdminServices::new(
+                Arc::clone(&app_state.catalog),
+                Arc::clone(&secret_encryption),
+            )
+            .await,
+        );
         let service_now = Arc::clone(&now);
         Arc::get_mut(&mut app_state.admin)
             .expect("fresh test AdminServices should be uniquely owned")
-            .auth = Arc::new(ManagerAuthService::new_for_test_with_secret_encryption(
-            Arc::new(move || service_now.load(Ordering::SeqCst)),
-            Arc::clone(&secret_encryption),
-        ));
+            .auth = Arc::new(
+            ManagerAuthService::new_for_test_with_secret_encryption(
+                Arc::clone(&app_state.database),
+                Arc::new(move || service_now.load(Ordering::SeqCst)),
+                Arc::clone(&secret_encryption),
+            )
+            .await,
+        );
         app_state.secret_encryption = secret_encryption;
         let app_state = Arc::new(app_state);
         app_state.catalog.clear_cache().await;
@@ -1818,38 +1824,29 @@ mod tests {
         (app_state, now)
     }
 
-    fn restart_with_corrupt_totp(app_state: &Arc<AppState>, now: &Arc<AtomicI64>) -> Arc<AppState> {
-        let mut connection = get_connection().expect("test connection should load");
-        match &mut connection {
-            DbConnection::Postgres(connection) => {
-                diesel::sql_query(
-                    "UPDATE manager_credential SET totp_secret_ciphertext = $1 WHERE manager_id = 0",
-                )
-                .bind::<diesel::sql_types::Binary, _>(vec![1_u8])
-                .execute(connection)
-                .expect("PostgreSQL TOTP corruption should succeed");
-            }
-            DbConnection::Sqlite(connection) => {
-                diesel::sql_query(
-                    "UPDATE manager_credential SET totp_secret_ciphertext = ? WHERE manager_id = 0",
-                )
-                .bind::<diesel::sql_types::Binary, _>(vec![1_u8])
-                .execute(connection)
-                .expect("SQLite TOTP corruption should succeed");
-            }
-        }
-        drop(connection);
+    async fn restart_with_corrupt_totp(
+        app_state: &Arc<AppState>,
+        now: &Arc<AtomicI64>,
+    ) -> Arc<AppState> {
+        ManagerCredential::corrupt_totp_ciphertext_for_test(&app_state.database)
+            .await
+            .expect("TOTP corruption should succeed");
 
         let mut restarted = (**app_state).clone();
         let mut admin = AdminServices::new(
             Arc::clone(&restarted.catalog),
             Arc::clone(&restarted.secret_encryption),
-        );
+        )
+        .await;
         let service_now = Arc::clone(now);
-        admin.auth = Arc::new(ManagerAuthService::new_for_test_with_secret_encryption(
-            Arc::new(move || service_now.load(Ordering::SeqCst)),
-            Arc::clone(&restarted.secret_encryption),
-        ));
+        admin.auth = Arc::new(
+            ManagerAuthService::new_for_test_with_secret_encryption(
+                Arc::clone(&restarted.database),
+                Arc::new(move || service_now.load(Ordering::SeqCst)),
+                Arc::clone(&restarted.secret_encryption),
+            )
+            .await,
+        );
         restarted.admin = Arc::new(admin);
         Arc::new(restarted)
     }
@@ -1950,417 +1947,447 @@ mod tests {
 
     #[tokio::test]
     async fn auth_http_bootstrap_login_access_rotate_and_legacy_refresh_removal_contract() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-contract.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-contract.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let status = send(
-                    &app_state,
-                    empty_request(Method::GET, "/auth/bootstrap/status"),
-                )
-                .await;
-                assert_eq!(
-                    response_json(status).await["data"]["state"],
-                    "uninitialized"
-                );
-
-                let bootstrap_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(bootstrap_response.status(), StatusCode::OK);
-                let bootstrap_cookie = mediator_cookie(&bootstrap_response);
-                let bootstrap_set_cookie = bootstrap_response
-                    .headers()
-                    .get(header::SET_COOKIE)
-                    .expect("bootstrap should set mediator cookie")
-                    .to_str()
-                    .expect("cookie should be text")
-                    .to_string();
-                assert!(bootstrap_set_cookie.contains("Path=/ai/manager/api/auth"));
-                assert!(bootstrap_set_cookie.contains("HttpOnly"));
-                assert!(bootstrap_set_cookie.contains("SameSite=Strict"));
-                assert!(!bootstrap_set_cookie.contains("Secure"));
-                let bootstrap_body = response_json(bootstrap_response).await;
-                assert_eq!(bootstrap_body["data"]["totp_state"], "disabled");
-                let bootstrap_access = access_token(&bootstrap_body);
-
-                let duplicate = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": ROTATED_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_error(duplicate, StatusCode::CONFLICT, 1401).await;
-
-                let legacy_key = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/password",
-                        json!({ "key": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_error(legacy_key, StatusCode::UNPROCESSABLE_ENTITY, 1416).await;
-
-                let removed_single_stage_login = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(removed_single_stage_login.status(), StatusCode::NOT_FOUND);
-
-                let login_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/password",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(login_response.status(), StatusCode::OK);
-                let login_cookie = mediator_cookie(&login_response);
-                let login_body = response_json(login_response).await;
-                assert_eq!(login_body["data"]["state"], "authenticated");
-                assert_eq!(login_body["data"]["totp_state"], "disabled");
-                let login_access = access_token(&login_body);
-
-                let mismatched_rotate = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/password/rotate",
-                        &bootstrap_cookie,
-                        Some(&login_access),
-                        json!({
-                            "current_password": INITIAL_PASSWORD,
-                            "new_password": ROTATED_PASSWORD,
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(mismatched_rotate.status(), StatusCode::UNAUTHORIZED);
-                assert!(
-                    mismatched_rotate
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-                assert_eq!(response_json(mismatched_rotate).await["code"], json!(1441));
-
-                let rotate_response = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/password/rotate",
-                        &login_cookie,
-                        Some(&login_access),
-                        json!({
-                            "current_password": INITIAL_PASSWORD,
-                            "new_password": ROTATED_PASSWORD,
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(rotate_response.status(), StatusCode::OK);
-                let rotated_cookie = mediator_cookie(&rotate_response);
-                let rotated_access = access_token(&response_json(rotate_response).await);
-
-                let stale_cookie_access = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/access",
-                        &bootstrap_cookie,
-                        None,
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(stale_cookie_access.status(), StatusCode::UNAUTHORIZED);
-                assert!(
-                    stale_cookie_access
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-                assert_eq!(
-                    response_json(stale_cookie_access).await["code"],
-                    json!(1441)
-                );
-
-                let access_response = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/access",
-                        &rotated_cookie,
-                        None,
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(access_response.status(), StatusCode::OK);
-                assert!(
-                    access_response.headers().get(header::SET_COOKIE).is_none(),
-                    "ordinary access retrieval must not reissue mediator cookie"
-                );
-                let recovered_access = access_token(&response_json(access_response).await);
-                assert_eq!(recovered_access, rotated_access);
-
-                let removed_refresh_route = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/refresh_token",
-                        &rotated_cookie,
-                        None,
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(removed_refresh_route.status(), StatusCode::NOT_FOUND);
-
-                let logout_response = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/logout",
-                        &rotated_cookie,
-                        None,
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(logout_response.status(), StatusCode::OK);
-                assert!(
-                    logout_response
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-
-                let idempotent_logout = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/logout",
-                        &rotated_cookie,
-                        None,
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(idempotent_logout.status(), StatusCode::OK);
-                assert!(
-                    idempotent_logout
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-
-                let stale_bootstrap_access = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(header::AUTHORIZATION, format!("Bearer {bootstrap_access}"))
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_error(stale_bootstrap_access, StatusCode::UNAUTHORIZED, 1433).await;
-            })
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let status = send(
+                &app_state,
+                empty_request(Method::GET, "/auth/bootstrap/status"),
+            )
             .await;
+            assert_eq!(
+                response_json(status).await["data"]["state"],
+                "uninitialized"
+            );
+
+            let bootstrap_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(bootstrap_response.status(), StatusCode::OK);
+            let bootstrap_cookie = mediator_cookie(&bootstrap_response);
+            let bootstrap_set_cookie = bootstrap_response
+                .headers()
+                .get(header::SET_COOKIE)
+                .expect("bootstrap should set mediator cookie")
+                .to_str()
+                .expect("cookie should be text")
+                .to_string();
+            assert!(bootstrap_set_cookie.contains("Path=/ai/manager/api/auth"));
+            assert!(bootstrap_set_cookie.contains("HttpOnly"));
+            assert!(bootstrap_set_cookie.contains("SameSite=Strict"));
+            assert!(!bootstrap_set_cookie.contains("Secure"));
+            let bootstrap_body = response_json(bootstrap_response).await;
+            assert_eq!(bootstrap_body["data"]["totp_state"], "disabled");
+            let bootstrap_access = access_token(&bootstrap_body);
+
+            let duplicate = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": ROTATED_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_error(duplicate, StatusCode::CONFLICT, 1401).await;
+
+            let legacy_key = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/password",
+                    json!({ "key": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_error(legacy_key, StatusCode::UNPROCESSABLE_ENTITY, 1416).await;
+
+            let removed_single_stage_login = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(removed_single_stage_login.status(), StatusCode::NOT_FOUND);
+
+            let login_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/password",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(login_response.status(), StatusCode::OK);
+            let login_cookie = mediator_cookie(&login_response);
+            let login_body = response_json(login_response).await;
+            assert_eq!(login_body["data"]["state"], "authenticated");
+            assert_eq!(login_body["data"]["totp_state"], "disabled");
+            let login_access = access_token(&login_body);
+
+            let mismatched_rotate = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/password/rotate",
+                    &bootstrap_cookie,
+                    Some(&login_access),
+                    json!({
+                        "current_password": INITIAL_PASSWORD,
+                        "new_password": ROTATED_PASSWORD,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(mismatched_rotate.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                mismatched_rotate
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+            assert_eq!(response_json(mismatched_rotate).await["code"], json!(1441));
+
+            let rotate_response = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/password/rotate",
+                    &login_cookie,
+                    Some(&login_access),
+                    json!({
+                        "current_password": INITIAL_PASSWORD,
+                        "new_password": ROTATED_PASSWORD,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(rotate_response.status(), StatusCode::OK);
+            let rotated_cookie = mediator_cookie(&rotate_response);
+            let rotated_access = access_token(&response_json(rotate_response).await);
+
+            let stale_cookie_access = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/access",
+                    &bootstrap_cookie,
+                    None,
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(stale_cookie_access.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                stale_cookie_access
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+            assert_eq!(
+                response_json(stale_cookie_access).await["code"],
+                json!(1441)
+            );
+
+            let access_response = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/access",
+                    &rotated_cookie,
+                    None,
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(access_response.status(), StatusCode::OK);
+            assert!(
+                access_response.headers().get(header::SET_COOKIE).is_none(),
+                "ordinary access retrieval must not reissue mediator cookie"
+            );
+            let recovered_access = access_token(&response_json(access_response).await);
+            assert_eq!(recovered_access, rotated_access);
+
+            let removed_refresh_route = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/refresh_token",
+                    &rotated_cookie,
+                    None,
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(removed_refresh_route.status(), StatusCode::NOT_FOUND);
+
+            let logout_response = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/logout",
+                    &rotated_cookie,
+                    None,
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(logout_response.status(), StatusCode::OK);
+            assert!(
+                logout_response
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+
+            let idempotent_logout = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/logout",
+                    &rotated_cookie,
+                    None,
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(idempotent_logout.status(), StatusCode::OK);
+            assert!(
+                idempotent_logout
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+
+            let stale_bootstrap_access = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(header::AUTHORIZATION, format!("Bearer {bootstrap_access}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await;
+            assert_error(stale_bootstrap_access, StatusCode::UNAUTHORIZED, 1433).await;
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_totp_enrollment_status_and_two_stage_login_contract() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-auth-totp-login-enrollment.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    1
-                );
-
-                let status = send(
-                    &app_state,
-                    cookie_request(
-                        Method::GET,
-                        "/auth/totp/status",
-                        &enrolled.cookie,
-                        Some(&enrolled.access_token),
-                        json!({}),
-                    ),
+            TestDatabase::new_sqlite_default("controller-auth-totp-login-enrollment.sqlite").await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
                 )
-                .await;
-                assert_eq!(status.status(), StatusCode::OK);
-                assert!(
-                    status.headers().get(header::SET_COOKIE).is_none(),
-                    "status must not mutate the mediator cookie"
-                );
-                let status = response_json(status).await;
-                assert_eq!(status["data"]["state"], "enabled");
-                assert!(status["data"]["enabled_at"].as_i64().is_some());
-                assert!(status["data"].get("manual_secret").is_none());
+                .await
+                .unwrap()
+                .len(),
+                1
+            );
 
-                let password_stage = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/password",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(password_stage.status(), StatusCode::OK);
-                assert!(
-                    password_stage
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0"))),
-                    "TOTP-required password stage must clear residual mediator cookies"
-                );
-                let password_stage = response_json(password_stage).await;
-                assert_eq!(password_stage["data"]["state"], "totp_required");
-                assert_eq!(password_stage["data"]["expires_in"], 300);
-                assert!(password_stage["data"].get("access_token").is_none());
-                assert!(password_stage["data"].get("totp_state").is_none());
-                let login_challenge = password_stage["data"]["login_challenge"]
-                    .as_str()
-                    .expect("login challenge should exist")
-                    .to_string();
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    1,
-                    "password stage must not create a database session"
-                );
-
-                let invalid_totp = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/totp",
-                        json!({
-                            "login_challenge": login_challenge,
-                            "totp_code": "abcdef",
-                        }),
-                    ),
-                )
-                .await;
-                assert!(
-                    invalid_totp.headers().get(header::SET_COOKIE).is_none(),
-                    "failed TOTP login must not issue a cookie"
-                );
-                assert_error(invalid_totp, StatusCode::UNAUTHORIZED, 1472).await;
-
-                let totp_stage = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/totp",
-                        json!({
-                            "login_challenge": login_challenge,
-                            "totp_code": totp_code_at(
-                                &enrolled.manual_secret,
-                                now.load(Ordering::SeqCst),
-                            ),
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(totp_stage.status(), StatusCode::OK);
-                let _login_cookie = mediator_cookie(&totp_stage);
-                let totp_stage = response_json(totp_stage).await;
-                assert_eq!(totp_stage["data"]["totp_state"], "enabled");
-                assert!(totp_stage["data"].get("recovery_codes").is_none());
-                access_token(&totp_stage);
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    2
-                );
-
-                let reused_challenge = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/totp",
-                        json!({
-                            "login_challenge": login_challenge,
-                            "totp_code": "000000",
-                        }),
-                    ),
-                )
-                .await;
-                assert_error(reused_challenge, StatusCode::UNAUTHORIZED, 1477).await;
-
-                for alias in [
-                    "/auth/login",
-                    "/auth/recovery",
-                    "/auth/totp/reset",
-                    "/auth/totp/recovery/start",
-                ] {
-                    let response =
-                        send(&app_state, json_request(Method::POST, alias, json!({}))).await;
-                    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{alias}");
-                }
-            })
+            let status = send(
+                &app_state,
+                cookie_request(
+                    Method::GET,
+                    "/auth/totp/status",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({}),
+                ),
+            )
             .await;
+            assert_eq!(status.status(), StatusCode::OK);
+            assert!(
+                status.headers().get(header::SET_COOKIE).is_none(),
+                "status must not mutate the mediator cookie"
+            );
+            let status = response_json(status).await;
+            assert_eq!(status["data"]["state"], "enabled");
+            assert!(status["data"]["enabled_at"].as_i64().is_some());
+            assert!(status["data"].get("manual_secret").is_none());
+
+            let password_stage = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/password",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(password_stage.status(), StatusCode::OK);
+            assert!(
+                password_stage
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0"))),
+                "TOTP-required password stage must clear residual mediator cookies"
+            );
+            let password_stage = response_json(password_stage).await;
+            assert_eq!(password_stage["data"]["state"], "totp_required");
+            assert_eq!(password_stage["data"]["expires_in"], 300);
+            assert!(password_stage["data"].get("access_token").is_none());
+            assert!(password_stage["data"].get("totp_state").is_none());
+            let login_challenge = password_stage["data"]["login_challenge"]
+                .as_str()
+                .expect("login challenge should exist")
+                .to_string();
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                1,
+                "password stage must not create a database session"
+            );
+
+            let invalid_totp = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/totp",
+                    json!({
+                        "login_challenge": login_challenge,
+                        "totp_code": "abcdef",
+                    }),
+                ),
+            )
+            .await;
+            assert!(
+                invalid_totp.headers().get(header::SET_COOKIE).is_none(),
+                "failed TOTP login must not issue a cookie"
+            );
+            assert_error(invalid_totp, StatusCode::UNAUTHORIZED, 1472).await;
+
+            let totp_stage = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/totp",
+                    json!({
+                        "login_challenge": login_challenge,
+                        "totp_code": totp_code_at(
+                            &enrolled.manual_secret,
+                            now.load(Ordering::SeqCst),
+                        ),
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(totp_stage.status(), StatusCode::OK);
+            let _login_cookie = mediator_cookie(&totp_stage);
+            let totp_stage = response_json(totp_stage).await;
+            assert_eq!(totp_stage["data"]["totp_state"], "enabled");
+            assert!(totp_stage["data"].get("recovery_codes").is_none());
+            access_token(&totp_stage);
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                2
+            );
+
+            let reused_challenge = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/totp",
+                    json!({
+                        "login_challenge": login_challenge,
+                        "totp_code": "000000",
+                    }),
+                ),
+            )
+            .await;
+            assert_error(reused_challenge, StatusCode::UNAUTHORIZED, 1477).await;
+
+            for alias in [
+                "/auth/login",
+                "/auth/recovery",
+                "/auth/totp/reset",
+                "/auth/totp/recovery/start",
+            ] {
+                let response = send(&app_state, json_request(Method::POST, alias, json!({}))).await;
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{alias}");
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_totp_replacement_rotates_epoch_session_and_recovery_material() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-totp-replacement.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-                let old_recovery_rows = ManagerTotpRecoveryCode::list().unwrap();
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-totp-replacement.sqlite").await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+            let old_recovery_rows = ManagerTotpRecoveryCode::list(&test_db_context)
+                .await
+                .unwrap();
 
-                let missing_header = send(
-                    &app_state,
+            let missing_header = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/totp/replace/start",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({ "current_password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_error(missing_header, StatusCode::PRECONDITION_REQUIRED, 1471).await;
+            assert_eq!(
+                ManagerTotpRecoveryCode::list(&test_db_context,)
+                    .await
+                    .unwrap(),
+                old_recovery_rows
+            );
+
+            let replace_start = send(
+                &app_state,
+                with_totp_header(
                     cookie_request(
                         Method::POST,
                         "/auth/totp/replace/start",
@@ -2368,1400 +2395,1449 @@ mod tests {
                         Some(&enrolled.access_token),
                         json!({ "current_password": INITIAL_PASSWORD }),
                     ),
-                )
-                .await;
-                assert_error(missing_header, StatusCode::PRECONDITION_REQUIRED, 1471).await;
-                assert_eq!(ManagerTotpRecoveryCode::list().unwrap(), old_recovery_rows);
-
-                let replace_start = send(
-                    &app_state,
-                    with_totp_header(
-                        cookie_request(
-                            Method::POST,
-                            "/auth/totp/replace/start",
-                            &enrolled.cookie,
-                            Some(&enrolled.access_token),
-                            json!({ "current_password": INITIAL_PASSWORD }),
-                        ),
-                        &totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst)),
-                    ),
-                )
-                .await;
-                assert_eq!(replace_start.status(), StatusCode::OK);
-                assert!(replace_start.headers().get(header::SET_COOKIE).is_none());
-                let replace_start = response_json(replace_start).await;
-                let setup_challenge = replace_start["data"]["setup_challenge"]
-                    .as_str()
-                    .expect("replacement challenge should exist");
-                let replacement_secret = replace_start["data"]["manual_secret"]
-                    .as_str()
-                    .expect("replacement secret should exist")
-                    .to_string();
-                assert_eq!(ManagerTotpRecoveryCode::list().unwrap(), old_recovery_rows);
-
-                now.fetch_add(30, Ordering::SeqCst);
-                let replace_confirm = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/totp/replace/confirm",
-                        &enrolled.cookie,
-                        Some(&enrolled.access_token),
-                        json!({
-                            "setup_challenge": setup_challenge,
-                            "totp_code": totp_code_at(
-                                &replacement_secret,
-                                now.load(Ordering::SeqCst) + 30,
-                            ),
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(replace_confirm.status(), StatusCode::OK);
-                let replacement_cookie = mediator_cookie(&replace_confirm);
-                let replace_confirm = response_json(replace_confirm).await;
-                assert_eq!(replace_confirm["data"]["totp_state"], "enabled");
-                assert_eq!(
-                    replace_confirm["data"]["recovery_codes"]
-                        .as_array()
-                        .expect("replacement codes should exist")
-                        .len(),
-                    10
-                );
-                assert!(replace_confirm["data"].get("manual_secret").is_none());
-                let replacement_access = access_token(&replace_confirm);
-                assert_ne!(ManagerTotpRecoveryCode::list().unwrap(), old_recovery_rows);
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    1
-                );
-
-                let old_status = send(
-                    &app_state,
-                    cookie_request(
-                        Method::GET,
-                        "/auth/totp/status",
-                        &enrolled.cookie,
-                        Some(&enrolled.access_token),
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(old_status.status(), StatusCode::UNAUTHORIZED);
-                let new_status = send(
-                    &app_state,
-                    cookie_request(
-                        Method::GET,
-                        "/auth/totp/status",
-                        &replacement_cookie,
-                        Some(&replacement_access),
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(new_status.status(), StatusCode::OK);
-            })
+                    &totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst)),
+                ),
+            )
             .await;
+            assert_eq!(replace_start.status(), StatusCode::OK);
+            assert!(replace_start.headers().get(header::SET_COOKIE).is_none());
+            let replace_start = response_json(replace_start).await;
+            let setup_challenge = replace_start["data"]["setup_challenge"]
+                .as_str()
+                .expect("replacement challenge should exist");
+            let replacement_secret = replace_start["data"]["manual_secret"]
+                .as_str()
+                .expect("replacement secret should exist")
+                .to_string();
+            assert_eq!(
+                ManagerTotpRecoveryCode::list(&test_db_context,)
+                    .await
+                    .unwrap(),
+                old_recovery_rows
+            );
+
+            now.fetch_add(30, Ordering::SeqCst);
+            let replace_confirm = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/totp/replace/confirm",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({
+                        "setup_challenge": setup_challenge,
+                        "totp_code": totp_code_at(
+                            &replacement_secret,
+                            now.load(Ordering::SeqCst) + 30,
+                        ),
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(replace_confirm.status(), StatusCode::OK);
+            let replacement_cookie = mediator_cookie(&replace_confirm);
+            let replace_confirm = response_json(replace_confirm).await;
+            assert_eq!(replace_confirm["data"]["totp_state"], "enabled");
+            assert_eq!(
+                replace_confirm["data"]["recovery_codes"]
+                    .as_array()
+                    .expect("replacement codes should exist")
+                    .len(),
+                10
+            );
+            assert!(replace_confirm["data"].get("manual_secret").is_none());
+            let replacement_access = access_token(&replace_confirm);
+            assert_ne!(
+                ManagerTotpRecoveryCode::list(&test_db_context,)
+                    .await
+                    .unwrap(),
+                old_recovery_rows
+            );
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                1
+            );
+
+            let old_status = send(
+                &app_state,
+                cookie_request(
+                    Method::GET,
+                    "/auth/totp/status",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(old_status.status(), StatusCode::UNAUTHORIZED);
+            let new_status = send(
+                &app_state,
+                cookie_request(
+                    Method::GET,
+                    "/auth/totp/status",
+                    &replacement_cookie,
+                    Some(&replacement_access),
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(new_status.status(), StatusCode::OK);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_totp_disable_returns_disabled_access_and_clears_recovery_codes() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-totp-disable.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-                let disable = send(
-                    &app_state,
-                    with_totp_header(
-                        cookie_request(
-                            Method::POST,
-                            "/auth/totp/disable",
-                            &enrolled.cookie,
-                            Some(&enrolled.access_token),
-                            json!({ "current_password": INITIAL_PASSWORD }),
-                        ),
-                        &totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst)),
-                    ),
-                )
-                .await;
-                assert_eq!(disable.status(), StatusCode::OK);
-                let disabled_cookie = mediator_cookie(&disable);
-                let disable = response_json(disable).await;
-                assert_eq!(disable["data"]["totp_state"], "disabled");
-                assert!(disable["data"].get("recovery_codes").is_none());
-                let disabled_access = access_token(&disable);
-                assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 0);
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    1
-                );
-
-                let status = send(
-                    &app_state,
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-totp-disable.sqlite").await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+            let disable = send(
+                &app_state,
+                with_totp_header(
                     cookie_request(
-                        Method::GET,
-                        "/auth/totp/status",
-                        &disabled_cookie,
-                        Some(&disabled_access),
-                        json!({}),
+                        Method::POST,
+                        "/auth/totp/disable",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({ "current_password": INITIAL_PASSWORD }),
                     ),
-                )
-                .await;
-                assert_eq!(response_json(status).await["data"]["state"], "disabled");
-            })
+                    &totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst)),
+                ),
+            )
             .await;
+            assert_eq!(disable.status(), StatusCode::OK);
+            let disabled_cookie = mediator_cookie(&disable);
+            let disable = response_json(disable).await;
+            assert_eq!(disable["data"]["totp_state"], "disabled");
+            assert!(disable["data"].get("recovery_codes").is_none());
+            let disabled_access = access_token(&disable);
+            assert_eq!(
+                ManagerTotpRecoveryCode::list(&test_db_context,)
+                    .await
+                    .unwrap()
+                    .len(),
+                0
+            );
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                1
+            );
+
+            let status = send(
+                &app_state,
+                cookie_request(
+                    Method::GET,
+                    "/auth/totp/status",
+                    &disabled_cookie,
+                    Some(&disabled_access),
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(response_json(status).await["data"]["state"], "disabled");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_password_reauth_contract_tracks_access_state() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-password-reauth.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let bootstrap = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(bootstrap.status(), StatusCode::OK);
-                let cookie = mediator_cookie(&bootstrap);
-                let bootstrap = response_json(bootstrap).await;
-                let access = access_token(&bootstrap);
-                assert_eq!(bootstrap["data"]["reauth"]["scope"], "secret_governance");
-                assert_eq!(bootstrap["data"]["reauth"]["method"], "password");
-
-                let wrong_method = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/reauth",
-                        &cookie,
-                        Some(&access),
-                        json!({ "method": "totp", "totp_code": "000000" }),
-                    ),
-                )
-                .await;
-                assert_error(wrong_method, StatusCode::CONFLICT, 1492).await;
-
-                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
-                let expired_access = send(
-                    &app_state,
-                    cookie_request(Method::POST, "/auth/access", &cookie, None, json!({})),
-                )
-                .await;
-                assert_eq!(expired_access.status(), StatusCode::OK);
-                assert!(response_json(expired_access).await["data"]["reauth"].is_null());
-
-                let blocked_create = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/api_key",
-                        &access,
-                        Some(json!({
-                            "name": "password-reauth-api-key",
-                            "default_action": "ALLOW",
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_error(blocked_create, StatusCode::FORBIDDEN, 1491).await;
-                assert!(app_state.admin.api_key.list_api_keys().unwrap().is_empty());
-
-                let invalid_password = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/reauth",
-                        &cookie,
-                        Some(&access),
-                        json!({
-                            "method": "password",
-                            "password": "wrong horse battery staple",
-                        }),
-                    ),
-                )
-                .await;
-                assert_error(invalid_password, StatusCode::UNAUTHORIZED, 1481).await;
-
-                let reauthenticated = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/reauth",
-                        &cookie,
-                        Some(&access),
-                        json!({
-                            "method": "password",
-                            "password": INITIAL_PASSWORD,
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(reauthenticated.status(), StatusCode::OK);
-                let reauthenticated = response_json(reauthenticated).await;
-                assert_eq!(reauthenticated["data"]["scope"], "secret_governance");
-                assert_eq!(reauthenticated["data"]["method"], "password");
-                assert_eq!(
-                    reauthenticated["data"]["verified_until"].as_i64(),
-                    Some(now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC)
-                );
-
-                let created = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/api_key",
-                        &access,
-                        Some(json!({
-                            "name": "password-reauth-api-key",
-                            "default_action": "ALLOW",
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(created.status(), StatusCode::OK);
-            })
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-password-reauth.sqlite").await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let bootstrap = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
             .await;
+            assert_eq!(bootstrap.status(), StatusCode::OK);
+            let cookie = mediator_cookie(&bootstrap);
+            let bootstrap = response_json(bootstrap).await;
+            let access = access_token(&bootstrap);
+            assert_eq!(bootstrap["data"]["reauth"]["scope"], "secret_governance");
+            assert_eq!(bootstrap["data"]["reauth"]["method"], "password");
+
+            let wrong_method = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/reauth",
+                    &cookie,
+                    Some(&access),
+                    json!({ "method": "totp", "totp_code": "000000" }),
+                ),
+            )
+            .await;
+            assert_error(wrong_method, StatusCode::CONFLICT, 1492).await;
+
+            now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
+            let expired_access = send(
+                &app_state,
+                cookie_request(Method::POST, "/auth/access", &cookie, None, json!({})),
+            )
+            .await;
+            assert_eq!(expired_access.status(), StatusCode::OK);
+            assert!(response_json(expired_access).await["data"]["reauth"].is_null());
+
+            let blocked_create = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/api_key",
+                    &access,
+                    Some(json!({
+                        "name": "password-reauth-api-key",
+                        "default_action": "ALLOW",
+                    })),
+                    None,
+                ),
+            )
+            .await;
+            assert_error(blocked_create, StatusCode::FORBIDDEN, 1491).await;
+            assert!(
+                app_state
+                    .admin
+                    .api_key
+                    .list_api_keys()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let invalid_password = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/reauth",
+                    &cookie,
+                    Some(&access),
+                    json!({
+                        "method": "password",
+                        "password": "wrong horse battery staple",
+                    }),
+                ),
+            )
+            .await;
+            assert_error(invalid_password, StatusCode::UNAUTHORIZED, 1481).await;
+
+            let reauthenticated = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/reauth",
+                    &cookie,
+                    Some(&access),
+                    json!({
+                        "method": "password",
+                        "password": INITIAL_PASSWORD,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(reauthenticated.status(), StatusCode::OK);
+            let reauthenticated = response_json(reauthenticated).await;
+            assert_eq!(reauthenticated["data"]["scope"], "secret_governance");
+            assert_eq!(reauthenticated["data"]["method"], "password");
+            assert_eq!(
+                reauthenticated["data"]["verified_until"].as_i64(),
+                Some(now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC)
+            );
+
+            let created = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/api_key",
+                    &access,
+                    Some(json!({
+                        "name": "password-reauth-api-key",
+                        "default_action": "ALLOW",
+                    })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_totp_recovery_consumes_code_revokes_sessions_and_returns_one_new_session() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-totp-recovery.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-                let recovery_start = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/recovery/start",
-                        json!({
-                            "password": INITIAL_PASSWORD,
-                            "recovery_code": enrolled.recovery_codes[0],
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(recovery_start.status(), StatusCode::OK);
-                assert!(
-                    recovery_start
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-                let recovery_start = response_json(recovery_start).await;
-                assert!(recovery_start["data"].get("access_token").is_none());
-                assert!(recovery_start["data"].get("recovery_codes").is_none());
-                let recovery_challenge = recovery_start["data"]["recovery_challenge"]
-                    .as_str()
-                    .expect("recovery challenge should exist");
-                let recovery_secret = recovery_start["data"]["manual_secret"]
-                    .as_str()
-                    .expect("recovery secret should exist")
-                    .to_string();
-                assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 9);
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    0
-                );
-
-                let recovery_confirm = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/recovery/confirm",
-                        json!({
-                            "recovery_challenge": recovery_challenge,
-                            "totp_code": totp_code_at(
-                                &recovery_secret,
-                                now.load(Ordering::SeqCst),
-                            ),
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(recovery_confirm.status(), StatusCode::OK);
-                mediator_cookie(&recovery_confirm);
-                let recovery_confirm = response_json(recovery_confirm).await;
-                assert_eq!(recovery_confirm["data"]["totp_state"], "enabled");
-                assert_eq!(
-                    recovery_confirm["data"]["recovery_codes"]
-                        .as_array()
-                        .expect("new recovery codes should exist")
-                        .len(),
-                    10
-                );
-                access_token(&recovery_confirm);
-                assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 10);
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    1
-                );
-            })
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-totp-recovery.sqlite").await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+            let recovery_start = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/recovery/start",
+                    json!({
+                        "password": INITIAL_PASSWORD,
+                        "recovery_code": enrolled.recovery_codes[0],
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(recovery_start.status(), StatusCode::OK);
+            assert!(
+                recovery_start
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+            let recovery_start = response_json(recovery_start).await;
+            assert!(recovery_start["data"].get("access_token").is_none());
+            assert!(recovery_start["data"].get("recovery_codes").is_none());
+            let recovery_challenge = recovery_start["data"]["recovery_challenge"]
+                .as_str()
+                .expect("recovery challenge should exist");
+            let recovery_secret = recovery_start["data"]["manual_secret"]
+                .as_str()
+                .expect("recovery secret should exist")
+                .to_string();
+            assert_eq!(
+                ManagerTotpRecoveryCode::list(&test_db_context,)
+                    .await
+                    .unwrap()
+                    .len(),
+                9
+            );
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                0
+            );
+
+            let recovery_confirm = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/recovery/confirm",
+                    json!({
+                        "recovery_challenge": recovery_challenge,
+                        "totp_code": totp_code_at(
+                            &recovery_secret,
+                            now.load(Ordering::SeqCst),
+                        ),
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(recovery_confirm.status(), StatusCode::OK);
+            mediator_cookie(&recovery_confirm);
+            let recovery_confirm = response_json(recovery_confirm).await;
+            assert_eq!(recovery_confirm["data"]["totp_state"], "enabled");
+            assert_eq!(
+                recovery_confirm["data"]["recovery_codes"]
+                    .as_array()
+                    .expect("new recovery codes should exist")
+                    .len(),
+                10
+            );
+            access_token(&recovery_confirm);
+            assert_eq!(
+                ManagerTotpRecoveryCode::list(&test_db_context,)
+                    .await
+                    .unwrap()
+                    .len(),
+                10
+            );
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                1
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn secret_governance_grant_protects_api_key_commands_before_business_side_effects() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-api-key-secret-governance-reauth.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
-                let create_payload = json!({
-                    "name": "sensitive-api-key",
-                    "default_action": "ALLOW"
-                });
+            TestDatabase::new_sqlite_default("controller-api-key-secret-governance-reauth.sqlite")
+                .await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+            now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
+            let create_payload = json!({
+                "name": "sensitive-api-key",
+                "default_action": "ALLOW"
+            });
 
-                let missing = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/api_key",
-                        &enrolled.access_token,
-                        Some(create_payload.clone()),
-                        None,
-                    ),
-                )
-                .await;
-                assert_error(missing, StatusCode::FORBIDDEN, 1491).await;
-                assert!(app_state.admin.api_key.list_api_keys().unwrap().is_empty());
-
-                let ignored_business_header = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/api_key",
-                        &enrolled.access_token,
-                        Some(create_payload.clone()),
-                        Some("000000"),
-                    ),
-                )
-                .await;
-                assert_error(ignored_business_header, StatusCode::FORBIDDEN, 1491).await;
-                assert!(app_state.admin.api_key.list_api_keys().unwrap().is_empty());
-
-                let invalid_reauth = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/reauth",
-                        &enrolled.cookie,
-                        Some(&enrolled.access_token),
-                        json!({ "method": "totp", "totp_code": "000000" }),
-                    ),
-                )
-                .await;
-                assert_error(invalid_reauth, StatusCode::UNAUTHORIZED, 1472).await;
-
-                let reauth_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
-                let reauthenticated = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/reauth",
-                        &enrolled.cookie,
-                        Some(&enrolled.access_token),
-                        json!({ "method": "totp", "totp_code": reauth_code }),
-                    ),
-                )
-                .await;
-                assert_eq!(reauthenticated.status(), StatusCode::OK);
-                let reauthenticated = response_json(reauthenticated).await;
-                assert_eq!(reauthenticated["data"]["scope"], "secret_governance");
-                assert_eq!(reauthenticated["data"]["method"], "totp");
-                assert_eq!(
-                    reauthenticated["data"]["verified_until"].as_i64(),
-                    Some(now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC)
-                );
-
-                let created = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/api_key",
-                        &enrolled.access_token,
-                        Some(create_payload),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(created.status(), StatusCode::OK);
-                let created = response_json(created).await;
-                let api_key_id = created["data"]["detail"]["id"]
-                    .as_i64()
-                    .expect("created API key id should exist");
-                let original_secret = created["data"]["reveal"]["api_key"]
-                    .as_str()
-                    .expect("one-time API key should exist")
-                    .to_string();
-
-                let metadata_update_path = format!("/manager/api/api_key/{api_key_id}");
-                let metadata_update = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::PUT,
-                        &metadata_update_path,
-                        &enrolled.access_token,
-                        Some(json!({ "name": "sensitive-api-key-updated" })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    metadata_update.status(),
-                    StatusCode::OK,
-                    "API key metadata update must not require TOTP"
-                );
-
-                let reveal_path = format!("/manager/api/api_key/{api_key_id}/reveal");
-                let missing_target = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/api_key/999999/reveal",
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(missing_target.status(), StatusCode::NOT_FOUND);
-                let revealed = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &reveal_path,
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(revealed.status(), StatusCode::OK);
-                assert_eq!(
-                    response_json(revealed).await["data"]["api_key"],
-                    original_secret
-                );
-
-                let rotate_path = format!("/manager/api/api_key/{api_key_id}/rotate");
-                let rotated = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &rotate_path,
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(rotated.status(), StatusCode::OK);
-                let rotated_secret = response_json(rotated).await["data"]["api_key"]
-                    .as_str()
-                    .expect("rotated API key should exist")
-                    .to_string();
-                assert_ne!(rotated_secret, original_secret);
-
-                let delete_path = format!("/manager/api/api_key/{api_key_id}");
-                let deleted = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::DELETE,
-                        &delete_path,
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(deleted.status(), StatusCode::OK);
-                assert!(
-                    app_state
-                        .admin
-                        .api_key
-                        .get_api_key_detail(api_key_id)
-                        .is_err()
-                );
-            })
+            let missing = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/api_key",
+                    &enrolled.access_token,
+                    Some(create_payload.clone()),
+                    None,
+                ),
+            )
             .await;
+            assert_error(missing, StatusCode::FORBIDDEN, 1491).await;
+            assert!(
+                app_state
+                    .admin
+                    .api_key
+                    .list_api_keys()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let ignored_business_header = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/api_key",
+                    &enrolled.access_token,
+                    Some(create_payload.clone()),
+                    Some("000000"),
+                ),
+            )
+            .await;
+            assert_error(ignored_business_header, StatusCode::FORBIDDEN, 1491).await;
+            assert!(
+                app_state
+                    .admin
+                    .api_key
+                    .list_api_keys()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let invalid_reauth = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/reauth",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({ "method": "totp", "totp_code": "000000" }),
+                ),
+            )
+            .await;
+            assert_error(invalid_reauth, StatusCode::UNAUTHORIZED, 1472).await;
+
+            let reauth_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+            let reauthenticated = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/reauth",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({ "method": "totp", "totp_code": reauth_code }),
+                ),
+            )
+            .await;
+            assert_eq!(reauthenticated.status(), StatusCode::OK);
+            let reauthenticated = response_json(reauthenticated).await;
+            assert_eq!(reauthenticated["data"]["scope"], "secret_governance");
+            assert_eq!(reauthenticated["data"]["method"], "totp");
+            assert_eq!(
+                reauthenticated["data"]["verified_until"].as_i64(),
+                Some(now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC)
+            );
+
+            let created = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/api_key",
+                    &enrolled.access_token,
+                    Some(create_payload),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let created = response_json(created).await;
+            let api_key_id = created["data"]["detail"]["id"]
+                .as_i64()
+                .expect("created API key id should exist");
+            let original_secret = created["data"]["reveal"]["api_key"]
+                .as_str()
+                .expect("one-time API key should exist")
+                .to_string();
+
+            let metadata_update_path = format!("/manager/api/api_key/{api_key_id}");
+            let metadata_update = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::PUT,
+                    &metadata_update_path,
+                    &enrolled.access_token,
+                    Some(json!({ "name": "sensitive-api-key-updated" })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                metadata_update.status(),
+                StatusCode::OK,
+                "API key metadata update must not require TOTP"
+            );
+
+            let reveal_path = format!("/manager/api/api_key/{api_key_id}/reveal");
+            let missing_target = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/api_key/999999/reveal",
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(missing_target.status(), StatusCode::NOT_FOUND);
+            let revealed = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &reveal_path,
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(revealed.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(revealed).await["data"]["api_key"],
+                original_secret
+            );
+
+            let rotate_path = format!("/manager/api/api_key/{api_key_id}/rotate");
+            let rotated = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &rotate_path,
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(rotated.status(), StatusCode::OK);
+            let rotated_secret = response_json(rotated).await["data"]["api_key"]
+                .as_str()
+                .expect("rotated API key should exist")
+                .to_string();
+            assert_ne!(rotated_secret, original_secret);
+
+            let delete_path = format!("/manager/api/api_key/{api_key_id}");
+            let deleted = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::DELETE,
+                    &delete_path,
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(deleted.status(), StatusCode::OK);
+            assert!(
+                app_state
+                    .admin
+                    .api_key
+                    .get_api_key_detail(api_key_id)
+                    .await
+                    .is_err()
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn provider_reveal_uses_secret_governance_grant_while_other_mutations_do_not() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-reveal-secret-governance.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
+            TestDatabase::new_sqlite_default("controller-provider-reveal-secret-governance.sqlite")
+                .await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+            now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
 
-                let provider = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/provider",
-                        &enrolled.access_token,
-                        Some(json!({
-                            "name": "Sensitive Provider",
-                            "key": "sensitive-provider",
-                            "initial_source": {
-                                "base_url": "https://api.example.com/v1",
-                                "use_proxy": false,
-                                "profile_type": "OPENAI",
-                                "is_enabled": true,
-                                "is_default": true
-                            },
-                            "provider_api_key_mode": "QUEUE"
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(provider.status(), StatusCode::OK);
-                let provider_id = response_json(provider).await["data"]["id"]
-                    .as_i64()
-                    .expect("provider id should exist");
-
-                let collection = format!("/manager/api/provider/{provider_id}/provider_keys");
-                let created_key = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &collection,
-                        &enrolled.access_token,
-                        Some(json!({
-                            "api_key": "sk-provider-original",
-                            "description": "primary"
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    created_key.status(),
-                    StatusCode::OK,
-                    "provider key creation must not require TOTP"
-                );
-                let key_id = response_json(created_key).await["data"]["id"]
-                    .as_i64()
-                    .expect("provider key id should exist");
-
-                let replace_path =
-                    format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}/replace");
-                let replaced = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &replace_path,
-                        &enrolled.access_token,
-                        Some(json!({ "api_key": "sk-provider-replaced" })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    replaced.status(),
-                    StatusCode::OK,
-                    "provider key replacement must not require TOTP"
-                );
-
-                let reveal_path =
-                    format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}/reveal");
-                let missing = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &reveal_path,
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_error(missing, StatusCode::FORBIDDEN, 1491).await;
-                let invalid = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &reveal_path,
-                        &enrolled.access_token,
-                        None,
-                        Some("abcdef"),
-                    ),
-                )
-                .await;
-                assert_error(invalid, StatusCode::FORBIDDEN, 1491).await;
-
-                let reauth_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
-                let reauthenticated = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/reauth",
-                        &enrolled.cookie,
-                        Some(&enrolled.access_token),
-                        json!({ "method": "totp", "totp_code": reauth_code }),
-                    ),
-                )
-                .await;
-                assert_eq!(reauthenticated.status(), StatusCode::OK);
-
-                let missing_target = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &format!("/manager/api/provider/{provider_id}/provider_keys/999999/reveal"),
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(missing_target.status(), StatusCode::NOT_FOUND);
-                let revealed = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &reveal_path,
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(revealed.status(), StatusCode::OK);
-                assert_eq!(
-                    response_json(revealed).await["data"]["api_key"],
-                    "sk-provider-replaced"
-                );
-
-                let key_path =
-                    format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}");
-                let updated = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::PUT,
-                        &key_path,
-                        &enrolled.access_token,
-                        Some(json!({ "description": "updated", "is_enabled": true })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    updated.status(),
-                    StatusCode::OK,
-                    "provider metadata update must not require TOTP"
-                );
-
-                let second_key = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &collection,
-                        &enrolled.access_token,
-                        Some(json!({
-                            "api_key": "sk-provider-delete",
-                            "description": null
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(second_key.status(), StatusCode::OK);
-                let second_key_id = response_json(second_key).await["data"]["id"]
-                    .as_i64()
-                    .expect("second provider key id should exist");
-                let deleted_key = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::DELETE,
-                        &format!(
-                            "/manager/api/provider/{provider_id}/provider_keys/{second_key_id}"
-                        ),
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    deleted_key.status(),
-                    StatusCode::OK,
-                    "provider key deletion must not require TOTP"
-                );
-
-                let second_provider = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/provider",
-                        &enrolled.access_token,
-                        Some(json!({
-                            "name": "Delete Provider",
-                            "key": "delete-provider",
-                            "initial_source": {
-                                "base_url": "https://delete.example.com/v1",
-                                "use_proxy": false,
-                                "profile_type": "OPENAI",
-                                "is_enabled": true,
-                                "is_default": true
-                            },
-                            "provider_api_key_mode": "QUEUE"
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(second_provider.status(), StatusCode::OK);
-                let second_provider_id = response_json(second_provider).await["data"]["id"]
-                    .as_i64()
-                    .expect("second provider id should exist");
-                let deleted_provider = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::DELETE,
-                        &format!("/manager/api/provider/{second_provider_id}"),
-                        &enrolled.access_token,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    deleted_provider.status(),
-                    StatusCode::OK,
-                    "provider deletion must not require TOTP"
-                );
-            })
+            let provider = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/provider",
+                    &enrolled.access_token,
+                    Some(json!({
+                        "name": "Sensitive Provider",
+                        "key": "sensitive-provider",
+                        "initial_source": {
+                            "base_url": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "profile_type": "OPENAI",
+                            "is_enabled": true,
+                            "is_default": true
+                        },
+                        "provider_api_key_mode": "QUEUE"
+                    })),
+                    None,
+                ),
+            )
             .await;
+            assert_eq!(provider.status(), StatusCode::OK);
+            let provider_id = response_json(provider).await["data"]["id"]
+                .as_i64()
+                .expect("provider id should exist");
+
+            let collection = format!("/manager/api/provider/{provider_id}/provider_keys");
+            let created_key = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &collection,
+                    &enrolled.access_token,
+                    Some(json!({
+                        "api_key": "sk-provider-original",
+                        "description": "primary"
+                    })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                created_key.status(),
+                StatusCode::OK,
+                "provider key creation must not require TOTP"
+            );
+            let key_id = response_json(created_key).await["data"]["id"]
+                .as_i64()
+                .expect("provider key id should exist");
+
+            let replace_path =
+                format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}/replace");
+            let replaced = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &replace_path,
+                    &enrolled.access_token,
+                    Some(json!({ "api_key": "sk-provider-replaced" })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                replaced.status(),
+                StatusCode::OK,
+                "provider key replacement must not require TOTP"
+            );
+
+            let reveal_path =
+                format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}/reveal");
+            let missing = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &reveal_path,
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_error(missing, StatusCode::FORBIDDEN, 1491).await;
+            let invalid = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &reveal_path,
+                    &enrolled.access_token,
+                    None,
+                    Some("abcdef"),
+                ),
+            )
+            .await;
+            assert_error(invalid, StatusCode::FORBIDDEN, 1491).await;
+
+            let reauth_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+            let reauthenticated = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/reauth",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({ "method": "totp", "totp_code": reauth_code }),
+                ),
+            )
+            .await;
+            assert_eq!(reauthenticated.status(), StatusCode::OK);
+
+            let missing_target = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &format!("/manager/api/provider/{provider_id}/provider_keys/999999/reveal"),
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(missing_target.status(), StatusCode::NOT_FOUND);
+            let revealed = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &reveal_path,
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(revealed.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(revealed).await["data"]["api_key"],
+                "sk-provider-replaced"
+            );
+
+            let key_path = format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}");
+            let updated = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::PUT,
+                    &key_path,
+                    &enrolled.access_token,
+                    Some(json!({ "description": "updated", "is_enabled": true })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                updated.status(),
+                StatusCode::OK,
+                "provider metadata update must not require TOTP"
+            );
+
+            let second_key = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &collection,
+                    &enrolled.access_token,
+                    Some(json!({
+                        "api_key": "sk-provider-delete",
+                        "description": null
+                    })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(second_key.status(), StatusCode::OK);
+            let second_key_id = response_json(second_key).await["data"]["id"]
+                .as_i64()
+                .expect("second provider key id should exist");
+            let deleted_key = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::DELETE,
+                    &format!("/manager/api/provider/{provider_id}/provider_keys/{second_key_id}"),
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                deleted_key.status(),
+                StatusCode::OK,
+                "provider key deletion must not require TOTP"
+            );
+
+            let second_provider = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/provider",
+                    &enrolled.access_token,
+                    Some(json!({
+                        "name": "Delete Provider",
+                        "key": "delete-provider",
+                        "initial_source": {
+                            "base_url": "https://delete.example.com/v1",
+                            "use_proxy": false,
+                            "profile_type": "OPENAI",
+                            "is_enabled": true,
+                            "is_default": true
+                        },
+                        "provider_api_key_mode": "QUEUE"
+                    })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(second_provider.status(), StatusCode::OK);
+            let second_provider_id = response_json(second_provider).await["data"]["id"]
+                .as_i64()
+                .expect("second provider id should exist");
+            let deleted_provider = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::DELETE,
+                    &format!("/manager/api/provider/{second_provider_id}"),
+                    &enrolled.access_token,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                deleted_provider.status(),
+                StatusCode::OK,
+                "provider deletion must not require TOTP"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn password_rotation_and_logout_all_verify_totp_at_the_required_command_boundary() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-sensitive-auth-commands-totp.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-
-                let rotate_request = |current_password: &str, totp_code: Option<&str>| {
-                    let request = cookie_request(
-                        Method::POST,
-                        "/auth/password/rotate",
-                        &enrolled.cookie,
-                        Some(&enrolled.access_token),
-                        json!({
-                            "current_password": current_password,
-                            "new_password": ROTATED_PASSWORD,
-                        }),
-                    );
-                    match totp_code {
-                        Some(code) => with_totp_header(request, code),
-                        None => request,
-                    }
-                };
-
-                let missing = send(&app_state, rotate_request(INITIAL_PASSWORD, None)).await;
-                assert_error(missing, StatusCode::PRECONDITION_REQUIRED, 1471).await;
-                let invalid =
-                    send(&app_state, rotate_request(INITIAL_PASSWORD, Some("abcdef"))).await;
-                assert_error(invalid, StatusCode::UNAUTHORIZED, 1472).await;
-
-                let current_code =
-                    totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
-                let wrong_password = send(
-                    &app_state,
-                    rotate_request("wrong horse battery staple", Some(&current_code)),
-                )
+            TestDatabase::new_sqlite_default("controller-sensitive-auth-commands-totp.sqlite")
                 .await;
-                assert_error(wrong_password, StatusCode::UNAUTHORIZED, 1421).await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
 
-                let rotated = send(
-                    &app_state,
-                    rotate_request(INITIAL_PASSWORD, Some(&current_code)),
-                )
-                .await;
-                assert_eq!(
-                    rotated.status(),
-                    StatusCode::OK,
-                    "wrong current password must not consume the TOTP step"
+            let rotate_request = |current_password: &str, totp_code: Option<&str>| {
+                let request = cookie_request(
+                    Method::POST,
+                    "/auth/password/rotate",
+                    &enrolled.cookie,
+                    Some(&enrolled.access_token),
+                    json!({
+                        "current_password": current_password,
+                        "new_password": ROTATED_PASSWORD,
+                    }),
                 );
-                let rotated_cookie = mediator_cookie(&rotated);
-                let rotated = response_json(rotated).await;
-                assert_eq!(rotated["data"]["totp_state"], "enabled");
-                let rotated_access = access_token(&rotated);
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    1
-                );
+                match totp_code {
+                    Some(code) => with_totp_header(request, code),
+                    None => request,
+                }
+            };
 
-                let logout_request = |current_password: &str, totp_code: Option<&str>| {
-                    let request = cookie_request(
-                        Method::POST,
-                        "/auth/logout_all",
-                        &rotated_cookie,
-                        Some(&rotated_access),
-                        json!({ "current_password": current_password }),
-                    );
-                    match totp_code {
-                        Some(code) => with_totp_header(request, code),
-                        None => request,
-                    }
-                };
-                let missing = send(&app_state, logout_request(ROTATED_PASSWORD, None)).await;
-                assert_error(missing, StatusCode::PRECONDITION_REQUIRED, 1471).await;
-                let invalid =
-                    send(&app_state, logout_request(ROTATED_PASSWORD, Some("000000"))).await;
-                assert_error(invalid, StatusCode::UNAUTHORIZED, 1472).await;
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    1,
-                    "failed TOTP must not revoke sessions"
-                );
+            let missing = send(&app_state, rotate_request(INITIAL_PASSWORD, None)).await;
+            assert_error(missing, StatusCode::PRECONDITION_REQUIRED, 1471).await;
+            let invalid = send(&app_state, rotate_request(INITIAL_PASSWORD, Some("abcdef"))).await;
+            assert_error(invalid, StatusCode::UNAUTHORIZED, 1472).await;
 
-                now.fetch_add(30, Ordering::SeqCst);
-                let logout_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
-                let wrong_password = send(
-                    &app_state,
-                    logout_request("wrong horse battery staple", Some(&logout_code)),
-                )
-                .await;
-                assert_error(wrong_password, StatusCode::UNAUTHORIZED, 1481).await;
-                let logged_out = send(
-                    &app_state,
-                    logout_request(ROTATED_PASSWORD, Some(&logout_code)),
-                )
-                .await;
-                assert_eq!(logged_out.status(), StatusCode::OK);
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    0
-                );
-            })
+            let current_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+            let wrong_password = send(
+                &app_state,
+                rotate_request("wrong horse battery staple", Some(&current_code)),
+            )
             .await;
+            assert_error(wrong_password, StatusCode::UNAUTHORIZED, 1421).await;
+
+            let rotated = send(
+                &app_state,
+                rotate_request(INITIAL_PASSWORD, Some(&current_code)),
+            )
+            .await;
+            assert_eq!(
+                rotated.status(),
+                StatusCode::OK,
+                "wrong current password must not consume the TOTP step"
+            );
+            let rotated_cookie = mediator_cookie(&rotated);
+            let rotated = response_json(rotated).await;
+            assert_eq!(rotated["data"]["totp_state"], "enabled");
+            let rotated_access = access_token(&rotated);
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                1
+            );
+
+            let logout_request = |current_password: &str, totp_code: Option<&str>| {
+                let request = cookie_request(
+                    Method::POST,
+                    "/auth/logout_all",
+                    &rotated_cookie,
+                    Some(&rotated_access),
+                    json!({ "current_password": current_password }),
+                );
+                match totp_code {
+                    Some(code) => with_totp_header(request, code),
+                    None => request,
+                }
+            };
+            let missing = send(&app_state, logout_request(ROTATED_PASSWORD, None)).await;
+            assert_error(missing, StatusCode::PRECONDITION_REQUIRED, 1471).await;
+            let invalid = send(&app_state, logout_request(ROTATED_PASSWORD, Some("000000"))).await;
+            assert_error(invalid, StatusCode::UNAUTHORIZED, 1472).await;
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                1,
+                "failed TOTP must not revoke sessions"
+            );
+
+            now.fetch_add(30, Ordering::SeqCst);
+            let logout_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+            let wrong_password = send(
+                &app_state,
+                logout_request("wrong horse battery staple", Some(&logout_code)),
+            )
+            .await;
+            assert_error(wrong_password, StatusCode::UNAUTHORIZED, 1481).await;
+            let logged_out = send(
+                &app_state,
+                logout_request(ROTATED_PASSWORD, Some(&logout_code)),
+            )
+            .await;
+            assert_eq!(logged_out.status(), StatusCode::OK);
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                0
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn sensitive_command_matrix_fails_closed_when_totp_is_unavailable() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-sensitive-totp-unavailable.sqlite");
-        test_db_context
-            .run_async(async {
-                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
-                let enrolled =
-                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
-                let create_code =
-                    totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
-                let created = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/api_key",
-                        &enrolled.access_token,
-                        Some(json!({
-                            "name": "unavailable-api-key",
-                            "default_action": "ALLOW"
-                        })),
-                        Some(&create_code),
-                    ),
-                )
-                .await;
-                assert_eq!(created.status(), StatusCode::OK);
-                let created = response_json(created).await;
-                let api_key_id = created["data"]["detail"]["id"]
-                    .as_i64()
-                    .expect("API key id should exist");
-                let api_key_secret = created["data"]["reveal"]["api_key"]
-                    .as_str()
-                    .expect("API key secret should exist")
-                    .to_string();
-
-                let provider = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        "/manager/api/provider",
-                        &enrolled.access_token,
-                        Some(json!({
-                            "name": "Unavailable Provider",
-                            "key": "unavailable-provider",
-                            "initial_source": {
-                                "base_url": "https://api.example.com/v1",
-                                "use_proxy": false,
-                                "profile_type": "OPENAI",
-                                "is_enabled": true,
-                                "is_default": true
-                            },
-                            "provider_api_key_mode": "QUEUE"
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(provider.status(), StatusCode::OK);
-                let provider_id = response_json(provider).await["data"]["id"]
-                    .as_i64()
-                    .expect("provider id should exist");
-                let provider_key = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &format!("/manager/api/provider/{provider_id}/provider_keys"),
-                        &enrolled.access_token,
-                        Some(json!({
-                            "api_key": "sk-unavailable-provider",
-                            "description": null
-                        })),
-                        None,
-                    ),
-                )
-                .await;
-                assert_eq!(provider_key.status(), StatusCode::OK);
-                let provider_key_id = response_json(provider_key).await["data"]["id"]
-                    .as_i64()
-                    .expect("provider key id should exist");
-
-                let credential_before = ManagerCredential::load()
-                    .unwrap()
-                    .expect("manager credential should exist");
-                let sessions_before =
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len();
-                let enrolled_context = decode_access_token(&enrolled.access_token)
-                    .expect("enrollment access should decode");
-                let app_state = restart_with_corrupt_totp(&app_state, &now);
-                let restarted_access = app_state
-                    .admin
-                    .auth
-                    .access_for_session(
-                        enrolled_context.login_instance_id,
-                        enrolled_context.credential_epoch,
-                    )
-                    .await
-                    .expect("mediator recovery should rebuild page access after restart");
-
-                let api_commands = [
-                    (
-                        Method::POST,
-                        "/manager/api/api_key".to_string(),
-                        Some(json!({
-                            "name": "must-not-create",
-                            "default_action": "ALLOW"
-                        })),
-                    ),
-                    (
-                        Method::POST,
-                        format!("/manager/api/api_key/{api_key_id}/reveal"),
-                        None,
-                    ),
-                    (
-                        Method::POST,
-                        format!("/manager/api/api_key/{api_key_id}/rotate"),
-                        None,
-                    ),
-                    (
-                        Method::DELETE,
-                        format!("/manager/api/api_key/{api_key_id}"),
-                        None,
-                    ),
-                ];
-                for (method, path, payload) in api_commands {
-                    let response = send_manager(
-                        &app_state,
-                        manager_command_request(
-                            method.clone(),
-                            &path,
-                            &restarted_access,
-                            payload,
-                            None,
-                        ),
-                    )
-                    .await;
-                    let status = response.status();
-                    let body = response_json(response).await;
-                    assert_eq!(
-                        status,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "{method} {path}: {body}"
-                    );
-                    assert_eq!(body["code"].as_u64(), Some(1479), "{method} {path}");
-                }
-                assert_eq!(app_state.admin.api_key.list_api_keys().unwrap().len(), 1);
-                assert_eq!(
-                    app_state
-                        .admin
-                        .api_key
-                        .reveal_api_key(api_key_id)
-                        .unwrap()
-                        .api_key,
-                    api_key_secret,
-                    "unavailable TOTP must precede reveal, rotation, and deletion"
-                );
-
-                let provider_reveal = send_manager(
-                    &app_state,
-                    manager_command_request(
-                        Method::POST,
-                        &format!(
-                            "/manager/api/provider/{provider_id}/provider_keys/{provider_key_id}/reveal"
-                        ),
-                        &restarted_access,
-                        None,
-                        None,
-                    ),
-                )
-                .await;
-                assert_error(
-                    provider_reveal,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    1479,
-                )
-                .await;
-                assert_eq!(
-                    app_state
-                        .admin
-                        .provider
-                        .reveal_provider_api_key(provider_id, provider_key_id)
-                        .await
-                        .unwrap()
-                        .api_key,
-                    "sk-unavailable-provider"
-                );
-
-                let rotate = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/password/rotate",
-                        &enrolled.cookie,
-                        Some(&restarted_access),
-                        json!({
-                            "current_password": INITIAL_PASSWORD,
-                            "new_password": ROTATED_PASSWORD,
-                        }),
-                    ),
-                )
-                .await;
-                assert_error(rotate, StatusCode::SERVICE_UNAVAILABLE, 1479).await;
-
-                let logout_all = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/logout_all",
-                        &enrolled.cookie,
-                        Some(&restarted_access),
-                        json!({ "current_password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_error(logout_all, StatusCode::SERVICE_UNAVAILABLE, 1479).await;
-                let credential_after = ManagerCredential::load()
-                    .unwrap()
-                    .expect("manager credential should remain");
-                assert_eq!(
-                    credential_after.password_verifier,
-                    credential_before.password_verifier,
-                    "unavailable TOTP must precede password mutation"
-                );
-                assert_eq!(
-                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
-                        .unwrap()
-                        .len(),
-                    sessions_before,
-                    "unavailable TOTP must precede logout-all revocation"
-                );
-            })
+            TestDatabase::new_sqlite_default("controller-sensitive-totp-unavailable.sqlite").await;
+        (async {
+            let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+            let enrolled = enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+            let create_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+            let created = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/api_key",
+                    &enrolled.access_token,
+                    Some(json!({
+                        "name": "unavailable-api-key",
+                        "default_action": "ALLOW"
+                    })),
+                    Some(&create_code),
+                ),
+            )
             .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let created = response_json(created).await;
+            let api_key_id = created["data"]["detail"]["id"]
+                .as_i64()
+                .expect("API key id should exist");
+            let api_key_secret = created["data"]["reveal"]["api_key"]
+                .as_str()
+                .expect("API key secret should exist")
+                .to_string();
+
+            let provider = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    "/manager/api/provider",
+                    &enrolled.access_token,
+                    Some(json!({
+                        "name": "Unavailable Provider",
+                        "key": "unavailable-provider",
+                        "initial_source": {
+                            "base_url": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "profile_type": "OPENAI",
+                            "is_enabled": true,
+                            "is_default": true
+                        },
+                        "provider_api_key_mode": "QUEUE"
+                    })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(provider.status(), StatusCode::OK);
+            let provider_id = response_json(provider).await["data"]["id"]
+                .as_i64()
+                .expect("provider id should exist");
+            let provider_key = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &format!("/manager/api/provider/{provider_id}/provider_keys"),
+                    &enrolled.access_token,
+                    Some(json!({
+                        "api_key": "sk-unavailable-provider",
+                        "description": null
+                    })),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(provider_key.status(), StatusCode::OK);
+            let provider_key_id = response_json(provider_key).await["data"]["id"]
+                .as_i64()
+                .expect("provider key id should exist");
+
+            let credential_before = ManagerCredential::load(&test_db_context)
+                .await
+                .unwrap()
+                .expect("manager credential should exist");
+            let sessions_before = ManagerAuthInstance::list_active_instances(
+                &test_db_context,
+                now.load(Ordering::SeqCst),
+            )
+            .await
+            .unwrap()
+            .len();
+            let enrolled_context = decode_access_token(&enrolled.access_token)
+                .expect("enrollment access should decode");
+            let app_state = restart_with_corrupt_totp(&app_state, &now).await;
+            let restarted_access = app_state
+                .admin
+                .auth
+                .access_for_session(
+                    enrolled_context.login_instance_id,
+                    enrolled_context.credential_epoch,
+                )
+                .await
+                .expect("mediator recovery should rebuild page access after restart");
+
+            let api_commands = [
+                (
+                    Method::POST,
+                    "/manager/api/api_key".to_string(),
+                    Some(json!({
+                        "name": "must-not-create",
+                        "default_action": "ALLOW"
+                    })),
+                ),
+                (
+                    Method::POST,
+                    format!("/manager/api/api_key/{api_key_id}/reveal"),
+                    None,
+                ),
+                (
+                    Method::POST,
+                    format!("/manager/api/api_key/{api_key_id}/rotate"),
+                    None,
+                ),
+                (
+                    Method::DELETE,
+                    format!("/manager/api/api_key/{api_key_id}"),
+                    None,
+                ),
+            ];
+            for (method, path, payload) in api_commands {
+                let response = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        method.clone(),
+                        &path,
+                        &restarted_access,
+                        payload,
+                        None,
+                    ),
+                )
+                .await;
+                let status = response.status();
+                let body = response_json(response).await;
+                assert_eq!(
+                    status,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{method} {path}: {body}"
+                );
+                assert_eq!(body["code"].as_u64(), Some(1479), "{method} {path}");
+            }
+            assert_eq!(
+                app_state.admin.api_key.list_api_keys().await.unwrap().len(),
+                1
+            );
+            assert_eq!(
+                app_state
+                    .admin
+                    .api_key
+                    .reveal_api_key(api_key_id)
+                    .await
+                    .unwrap()
+                    .api_key,
+                api_key_secret,
+                "unavailable TOTP must precede reveal, rotation, and deletion"
+            );
+
+            let provider_reveal = send_manager(
+                &app_state,
+                manager_command_request(
+                    Method::POST,
+                    &format!(
+                        "/manager/api/provider/{provider_id}/provider_keys/{provider_key_id}/reveal"
+                    ),
+                    &restarted_access,
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_error(provider_reveal, StatusCode::SERVICE_UNAVAILABLE, 1479).await;
+            assert_eq!(
+                app_state
+                    .admin
+                    .provider
+                    .reveal_provider_api_key(provider_id, provider_key_id)
+                    .await
+                    .unwrap()
+                    .api_key,
+                "sk-unavailable-provider"
+            );
+
+            let rotate = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/password/rotate",
+                    &enrolled.cookie,
+                    Some(&restarted_access),
+                    json!({
+                        "current_password": INITIAL_PASSWORD,
+                        "new_password": ROTATED_PASSWORD,
+                    }),
+                ),
+            )
+            .await;
+            assert_error(rotate, StatusCode::SERVICE_UNAVAILABLE, 1479).await;
+
+            let logout_all = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/logout_all",
+                    &enrolled.cookie,
+                    Some(&restarted_access),
+                    json!({ "current_password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_error(logout_all, StatusCode::SERVICE_UNAVAILABLE, 1479).await;
+            let credential_after = ManagerCredential::load(&test_db_context)
+                .await
+                .unwrap()
+                .expect("manager credential should remain");
+            assert_eq!(
+                credential_after.password_verifier, credential_before.password_verifier,
+                "unavailable TOTP must precede password mutation"
+            );
+            assert_eq!(
+                ManagerAuthInstance::list_active_instances(
+                    &test_db_context,
+                    now.load(Ordering::SeqCst)
+                )
+                .await
+                .unwrap()
+                .len(),
+                sessions_before,
+                "unavailable TOTP must precede logout-all revocation"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_logout_all_revokes_current_and_other_sessions() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-logout-all.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-logout-all.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let first_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(first_response.status(), StatusCode::OK);
-                let first_cookie = mediator_cookie(&first_response);
-                let first_access = access_token(&response_json(first_response).await);
-                let second_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/password",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(second_response.status(), StatusCode::OK);
-                let second_cookie = mediator_cookie(&second_response);
-                let second_access = access_token(&response_json(second_response).await);
-
-                let mismatch = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/logout_all",
-                        &first_cookie,
-                        Some(&second_access),
-                        json!({ "current_password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(mismatch.status(), StatusCode::UNAUTHORIZED);
-                assert!(
-                    mismatch
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-                assert_eq!(response_json(mismatch).await["code"], json!(1441));
-
-                let logout_all_response = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/logout_all",
-                        &second_cookie,
-                        Some(&second_access),
-                        json!({ "current_password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(logout_all_response.status(), StatusCode::OK);
-                assert!(
-                    logout_all_response
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-                assert_eq!(
-                    response_json(logout_all_response).await["data"]["revoked_sessions"],
-                    json!(2)
-                );
-
-                for access_token in [first_access, second_access] {
-                    let response = send_manager(
-                        &app_state,
-                        Request::builder()
-                            .method(Method::GET)
-                            .uri("/manager/api/system/overview")
-                            .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
-                            .body(Body::empty())
-                            .expect("request should build"),
-                    )
-                    .await;
-                    assert_error(response, StatusCode::UNAUTHORIZED, 1435).await;
-                }
-            })
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let first_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
             .await;
+            assert_eq!(first_response.status(), StatusCode::OK);
+            let first_cookie = mediator_cookie(&first_response);
+            let first_access = access_token(&response_json(first_response).await);
+            let second_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/password",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(second_response.status(), StatusCode::OK);
+            let second_cookie = mediator_cookie(&second_response);
+            let second_access = access_token(&response_json(second_response).await);
+
+            let mismatch = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/logout_all",
+                    &first_cookie,
+                    Some(&second_access),
+                    json!({ "current_password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(mismatch.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                mismatch
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+            assert_eq!(response_json(mismatch).await["code"], json!(1441));
+
+            let logout_all_response = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/logout_all",
+                    &second_cookie,
+                    Some(&second_access),
+                    json!({ "current_password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(logout_all_response.status(), StatusCode::OK);
+            assert!(
+                logout_all_response
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+            assert_eq!(
+                response_json(logout_all_response).await["data"]["revoked_sessions"],
+                json!(2)
+            );
+
+            for access_token in [first_access, second_access] {
+                let response = send_manager(
+                    &app_state,
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/manager/api/system/overview")
+                        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await;
+                assert_error(response, StatusCode::UNAUTHORIZED, 1435).await;
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_sensitive_storage_failures_preserve_or_delete_browser_state_by_contract() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-auth-sensitive-storage-failures.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let bootstrap = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
+            TestDatabase::new_sqlite_default("controller-auth-sensitive-storage-failures.sqlite")
                 .await;
-                assert_eq!(bootstrap.status(), StatusCode::OK);
-                let cookie = mediator_cookie(&bootstrap);
-                let access = access_token(&response_json(bootstrap).await);
 
-                let mut conn = get_connection().expect("connection should load");
-                match &mut conn {
-                    DbConnection::Postgres(conn) => {
-                        diesel::sql_query("DROP TABLE manager_auth_instance")
-                            .execute(conn)
-                            .expect("session table should drop");
-                    }
-                    DbConnection::Sqlite(conn) => {
-                        diesel::sql_query("DROP TABLE manager_auth_instance")
-                            .execute(conn)
-                            .expect("session table should drop");
-                    }
-                }
-                drop(conn);
-
-                let rotate_failure = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/password/rotate",
-                        &cookie,
-                        Some(&access),
-                        json!({
-                            "current_password": INITIAL_PASSWORD,
-                            "new_password": ROTATED_PASSWORD,
-                        }),
-                    ),
-                )
-                .await;
-                assert!(
-                    rotate_failure.headers().get(header::SET_COOKIE).is_none(),
-                    "transaction failure must preserve the caller cookie"
-                );
-                assert_error(rotate_failure, StatusCode::SERVICE_UNAVAILABLE, 1426).await;
-
-                let logout_all_failure = send(
-                    &app_state,
-                    cookie_request(
-                        Method::POST,
-                        "/auth/logout_all",
-                        &cookie,
-                        Some(&access),
-                        json!({ "current_password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert!(
-                    logout_all_failure
-                        .headers()
-                        .get(header::SET_COOKIE)
-                        .is_none(),
-                    "logout-all storage failure must preserve the caller cookie"
-                );
-                assert_error(logout_all_failure, StatusCode::SERVICE_UNAVAILABLE, 1484).await;
-
-                let logout_failure = send(
-                    &app_state,
-                    cookie_request(Method::POST, "/auth/logout", &cookie, None, json!({})),
-                )
-                .await;
-                assert!(
-                    logout_failure
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0"))),
-                    "current logout storage failure must delete the caller cookie"
-                );
-                assert_error(logout_failure, StatusCode::SERVICE_UNAVAILABLE, 1451).await;
-
-                let still_valid = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(header::AUTHORIZATION, format!("Bearer {access}"))
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_eq!(
-                    still_valid.status(),
-                    StatusCode::OK,
-                    "failed persistent mutations must not alter in-memory authentication state"
-                );
-            })
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let bootstrap = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
             .await;
+            assert_eq!(bootstrap.status(), StatusCode::OK);
+            let cookie = mediator_cookie(&bootstrap);
+            let access = access_token(&response_json(bootstrap).await);
+
+            test_db_context
+                .execute_sqlite_batch("DROP TABLE manager_auth_instance")
+                .await
+                .expect("session table should drop");
+
+            let rotate_failure = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/password/rotate",
+                    &cookie,
+                    Some(&access),
+                    json!({
+                        "current_password": INITIAL_PASSWORD,
+                        "new_password": ROTATED_PASSWORD,
+                    }),
+                ),
+            )
+            .await;
+            assert!(
+                rotate_failure.headers().get(header::SET_COOKIE).is_none(),
+                "transaction failure must preserve the caller cookie"
+            );
+            assert_error(rotate_failure, StatusCode::SERVICE_UNAVAILABLE, 1426).await;
+
+            let logout_all_failure = send(
+                &app_state,
+                cookie_request(
+                    Method::POST,
+                    "/auth/logout_all",
+                    &cookie,
+                    Some(&access),
+                    json!({ "current_password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert!(
+                logout_all_failure
+                    .headers()
+                    .get(header::SET_COOKIE)
+                    .is_none(),
+                "logout-all storage failure must preserve the caller cookie"
+            );
+            assert_error(logout_all_failure, StatusCode::SERVICE_UNAVAILABLE, 1484).await;
+
+            let logout_failure = send(
+                &app_state,
+                cookie_request(Method::POST, "/auth/logout", &cookie, None, json!({})),
+            )
+            .await;
+            assert!(
+                logout_failure
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0"))),
+                "current logout storage failure must delete the caller cookie"
+            );
+            assert_error(logout_failure, StatusCode::SERVICE_UNAVAILABLE, 1451).await;
+
+            let still_valid = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await;
+            assert_eq!(
+                still_valid.status(),
+                StatusCode::OK,
+                "failed persistent mutations must not alter in-memory authentication state"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_rejects_bad_headers_and_oversized_or_legacy_bodies() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-rejections.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-rejections.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let missing_mediator =
-                    send(&app_state, empty_request(Method::POST, "/auth/access")).await;
-                assert_error(missing_mediator, StatusCode::UNAUTHORIZED, 1441).await;
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let missing_mediator =
+                send(&app_state, empty_request(Method::POST, "/auth/access")).await;
+            assert_error(missing_mediator, StatusCode::UNAUTHORIZED, 1441).await;
 
-                let bad_logout = send(
-                    &app_state,
-                    auth_request(Method::POST, "/auth/logout", "invalid", json!({})),
-                )
-                .await;
-                assert_eq!(bad_logout.status(), StatusCode::OK);
-                assert!(
-                    bad_logout
-                        .headers()
-                        .get_all(header::SET_COOKIE)
-                        .iter()
-                        .any(|value| value
-                            .to_str()
-                            .is_ok_and(|value| value.contains("Max-Age=0")))
-                );
-
-                let oversized = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": "x".repeat(5_000) }),
-                    ),
-                )
-                .await;
-                assert_error(oversized, StatusCode::UNPROCESSABLE_ENTITY, 1402).await;
-            })
+            let bad_logout = send(
+                &app_state,
+                auth_request(Method::POST, "/auth/logout", "invalid", json!({})),
+            )
             .await;
+            assert_eq!(bad_logout.status(), StatusCode::OK);
+            assert!(
+                bad_logout
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .any(|value| value
+                        .to_str()
+                        .is_ok_and(|value| value.contains("Max-Age=0")))
+            );
+
+            let oversized = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": "x".repeat(5_000) }),
+                ),
+            )
+            .await;
+            assert_error(oversized, StatusCode::UNPROCESSABLE_ENTITY, 1402).await;
+        })
+        .await;
     }
 
     #[test]
@@ -3800,506 +3876,491 @@ mod tests {
 
     #[tokio::test]
     async fn auth_http_browser_boundary_rejects_unsafe_requests_before_credentials_change() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-browser-boundary.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-browser-boundary.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                for path in [
-                    "/auth/bootstrap",
-                    "/auth/login/password",
-                    "/auth/login/totp",
-                    "/auth/reauth",
-                    "/auth/recovery/start",
-                    "/auth/recovery/confirm",
-                    "/auth/totp/enroll/start",
-                    "/auth/totp/enroll/confirm",
-                    "/auth/totp/replace/start",
-                    "/auth/totp/replace/confirm",
-                    "/auth/totp/disable",
-                    "/auth/access",
-                    "/auth/password/rotate",
-                    "/auth/logout",
-                    "/auth/logout_all",
-                ] {
-                    let mut missing_origin =
-                        json_request(Method::POST, path, json!({ "password": INITIAL_PASSWORD }));
-                    missing_origin.headers_mut().remove(header::ORIGIN);
-                    assert_error(
-                        send(&app_state, missing_origin).await,
-                        StatusCode::FORBIDDEN,
-                        1461,
-                    )
-                    .await;
-                }
-
-                let mut origin_with_path = json_request(
-                    Method::POST,
-                    "/auth/bootstrap",
-                    json!({ "password": INITIAL_PASSWORD }),
-                );
-                origin_with_path.headers_mut().insert(
-                    header::ORIGIN,
-                    "http://127.0.0.1:29528/path"
-                        .parse()
-                        .expect("origin should parse as a header"),
-                );
+            for path in [
+                "/auth/bootstrap",
+                "/auth/login/password",
+                "/auth/login/totp",
+                "/auth/reauth",
+                "/auth/recovery/start",
+                "/auth/recovery/confirm",
+                "/auth/totp/enroll/start",
+                "/auth/totp/enroll/confirm",
+                "/auth/totp/replace/start",
+                "/auth/totp/replace/confirm",
+                "/auth/totp/disable",
+                "/auth/access",
+                "/auth/password/rotate",
+                "/auth/logout",
+                "/auth/logout_all",
+            ] {
+                let mut missing_origin =
+                    json_request(Method::POST, path, json!({ "password": INITIAL_PASSWORD }));
+                missing_origin.headers_mut().remove(header::ORIGIN);
                 assert_error(
-                    send(&app_state, origin_with_path).await,
+                    send(&app_state, missing_origin).await,
                     StatusCode::FORBIDDEN,
                     1461,
                 )
                 .await;
+            }
 
-                let mut cross_site = json_request(
-                    Method::POST,
-                    "/auth/bootstrap",
-                    json!({ "password": INITIAL_PASSWORD }),
-                );
-                cross_site.headers_mut().insert(
-                    "sec-fetch-site",
-                    "cross-site".parse().expect("fetch site should parse"),
-                );
-                assert_error(
-                    send(&app_state, cross_site).await,
-                    StatusCode::FORBIDDEN,
-                    1461,
-                )
-                .await;
-
-                let mut missing_custom_header = json_request(
-                    Method::POST,
-                    "/auth/bootstrap",
-                    json!({ "password": INITIAL_PASSWORD }),
-                );
-                missing_custom_header
-                    .headers_mut()
-                    .remove("x-cyder-manager-auth");
-                assert_error(
-                    send(&app_state, missing_custom_header).await,
-                    StatusCode::FORBIDDEN,
-                    1461,
-                )
-                .await;
-
-                let mut wrong_content_type = json_request(
-                    Method::POST,
-                    "/auth/bootstrap",
-                    json!({ "password": INITIAL_PASSWORD }),
-                );
-                wrong_content_type.headers_mut().insert(
-                    header::CONTENT_TYPE,
-                    "text/plain".parse().expect("content type should parse"),
-                );
-                assert_error(
-                    send(&app_state, wrong_content_type).await,
-                    StatusCode::FORBIDDEN,
-                    1461,
-                )
-                .await;
-
-                let non_loopback = send_from(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                    SocketAddr::from(([192, 0, 2, 10], 31_004)),
-                )
-                .await;
-                assert_error(non_loopback, StatusCode::FORBIDDEN, 1461).await;
-
-                let valid = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/bootstrap",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                )
-                .await;
-                assert_eq!(valid.status(), StatusCode::OK);
-            })
+            let mut origin_with_path = json_request(
+                Method::POST,
+                "/auth/bootstrap",
+                json!({ "password": INITIAL_PASSWORD }),
+            );
+            origin_with_path.headers_mut().insert(
+                header::ORIGIN,
+                "http://127.0.0.1:29528/path"
+                    .parse()
+                    .expect("origin should parse as a header"),
+            );
+            assert_error(
+                send(&app_state, origin_with_path).await,
+                StatusCode::FORBIDDEN,
+                1461,
+            )
             .await;
+
+            let mut cross_site = json_request(
+                Method::POST,
+                "/auth/bootstrap",
+                json!({ "password": INITIAL_PASSWORD }),
+            );
+            cross_site.headers_mut().insert(
+                "sec-fetch-site",
+                "cross-site".parse().expect("fetch site should parse"),
+            );
+            assert_error(
+                send(&app_state, cross_site).await,
+                StatusCode::FORBIDDEN,
+                1461,
+            )
+            .await;
+
+            let mut missing_custom_header = json_request(
+                Method::POST,
+                "/auth/bootstrap",
+                json!({ "password": INITIAL_PASSWORD }),
+            );
+            missing_custom_header
+                .headers_mut()
+                .remove("x-cyder-manager-auth");
+            assert_error(
+                send(&app_state, missing_custom_header).await,
+                StatusCode::FORBIDDEN,
+                1461,
+            )
+            .await;
+
+            let mut wrong_content_type = json_request(
+                Method::POST,
+                "/auth/bootstrap",
+                json!({ "password": INITIAL_PASSWORD }),
+            );
+            wrong_content_type.headers_mut().insert(
+                header::CONTENT_TYPE,
+                "text/plain".parse().expect("content type should parse"),
+            );
+            assert_error(
+                send(&app_state, wrong_content_type).await,
+                StatusCode::FORBIDDEN,
+                1461,
+            )
+            .await;
+
+            let non_loopback = send_from(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+                SocketAddr::from(([192, 0, 2, 10], 31_004)),
+            )
+            .await;
+            assert_error(non_loopback, StatusCode::FORBIDDEN, 1461).await;
+
+            let valid = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/bootstrap",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+            )
+            .await;
+            assert_eq!(valid.status(), StatusCode::OK);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_login_rate_limit_uses_peer_ip_and_ignores_forwarded_headers() {
-        let test_db_context = TestDbContext::new_sqlite("controller-auth-peer-rate-limit.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-auth-peer-rate-limit.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                app_state
-                    .admin
-                    .auth
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-                let first_peer = SocketAddr::from(([127, 0, 0, 10], 31_001));
-                let second_peer = SocketAddr::from(([127, 0, 0, 11], 31_002));
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            app_state
+                .admin
+                .auth
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let first_peer = SocketAddr::from(([127, 0, 0, 10], 31_001));
+            let second_peer = SocketAddr::from(([127, 0, 0, 11], 31_002));
 
-                for index in 0..5 {
-                    let mut request = json_request(
-                        Method::POST,
-                        "/auth/login/password",
-                        json!({ "password": "wrong horse battery staple" }),
-                    );
-                    request.headers_mut().insert(
-                        "x-forwarded-for",
-                        format!("198.51.100.{}", index + 1)
-                            .parse()
-                            .expect("forwarded header should parse"),
-                    );
-                    request.headers_mut().insert(
-                        "x-real-ip",
-                        format!("203.0.113.{}", index + 1)
-                            .parse()
-                            .expect("real ip header should parse"),
-                    );
-                    let response = send_from(&app_state, request, first_peer).await;
-                    assert_error(response, StatusCode::UNAUTHORIZED, 1412).await;
-                }
-
-                let mut locked_request = json_request(
+            for index in 0..5 {
+                let mut request = json_request(
                     Method::POST,
                     "/auth/login/password",
-                    json!({ "password": INITIAL_PASSWORD }),
+                    json!({ "password": "wrong horse battery staple" }),
                 );
-                locked_request.headers_mut().insert(
-                    "forwarded",
-                    "for=203.0.113.200"
+                request.headers_mut().insert(
+                    "x-forwarded-for",
+                    format!("198.51.100.{}", index + 1)
                         .parse()
                         .expect("forwarded header should parse"),
                 );
-                let locked = send_from(&app_state, locked_request, first_peer).await;
-                let retry_after = locked
-                    .headers()
-                    .get(header::RETRY_AFTER)
-                    .expect("source lock should expose Retry-After")
-                    .to_str()
-                    .expect("Retry-After should be text")
-                    .parse::<u64>()
-                    .expect("Retry-After should be numeric");
-                assert!((1..=60).contains(&retry_after));
-                assert_error(locked, StatusCode::TOO_MANY_REQUESTS, 1417).await;
+                request.headers_mut().insert(
+                    "x-real-ip",
+                    format!("203.0.113.{}", index + 1)
+                        .parse()
+                        .expect("real ip header should parse"),
+                );
+                let response = send_from(&app_state, request, first_peer).await;
+                assert_error(response, StatusCode::UNAUTHORIZED, 1412).await;
+            }
 
-                let independent = send_from(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/auth/login/password",
-                        json!({ "password": INITIAL_PASSWORD }),
-                    ),
-                    second_peer,
-                )
-                .await;
-                assert_eq!(independent.status(), StatusCode::OK);
-            })
+            let mut locked_request = json_request(
+                Method::POST,
+                "/auth/login/password",
+                json!({ "password": INITIAL_PASSWORD }),
+            );
+            locked_request.headers_mut().insert(
+                "forwarded",
+                "for=203.0.113.200"
+                    .parse()
+                    .expect("forwarded header should parse"),
+            );
+            let locked = send_from(&app_state, locked_request, first_peer).await;
+            let retry_after = locked
+                .headers()
+                .get(header::RETRY_AFTER)
+                .expect("source lock should expose Retry-After")
+                .to_str()
+                .expect("Retry-After should be text")
+                .parse::<u64>()
+                .expect("Retry-After should be numeric");
+            assert!((1..=60).contains(&retry_after));
+            assert_error(locked, StatusCode::TOO_MANY_REQUESTS, 1417).await;
+
+            let independent = send_from(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/auth/login/password",
+                    json!({ "password": INITIAL_PASSWORD }),
+                ),
+                second_peer,
+            )
             .await;
+            assert_eq!(independent.status(), StatusCode::OK);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn auth_http_login_rate_limit_uses_client_identity_from_trusted_proxy() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-auth-forwarded-rate-limit.sqlite");
+            TestDatabase::new_sqlite_default("controller-auth-forwarded-rate-limit.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                app_state
-                    .admin
-                    .auth
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-                let resolver = Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig {
-                    trusted_proxy_cidrs: vec![
-                        "127.0.0.9/32".parse().expect("test CIDR should parse"),
-                    ],
-                    max_forwarded_hops: 8,
-                }));
-                let trusted_peer = SocketAddr::from(([127, 0, 0, 9], 31_003));
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            app_state
+                .admin
+                .auth
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let resolver = Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig {
+                trusted_proxy_cidrs: vec!["127.0.0.9/32".parse().expect("test CIDR should parse")],
+                max_forwarded_hops: 8,
+            }));
+            let trusted_peer = SocketAddr::from(([127, 0, 0, 9], 31_003));
 
-                for _ in 0..5 {
-                    let mut request = json_request(
-                        Method::POST,
-                        "/manager/api/auth/login/password",
-                        json!({ "password": "wrong horse battery staple" }),
-                    );
-                    request.headers_mut().insert(
-                        "forwarded",
-                        "for=198.51.100.10"
-                            .parse()
-                            .expect("forwarded header should parse"),
-                    );
-                    let response = send_manager_with_resolver(
-                        &app_state,
-                        request,
-                        Arc::clone(&resolver),
-                        trusted_peer,
-                    )
-                    .await;
-                    assert_error(response, StatusCode::UNAUTHORIZED, 1412).await;
-                }
-
-                let mut locked_request = json_request(
+            for _ in 0..5 {
+                let mut request = json_request(
                     Method::POST,
                     "/manager/api/auth/login/password",
-                    json!({ "password": INITIAL_PASSWORD }),
+                    json!({ "password": "wrong horse battery staple" }),
                 );
-                locked_request.headers_mut().insert(
+                request.headers_mut().insert(
                     "forwarded",
                     "for=198.51.100.10"
                         .parse()
                         .expect("forwarded header should parse"),
                 );
-                let locked = send_manager_with_resolver(
+                let response = send_manager_with_resolver(
                     &app_state,
-                    locked_request,
+                    request,
                     Arc::clone(&resolver),
                     trusted_peer,
                 )
                 .await;
-                assert_error(locked, StatusCode::TOO_MANY_REQUESTS, 1417).await;
+                assert_error(response, StatusCode::UNAUTHORIZED, 1412).await;
+            }
 
-                let mut independent_request = json_request(
-                    Method::POST,
-                    "/manager/api/auth/login/password",
-                    json!({ "password": INITIAL_PASSWORD }),
-                );
-                independent_request.headers_mut().insert(
-                    "forwarded",
-                    "for=198.51.100.11"
-                        .parse()
-                        .expect("forwarded header should parse"),
-                );
-                let independent = send_manager_with_resolver(
-                    &app_state,
-                    independent_request,
-                    resolver,
-                    trusted_peer,
-                )
-                .await;
-                assert_eq!(independent.status(), StatusCode::OK);
-            })
+            let mut locked_request = json_request(
+                Method::POST,
+                "/manager/api/auth/login/password",
+                json!({ "password": INITIAL_PASSWORD }),
+            );
+            locked_request.headers_mut().insert(
+                "forwarded",
+                "for=198.51.100.10"
+                    .parse()
+                    .expect("forwarded header should parse"),
+            );
+            let locked = send_manager_with_resolver(
+                &app_state,
+                locked_request,
+                Arc::clone(&resolver),
+                trusted_peer,
+            )
             .await;
+            assert_error(locked, StatusCode::TOO_MANY_REQUESTS, 1417).await;
+
+            let mut independent_request = json_request(
+                Method::POST,
+                "/manager/api/auth/login/password",
+                json!({ "password": INITIAL_PASSWORD }),
+            );
+            independent_request.headers_mut().insert(
+                "forwarded",
+                "for=198.51.100.11"
+                    .parse()
+                    .expect("forwarded header should parse"),
+            );
+            let independent =
+                send_manager_with_resolver(&app_state, independent_request, resolver, trusted_peer)
+                    .await;
+            assert_eq!(independent.status(), StatusCode::OK);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_router_access_guard_enforces_the_in_memory_credential_epoch() {
-        let test_db_context = TestDbContext::new_sqlite("manager-access-guard.sqlite");
+        let test_db_context = TestDatabase::new_sqlite_default("manager-access-guard.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let public_status = send_manager(
-                    &app_state,
-                    empty_request(Method::GET, "/manager/api/auth/bootstrap/status"),
-                )
-                .await;
-                assert_eq!(public_status.status(), StatusCode::OK);
-
-                let missing = send_manager(
-                    &app_state,
-                    empty_request(Method::GET, "/manager/api/system/overview"),
-                )
-                .await;
-                assert_error(missing, StatusCode::UNAUTHORIZED, 1431).await;
-
-                let invalid = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(header::AUTHORIZATION, "Bearer invalid")
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_error(invalid, StatusCode::UNAUTHORIZED, 1432).await;
-
-                let initial = app_state
-                    .admin
-                    .auth
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-                let initial_context = decode_access_token(&initial.access_token)
-                    .expect("initial access should decode");
-                let accepted = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(
-                            header::AUTHORIZATION,
-                            format!("Bearer {}", initial.access_token),
-                        )
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_eq!(accepted.status(), StatusCode::OK);
-
-                let rotated = app_state
-                    .admin
-                    .auth
-                    .rotate_password(
-                        &initial_context,
-                        SocketAddr::from(([127, 0, 0, 1], 31_000)).ip(),
-                        None,
-                        INITIAL_PASSWORD,
-                        ROTATED_PASSWORD,
-                    )
-                    .await
-                    .expect("rotation should succeed");
-                let stale = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(
-                            header::AUTHORIZATION,
-                            format!("Bearer {}", initial.access_token),
-                        )
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_error(stale, StatusCode::UNAUTHORIZED, 1433).await;
-
-                let accepted_after_rotation = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(
-                            header::AUTHORIZATION,
-                            format!("Bearer {}", rotated.access_token),
-                        )
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_eq!(accepted_after_rotation.status(), StatusCode::OK);
-
-                let rotated_context = decode_access_token(&rotated.access_token)
-                    .expect("rotated access should decode");
-                app_state
-                    .admin
-                    .auth
-                    .logout_session(
-                        rotated_context.login_instance_id,
-                        rotated_context.credential_epoch,
-                    )
-                    .await
-                    .expect("logout should revoke the rotated session");
-                let revoked = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(
-                            header::AUTHORIZATION,
-                            format!("Bearer {}", rotated.access_token),
-                        )
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_error(revoked, StatusCode::UNAUTHORIZED, 1435).await;
-            })
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let public_status = send_manager(
+                &app_state,
+                empty_request(Method::GET, "/manager/api/auth/bootstrap/status"),
+            )
             .await;
+            assert_eq!(public_status.status(), StatusCode::OK);
+
+            let missing = send_manager(
+                &app_state,
+                empty_request(Method::GET, "/manager/api/system/overview"),
+            )
+            .await;
+            assert_error(missing, StatusCode::UNAUTHORIZED, 1431).await;
+
+            let invalid = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(header::AUTHORIZATION, "Bearer invalid")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await;
+            assert_error(invalid, StatusCode::UNAUTHORIZED, 1432).await;
+
+            let initial = app_state
+                .admin
+                .auth
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let initial_context =
+                decode_access_token(&initial.access_token).expect("initial access should decode");
+            let accepted = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", initial.access_token),
+                    )
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await;
+            assert_eq!(accepted.status(), StatusCode::OK);
+
+            let rotated = app_state
+                .admin
+                .auth
+                .rotate_password(
+                    &initial_context,
+                    SocketAddr::from(([127, 0, 0, 1], 31_000)).ip(),
+                    None,
+                    INITIAL_PASSWORD,
+                    ROTATED_PASSWORD,
+                )
+                .await
+                .expect("rotation should succeed");
+            let stale = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", initial.access_token),
+                    )
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await;
+            assert_error(stale, StatusCode::UNAUTHORIZED, 1433).await;
+
+            let accepted_after_rotation = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", rotated.access_token),
+                    )
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await;
+            assert_eq!(accepted_after_rotation.status(), StatusCode::OK);
+
+            let rotated_context =
+                decode_access_token(&rotated.access_token).expect("rotated access should decode");
+            app_state
+                .admin
+                .auth
+                .logout_session(
+                    rotated_context.login_instance_id,
+                    rotated_context.credential_epoch,
+                )
+                .await
+                .expect("logout should revoke the rotated session");
+            let revoked = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", rotated.access_token),
+                    )
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await;
+            assert_error(revoked, StatusCode::UNAUTHORIZED, 1435).await;
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_router_access_guard_reports_unavailable_session_registry() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-access-session-unavailable.sqlite");
+            TestDatabase::new_sqlite_default("manager-access-session-unavailable.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let initial_state = create_test_app_state(test_db_context.clone()).await;
-                let tokens = initial_state
-                    .admin
-                    .auth
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
+        (async {
+            let initial_state = create_test_app_state(test_db_context.clone()).await;
+            let tokens = initial_state
+                .admin
+                .auth
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
 
-                let mut conn = get_connection().expect("connection should load");
-                match &mut conn {
-                    DbConnection::Postgres(conn) => {
-                        diesel::sql_query("DROP TABLE manager_auth_instance")
-                            .execute(conn)
-                            .expect("session table should drop");
-                    }
-                    DbConnection::Sqlite(conn) => {
-                        diesel::sql_query("DROP TABLE manager_auth_instance")
-                            .execute(conn)
-                            .expect("session table should drop");
-                    }
-                }
-                drop(conn);
+            test_db_context
+                .execute_sqlite_batch("DROP TABLE manager_auth_instance")
+                .await
+                .expect("session table should drop");
 
-                let unavailable_state = create_test_app_state(test_db_context.clone()).await;
-                let response = send_manager(
-                    &unavailable_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(
-                            header::AUTHORIZATION,
-                            format!("Bearer {}", tokens.access_token),
-                        )
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_error(response, StatusCode::SERVICE_UNAVAILABLE, 1436).await;
-                assert!(unavailable_state.max_body_size > 0);
-            })
+            let unavailable_state = create_test_app_state(test_db_context.clone()).await;
+            let response = send_manager(
+                &unavailable_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", tokens.access_token),
+                    )
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
             .await;
+            assert_error(response, StatusCode::SERVICE_UNAVAILABLE, 1436).await;
+            assert!(unavailable_state.max_body_size > 0);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_router_access_guard_reports_unavailable_corrupt_credential() {
-        let test_db_context = TestDbContext::new_sqlite("manager-access-guard-corrupt.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-access-guard-corrupt.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                ManagerCredential::insert_once(NewManagerCredential {
+        (async {
+            ManagerCredential::insert_once(
+                &test_db_context,
+                NewManagerCredential {
                     password_verifier: "not-a-phc".to_string(),
                     credential_epoch: uuid::Uuid::new_v4().to_string(),
                     now: 1,
-                })
-                .expect("corrupt fixture should persist");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let now = get_current_timestamp();
-                let access_token = issue_access_token(
-                    crate::database::manager_credential::MANAGER_ID,
-                    1,
-                    &generate_token_jti(),
-                    crate::database::manager_auth_instance::INITIAL_SESSION_VERSION,
-                    &uuid::Uuid::new_v4(),
-                    now,
-                );
-                let response = send_manager(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/manager/api/system/overview")
-                        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
-                        .body(Body::empty())
-                        .expect("request should build"),
-                )
-                .await;
-                assert_error(response, StatusCode::SERVICE_UNAVAILABLE, 1434).await;
-            })
+                },
+            )
+            .await
+            .expect("corrupt fixture should persist");
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let now = get_current_timestamp();
+            let access_token = issue_access_token(
+                crate::database::manager_credential::MANAGER_ID,
+                1,
+                &generate_token_jti(),
+                crate::database::manager_auth_instance::INITIAL_SESSION_VERSION,
+                &uuid::Uuid::new_v4(),
+                now,
+            );
+            let response = send_manager(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/manager/api/system/overview")
+                    .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
             .await;
+            assert_error(response, StatusCode::SERVICE_UNAVAILABLE, 1434).await;
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::{CacheBackendType, FinalConfig, RuntimeStateBackendType};
+use crate::database::runtime::DatabaseRuntime;
 use crate::service::redis::{RedisPool, get_pool};
 
 use super::api_key_governance::{
@@ -122,6 +123,7 @@ impl RuntimeStateBackendBundle {
     pub async fn from_config(
         config: &FinalConfig,
         force_memory_backend: bool,
+        database: Arc<DatabaseRuntime>,
     ) -> Result<Self, RuntimeStateBackendError> {
         if force_memory_backend {
             return Ok(Self::memory(
@@ -129,6 +131,7 @@ impl RuntimeStateBackendBundle {
                 RuntimeStateBackendType::Memory,
                 Some("test_isolation".to_string()),
                 None,
+                database,
             ));
         }
 
@@ -144,13 +147,14 @@ impl RuntimeStateBackendBundle {
             get_pool().await
         };
 
-        Self::from_config_with_pool(config, force_memory_backend, redis_pool)
+        Self::from_config_with_pool(config, force_memory_backend, redis_pool, database)
     }
 
     pub fn from_config_with_pool(
         config: &FinalConfig,
         force_memory_backend: bool,
         redis_pool: Option<RedisPool>,
+        database: Arc<DatabaseRuntime>,
     ) -> Result<Self, RuntimeStateBackendError> {
         if force_memory_backend {
             return Ok(Self::memory(
@@ -158,6 +162,7 @@ impl RuntimeStateBackendBundle {
                 RuntimeStateBackendType::Memory,
                 Some("test_isolation".to_string()),
                 None,
+                database,
             ));
         }
 
@@ -171,10 +176,11 @@ impl RuntimeStateBackendBundle {
                 RuntimeStateBackendType::Memory,
                 None,
                 None,
+                database,
             )),
             RuntimeStateBackendType::Redis => {
                 if let Some(pool) = redis_pool {
-                    Ok(Self::redis(config, pool))
+                    Ok(Self::redis(config, pool, database))
                 } else if config.runtime_state.fallback_to_memory {
                     let reason = "redis_unavailable".to_string();
                     let error = "redis pool is unavailable".to_string();
@@ -190,6 +196,7 @@ impl RuntimeStateBackendBundle {
                         RuntimeStateBackendType::Redis,
                         Some(reason),
                         Some(error),
+                        database,
                     ))
                 } else {
                     crate::warn_event!(
@@ -211,6 +218,7 @@ impl RuntimeStateBackendBundle {
         configured_backend: RuntimeStateBackendType,
         fallback_reason: Option<String>,
         last_error: Option<String>,
+        database: Arc<DatabaseRuntime>,
     ) -> Self {
         let status = RuntimeStateBackendStatus {
             catalog_cache_backend: config.cache.catalog_backend(),
@@ -223,9 +231,10 @@ impl RuntimeStateBackendBundle {
         log_backend_selected(&status);
 
         Self {
-            api_key_governance: Arc::new(ApiKeyGovernanceService::new(Arc::new(
-                MemoryApiKeyRuntimeStore::default(),
-            ))),
+            api_key_governance: Arc::new(ApiKeyGovernanceService::new(
+                database,
+                Arc::new(MemoryApiKeyRuntimeStore::default()),
+            )),
             provider_key_cursor_store: Arc::new(MemoryProviderKeyCursorStore::default()),
             health: RuntimeStateBackendHealth {
                 effective_backend: RuntimeStateBackendType::Memory,
@@ -235,7 +244,7 @@ impl RuntimeStateBackendBundle {
         }
     }
 
-    fn redis(config: &FinalConfig, pool: RedisPool) -> Self {
+    fn redis(config: &FinalConfig, pool: RedisPool, database: Arc<DatabaseRuntime>) -> Self {
         let redis_config = config
             .redis
             .as_ref()
@@ -256,14 +265,15 @@ impl RuntimeStateBackendBundle {
         log_backend_selected(&status);
 
         Self {
-            api_key_governance: Arc::new(ApiKeyGovernanceService::new(Arc::new(
-                RedisApiKeyRuntimeStore::new(
+            api_key_governance: Arc::new(ApiKeyGovernanceService::new(
+                database,
+                Arc::new(RedisApiKeyRuntimeStore::new(
                     pool.clone(),
                     key_prefix.clone(),
                     config.runtime_state.api_key_concurrency_lease_ttl(),
                     state_ttl,
-                ),
-            ))),
+                )),
+            )),
             provider_key_cursor_store: Arc::new(RedisProviderKeyCursorStore::new(
                 pool.clone(),
                 key_prefix.clone(),
@@ -296,6 +306,8 @@ fn cache_backend_name(backend: CacheBackendType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DatabaseIoConfig;
+    use crate::database::test_support::TestDatabase;
 
     #[tokio::test]
     async fn memory_backend_health_does_not_probe_remote_services() {
@@ -327,8 +339,22 @@ mod tests {
         config.runtime_state.fallback_to_memory = true;
         config.redis = None;
 
-        let bundle = RuntimeStateBackendBundle::from_config_with_pool(&config, false, None)
-            .expect("redis fallback should initialize memory runtime state");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+        let database = runtime.block_on(TestDatabase::new_sqlite(
+            "runtime-state-backend.sqlite",
+            2,
+            DatabaseIoConfig::default(),
+        ));
+        let bundle = RuntimeStateBackendBundle::from_config_with_pool(
+            &config,
+            false,
+            None,
+            database.runtime(),
+        )
+        .expect("redis fallback should initialize memory runtime state");
 
         assert_eq!(
             bundle.status.configured_backend,

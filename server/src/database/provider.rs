@@ -1,13 +1,13 @@
 use chrono::Utc;
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use serde::Deserialize; // Serialize on Provider is via db_object!, Deserialize for helper structs
 use serde::Serialize;
 
+use crate::database::DbResult;
 use crate::database::model::{Model, NewModel};
+use crate::database::runtime::{DatabaseRuntime, DatabaseWorkload, db_execute as async_db_execute};
 use crate::database::upstream_source::{NewUpstreamSource, UpstreamSource};
-use crate::database::{DbConnection, DbResult, get_connection};
-use crate::{db_execute, db_object};
+use crate::db_object;
 // db_object! is exported at the crate root by `#[macro_export]` in `database/mod.rs`.
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
 use crate::controller::BaseError;
@@ -39,7 +39,7 @@ db_object! {
 // Data structure for inserting a new provider.
 // The `#[diesel(table_name = ...)]` here needs to resolve from this file's context.
 // `crate::schema::postgres::provider` is the path to the table definition.
-#[derive(Insertable, Deserialize, Debug)]
+#[derive(Insertable, Deserialize, Debug, Clone)]
 #[diesel(table_name = provider)]
     pub struct NewProvider {
         pub id: i64,
@@ -166,6 +166,7 @@ impl StoredProviderApiKey {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct NewProviderApiKey {
     pub id: i64,
     pub provider_id: i64,
@@ -179,6 +180,7 @@ pub(crate) struct NewProviderApiKey {
     pub updated_at: i64,
 }
 
+#[derive(Clone)]
 pub(crate) struct UpdateProviderApiKeyMetadata {
     pub description: Option<String>,
     pub is_enabled: bool,
@@ -202,6 +204,14 @@ type StoredProviderApiKeyTuple = (
 );
 
 type ProviderApiKeySummaryTuple = (i64, i64, Option<String>, String, String, bool, i64, i64);
+type ProviderApiKeySelectionTuple = (
+    i64,
+    i64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<i32>,
+    Option<String>,
+);
 
 fn provider_api_key_summary_from_tuple(row: ProviderApiKeySummaryTuple) -> ProviderApiKeySummary {
     ProviderApiKeySummary {
@@ -253,51 +263,6 @@ fn map_provider_api_key_write_error(
     }
 }
 
-macro_rules! insert_provider_api_key {
-    ($conn:expr, $new_key:expr) => {{
-        let new_key = $new_key;
-        let row = diesel::insert_into(provider_api_key::table)
-            .values((
-                provider_api_key::dsl::id.eq(new_key.id),
-                provider_api_key::dsl::provider_id.eq(new_key.provider_id),
-                provider_api_key::dsl::description.eq(new_key.description.clone()),
-                provider_api_key::dsl::key_prefix.eq(new_key.key_prefix.clone()),
-                provider_api_key::dsl::key_last4.eq(new_key.key_last4.clone()),
-                provider_api_key::dsl::secret_ciphertext
-                    .eq(Some(new_key.encrypted_secret.ciphertext().to_vec())),
-                provider_api_key::dsl::secret_nonce
-                    .eq(Some(new_key.encrypted_secret.nonce().to_vec())),
-                provider_api_key::dsl::secret_format_version
-                    .eq(Some(new_key.encrypted_secret.format_version())),
-                provider_api_key::dsl::secret_key_fingerprint.eq(Some(
-                    new_key
-                        .encrypted_secret
-                        .key_fingerprint()
-                        .as_str()
-                        .to_string(),
-                )),
-                provider_api_key::dsl::secret_hmac
-                    .eq(Some(new_key.secret_hmac.as_str().to_string())),
-                provider_api_key::dsl::is_enabled.eq(new_key.is_enabled),
-                provider_api_key::dsl::created_at.eq(new_key.created_at),
-                provider_api_key::dsl::updated_at.eq(new_key.updated_at),
-            ))
-            .returning((
-                provider_api_key::dsl::id,
-                provider_api_key::dsl::provider_id,
-                provider_api_key::dsl::description,
-                provider_api_key::dsl::key_prefix,
-                provider_api_key::dsl::key_last4,
-                provider_api_key::dsl::is_enabled,
-                provider_api_key::dsl::created_at,
-                provider_api_key::dsl::updated_at,
-            ))
-            .get_result::<ProviderApiKeySummaryTuple>($conn)
-            .map_err(|error| map_provider_api_key_write_error("insert", error))?;
-        provider_api_key_summary_from_tuple(row)
-    }};
-}
-
 macro_rules! stored_provider_key_columns {
     () => {
         (
@@ -344,6 +309,13 @@ pub struct BootstrapProviderResult {
     pub created_model: Model,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ProviderDetail {
+    pub provider: ProviderAggregate,
+    pub api_keys: Vec<ProviderApiKeySummary>,
+    pub request_patch_variants: Vec<RequestPatchVariantAggregate>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderSummaryItem {
     pub id: i64,
@@ -356,575 +328,192 @@ pub struct ProviderSummaryItem {
     pub default_source_profile_type: Option<UpstreamProfileType>,
 }
 
-macro_rules! bootstrap_transaction {
-    ($conn:expr, $source_new_db:ident, $source_db:ident, $model_new_db:ident, $model_db:ident, $input:expr) => {{
-        let bootstrap_input = $input;
-        let current_time = Utc::now().timestamp_millis();
-
-        $conn.batch_execute("BEGIN").map_err(|e| {
-            BaseError::DatabaseFatal(Some(format!(
-                "Failed to start bootstrap transaction: {}",
-                e
-            )))
-        })?;
-
-        let transaction_result: DbResult<BootstrapProviderResult> = (|| {
-            let new_provider_data = NewProvider {
-                id: bootstrap_input.provider_id,
-                provider_key: bootstrap_input.provider_key.clone(),
-                name: bootstrap_input.name.clone(),
-                is_enabled: true,
-                created_at: current_time,
-                updated_at: current_time,
-                provider_api_key_mode: bootstrap_input.provider_api_key_mode.clone(),
-            };
-
-            let provider_db = diesel::insert_into(provider::table)
-                .values(NewProviderDb::to_db(&new_provider_data))
-                .returning(ProviderDb::as_returning())
-                .get_result::<ProviderDb>($conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert bootstrap provider: {}",
-                        e
-                    )))
-                })?;
-            let provider = provider_db.from_db();
-
-            let new_source_data = bootstrap_input.source.clone();
-            let source_db = diesel::insert_into(upstream_source::table)
-                .values($source_new_db::to_db(&new_source_data))
-                .returning($source_db::as_returning())
-                .get_result::<$source_db>($conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert bootstrap upstream source: {}",
-                        e
-                    )))
-                })?;
-            let upstream_source = source_db.from_db();
-
-            let new_provider_api_key_data = NewProviderApiKey {
-                id: bootstrap_input.provider_api_key_id,
-                provider_id: provider.id,
-                description: bootstrap_input.api_key_description.clone(),
-                key_prefix: bootstrap_input.key_prefix.clone(),
-                key_last4: bootstrap_input.key_last4.clone(),
-                encrypted_secret: bootstrap_input.encrypted_secret.clone(),
-                secret_hmac: bootstrap_input.secret_hmac.clone(),
-                is_enabled: true,
-                created_at: current_time,
-                updated_at: current_time,
-            };
-
-            let created_key = insert_provider_api_key!($conn, &new_provider_api_key_data);
-
-            let new_model_data = NewModel {
-                id: ID_GENERATOR.generate_id(),
-                provider_id: provider.id,
-                model_name: bootstrap_input.model_name.clone(),
-                real_model_name: bootstrap_input.real_model_name.clone(),
-                model_kind: bootstrap_input.model_kind,
-                source_selection_mode: "INHERIT_ALL".to_string(),
-                is_enabled: true,
-                created_at: current_time,
-                updated_at: current_time,
-            };
-
-            let created_model_db = diesel::insert_into(model::table)
-                .values($model_new_db::to_db(&new_model_data))
-                .returning($model_db::as_returning())
-                .get_result::<$model_db>($conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert bootstrap model: {}",
-                        e
-                    )))
-                })?;
-            let created_model = created_model_db.from_db();
-
-            Ok(BootstrapProviderResult {
-                provider: ProviderAggregate {
-                    provider,
-                    upstream_sources: vec![upstream_source],
-                },
-                created_key,
-                created_model,
-            })
-        })();
-
-        match transaction_result {
-            Ok(result) => {
-                $conn.batch_execute("COMMIT").map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to commit bootstrap transaction: {}",
-                        e
-                    )))
-                })?;
-                Ok(result)
+macro_rules! provider_async_transaction {
+    ($connection:ident as $conn:ident, $block:block) => {{
+        match $connection {
+            crate::database::runtime::RuntimeConnection::Postgres($conn) => {
+                #[allow(unused_imports)]
+                use self::_postgres_model::*;
+                use crate::database::_postgres_schema::*;
+                #[allow(unused_imports)]
+                use crate::database::model::_postgres_model::{
+                    ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
+                };
+                #[allow(unused_imports)]
+                use crate::database::upstream_source::_postgres_model::{
+                    NewUpstreamSourceDb as AggregateNewSourceDb,
+                    UpstreamSourceDb as AggregateSourceDb,
+                };
+                use diesel::prelude::*;
+                use diesel_async::AsyncConnection;
+                $conn.transaction(async move |$conn| $block).await
             }
-            Err(err) => {
-                let _ = $conn.batch_execute("ROLLBACK");
-                Err(err)
+            crate::database::runtime::RuntimeConnection::Sqlite($conn) => {
+                #[allow(unused_imports)]
+                use self::_sqlite_model::*;
+                use crate::database::_sqlite_schema::*;
+                #[allow(unused_imports)]
+                use crate::database::model::_sqlite_model::{
+                    ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
+                };
+                #[allow(unused_imports)]
+                use crate::database::upstream_source::_sqlite_model::{
+                    NewUpstreamSourceDb as AggregateNewSourceDb,
+                    UpstreamSourceDb as AggregateSourceDb,
+                };
+                use diesel::prelude::*;
+                use diesel_async::AsyncConnection;
+                $conn.transaction(async move |$conn| $block).await
             }
         }
-    }};
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProviderDetail {
-    pub provider: ProviderAggregate,
-    pub api_keys: Vec<ProviderApiKeySummary>,
-    pub request_patch_variants: Vec<RequestPatchVariantAggregate>,
-}
-
-macro_rules! create_provider_transaction {
-    ($conn:expr, $source_new_db:ident, $source_db:ident, $new_provider:expr, $new_source:expr) => {{
-        $conn.transaction::<ProviderAggregate, BaseError, _>(|conn| {
-            let new_source_data = $new_source;
-            let provider = diesel::insert_into(provider::table)
-                .values(NewProviderDb::to_db($new_provider))
-                .returning(ProviderDb::as_returning())
-                .get_result::<ProviderDb>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert provider aggregate: {error}"
-                    )))
-                })?
-                .from_db();
-
-            let upstream_sources = match new_source_data {
-                Some(new_source) => {
-                    if new_source.provider_id != provider.id {
-                        return Err(BaseError::ParamInvalid(Some(
-                            "upstream source must belong to its provider".to_string(),
-                        )));
-                    }
-                    let upstream_source = diesel::insert_into(upstream_source::table)
-                        .values($source_new_db::to_db(new_source))
-                        .returning($source_db::as_returning())
-                        .get_result::<$source_db>(conn)
-                        .map_err(|error| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to insert provider upstream source: {error}"
-                            )))
-                        })?
-                        .from_db();
-                    vec![upstream_source]
-                }
-                None => Vec::new(),
-            };
-
-            Ok(ProviderAggregate {
-                provider,
-                upstream_sources,
-            })
-        })
-    }};
-}
-
-macro_rules! update_provider_transaction {
-    ($conn:expr, $source_db:ident, $id:expr, $provider_update:expr, $now:expr) => {{
-        $conn.transaction::<ProviderAggregate, BaseError, _>(|conn| {
-            let provider = diesel::update(
-                provider::table.filter(
-                    provider::dsl::id
-                        .eq($id)
-                        .and(provider::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set((
-                UpdateProviderDataDb::to_db($provider_update),
-                provider::dsl::updated_at.eq($now),
-            ))
-            .returning(ProviderDb::as_returning())
-            .get_result::<ProviderDb>(conn)
-            .map_err(|error| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to update provider {}: {error}",
-                    $id
-                )))
-            })?
-            .from_db();
-
-            let source_rows = upstream_source::table
-                .filter(
-                    upstream_source::dsl::provider_id
-                        .eq($id)
-                        .and(upstream_source::dsl::deleted_at.is_null()),
-                )
-                .order(upstream_source::dsl::id.asc())
-                .select($source_db::as_select())
-                .load::<$source_db>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load upstream source for provider {}: {error}",
-                        $id
-                    )))
-                })?;
-            let upstream_sources = source_rows
-                .into_iter()
-                .map(|row| row.from_db())
-                .collect::<Vec<_>>();
-
-            Ok(ProviderAggregate {
-                provider,
-                upstream_sources,
-            })
-        })
     }};
 }
 
 impl Provider {
-    /// Atomically inserts a logical provider with an initial Source.
-    pub fn create(
-        new_provider_data: &NewProvider,
-        new_source_data: &NewUpstreamSource,
-    ) -> DbResult<ProviderAggregate> {
-        Self::create_optional(new_provider_data, Some(new_source_data))
-    }
-
-    /// Atomically inserts a logical provider and an optional initial Source.
-    pub fn create_optional(
-        new_provider_data: &NewProvider,
-        new_source_data: Option<&NewUpstreamSource>,
-    ) -> DbResult<ProviderAggregate> {
-        let conn = &mut get_connection()?;
-        match conn {
-            DbConnection::Postgres(conn) => {
-                use self::_postgres_model::*;
-                use crate::database::_postgres_schema::*;
-                use crate::database::upstream_source::_postgres_model::{
-                    NewUpstreamSourceDb as AggregateNewSourceDb,
-                    UpstreamSourceDb as AggregateSourceDb,
-                };
-                create_provider_transaction!(
-                    conn,
-                    AggregateNewSourceDb,
-                    AggregateSourceDb,
-                    new_provider_data,
-                    new_source_data
-                )
-            }
-            DbConnection::Sqlite(conn) => {
-                use self::_sqlite_model::*;
-                use crate::database::_sqlite_schema::*;
-                use crate::database::upstream_source::_sqlite_model::{
-                    NewUpstreamSourceDb as AggregateNewSourceDb,
-                    UpstreamSourceDb as AggregateSourceDb,
-                };
-                create_provider_transaction!(
-                    conn,
-                    AggregateNewSourceDb,
-                    AggregateSourceDb,
-                    new_provider_data,
-                    new_source_data
-                )
-            }
-        }
-    }
-
-    /// Atomically updates only logical Provider fields. Source mutations use
-    /// `UpstreamSource` repository operations so Profile remains immutable.
-    pub fn update(id_value: i64, update_data: &UpdateProviderData) -> DbResult<ProviderAggregate> {
-        let conn = &mut get_connection()?;
-        let current_time = Utc::now().timestamp_millis();
-        let mut update_data = update_data.clone();
-        update_data.provider_key = None;
-        match conn {
-            DbConnection::Postgres(conn) => {
-                use self::_postgres_model::*;
-                use crate::database::_postgres_schema::*;
-                use crate::database::upstream_source::_postgres_model::UpstreamSourceDb as AggregateSourceDb;
-                update_provider_transaction!(
-                    conn,
-                    AggregateSourceDb,
-                    id_value,
-                    &update_data,
-                    current_time
-                )
-            }
-            DbConnection::Sqlite(conn) => {
-                use self::_sqlite_model::*;
-                use crate::database::_sqlite_schema::*;
-                use crate::database::upstream_source::_sqlite_model::UpstreamSourceDb as AggregateSourceDb;
-                update_provider_transaction!(
-                    conn,
-                    AggregateSourceDb,
-                    id_value,
-                    &update_data,
-                    current_time
-                )
-            }
-        }
-    }
-
-    pub fn bootstrap(input: &BootstrapProviderInput) -> DbResult<BootstrapProviderResult> {
-        let conn = &mut get_connection()?;
-        match conn {
-            DbConnection::Postgres(conn) => {
-                use self::_postgres_model::*;
-                use crate::database::_postgres_schema::*;
-                use crate::database::model::_postgres_model::{
-                    ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
-                };
-                use crate::database::upstream_source::_postgres_model::{
-                    NewUpstreamSourceDb as BootstrapNewSourceDb,
-                    UpstreamSourceDb as BootstrapSourceDb,
-                };
-                bootstrap_transaction!(
-                    conn,
-                    BootstrapNewSourceDb,
-                    BootstrapSourceDb,
-                    BootstrapNewModelDb,
-                    BootstrapModelDb,
-                    input
-                )
-            }
-            DbConnection::Sqlite(conn) => {
-                use self::_sqlite_model::*;
-                use crate::database::_sqlite_schema::*;
-                use crate::database::model::_sqlite_model::{
-                    ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
-                };
-                use crate::database::upstream_source::_sqlite_model::{
-                    NewUpstreamSourceDb as BootstrapNewSourceDb,
-                    UpstreamSourceDb as BootstrapSourceDb,
-                };
-                bootstrap_transaction!(
-                    conn,
-                    BootstrapNewSourceDb,
-                    BootstrapSourceDb,
-                    BootstrapNewModelDb,
-                    BootstrapModelDb,
-                    input
-                )
-            }
-        }
-    }
-
-    /// Soft deletes a provider record by setting `deleted_at` to the current time and `is_enabled` to false.
-    pub fn delete(target_id_value: i64) -> DbResult<usize> {
-        Self::delete_with_dependents(target_id_value)
-    }
-
-    /// Soft deletes a provider and all delete-owned dependent rows in one transaction.
-    pub fn delete_with_dependents(target_id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
-        let current_time = Utc::now().timestamp_millis();
-
-        db_execute!(conn, {
-            conn.transaction::<usize, BaseError, _>(|conn| {
-                let updated = diesel::update(provider::table.find(target_id_value))
-                    .set((
-                        provider::dsl::deleted_at.eq(current_time),
-                        provider::dsl::is_enabled.eq(false),
-                        provider::dsl::updated_at.eq(current_time),
-                    ))
-                    .execute(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to delete provider {}: {}",
-                            target_id_value, e
-                        )))
+    pub async fn get_by_key(
+        database: &DatabaseRuntime,
+        provider_key_val: &str,
+    ) -> DbResult<Option<ProviderAggregate>> {
+        let provider_key_val = provider_key_val.to_string();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    let provider = async_db_execute!(connection as conn, {
+                        let query = provider::table
+                            .filter(
+                                provider::dsl::provider_key
+                                    .eq(&provider_key_val)
+                                    .and(provider::dsl::deleted_at.is_null()),
+                            )
+                            .select(ProviderDb::as_select());
+                        let result: Result<ProviderDb, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::first(query, &mut **conn).await;
+                        result
+                            .optional()
+                            .map(|row| row.map(ProviderDb::from_db))
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Error fetching provider by key '{}': {}",
+                                    provider_key_val, error
+                                )))
+                            })
                     })?;
-
-                diesel::update(
-                    upstream_source::table.filter(
-                        upstream_source::dsl::provider_id
-                            .eq(target_id_value)
-                            .and(upstream_source::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    upstream_source::dsl::deleted_at.eq(current_time),
-                    upstream_source::dsl::is_enabled.eq(false),
-                    upstream_source::dsl::is_default.eq(false),
-                    upstream_source::dsl::updated_at.eq(current_time),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete upstream source for provider {}: {}",
-                        target_id_value, e
-                    )))
-                })?;
-                diesel::update(
-                    provider_api_key::table.filter(
-                        provider_api_key::dsl::provider_id
-                            .eq(target_id_value)
-                            .and(provider_api_key::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    provider_api_key::dsl::deleted_at.eq(current_time),
-                    provider_api_key::dsl::is_enabled.eq(false),
-                    provider_api_key::dsl::secret_ciphertext.eq(Option::<Vec<u8>>::None),
-                    provider_api_key::dsl::secret_nonce.eq(Option::<Vec<u8>>::None),
-                    provider_api_key::dsl::secret_format_version.eq(Option::<i32>::None),
-                    provider_api_key::dsl::secret_key_fingerprint.eq(Option::<String>::None),
-                    provider_api_key::dsl::secret_hmac.eq(Option::<String>::None),
-                    provider_api_key::dsl::updated_at.eq(current_time),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete provider API keys for provider {}: {}",
-                        target_id_value, e
-                    )))
-                })?;
-
-                let source_ids = upstream_source::table
-                    .filter(upstream_source::dsl::provider_id.eq(target_id_value))
-                    .select(upstream_source::dsl::id)
-                    .load::<i64>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to load provider Sources for {}: {}",
-                            target_id_value, e
-                        )))
-                    })?;
-                let variant_ids = if source_ids.is_empty() {
-                    Vec::new()
-                } else {
-                    request_patch_variant::table
-                        .filter(request_patch_variant::dsl::source_id.eq_any(&source_ids))
-                        .filter(request_patch_variant::dsl::deleted_at.is_null())
-                        .select(request_patch_variant::dsl::id)
-                        .load::<i64>(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to load provider request patch Variants for {}: {}",
-                                target_id_value, e
-                            )))
-                        })?
-                };
-                if !variant_ids.is_empty() {
-                    diesel::update(
-                        request_patch_variant::table
-                            .filter(request_patch_variant::dsl::id.eq_any(&variant_ids)),
-                    )
-                    .set((
-                        request_patch_variant::dsl::deleted_at.eq(current_time),
-                        request_patch_variant::dsl::enabled.eq(false),
-                        request_patch_variant::dsl::expose_in_models.eq(false),
-                        request_patch_variant::dsl::updated_at.eq(current_time),
-                    ))
-                    .execute(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to delete provider request patch Variants for {}: {}",
-                            target_id_value, e
-                        )))
-                    })?;
-                    diesel::update(
-                        request_patch_rule::table
-                            .filter(request_patch_rule::dsl::variant_id.eq_any(&variant_ids))
-                            .filter(request_patch_rule::dsl::deleted_at.is_null()),
-                    )
-                    .set(request_patch_rule::dsl::deleted_at.eq(current_time))
-                    .execute(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to delete provider request patch Rules for {}: {}",
-                            target_id_value, e
-                        )))
-                    })?;
-                }
-
-                Ok(updated)
-            })
-        })
-    }
-
-    /// Retrieves a provider by its key, if it's not marked as deleted.
-    pub fn get_by_key(provider_key_val: &str) -> DbResult<Option<ProviderAggregate>> {
-        let provider = {
-            let conn = &mut get_connection()?;
-            db_execute!(conn, {
-                let db_provider_opt = provider::table
-                    .filter(
-                        provider::dsl::provider_key
-                            .eq(provider_key_val)
-                            .and(provider::dsl::deleted_at.is_null()),
-                    )
-                    .select(ProviderDb::as_select())
-                    .first::<ProviderDb>(conn)
-                    .optional() // Returns Ok(None) if not found, rather than Err
-                    .map_err(|e| {
-                        // We only expect NotFound to be handled by optional(), other errors are fatal
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Error fetching provider by key '{}': {}",
-                            provider_key_val, e
-                        )))
-                    })?;
-
-                Ok::<Option<Provider>, BaseError>(db_provider_opt.map(|db_p| db_p.from_db()))
-            })?
-        };
-        provider.map(attach_sources).transpose()
-    }
-
-    /// Retrieves a provider by its ID, if it's not marked as deleted.
-    pub fn get_by_id(target_id_value: i64) -> DbResult<ProviderAggregate> {
-        let provider = {
-            let conn = &mut get_connection()?;
-            db_execute!(conn, {
-                let db_provider = provider::table
-                    .filter(
-                        provider::dsl::id
-                            .eq(target_id_value)
-                            .and(provider::dsl::deleted_at.is_null()),
-                    )
-                    .select(ProviderDb::as_select()) // Select as ProviderDb
-                    .first::<ProviderDb>(conn) // Expect a ProviderDb instance
-                    .map_err(|e| {
-                        if matches!(e, diesel::result::Error::NotFound) {
-                            BaseError::ParamInvalid(Some(format!(
-                                "Provider with id {} not found",
-                                target_id_value
-                            )))
-                        } else {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Error fetching provider {}: {}",
-                                target_id_value, e
-                            )))
+                    match provider {
+                        Some(provider) => {
+                            let upstream_sources =
+                                UpstreamSource::list_active_by_provider_id_with_connection(
+                                    connection,
+                                    provider.id,
+                                )
+                                .await?;
+                            Ok(Some(ProviderAggregate {
+                                provider,
+                                upstream_sources,
+                            }))
                         }
-                    })?;
-                Ok::<Provider, BaseError>(db_provider.from_db())
-            })?
-        };
-        attach_sources(provider)
+                        None => Ok(None),
+                    }
+                })
+            })
+            .await
     }
 
-    /// Lists all provider records that are not marked as deleted, ordered by creation date.
-    pub fn list_all() -> DbResult<Vec<ProviderAggregate>> {
-        let providers = {
-            let conn = &mut get_connection()?;
-            db_execute!(conn, {
-                let db_providers = provider::table
-                    .filter(provider::dsl::deleted_at.is_null())
-                    .order(provider::dsl::created_at.desc())
-                    .select(ProviderDb::as_select()) // Select as Vec<ProviderDb>
-                    .load::<ProviderDb>(conn) // Expect Vec<ProviderDb>
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!("Failed to list providers: {}", e)))
+    pub async fn get_by_id(
+        database: &DatabaseRuntime,
+        target_id_value: i64,
+    ) -> DbResult<ProviderAggregate> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    let provider = async_db_execute!(connection as conn, {
+                        let query = provider::table
+                            .filter(
+                                provider::dsl::id
+                                    .eq(target_id_value)
+                                    .and(provider::dsl::deleted_at.is_null()),
+                            )
+                            .select(ProviderDb::as_select());
+                        let result: Result<ProviderDb, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::first(query, &mut **conn).await;
+                        result.map(ProviderDb::from_db).map_err(|error| {
+                            if matches!(error, diesel::result::Error::NotFound) {
+                                BaseError::ParamInvalid(Some(format!(
+                                    "Provider with id {} not found",
+                                    target_id_value
+                                )))
+                            } else {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Error fetching provider {}: {}",
+                                    target_id_value, error
+                                )))
+                            }
+                        })
                     })?;
+                    let upstream_sources =
+                        UpstreamSource::list_active_by_provider_id_with_connection(
+                            connection,
+                            provider.id,
+                        )
+                        .await?;
+                    Ok(ProviderAggregate {
+                        provider,
+                        upstream_sources,
+                    })
+                })
+            })
+            .await
+    }
 
-                Ok::<Vec<Provider>, BaseError>(
-                    db_providers
+    pub async fn list_all(database: &DatabaseRuntime) -> DbResult<Vec<ProviderAggregate>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    let providers = async_db_execute!(connection as conn, {
+                        let query = provider::table
+                            .filter(provider::dsl::deleted_at.is_null())
+                            .order(provider::dsl::created_at.desc())
+                            .select(ProviderDb::as_select());
+                        let result: Result<Vec<ProviderDb>, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn).await;
+                        result
+                            .map(|rows| {
+                                rows.into_iter()
+                                    .map(ProviderDb::from_db)
+                                    .collect::<Vec<_>>()
+                            })
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to list providers: {}",
+                                    error
+                                )))
+                            })
+                    })?;
+                    let provider_ids = providers
+                        .iter()
+                        .map(|provider| provider.id)
+                        .collect::<Vec<_>>();
+                    let mut sources = UpstreamSource::list_active_for_provider_ids_with_connection(
+                        connection,
+                        provider_ids,
+                    )
+                    .await?;
+                    Ok(providers
                         .into_iter()
-                        .map(|db_p| db_p.from_db())
-                        .collect::<Vec<_>>(),
-                )
-            })?
-        };
-        attach_sources_batch(providers)
+                        .map(|provider| {
+                            let upstream_sources = sources.remove(&provider.id).unwrap_or_default();
+                            ProviderAggregate {
+                                provider,
+                                upstream_sources,
+                            }
+                        })
+                        .collect())
+                })
+            })
+            .await
     }
 
-    /// Lists provider summary rows for lightweight dropdowns and maps.
-    pub fn list_summary() -> DbResult<Vec<ProviderSummaryItem>> {
-        let mut providers = Self::list_all()?;
+    pub async fn list_summary(database: &DatabaseRuntime) -> DbResult<Vec<ProviderSummaryItem>> {
+        let mut providers = Self::list_all(database).await?;
         providers.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(providers
             .into_iter()
@@ -953,92 +542,539 @@ impl Provider {
             .collect())
     }
 
-    /// Lists all active (not deleted and enabled) provider records, ordered by creation date.
-    pub fn list_all_active() -> DbResult<Vec<ProviderAggregate>> {
-        let providers = {
-            let conn = &mut get_connection()?;
-            db_execute!(conn, {
-                let db_providers = provider::table
-                    .filter(
-                        provider::dsl::deleted_at
-                            .is_null()
-                            .and(provider::dsl::is_enabled.eq(true)),
-                    )
-                    .order(provider::dsl::created_at.desc())
-                    .select(ProviderDb::as_select())
-                    .load::<ProviderDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to list active providers: {}",
-                            e
-                        )))
-                    })?;
-
-                Ok::<Vec<Provider>, BaseError>(
-                    db_providers
-                        .into_iter()
-                        .map(|db_p| db_p.from_db())
-                        .collect::<Vec<_>>(),
-                )
-            })?
-        };
-        attach_sources_batch(providers)
-    }
-
-    /// Retrieves a provider's details including API keys and Source-bound patch Variants.
-    pub fn get_detail_by_id(provider_id_val: i64) -> DbResult<ProviderDetail> {
-        let provider = Provider::get_by_id(provider_id_val)?;
-        let api_keys = ProviderApiKeyRepository::list_summaries_by_provider_id(provider_id_val)?;
-        let source_ids = UpstreamSource::list_active_by_provider_id(provider_id_val)?
-            .into_iter()
+    pub async fn get_detail_by_id(
+        database: &DatabaseRuntime,
+        provider_id_val: i64,
+    ) -> DbResult<ProviderDetail> {
+        let provider = Self::get_by_id(database, provider_id_val).await?;
+        let api_keys =
+            ProviderApiKeyRepository::list_summaries_by_provider_id(database, provider_id_val)
+                .await?;
+        let source_ids = provider
+            .upstream_sources
+            .iter()
             .map(|source| source.id)
             .collect::<Vec<_>>();
         let request_patch_variants =
-            RequestPatchVariantRepository::list_by_source_ids(&source_ids)?;
-
+            RequestPatchVariantRepository::list_by_source_ids(database, &source_ids).await?;
         Ok(ProviderDetail {
             provider,
             api_keys,
             request_patch_variants,
         })
     }
-}
 
-fn attach_sources(provider: Provider) -> DbResult<ProviderAggregate> {
-    let upstream_sources = UpstreamSource::list_active_by_provider_id(provider.id)?;
-    Ok(ProviderAggregate {
-        provider,
-        upstream_sources,
-    })
-}
-
-fn attach_sources_batch(providers: Vec<Provider>) -> DbResult<Vec<ProviderAggregate>> {
-    let provider_ids = providers
-        .iter()
-        .map(|provider| provider.id)
-        .collect::<Vec<_>>();
-    let mut sources = UpstreamSource::list_active_for_provider_ids(&provider_ids)?;
-    providers
-        .into_iter()
-        .map(|provider| {
-            let upstream_sources = sources.remove(&provider.id).unwrap_or_default();
-            Ok(ProviderAggregate {
-                provider,
-                upstream_sources,
+    pub async fn create_optional(
+        database: &DatabaseRuntime,
+        new_provider_data: &NewProvider,
+        new_source_data: Option<&NewUpstreamSource>,
+    ) -> DbResult<ProviderAggregate> {
+        let new_provider_data = new_provider_data.clone();
+        let new_source_data = new_source_data.cloned();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    provider_async_transaction!(connection as conn, {
+                        let query = diesel::insert_into(provider::table)
+                            .values(NewProviderDb::to_db(&new_provider_data))
+                            .returning(ProviderDb::as_returning());
+                        let provider =
+                            diesel_async::RunQueryDsl::get_result::<ProviderDb>(query, &mut *conn)
+                                .await
+                                .map(ProviderDb::from_db)
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to insert provider aggregate: {error}"
+                                    )))
+                                })?;
+                        let upstream_sources = match new_source_data {
+                            Some(new_source) => {
+                                if new_source.provider_id != provider.id {
+                                    return Err(BaseError::ParamInvalid(Some(
+                                        "upstream source must belong to its provider".to_string(),
+                                    )));
+                                }
+                                let query = diesel::insert_into(upstream_source::table)
+                                    .values(AggregateNewSourceDb::to_db(&new_source))
+                                    .returning(AggregateSourceDb::as_returning());
+                                let source = diesel_async::RunQueryDsl::get_result::<
+                                    AggregateSourceDb,
+                                >(query, &mut *conn)
+                                .await
+                                .map(AggregateSourceDb::from_db)
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to insert provider upstream source: {error}"
+                                    )))
+                                })?;
+                                vec![source]
+                            }
+                            None => Vec::new(),
+                        };
+                        Ok(ProviderAggregate {
+                            provider,
+                            upstream_sources,
+                        })
+                    })
+                })
             })
-        })
-        .collect()
+            .await
+    }
+
+    pub async fn update(
+        database: &DatabaseRuntime,
+        id_value: i64,
+        update_data: &UpdateProviderData,
+    ) -> DbResult<ProviderAggregate> {
+        let current_time = Utc::now().timestamp_millis();
+        let mut update_data = update_data.clone();
+        update_data.provider_key = None;
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    provider_async_transaction!(connection as conn, {
+                        let query = diesel::update(
+                            provider::table.filter(
+                                provider::dsl::id
+                                    .eq(id_value)
+                                    .and(provider::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            UpdateProviderDataDb::to_db(&update_data),
+                            provider::dsl::updated_at.eq(current_time),
+                        ))
+                        .returning(ProviderDb::as_returning());
+                        let provider =
+                            diesel_async::RunQueryDsl::get_result::<ProviderDb>(query, &mut *conn)
+                                .await
+                                .map(ProviderDb::from_db)
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to update provider {}: {error}",
+                                        id_value
+                                    )))
+                                })?;
+                        let query = upstream_source::table
+                            .filter(
+                                upstream_source::dsl::provider_id
+                                    .eq(id_value)
+                                    .and(upstream_source::dsl::deleted_at.is_null()),
+                            )
+                            .order(upstream_source::dsl::id.asc())
+                            .select(AggregateSourceDb::as_select());
+                        let upstream_sources =
+                            diesel_async::RunQueryDsl::load::<AggregateSourceDb>(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to load upstream source for provider {}: {error}",
+                                        id_value
+                                    )))
+                                })?
+                                .into_iter()
+                                .map(AggregateSourceDb::from_db)
+                                .collect();
+                        Ok(ProviderAggregate {
+                            provider,
+                            upstream_sources,
+                        })
+                    })
+                })
+            })
+            .await
+    }
+
+    /// Atomically inserts a logical provider with an initial Source.
+    pub async fn create(
+        database: &DatabaseRuntime,
+        new_provider_data: &NewProvider,
+        new_source_data: &NewUpstreamSource,
+    ) -> DbResult<ProviderAggregate> {
+        Self::create_optional(database, new_provider_data, Some(new_source_data)).await
+    }
+
+    pub async fn bootstrap(
+        database: &DatabaseRuntime,
+        input: &BootstrapProviderInput,
+    ) -> DbResult<BootstrapProviderResult> {
+        let input = input.clone();
+        let current_time = Utc::now().timestamp_millis();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    provider_async_transaction!(connection as conn, {
+                        let new_provider = NewProvider {
+                            id: input.provider_id,
+                            provider_key: input.provider_key.clone(),
+                            name: input.name.clone(),
+                            is_enabled: true,
+                            created_at: current_time,
+                            updated_at: current_time,
+                            provider_api_key_mode: input.provider_api_key_mode,
+                        };
+                        let query = diesel::insert_into(provider::table)
+                            .values(NewProviderDb::to_db(&new_provider))
+                            .returning(ProviderDb::as_returning());
+                        let provider =
+                            diesel_async::RunQueryDsl::get_result::<ProviderDb>(query, &mut *conn)
+                                .await
+                                .map(ProviderDb::from_db)
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to insert bootstrap provider: {}",
+                                        error
+                                    )))
+                                })?;
+                        let query = diesel::insert_into(upstream_source::table)
+                            .values(AggregateNewSourceDb::to_db(&input.source))
+                            .returning(AggregateSourceDb::as_returning());
+                        let upstream_source = diesel_async::RunQueryDsl::get_result::<
+                            AggregateSourceDb,
+                        >(query, &mut *conn)
+                        .await
+                        .map(AggregateSourceDb::from_db)
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to insert bootstrap upstream source: {}",
+                                error
+                            )))
+                        })?;
+                        let new_key = NewProviderApiKey {
+                            id: input.provider_api_key_id,
+                            provider_id: provider.id,
+                            description: input.api_key_description,
+                            key_prefix: input.key_prefix,
+                            key_last4: input.key_last4,
+                            encrypted_secret: input.encrypted_secret,
+                            secret_hmac: input.secret_hmac,
+                            is_enabled: true,
+                            created_at: current_time,
+                            updated_at: current_time,
+                        };
+                        let query = diesel::insert_into(provider_api_key::table)
+                            .values((
+                                provider_api_key::dsl::id.eq(new_key.id),
+                                provider_api_key::dsl::provider_id.eq(new_key.provider_id),
+                                provider_api_key::dsl::description.eq(new_key.description),
+                                provider_api_key::dsl::key_prefix.eq(new_key.key_prefix),
+                                provider_api_key::dsl::key_last4.eq(new_key.key_last4),
+                                provider_api_key::dsl::secret_ciphertext
+                                    .eq(Some(new_key.encrypted_secret.ciphertext().to_vec())),
+                                provider_api_key::dsl::secret_nonce
+                                    .eq(Some(new_key.encrypted_secret.nonce().to_vec())),
+                                provider_api_key::dsl::secret_format_version
+                                    .eq(Some(new_key.encrypted_secret.format_version())),
+                                provider_api_key::dsl::secret_key_fingerprint.eq(Some(
+                                    new_key
+                                        .encrypted_secret
+                                        .key_fingerprint()
+                                        .as_str()
+                                        .to_string(),
+                                )),
+                                provider_api_key::dsl::secret_hmac
+                                    .eq(Some(new_key.secret_hmac.as_str().to_string())),
+                                provider_api_key::dsl::is_enabled.eq(true),
+                                provider_api_key::dsl::created_at.eq(current_time),
+                                provider_api_key::dsl::updated_at.eq(current_time),
+                            ))
+                            .returning((
+                                provider_api_key::dsl::id,
+                                provider_api_key::dsl::provider_id,
+                                provider_api_key::dsl::description,
+                                provider_api_key::dsl::key_prefix,
+                                provider_api_key::dsl::key_last4,
+                                provider_api_key::dsl::is_enabled,
+                                provider_api_key::dsl::created_at,
+                                provider_api_key::dsl::updated_at,
+                            ));
+                        let created_key = diesel_async::RunQueryDsl::get_result::<
+                            ProviderApiKeySummaryTuple,
+                        >(query, &mut *conn)
+                        .await
+                        .map(provider_api_key_summary_from_tuple)
+                        .map_err(|error| map_provider_api_key_write_error("insert", error))?;
+                        let new_model = NewModel {
+                            id: ID_GENERATOR.generate_id(),
+                            provider_id: provider.id,
+                            model_name: input.model_name,
+                            real_model_name: input.real_model_name,
+                            model_kind: input.model_kind,
+                            source_selection_mode: "INHERIT_ALL".to_string(),
+                            is_enabled: true,
+                            created_at: current_time,
+                            updated_at: current_time,
+                        };
+                        let query = diesel::insert_into(model::table)
+                            .values(BootstrapNewModelDb::to_db(&new_model))
+                            .returning(BootstrapModelDb::as_returning());
+                        let created_model =
+                            diesel_async::RunQueryDsl::get_result::<BootstrapModelDb>(
+                                query, &mut *conn,
+                            )
+                            .await
+                            .map(BootstrapModelDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to insert bootstrap model: {}",
+                                    error
+                                )))
+                            })?;
+                        Ok(BootstrapProviderResult {
+                            provider: ProviderAggregate {
+                                provider,
+                                upstream_sources: vec![upstream_source],
+                            },
+                            created_key,
+                            created_model,
+                        })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn delete_with_dependents(
+        database: &DatabaseRuntime,
+        target_id_value: i64,
+    ) -> DbResult<usize> {
+        let current_time = Utc::now().timestamp_millis();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    provider_async_transaction!(connection as conn, {
+                        let query = diesel::update(provider::table.find(target_id_value)).set((
+                            provider::dsl::deleted_at.eq(current_time),
+                            provider::dsl::is_enabled.eq(false),
+                            provider::dsl::updated_at.eq(current_time),
+                        ));
+                        let updated = diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete provider {}: {}",
+                                    target_id_value, error
+                                )))
+                            })?;
+                        let query = diesel::update(
+                            upstream_source::table.filter(
+                                upstream_source::dsl::provider_id
+                                    .eq(target_id_value)
+                                    .and(upstream_source::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            upstream_source::dsl::deleted_at.eq(current_time),
+                            upstream_source::dsl::is_enabled.eq(false),
+                            upstream_source::dsl::is_default.eq(false),
+                            upstream_source::dsl::updated_at.eq(current_time),
+                        ));
+                        diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete upstream source for provider {}: {}",
+                                    target_id_value, error
+                                )))
+                            })?;
+                        let query = diesel::update(
+                            provider_api_key::table.filter(
+                                provider_api_key::dsl::provider_id
+                                    .eq(target_id_value)
+                                    .and(provider_api_key::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            provider_api_key::dsl::deleted_at.eq(current_time),
+                            provider_api_key::dsl::is_enabled.eq(false),
+                            provider_api_key::dsl::secret_ciphertext.eq(Option::<Vec<u8>>::None),
+                            provider_api_key::dsl::secret_nonce.eq(Option::<Vec<u8>>::None),
+                            provider_api_key::dsl::secret_format_version.eq(Option::<i32>::None),
+                            provider_api_key::dsl::secret_key_fingerprint
+                                .eq(Option::<String>::None),
+                            provider_api_key::dsl::secret_hmac.eq(Option::<String>::None),
+                            provider_api_key::dsl::updated_at.eq(current_time),
+                        ));
+                        diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete provider API keys for provider {}: {}",
+                                    target_id_value, error
+                                )))
+                            })?;
+                        let query = upstream_source::table
+                            .filter(upstream_source::dsl::provider_id.eq(target_id_value))
+                            .select(upstream_source::dsl::id);
+                        let source_ids =
+                            diesel_async::RunQueryDsl::load::<i64>(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to load provider Sources for {}: {}",
+                                        target_id_value, error
+                                    )))
+                                })?;
+                        let variant_ids = if source_ids.is_empty() {
+                            Vec::new()
+                        } else {
+                            let query = request_patch_variant::table
+                                .filter(
+                                    request_patch_variant::dsl::source_id.eq_any(&source_ids),
+                                )
+                                .filter(request_patch_variant::dsl::deleted_at.is_null())
+                                .select(request_patch_variant::dsl::id);
+                            diesel_async::RunQueryDsl::load::<i64>(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to load provider request patch Variants for {}: {}",
+                                        target_id_value, error
+                                    )))
+                                })?
+                        };
+                        if !variant_ids.is_empty() {
+                            let query = diesel::update(
+                                request_patch_variant::table.filter(
+                                    request_patch_variant::dsl::id.eq_any(&variant_ids),
+                                ),
+                            )
+                            .set((
+                                request_patch_variant::dsl::deleted_at.eq(current_time),
+                                request_patch_variant::dsl::enabled.eq(false),
+                                request_patch_variant::dsl::expose_in_models.eq(false),
+                                request_patch_variant::dsl::updated_at.eq(current_time),
+                            ));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to delete provider request patch Variants for {}: {}",
+                                        target_id_value, error
+                                    )))
+                                })?;
+                            let query = diesel::update(
+                                request_patch_rule::table
+                                    .filter(
+                                        request_patch_rule::dsl::variant_id.eq_any(&variant_ids),
+                                    )
+                                    .filter(request_patch_rule::dsl::deleted_at.is_null()),
+                            )
+                            .set(request_patch_rule::dsl::deleted_at.eq(current_time));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to delete provider request patch Rules for {}: {}",
+                                        target_id_value, error
+                                    )))
+                                })?;
+                        }
+                        Ok(updated)
+                    })
+                })
+            })
+            .await
+    }
+
+    /// Soft deletes a provider record by setting `deleted_at` to the current time and `is_enabled` to false.
+    pub async fn delete(database: &DatabaseRuntime, target_id_value: i64) -> DbResult<usize> {
+        Self::delete_with_dependents(database, target_id_value).await
+    }
+}
+
+fn provider_api_key_selection_from_row(
+    row: ProviderApiKeySelectionTuple,
+) -> DbResult<ProviderApiKeySelection> {
+    Ok(ProviderApiKeySelection {
+        id: row.0,
+        provider_id: row.1,
+        secret_ciphertext: row.2.ok_or_else(|| {
+            BaseError::DatabaseFatal(Some(
+                "Provider API key secret contract is incomplete".to_string(),
+            ))
+        })?,
+        secret_nonce: row.3.ok_or_else(|| {
+            BaseError::DatabaseFatal(Some(
+                "Provider API key secret contract is incomplete".to_string(),
+            ))
+        })?,
+        secret_format_version: row.4.ok_or_else(|| {
+            BaseError::DatabaseFatal(Some(
+                "Provider API key secret contract is incomplete".to_string(),
+            ))
+        })?,
+        secret_key_fingerprint: row.5.ok_or_else(|| {
+            BaseError::DatabaseFatal(Some(
+                "Provider API key secret contract is incomplete".to_string(),
+            ))
+        })?,
+    })
 }
 
 pub struct ProviderApiKeyRepository;
 
 impl ProviderApiKeyRepository {
-    pub(crate) fn insert(new_key: &NewProviderApiKey) -> DbResult<ProviderApiKeySummary> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, { Ok(insert_provider_api_key!(conn, new_key)) })
+    pub(crate) async fn insert(
+        database: &DatabaseRuntime,
+        new_key: &NewProviderApiKey,
+    ) -> DbResult<ProviderApiKeySummary> {
+        let new_key = new_key.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::insert_into(provider_api_key::table)
+                            .values((
+                                provider_api_key::dsl::id.eq(new_key.id),
+                                provider_api_key::dsl::provider_id.eq(new_key.provider_id),
+                                provider_api_key::dsl::description.eq(new_key.description),
+                                provider_api_key::dsl::key_prefix.eq(new_key.key_prefix),
+                                provider_api_key::dsl::key_last4.eq(new_key.key_last4),
+                                provider_api_key::dsl::secret_ciphertext
+                                    .eq(Some(new_key.encrypted_secret.ciphertext().to_vec())),
+                                provider_api_key::dsl::secret_nonce
+                                    .eq(Some(new_key.encrypted_secret.nonce().to_vec())),
+                                provider_api_key::dsl::secret_format_version
+                                    .eq(Some(new_key.encrypted_secret.format_version())),
+                                provider_api_key::dsl::secret_key_fingerprint.eq(Some(
+                                    new_key
+                                        .encrypted_secret
+                                        .key_fingerprint()
+                                        .as_str()
+                                        .to_string(),
+                                )),
+                                provider_api_key::dsl::secret_hmac
+                                    .eq(Some(new_key.secret_hmac.as_str().to_string())),
+                                provider_api_key::dsl::is_enabled.eq(new_key.is_enabled),
+                                provider_api_key::dsl::created_at.eq(new_key.created_at),
+                                provider_api_key::dsl::updated_at.eq(new_key.updated_at),
+                            ))
+                            .returning((
+                                provider_api_key::dsl::id,
+                                provider_api_key::dsl::provider_id,
+                                provider_api_key::dsl::description,
+                                provider_api_key::dsl::key_prefix,
+                                provider_api_key::dsl::key_last4,
+                                provider_api_key::dsl::is_enabled,
+                                provider_api_key::dsl::created_at,
+                                provider_api_key::dsl::updated_at,
+                            ));
+                        diesel_async::RunQueryDsl::get_result::<ProviderApiKeySummaryTuple>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(provider_api_key_summary_from_tuple)
+                        .map_err(|error| map_provider_api_key_write_error("insert", error))
+                    })
+                })
+            })
+            .await
     }
 
-    pub(crate) fn replace_secret(
+    pub(crate) async fn replace_secret(
+        database: &DatabaseRuntime,
         provider_id_value: i64,
         key_id: i64,
         key_prefix_value: String,
@@ -1046,377 +1082,448 @@ impl ProviderApiKeyRepository {
         encrypted_secret: &EncryptedSecret,
         secret_hmac_value: &ProviderSecretFingerprint,
     ) -> DbResult<ProviderApiKeySummary> {
-        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            let row = diesel::update(
-                provider_api_key::table.filter(
-                    provider_api_key::dsl::id
-                        .eq(key_id)
-                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
-                        .and(provider_api_key::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set((
-                provider_api_key::dsl::key_prefix.eq(key_prefix_value),
-                provider_api_key::dsl::key_last4.eq(key_last4_value),
-                provider_api_key::dsl::secret_ciphertext
-                    .eq(Some(encrypted_secret.ciphertext().to_vec())),
-                provider_api_key::dsl::secret_nonce.eq(Some(encrypted_secret.nonce().to_vec())),
-                provider_api_key::dsl::secret_format_version
-                    .eq(Some(encrypted_secret.format_version())),
-                provider_api_key::dsl::secret_key_fingerprint.eq(Some(
-                    encrypted_secret.key_fingerprint().as_str().to_string(),
-                )),
-                provider_api_key::dsl::secret_hmac.eq(Some(secret_hmac_value.as_str().to_string())),
-                provider_api_key::dsl::updated_at.eq(current_time),
-            ))
-            .returning((
-                provider_api_key::dsl::id,
-                provider_api_key::dsl::provider_id,
-                provider_api_key::dsl::description,
-                provider_api_key::dsl::key_prefix,
-                provider_api_key::dsl::key_last4,
-                provider_api_key::dsl::is_enabled,
-                provider_api_key::dsl::created_at,
-                provider_api_key::dsl::updated_at,
-            ))
-            .get_result::<ProviderApiKeySummaryTuple>(conn)
-            .map_err(|error| map_provider_api_key_write_error("replace", error))?;
-            Ok(provider_api_key_summary_from_tuple(row))
-        })
+        let ciphertext = encrypted_secret.ciphertext().to_vec();
+        let nonce = encrypted_secret.nonce().to_vec();
+        let format_version = encrypted_secret.format_version();
+        let fingerprint = encrypted_secret.key_fingerprint().as_str().to_string();
+        let secret_hmac_value = secret_hmac_value.as_str().to_string();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(
+                            provider_api_key::table.filter(
+                                provider_api_key::dsl::id
+                                    .eq(key_id)
+                                    .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
+                                    .and(provider_api_key::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            provider_api_key::dsl::key_prefix.eq(key_prefix_value),
+                            provider_api_key::dsl::key_last4.eq(key_last4_value),
+                            provider_api_key::dsl::secret_ciphertext.eq(Some(ciphertext)),
+                            provider_api_key::dsl::secret_nonce.eq(Some(nonce)),
+                            provider_api_key::dsl::secret_format_version.eq(Some(format_version)),
+                            provider_api_key::dsl::secret_key_fingerprint.eq(Some(fingerprint)),
+                            provider_api_key::dsl::secret_hmac.eq(Some(secret_hmac_value)),
+                            provider_api_key::dsl::updated_at.eq(current_time),
+                        ))
+                        .returning((
+                            provider_api_key::dsl::id,
+                            provider_api_key::dsl::provider_id,
+                            provider_api_key::dsl::description,
+                            provider_api_key::dsl::key_prefix,
+                            provider_api_key::dsl::key_last4,
+                            provider_api_key::dsl::is_enabled,
+                            provider_api_key::dsl::created_at,
+                            provider_api_key::dsl::updated_at,
+                        ));
+                        diesel_async::RunQueryDsl::get_result::<ProviderApiKeySummaryTuple>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(provider_api_key_summary_from_tuple)
+                        .map_err(|error| map_provider_api_key_write_error("replace", error))
+                    })
+                })
+            })
+            .await
     }
 
-    pub(crate) fn update_metadata(
+    pub(crate) async fn update_metadata(
+        database: &DatabaseRuntime,
         provider_id_value: i64,
         key_id: i64,
         update: &UpdateProviderApiKeyMetadata,
     ) -> DbResult<ProviderApiKeySummary> {
-        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            let row = diesel::update(
-                provider_api_key::table.filter(
-                    provider_api_key::dsl::id
-                        .eq(key_id)
-                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
-                        .and(provider_api_key::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set((
-                provider_api_key::dsl::description.eq(update.description.clone()),
-                provider_api_key::dsl::is_enabled.eq(update.is_enabled),
-                provider_api_key::dsl::updated_at.eq(current_time),
-            ))
-            .returning((
-                provider_api_key::dsl::id,
-                provider_api_key::dsl::provider_id,
-                provider_api_key::dsl::description,
-                provider_api_key::dsl::key_prefix,
-                provider_api_key::dsl::key_last4,
-                provider_api_key::dsl::is_enabled,
-                provider_api_key::dsl::created_at,
-                provider_api_key::dsl::updated_at,
-            ))
-            .get_result::<ProviderApiKeySummaryTuple>(conn)
-            .map_err(|error| match error {
-                diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                    "Provider API key {key_id} not found for provider {provider_id_value}"
-                ))),
-                other => map_provider_api_key_write_error("update metadata for", other),
-            })?;
-            Ok(provider_api_key_summary_from_tuple(row))
-        })
+        let update = update.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(
+                            provider_api_key::table.filter(
+                                provider_api_key::dsl::id
+                                    .eq(key_id)
+                                    .and(
+                                        provider_api_key::dsl::provider_id.eq(provider_id_value),
+                                    )
+                                    .and(provider_api_key::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            provider_api_key::dsl::description.eq(update.description),
+                            provider_api_key::dsl::is_enabled.eq(update.is_enabled),
+                            provider_api_key::dsl::updated_at.eq(current_time),
+                        ))
+                        .returning((
+                            provider_api_key::dsl::id,
+                            provider_api_key::dsl::provider_id,
+                            provider_api_key::dsl::description,
+                            provider_api_key::dsl::key_prefix,
+                            provider_api_key::dsl::key_last4,
+                            provider_api_key::dsl::is_enabled,
+                            provider_api_key::dsl::created_at,
+                            provider_api_key::dsl::updated_at,
+                        ));
+                        diesel_async::RunQueryDsl::get_result::<ProviderApiKeySummaryTuple>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(provider_api_key_summary_from_tuple)
+                        .map_err(|error| match error {
+                            diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                                "Provider API key {key_id} not found for provider {provider_id_value}"
+                            ))),
+                            other => {
+                                map_provider_api_key_write_error("update metadata for", other)
+                            }
+                        })
+                    })
+                })
+            })
+            .await
     }
 
-    pub(crate) fn soft_delete(provider_id_value: i64, key_id: i64) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
+    pub(crate) async fn soft_delete(
+        database: &DatabaseRuntime,
+        provider_id_value: i64,
+        key_id: i64,
+    ) -> DbResult<usize> {
         let current_time = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            diesel::update(
-                provider_api_key::table.filter(
-                    provider_api_key::dsl::id
-                        .eq(key_id)
-                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
-                        .and(provider_api_key::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set((
-                provider_api_key::dsl::deleted_at.eq(Some(current_time)),
-                provider_api_key::dsl::is_enabled.eq(false),
-                provider_api_key::dsl::secret_ciphertext.eq(Option::<Vec<u8>>::None),
-                provider_api_key::dsl::secret_nonce.eq(Option::<Vec<u8>>::None),
-                provider_api_key::dsl::secret_format_version.eq(Option::<i32>::None),
-                provider_api_key::dsl::secret_key_fingerprint.eq(Option::<String>::None),
-                provider_api_key::dsl::secret_hmac.eq(Option::<String>::None),
-                provider_api_key::dsl::updated_at.eq(current_time),
-            ))
-            .execute(conn)
-            .map_err(|error| map_provider_api_key_write_error("delete", error))
-        })
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(
+                            provider_api_key::table.filter(
+                                provider_api_key::dsl::id
+                                    .eq(key_id)
+                                    .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
+                                    .and(provider_api_key::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            provider_api_key::dsl::deleted_at.eq(Some(current_time)),
+                            provider_api_key::dsl::is_enabled.eq(false),
+                            provider_api_key::dsl::secret_ciphertext.eq(Option::<Vec<u8>>::None),
+                            provider_api_key::dsl::secret_nonce.eq(Option::<Vec<u8>>::None),
+                            provider_api_key::dsl::secret_format_version.eq(Option::<i32>::None),
+                            provider_api_key::dsl::secret_key_fingerprint
+                                .eq(Option::<String>::None),
+                            provider_api_key::dsl::secret_hmac.eq(Option::<String>::None),
+                            provider_api_key::dsl::updated_at.eq(current_time),
+                        ));
+                        diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map_err(|error| map_provider_api_key_write_error("delete", error))
+                    })
+                })
+            })
+            .await
     }
 
-    pub fn get_summary_by_id(
+    pub async fn get_summary_by_id(
+        database: &DatabaseRuntime,
         provider_id_value: i64,
         key_id: i64,
     ) -> DbResult<ProviderApiKeySummary> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let row = provider_api_key::table
-                .filter(
-                    provider_api_key::dsl::id
-                        .eq(key_id)
-                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
-                        .and(provider_api_key::dsl::deleted_at.is_null()),
-                )
-                .select((
-                    provider_api_key::dsl::id,
-                    provider_api_key::dsl::provider_id,
-                    provider_api_key::dsl::description,
-                    provider_api_key::dsl::key_prefix,
-                    provider_api_key::dsl::key_last4,
-                    provider_api_key::dsl::is_enabled,
-                    provider_api_key::dsl::created_at,
-                    provider_api_key::dsl::updated_at,
-                ))
-                .first::<ProviderApiKeySummaryTuple>(conn)
-                .map_err(|error| match error {
-                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                        "Provider API key {key_id} not found for provider {provider_id_value}"
-                    ))),
-                    other => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load provider API key summary: {other}"
-                    ))),
-                })?;
-            Ok(provider_api_key_summary_from_tuple(row))
-        })
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = provider_api_key::table
+                            .filter(
+                                provider_api_key::dsl::id
+                                    .eq(key_id)
+                                    .and(
+                                        provider_api_key::dsl::provider_id.eq(provider_id_value),
+                                    )
+                                    .and(provider_api_key::dsl::deleted_at.is_null()),
+                            )
+                            .select((
+                                provider_api_key::dsl::id,
+                                provider_api_key::dsl::provider_id,
+                                provider_api_key::dsl::description,
+                                provider_api_key::dsl::key_prefix,
+                                provider_api_key::dsl::key_last4,
+                                provider_api_key::dsl::is_enabled,
+                                provider_api_key::dsl::created_at,
+                                provider_api_key::dsl::updated_at,
+                            ));
+                        diesel_async::RunQueryDsl::first::<ProviderApiKeySummaryTuple>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(provider_api_key_summary_from_tuple)
+                        .map_err(|error| match error {
+                            diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                                "Provider API key {key_id} not found for provider {provider_id_value}"
+                            ))),
+                            other => BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load provider API key summary: {other}"
+                            ))),
+                        })
+                    })
+                })
+            })
+            .await
     }
 
-    pub fn list_summaries_by_provider_id(
+    pub async fn list_summaries_by_provider_id(
+        database: &DatabaseRuntime,
         provider_id_value: i64,
     ) -> DbResult<Vec<ProviderApiKeySummary>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = provider_api_key::table
-                .filter(
-                    provider_api_key::dsl::provider_id
-                        .eq(provider_id_value)
-                        .and(provider_api_key::dsl::deleted_at.is_null()),
-                )
-                .order(provider_api_key::dsl::created_at.desc())
-                .select((
-                    provider_api_key::dsl::id,
-                    provider_api_key::dsl::provider_id,
-                    provider_api_key::dsl::description,
-                    provider_api_key::dsl::key_prefix,
-                    provider_api_key::dsl::key_last4,
-                    provider_api_key::dsl::is_enabled,
-                    provider_api_key::dsl::created_at,
-                    provider_api_key::dsl::updated_at,
-                ))
-                .load::<ProviderApiKeySummaryTuple>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list provider API key summaries: {error}"
-                    )))
-                })?;
-            Ok(rows
-                .into_iter()
-                .map(provider_api_key_summary_from_tuple)
-                .collect())
-        })
-    }
-
-    pub fn list_all_summaries() -> DbResult<Vec<ProviderApiKeySummary>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = provider_api_key::table
-                .filter(provider_api_key::dsl::deleted_at.is_null())
-                .order(provider_api_key::dsl::created_at.desc())
-                .select((
-                    provider_api_key::dsl::id,
-                    provider_api_key::dsl::provider_id,
-                    provider_api_key::dsl::description,
-                    provider_api_key::dsl::key_prefix,
-                    provider_api_key::dsl::key_last4,
-                    provider_api_key::dsl::is_enabled,
-                    provider_api_key::dsl::created_at,
-                    provider_api_key::dsl::updated_at,
-                ))
-                .load::<ProviderApiKeySummaryTuple>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list provider API key summaries: {error}"
-                    )))
-                })?;
-            Ok(rows
-                .into_iter()
-                .map(provider_api_key_summary_from_tuple)
-                .collect())
-        })
-    }
-
-    pub(crate) fn list_selections_by_provider_id(
-        provider_id_value: i64,
-    ) -> DbResult<Vec<ProviderApiKeySelection>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = provider_api_key::table
-                .filter(
-                    provider_api_key::dsl::provider_id
-                        .eq(provider_id_value)
-                        .and(provider_api_key::dsl::deleted_at.is_null())
-                        .and(provider_api_key::dsl::is_enabled.eq(true)),
-                )
-                .order((
-                    provider_api_key::dsl::created_at.asc(),
-                    provider_api_key::dsl::id.asc(),
-                ))
-                .select((
-                    provider_api_key::dsl::id,
-                    provider_api_key::dsl::provider_id,
-                    provider_api_key::dsl::secret_ciphertext,
-                    provider_api_key::dsl::secret_nonce,
-                    provider_api_key::dsl::secret_format_version,
-                    provider_api_key::dsl::secret_key_fingerprint,
-                ))
-                .load::<(
-                    i64,
-                    i64,
-                    Option<Vec<u8>>,
-                    Option<Vec<u8>>,
-                    Option<i32>,
-                    Option<String>,
-                )>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list provider API key selections: {error}"
-                    )))
-                })?;
-
-            rows.into_iter()
-                .map(|row| {
-                    Ok(ProviderApiKeySelection {
-                        id: row.0,
-                        provider_id: row.1,
-                        secret_ciphertext: row.2.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
-                        secret_nonce: row.3.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
-                        secret_format_version: row.4.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
-                        secret_key_fingerprint: row.5.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = provider_api_key::table
+                            .filter(
+                                provider_api_key::dsl::provider_id
+                                    .eq(provider_id_value)
+                                    .and(provider_api_key::dsl::deleted_at.is_null()),
+                            )
+                            .order(provider_api_key::dsl::created_at.desc())
+                            .select((
+                                provider_api_key::dsl::id,
+                                provider_api_key::dsl::provider_id,
+                                provider_api_key::dsl::description,
+                                provider_api_key::dsl::key_prefix,
+                                provider_api_key::dsl::key_last4,
+                                provider_api_key::dsl::is_enabled,
+                                provider_api_key::dsl::created_at,
+                                provider_api_key::dsl::updated_at,
+                            ));
+                        diesel_async::RunQueryDsl::load::<ProviderApiKeySummaryTuple>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(provider_api_key_summary_from_tuple)
+                                .collect()
+                        })
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to list provider API key summaries: {error}"
+                            )))
+                        })
                     })
                 })
-                .collect()
-        })
+            })
+            .await
     }
 
-    pub(crate) fn list_all_selections() -> DbResult<Vec<ProviderApiKeySelection>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = provider_api_key::table
-                .filter(
-                    provider_api_key::dsl::deleted_at
-                        .is_null()
-                        .and(provider_api_key::dsl::is_enabled.eq(true)),
-                )
-                .order((
-                    provider_api_key::dsl::provider_id.asc(),
-                    provider_api_key::dsl::created_at.asc(),
-                    provider_api_key::dsl::id.asc(),
-                ))
-                .select((
-                    provider_api_key::dsl::id,
-                    provider_api_key::dsl::provider_id,
-                    provider_api_key::dsl::secret_ciphertext,
-                    provider_api_key::dsl::secret_nonce,
-                    provider_api_key::dsl::secret_format_version,
-                    provider_api_key::dsl::secret_key_fingerprint,
-                ))
-                .load::<(
-                    i64,
-                    i64,
-                    Option<Vec<u8>>,
-                    Option<Vec<u8>>,
-                    Option<i32>,
-                    Option<String>,
-                )>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list provider API key selections: {error}"
-                    )))
-                })?;
-
-            rows.into_iter()
-                .map(|row| {
-                    Ok(ProviderApiKeySelection {
-                        id: row.0,
-                        provider_id: row.1,
-                        secret_ciphertext: row.2.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
-                        secret_nonce: row.3.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
-                        secret_format_version: row.4.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
-                        secret_key_fingerprint: row.5.ok_or_else(|| {
-                            BaseError::DatabaseFatal(Some(
-                                "Provider API key secret contract is incomplete".to_string(),
-                            ))
-                        })?,
+    pub async fn list_all_summaries(
+        database: &DatabaseRuntime,
+    ) -> DbResult<Vec<ProviderApiKeySummary>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = provider_api_key::table
+                            .filter(provider_api_key::dsl::deleted_at.is_null())
+                            .order(provider_api_key::dsl::created_at.desc())
+                            .select((
+                                provider_api_key::dsl::id,
+                                provider_api_key::dsl::provider_id,
+                                provider_api_key::dsl::description,
+                                provider_api_key::dsl::key_prefix,
+                                provider_api_key::dsl::key_last4,
+                                provider_api_key::dsl::is_enabled,
+                                provider_api_key::dsl::created_at,
+                                provider_api_key::dsl::updated_at,
+                            ));
+                        let rows = diesel_async::RunQueryDsl::load::<ProviderApiKeySummaryTuple>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to list provider API key summaries: {error}"
+                            )))
+                        })?;
+                        Ok(rows
+                            .into_iter()
+                            .map(provider_api_key_summary_from_tuple)
+                            .collect())
                     })
                 })
-                .collect()
-        })
+            })
+            .await
     }
 
-    pub(crate) fn get_stored_by_id(
+    pub(crate) async fn get_stored_by_id(
+        database: &DatabaseRuntime,
         provider_id_value: i64,
         key_id: i64,
     ) -> DbResult<StoredProviderApiKey> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let row = provider_api_key::table
-                .filter(
-                    provider_api_key::dsl::id
-                        .eq(key_id)
-                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
-                        .and(provider_api_key::dsl::deleted_at.is_null()),
-                )
-                .select(stored_provider_key_columns!())
-                .first::<StoredProviderApiKeyTuple>(conn)
-                .map_err(|error| match error {
-                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                        "Provider API key {key_id} not found for provider {provider_id_value}"
-                    ))),
-                    other => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load provider API key secret: {other}"
-                    ))),
-                })?;
-            Ok(stored_provider_api_key_from_tuple(row))
-        })
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = provider_api_key::table
+                            .filter(
+                                provider_api_key::dsl::id
+                                    .eq(key_id)
+                                    .and(
+                                        provider_api_key::dsl::provider_id.eq(provider_id_value),
+                                    )
+                                    .and(provider_api_key::dsl::deleted_at.is_null()),
+                            )
+                            .select(stored_provider_key_columns!());
+                        diesel_async::RunQueryDsl::first::<StoredProviderApiKeyTuple>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(stored_provider_api_key_from_tuple)
+                        .map_err(|error| match error {
+                            diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                                "Provider API key {key_id} not found for provider {provider_id_value}"
+                            ))),
+                            other => BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load provider API key secret: {other}"
+                            ))),
+                        })
+                    })
+                })
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_secret_hmac_for_test(
+        database: &DatabaseRuntime,
+        provider_id_value: i64,
+        key_id: i64,
+        secret_hmac: String,
+    ) -> DbResult<()> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(provider_api_key::table.filter(
+                            provider_api_key::dsl::id
+                                .eq(key_id)
+                                .and(provider_api_key::dsl::provider_id.eq(provider_id_value)),
+                        ))
+                        .set(provider_api_key::dsl::secret_hmac.eq(Some(secret_hmac)));
+                        let updated = diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to update provider API key test HMAC: {error}"
+                                )))
+                            })?;
+                        if updated == 1 {
+                            Ok(())
+                        } else {
+                            Err(BaseError::NotFound(Some(format!(
+                                "Provider API key {key_id} not found for provider {provider_id_value}"
+                            ))))
+                        }
+                    })
+                })
+            })
+            .await
+    }
+    pub(crate) async fn list_selections_by_provider_id(
+        database: &DatabaseRuntime,
+        provider_id_value: i64,
+    ) -> DbResult<Vec<ProviderApiKeySelection>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = provider_api_key::table
+                            .filter(
+                                provider_api_key::dsl::provider_id
+                                    .eq(provider_id_value)
+                                    .and(provider_api_key::dsl::deleted_at.is_null())
+                                    .and(provider_api_key::dsl::is_enabled.eq(true)),
+                            )
+                            .order((
+                                provider_api_key::dsl::created_at.asc(),
+                                provider_api_key::dsl::id.asc(),
+                            ))
+                            .select((
+                                provider_api_key::dsl::id,
+                                provider_api_key::dsl::provider_id,
+                                provider_api_key::dsl::secret_ciphertext,
+                                provider_api_key::dsl::secret_nonce,
+                                provider_api_key::dsl::secret_format_version,
+                                provider_api_key::dsl::secret_key_fingerprint,
+                            ));
+                        let rows: Vec<ProviderApiKeySelectionTuple> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to list provider API key selections: {error}"
+                                    )))
+                                })?;
+
+                        rows.into_iter()
+                            .map(provider_api_key_selection_from_row)
+                            .collect()
+                    })
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn list_all_selections(
+        database: &DatabaseRuntime,
+    ) -> DbResult<Vec<ProviderApiKeySelection>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = provider_api_key::table
+                            .filter(
+                                provider_api_key::dsl::deleted_at
+                                    .is_null()
+                                    .and(provider_api_key::dsl::is_enabled.eq(true)),
+                            )
+                            .order((
+                                provider_api_key::dsl::provider_id.asc(),
+                                provider_api_key::dsl::created_at.asc(),
+                                provider_api_key::dsl::id.asc(),
+                            ))
+                            .select((
+                                provider_api_key::dsl::id,
+                                provider_api_key::dsl::provider_id,
+                                provider_api_key::dsl::secret_ciphertext,
+                                provider_api_key::dsl::secret_nonce,
+                                provider_api_key::dsl::secret_format_version,
+                                provider_api_key::dsl::secret_key_fingerprint,
+                            ));
+                        let rows: Vec<ProviderApiKeySelectionTuple> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to list provider API key selections: {error}"
+                                    )))
+                                })?;
+
+                        rows.into_iter()
+                            .map(provider_api_key_selection_from_row)
+                            .collect()
+                    })
+                })
+            })
+            .await
     }
 }
 
@@ -1424,49 +1531,11 @@ impl ProviderApiKeyRepository {
 mod tests {
     use super::*;
     use crate::config::SecretEncryptionConfig;
-    use crate::database::_sqlite_schema::provider_api_key;
     use crate::database::upstream_source::UpdateUpstreamSourceData;
     use crate::service::secret_encryption::{
         SecretDomain, SecretEncryptionService, SensitiveSecret,
     };
     use serde_json::Value;
-
-    struct TestSqliteDb {
-        _temp_dir: tempfile::TempDir,
-        conn: diesel::SqliteConnection,
-    }
-
-    fn bootstrap_with_sqlite_connection(
-        conn: &mut diesel::SqliteConnection,
-        input: &BootstrapProviderInput,
-    ) -> DbResult<BootstrapProviderResult> {
-        use self::_sqlite_model::*;
-        use crate::database::_sqlite_schema::*;
-        use crate::database::model::_sqlite_model::{
-            ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
-        };
-        use crate::database::upstream_source::_sqlite_model::{
-            NewUpstreamSourceDb as BootstrapNewSourceDb, UpstreamSourceDb as BootstrapSourceDb,
-        };
-
-        bootstrap_transaction!(
-            conn,
-            BootstrapNewSourceDb,
-            BootstrapSourceDb,
-            BootstrapNewModelDb,
-            BootstrapModelDb,
-            input
-        )
-    }
-
-    fn sqlite_connection() -> TestSqliteDb {
-        let (temp_dir, conn) =
-            crate::database::open_test_sqlite_connection_with_migrations("bootstrap.sqlite");
-        TestSqliteDb {
-            _temp_dir: temp_dir,
-            conn,
-        }
-    }
 
     fn sample_input(real_model_name: Option<&str>) -> BootstrapProviderInput {
         let provider_id = 101;
@@ -1511,96 +1580,13 @@ mod tests {
         }
     }
 
-    fn provider_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
-        use crate::database::_sqlite_schema::*;
-
-        provider::table
-            .filter(provider::dsl::id.eq(provider_id))
-            .count()
-            .get_result(conn)
-            .expect("provider count should load")
-    }
-
-    fn provider_key_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
-        provider_api_key::table
-            .filter(provider_api_key::dsl::provider_id.eq(provider_id))
-            .count()
-            .get_result(conn)
-            .expect("provider key count should load")
-    }
-
-    fn source_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
-        use crate::database::_sqlite_schema::*;
-
-        upstream_source::table
-            .filter(upstream_source::dsl::provider_id.eq(provider_id))
-            .count()
-            .get_result(conn)
-            .expect("upstream source count should load")
-    }
-
-    fn model_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
-        use crate::database::_sqlite_schema::*;
-
-        model::table
-            .filter(model::dsl::provider_id.eq(provider_id))
-            .count()
-            .get_result(conn)
-            .expect("model count should load")
-    }
-
-    fn provider_summaries(conn: &mut diesel::SqliteConnection) -> Vec<ProviderSummaryItem> {
-        use crate::database::_sqlite_schema::*;
-
-        let rows = provider::table
-            .filter(provider::dsl::deleted_at.is_null())
-            .order(provider::dsl::name.asc())
-            .select((
-                provider::dsl::id,
-                provider::dsl::provider_key,
-                provider::dsl::name,
-                provider::dsl::is_enabled,
-            ))
-            .load::<(i64, String, String, bool)>(conn)
-            .expect("provider summary rows should load");
-
-        rows.into_iter()
-            .map(|(id, provider_key, name, is_enabled)| {
-                use crate::database::upstream_source::_sqlite_model::UpstreamSourceDb;
-
-                let sources = upstream_source::table
-                    .filter(
-                        upstream_source::dsl::provider_id
-                            .eq(id)
-                            .and(upstream_source::dsl::deleted_at.is_null()),
-                    )
-                    .select(UpstreamSourceDb::as_select())
-                    .load::<UpstreamSourceDb>(conn)
-                    .expect("summary sources should load")
-                    .into_iter()
-                    .map(|source| source.from_db())
-                    .collect::<Vec<_>>();
-                let default_source = sources.iter().find(|source| source.is_default);
-
-                ProviderSummaryItem {
-                    id,
-                    provider_key,
-                    name,
-                    is_enabled,
-                    source_count: sources.len() as i64,
-                    enabled_source_count: sources.iter().filter(|source| source.is_enabled).count()
-                        as i64,
-                    default_source_id: default_source.map(|source| source.id),
-                    default_source_profile_type: default_source.map(|source| source.profile_type),
-                }
-            })
-            .collect()
-    }
-
-    #[test]
-    fn bootstrap_provider_creates_provider_key_and_model_atomically() {
-        let mut db = sqlite_connection();
-        let result = bootstrap_with_sqlite_connection(&mut db.conn, &sample_input(Some("gpt-4o")))
+    #[tokio::test]
+    async fn bootstrap_provider_creates_provider_key_and_model_atomically() {
+        let database =
+            crate::database::TestDatabase::new_sqlite_default("provider-bootstrap-atomic.sqlite")
+                .await;
+        let result = Provider::bootstrap(&database, &sample_input(Some("gpt-4o")))
+            .await
             .expect("bootstrap should succeed");
 
         assert_eq!(result.provider.id, 101);
@@ -1616,16 +1602,30 @@ mod tests {
         assert_eq!(result.created_model.provider_id, result.provider.id);
         assert_eq!(result.created_model.model_name, "gpt-4o-mini");
 
-        assert_eq!(provider_count(&mut db.conn, result.provider.id), 1);
-        assert_eq!(source_count(&mut db.conn, result.provider.id), 1);
-        assert_eq!(provider_key_count(&mut db.conn, result.provider.id), 1);
-        assert_eq!(model_count(&mut db.conn, result.provider.id), 1);
+        assert_eq!(Provider::list_all(&database).await.unwrap().len(), 1);
+        assert_eq!(
+            ProviderApiKeyRepository::list_summaries_by_provider_id(&database, result.provider.id,)
+                .await
+                .unwrap()
+                .len(),
+            1,
+        );
+        assert_eq!(
+            crate::database::model::Model::list_by_provider_id(&database, result.provider.id,)
+                .await
+                .unwrap()
+                .len(),
+            1,
+        );
     }
 
-    #[test]
-    fn bootstrap_provider_rolls_back_on_model_validation_failure() {
-        let mut db = sqlite_connection();
-        let result = bootstrap_with_sqlite_connection(&mut db.conn, &sample_input(Some("")))
+    #[tokio::test]
+    async fn bootstrap_provider_rolls_back_on_model_validation_failure() {
+        let database =
+            crate::database::TestDatabase::new_sqlite_default("provider-bootstrap-rollback.sqlite")
+                .await;
+        let result = Provider::bootstrap(&database, &sample_input(Some("")))
+            .await
             .expect_err("bootstrap should fail");
 
         let message = match result {
@@ -1635,19 +1635,36 @@ mod tests {
 
         assert!(message.contains("Failed to insert bootstrap model"));
 
-        assert_eq!(provider_count(&mut db.conn, 101), 0);
-        assert_eq!(source_count(&mut db.conn, 101), 0);
-        assert_eq!(provider_key_count(&mut db.conn, 101), 0);
-        assert_eq!(model_count(&mut db.conn, 101), 0);
+        let provider_after = Provider::get_by_id(&database, 101).await;
+        assert!(
+            matches!(provider_after, Err(BaseError::ParamInvalid(_))),
+            "provider bootstrap rollback result: {provider_after:?}"
+        );
+        assert!(
+            ProviderApiKeyRepository::list_summaries_by_provider_id(&database, 101)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            crate::database::model::Model::list_by_provider_id(&database, 101)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
-    #[test]
-    fn provider_summary_list_returns_lightweight_rows() {
-        let mut db = sqlite_connection();
-        bootstrap_with_sqlite_connection(&mut db.conn, &sample_input(Some("gpt-4o")))
+    #[tokio::test]
+    async fn provider_summary_list_returns_lightweight_rows() {
+        let database =
+            crate::database::TestDatabase::new_sqlite_default("provider-summary-list.sqlite").await;
+        Provider::bootstrap(&database, &sample_input(Some("gpt-4o")))
+            .await
             .expect("bootstrap should succeed");
 
-        let rows = provider_summaries(&mut db.conn);
+        let rows = Provider::list_summary(&database)
+            .await
+            .expect("provider summaries should list");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.id, 101);
@@ -1717,102 +1734,113 @@ mod tests {
 
     #[tokio::test]
     async fn provider_aggregate_update_and_delete_keep_source_state_atomic() {
-        let database = crate::database::TestDbContext::new_sqlite("provider-aggregate-crud.sqlite");
-        database
-            .run_async(async {
-                Provider::create(
-                    &NewProvider {
-                        id: 401,
-                        provider_key: "aggregate-provider".to_string(),
-                        name: "Aggregate Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &NewUpstreamSource {
-                        id: 402,
-                        provider_id: 401,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: "https://old.example.com/v1".to_string(),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
-                    },
-                )
-                .expect("aggregate should create");
+        let database =
+            crate::database::TestDatabase::new_sqlite_default("provider-aggregate-crud.sqlite")
+                .await;
+        (async {
+            Provider::create(
+                &database,
+                &NewProvider {
+                    id: 401,
+                    provider_key: "aggregate-provider".to_string(),
+                    name: "Aggregate Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &NewUpstreamSource {
+                    id: 402,
+                    provider_id: 401,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: "https://old.example.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
+                },
+            )
+            .await
+            .expect("aggregate should create");
 
-                let updated = Provider::update(
-                    401,
-                    &UpdateProviderData {
-                        provider_key: Some("must-not-change".to_string()),
-                        name: Some("Updated Provider".to_string()),
-                        is_enabled: None,
-                        provider_api_key_mode: None,
-                    },
-                )
-                .expect("provider should update");
-                assert_eq!(updated.name, "Updated Provider");
-                assert_eq!(updated.provider_key, "aggregate-provider");
+            let updated = Provider::update(
+                &database,
+                401,
+                &UpdateProviderData {
+                    provider_key: Some("must-not-change".to_string()),
+                    name: Some("Updated Provider".to_string()),
+                    is_enabled: None,
+                    provider_api_key_mode: None,
+                },
+            )
+            .await
+            .expect("provider should update");
+            assert_eq!(updated.name, "Updated Provider");
+            assert_eq!(updated.provider_key, "aggregate-provider");
 
-                let updated_source = UpstreamSource::update(
-                    402,
-                    401,
-                    &UpdateUpstreamSourceData {
-                        base_url: Some("https://new.example.com/v1".to_string()),
-                        use_proxy: Some(true),
-                        is_enabled: None,
-                        is_default: None,
-                        updated_at: 2,
-                        ..UpdateUpstreamSourceData::test_defaults()
-                    },
-                )
-                .expect("source should update");
-                assert_eq!(updated_source.profile_type, UpstreamProfileType::Openai);
-                assert_eq!(updated_source.base_url, "https://new.example.com/v1");
-                assert!(updated_source.use_proxy);
+            let updated_source = UpstreamSource::update(
+                &database,
+                402,
+                401,
+                &UpdateUpstreamSourceData {
+                    base_url: Some("https://new.example.com/v1".to_string()),
+                    use_proxy: Some(true),
+                    is_enabled: None,
+                    is_default: None,
+                    updated_at: 2,
+                    ..UpdateUpstreamSourceData::test_defaults()
+                },
+            )
+            .await
+            .expect("source should update");
+            assert_eq!(updated_source.profile_type, UpstreamProfileType::Openai);
+            assert_eq!(updated_source.base_url, "https://new.example.com/v1");
+            assert!(updated_source.use_proxy);
 
-                assert_eq!(Provider::delete_with_dependents(401).expect("delete"), 1);
-                assert!(Provider::get_by_id(401).is_err());
+            assert_eq!(
+                Provider::delete_with_dependents(&database, 401)
+                    .await
+                    .expect("delete"),
+                1
+            );
+            assert!(Provider::get_by_id(&database, 401).await.is_err());
 
-                let conn = &mut get_connection().expect("test connection");
-                db_execute!(conn, {
-                    let deleted_at = upstream_source::table
-                        .find(402)
-                        .select(upstream_source::dsl::deleted_at)
-                        .first::<Option<i64>>(conn)
-                        .expect("source should remain soft deleted");
-                    assert!(deleted_at.is_some());
-                });
-            })
-            .await;
+            let deleted_at = UpstreamSource::deleted_at_for_test(&database, 402)
+                .await
+                .expect("source should remain soft deleted");
+            assert!(deleted_at.is_some());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn provider_aggregate_allows_zero_or_more_sources_and_preserves_family_identity() {
         let database =
-            crate::database::TestDbContext::new_sqlite("provider-source-cardinality.sqlite");
-        database
-            .run_async(async {
-                let provider = Provider::create_optional(
-                    &NewProvider {
-                        id: 411,
-                        provider_key: "source-free-provider".to_string(),
-                        name: "Source Free Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    None,
-                )
-                .expect("provider without a source should be valid");
-                assert!(provider.upstream_sources.is_empty());
+            crate::database::TestDatabase::new_sqlite_default("provider-source-cardinality.sqlite")
+                .await;
+        (async {
+            let provider = Provider::create_optional(
+                &database,
+                &NewProvider {
+                    id: 411,
+                    provider_key: "source-free-provider".to_string(),
+                    name: "Source Free Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                None,
+            )
+            .await
+            .expect("provider without a source should be valid");
+            assert!(provider.upstream_sources.is_empty());
 
-                let source = UpstreamSource::create(&NewUpstreamSource {
+            let source = UpstreamSource::create(
+                &database,
+                &NewUpstreamSource {
                     id: 412,
                     provider_id: 411,
                     profile_type: UpstreamProfileType::Openai,
@@ -1823,11 +1851,15 @@ mod tests {
                     created_at: 1,
                     updated_at: 1,
                     ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
-                })
-                .expect("first source should create");
-                assert!(source.is_default);
+                },
+            )
+            .await
+            .expect("first source should create");
+            assert!(source.is_default);
 
-                let second = UpstreamSource::create(&NewUpstreamSource {
+            let second = UpstreamSource::create(
+                &database,
+                &NewUpstreamSource {
                     id: 413,
                     provider_id: 411,
                     profile_type: UpstreamProfileType::Gemini,
@@ -1838,29 +1870,34 @@ mod tests {
                     created_at: 1,
                     updated_at: 1,
                     ..NewUpstreamSource::test_defaults(UpstreamProfileType::Gemini)
-                })
-                .expect("different source family should coexist");
-                assert!(!second.is_default);
+                },
+            )
+            .await
+            .expect("different source family should coexist");
+            assert!(!second.is_default);
 
-                let loaded = Provider::get_by_id(411).expect("provider should load");
-                assert_eq!(
-                    loaded
-                        .upstream_sources
-                        .iter()
-                        .map(|source| source.id)
-                        .collect::<Vec<_>>(),
-                    vec![412, 413]
-                );
-            })
-            .await;
+            let loaded = Provider::get_by_id(&database, 411)
+                .await
+                .expect("provider should load");
+            assert_eq!(
+                loaded
+                    .upstream_sources
+                    .iter()
+                    .map(|source| source.id)
+                    .collect::<Vec<_>>(),
+                vec![412, 413]
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn provider_key_repository_enforces_safe_projection_membership_and_hmac_lifecycle() {
-        let database = crate::database::TestDbContext::new_sqlite("provider-key-repository.sqlite");
-        database
-            .run_async(async {
-                Provider::create(&NewProvider {
+        let database =
+            crate::database::TestDatabase::new_sqlite_default("provider-key-repository.sqlite")
+                .await;
+        (async {
+                Provider::create(&database, &NewProvider {
                     id: 501,
                     provider_key: "repository-provider".to_string(),
                     name: "Repository Provider".to_string(),
@@ -1879,9 +1916,9 @@ mod tests {
                     created_at: 1,
                     updated_at: 1,
                     ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
-                })
+                }).await
                 .expect("provider should seed");
-                Provider::create(&NewProvider {
+                Provider::create(&database, &NewProvider {
                     id: 502,
                     provider_key: "other-provider".to_string(),
                     name: "Other Provider".to_string(),
@@ -1900,7 +1937,7 @@ mod tests {
                     created_at: 1,
                     updated_at: 1,
                     ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
-                })
+                }).await
                 .expect("other provider should seed");
 
                 let config: SecretEncryptionConfig = serde_yaml::from_str(
@@ -1926,7 +1963,7 @@ mod tests {
                     updated_at: id,
                 };
 
-                let summary = ProviderApiKeyRepository::insert(&new_key(601))
+                let summary = ProviderApiKeyRepository::insert(&database, &new_key(601)).await
                     .expect("provider key should insert");
                 let json = serde_json::to_value(&summary).expect("summary should serialize");
                 let object = json.as_object().expect("summary should be an object");
@@ -1940,41 +1977,41 @@ mod tests {
                 ] {
                     assert!(!object.contains_key(forbidden));
                 }
-                assert!(ProviderApiKeyRepository::insert(&new_key(602)).is_err());
+                assert!(ProviderApiKeyRepository::insert(&database, &new_key(602)).await.is_err());
                 assert!(
-                    ProviderApiKeyRepository::update_metadata(
+                    ProviderApiKeyRepository::update_metadata(&database,
                         502,
                         601,
                         &UpdateProviderApiKeyMetadata {
                             description: None,
                             is_enabled: false,
                         },
-                    )
+                    ).await
                     .is_err()
                 );
 
-                ProviderApiKeyRepository::update_metadata(
+                ProviderApiKeyRepository::update_metadata(&database,
                     501,
                     601,
                     &UpdateProviderApiKeyMetadata {
                         description: Some("disabled".to_string()),
                         is_enabled: false,
                     },
-                )
+                ).await
                 .expect("metadata update should succeed");
-                assert!(ProviderApiKeyRepository::insert(&new_key(602)).is_err());
+                assert!(ProviderApiKeyRepository::insert(&database, &new_key(602)).await.is_err());
 
-                let stored = ProviderApiKeyRepository::get_stored_by_id(501, 601)
+                let stored = ProviderApiKeyRepository::get_stored_by_id(&database, 501, 601).await
                     .expect("stored provider key should load");
                 let debug = format!("{stored:?}");
                 assert!(debug.contains("<redacted>"));
                 assert!(!debug.contains("sk-repository-secret"));
                 assert!(!debug.contains(stored.secret_hmac.as_deref().unwrap_or_default()));
 
-                ProviderApiKeyRepository::soft_delete(501, 601)
+                ProviderApiKeyRepository::soft_delete(&database, 501, 601).await
                     .expect("provider key soft delete should succeed");
-                assert!(ProviderApiKeyRepository::get_stored_by_id(501, 601).is_err());
-                ProviderApiKeyRepository::insert(&new_key(602))
+                assert!(ProviderApiKeyRepository::get_stored_by_id(&database, 501, 601).await.is_err());
+                ProviderApiKeyRepository::insert(&database, &new_key(602)).await
                     .expect("soft deletion should release the HMAC uniqueness slot");
             })
             .await;

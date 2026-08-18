@@ -76,7 +76,9 @@ pub(in crate::service::transform) struct UpstreamStreamCodec {
 
 #[derive(Clone, Copy)]
 pub(in crate::service::transform) struct DownstreamAdapter {
+    #[cfg(test)]
     pub(in crate::service::transform) protocol: DownstreamProtocol,
+    #[cfg(test)]
     pub(in crate::service::transform) name: &'static str,
     pub(in crate::service::transform) request: DownstreamRequestCodec,
     pub(in crate::service::transform) response: DownstreamResponseCodec,
@@ -85,7 +87,9 @@ pub(in crate::service::transform) struct DownstreamAdapter {
 
 #[derive(Clone, Copy)]
 pub(in crate::service::transform) struct UpstreamAdapter {
+    #[cfg(test)]
     pub(in crate::service::transform) protocol: UpstreamProtocol,
+    #[cfg(test)]
     pub(in crate::service::transform) name: &'static str,
     pub(in crate::service::transform) request: UpstreamRequestCodec,
     pub(in crate::service::transform) response: UpstreamResponseCodec,
@@ -747,7 +751,9 @@ fn encode_responses_legacy_chunk(
 }
 
 const OPENAI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    #[cfg(test)]
     protocol: DownstreamProtocol::Openai,
+    #[cfg(test)]
     name: "openai",
     request: DownstreamRequestCodec {
         decode: decode_openai_request,
@@ -762,7 +768,9 @@ const OPENAI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
 };
 
 const GEMINI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    #[cfg(test)]
     protocol: DownstreamProtocol::Gemini,
+    #[cfg(test)]
     name: "gemini",
     request: DownstreamRequestCodec {
         decode: decode_gemini_request,
@@ -777,7 +785,9 @@ const GEMINI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
 };
 
 const ANTHROPIC_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    #[cfg(test)]
     protocol: DownstreamProtocol::Anthropic,
+    #[cfg(test)]
     name: "anthropic",
     request: DownstreamRequestCodec {
         decode: decode_anthropic_request,
@@ -792,7 +802,9 @@ const ANTHROPIC_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
 };
 
 const RESPONSES_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    #[cfg(test)]
     protocol: DownstreamProtocol::Responses,
+    #[cfg(test)]
     name: "responses",
     request: DownstreamRequestCodec {
         decode: decode_responses_request,
@@ -807,7 +819,9 @@ const RESPONSES_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
 };
 
 const OPENAI_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    #[cfg(test)]
     protocol: UpstreamProtocol::Openai,
+    #[cfg(test)]
     name: "openai",
     request: UpstreamRequestCodec {
         encode: encode_openai_request,
@@ -822,7 +836,9 @@ const OPENAI_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
 };
 
 const GEMINI_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    #[cfg(test)]
     protocol: UpstreamProtocol::Gemini,
+    #[cfg(test)]
     name: "gemini",
     request: UpstreamRequestCodec {
         encode: encode_gemini_request,
@@ -837,7 +853,9 @@ const GEMINI_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
 };
 
 const ANTHROPIC_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    #[cfg(test)]
     protocol: UpstreamProtocol::Anthropic,
+    #[cfg(test)]
     name: "anthropic",
     request: UpstreamRequestCodec {
         encode: encode_anthropic_request,
@@ -852,7 +870,9 @@ const ANTHROPIC_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
 };
 
 const RESPONSES_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    #[cfg(test)]
     protocol: UpstreamProtocol::Responses,
+    #[cfg(test)]
     name: "responses",
     request: UpstreamRequestCodec {
         encode: encode_responses_request,

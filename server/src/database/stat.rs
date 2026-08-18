@@ -1,8 +1,7 @@
 use crate::controller::BaseError;
-use crate::database::model::Model;
-use crate::database::provider::{Provider, ProviderApiKeyRepository};
-use crate::database::{DbConnection, DbResult, get_connection};
-use crate::{db_execute, db_object};
+use crate::database::DbResult;
+use crate::database::runtime::{DatabaseRuntime, DatabaseWorkload, RuntimeConnection};
+use crate::db_object;
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use diesel::QueryableByName;
@@ -112,15 +111,6 @@ pub struct DashboardTopModelItem {
     pub request_count: i64,
     pub total_tokens: i64,
     pub total_cost: HashMap<String, i64>,
-}
-
-#[derive(Debug)]
-struct TodayRequestLogSummaryRow {
-    requests_count: i64,
-    total_input_tokens: Option<i64>,
-    total_output_tokens: Option<i64>,
-    total_reasoning_tokens: Option<i64>,
-    total_tokens: Option<i64>,
 }
 
 #[derive(QueryableByName, Debug)]
@@ -298,160 +288,284 @@ struct UsageStatsCostRow {
     total_cost_nanos: i64,
 }
 
-pub fn get_system_overview_stats() -> DbResult<SystemOverviewStats> {
-    let conn = &mut get_connection()?;
-    let mut stats = SystemOverviewStats::default();
-
-    stats.providers_count = db_execute!(conn, {
-        provider::table
-            .filter(provider::dsl::deleted_at.is_null())
-            .select(count_star())
-            .first(conn)
-    })?;
-
-    stats.models_count = db_execute!(conn, {
-        model::table
-            .filter(model::dsl::deleted_at.is_null())
-            .select(count_star())
-            .first(conn)
-    })?;
-
-    stats.provider_keys_count = db_execute!(conn, {
-        provider_api_key::table
-            .filter(provider_api_key::dsl::deleted_at.is_null())
-            .select(count_star())
-            .first(conn)
-    })?;
-
-    Ok(stats)
+pub async fn get_system_overview_stats(
+    database: &DatabaseRuntime,
+) -> DbResult<SystemOverviewStats> {
+    database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                match connection {
+                    RuntimeConnection::Postgres(conn) => {
+                        use crate::database::_postgres_schema::*;
+                        let providers_query = provider::table
+                            .filter(provider::dsl::deleted_at.is_null())
+                            .select(count_star());
+                        let providers_count =
+                            diesel_async::RunQueryDsl::first::<i64>(providers_query, &mut **conn)
+                                .await?;
+                        let models_query = model::table
+                            .filter(model::dsl::deleted_at.is_null())
+                            .select(count_star());
+                        let models_count =
+                            diesel_async::RunQueryDsl::first::<i64>(models_query, &mut **conn)
+                                .await?;
+                        let provider_keys_query = provider_api_key::table
+                            .filter(provider_api_key::dsl::deleted_at.is_null())
+                            .select(count_star());
+                        let provider_keys_count = diesel_async::RunQueryDsl::first::<i64>(
+                            provider_keys_query,
+                            &mut **conn,
+                        )
+                        .await?;
+                        Ok(SystemOverviewStats {
+                            providers_count,
+                            models_count,
+                            provider_keys_count,
+                        })
+                    }
+                    RuntimeConnection::Sqlite(conn) => {
+                        use crate::database::_sqlite_schema::*;
+                        let providers_query = provider::table
+                            .filter(provider::dsl::deleted_at.is_null())
+                            .select(count_star());
+                        let providers_count =
+                            diesel_async::RunQueryDsl::first::<i64>(providers_query, &mut **conn)
+                                .await?;
+                        let models_query = model::table
+                            .filter(model::dsl::deleted_at.is_null())
+                            .select(count_star());
+                        let models_count =
+                            diesel_async::RunQueryDsl::first::<i64>(models_query, &mut **conn)
+                                .await?;
+                        let provider_keys_query = provider_api_key::table
+                            .filter(provider_api_key::dsl::deleted_at.is_null())
+                            .select(count_star());
+                        let provider_keys_count = diesel_async::RunQueryDsl::first::<i64>(
+                            provider_keys_query,
+                            &mut **conn,
+                        )
+                        .await?;
+                        Ok(SystemOverviewStats {
+                            providers_count,
+                            models_count,
+                            provider_keys_count,
+                        })
+                    }
+                }
+            })
+        })
+        .await
 }
 
-pub fn get_request_logs_in_range(
-    start_time_ms: i64,
-    end_time_ms: i64,
-    provider_id_filter: Option<i64>,
-    model_id_filter: Option<i64>,
-    api_key_id_filter: Option<i64>,
-    provider_api_key_id_filter: Option<i64>,
-) -> DbResult<Vec<RequestLogEntryForStats>> {
-    match &mut get_connection()? {
-        DbConnection::Postgres(conn) => sql_query(
-            "SELECT
-                rl.created_at,
-                rl.provider_id AS provider_id,
-                rl.model_id AS model_id,
-                rl.total_input_tokens,
-                rl.total_output_tokens,
-                rl.reasoning_tokens,
-                rl.total_tokens,
-                rl.estimated_cost_nanos,
-                rl.estimated_cost_currency,
-                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
-                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name,
-                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name
-             FROM request_log rl
-             LEFT JOIN provider p ON p.id = rl.provider_id
-             LEFT JOIN model m ON m.id = rl.model_id
-             WHERE rl.created_at >= $1
-               AND rl.created_at < $2
-               AND rl.provider_id IS NOT NULL
-               AND rl.model_id IS NOT NULL
-               AND ($3 IS NULL OR rl.provider_id = $3)
-               AND ($4 IS NULL OR rl.model_id = $4)
-               AND ($5 IS NULL OR rl.api_key_id = $5)
-               AND ($6 IS NULL OR rl.provider_api_key_id = $6)
-             ORDER BY rl.created_at ASC",
-        )
-        .bind::<BigInt, _>(start_time_ms)
-        .bind::<BigInt, _>(end_time_ms)
-        .bind::<Nullable<BigInt>, _>(provider_id_filter)
-        .bind::<Nullable<BigInt>, _>(model_id_filter)
-        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-        .load::<RequestLogEntryForStats>(conn)
-        .map_err(Into::into),
-        DbConnection::Sqlite(conn) => sql_query(
-            "SELECT
-                rl.created_at,
-                rl.provider_id AS provider_id,
-                rl.model_id AS model_id,
-                rl.total_input_tokens,
-                rl.total_output_tokens,
-                rl.reasoning_tokens,
-                rl.total_tokens,
-                rl.estimated_cost_nanos,
-                rl.estimated_cost_currency,
-                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
-                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name,
-                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name
-             FROM request_log rl
-             LEFT JOIN provider p ON p.id = rl.provider_id
-             LEFT JOIN model m ON m.id = rl.model_id
-             WHERE rl.created_at >= ?
-               AND rl.created_at < ?
-               AND rl.provider_id IS NOT NULL
-               AND rl.model_id IS NOT NULL
-               AND (? IS NULL OR rl.provider_id = ?)
-               AND (? IS NULL OR rl.model_id = ?)
-               AND (? IS NULL OR rl.api_key_id = ?)
-               AND (? IS NULL OR rl.provider_api_key_id = ?)
-             ORDER BY rl.created_at ASC",
-        )
-        .bind::<BigInt, _>(start_time_ms)
-        .bind::<BigInt, _>(end_time_ms)
-        .bind::<Nullable<BigInt>, _>(provider_id_filter)
-        .bind::<Nullable<BigInt>, _>(provider_id_filter)
-        .bind::<Nullable<BigInt>, _>(model_id_filter)
-        .bind::<Nullable<BigInt>, _>(model_id_filter)
-        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-        .load::<RequestLogEntryForStats>(conn)
-        .map_err(Into::into),
-    }
+pub async fn get_dashboard_overview_stats(
+    database: &DatabaseRuntime,
+) -> DbResult<DashboardOverviewStats> {
+    database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                macro_rules! load_counts {
+                    ($conn:expr) => {{
+                        let provider_count = diesel_async::RunQueryDsl::first::<i64>(
+                            provider::table
+                                .filter(provider::dsl::deleted_at.is_null())
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        let enabled_provider_count = diesel_async::RunQueryDsl::first::<i64>(
+                            provider::table
+                                .filter(
+                                    provider::dsl::deleted_at
+                                        .is_null()
+                                        .and(provider::dsl::is_enabled.eq(true)),
+                                )
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        let model_count = diesel_async::RunQueryDsl::first::<i64>(
+                            model::table
+                                .filter(model::dsl::deleted_at.is_null())
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        let enabled_model_count = diesel_async::RunQueryDsl::first::<i64>(
+                            model::table
+                                .filter(
+                                    model::dsl::deleted_at
+                                        .is_null()
+                                        .and(model::dsl::is_enabled.eq(true)),
+                                )
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        let provider_key_count = diesel_async::RunQueryDsl::first::<i64>(
+                            provider_api_key::table
+                                .filter(provider_api_key::dsl::deleted_at.is_null())
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        let enabled_provider_key_count = diesel_async::RunQueryDsl::first::<i64>(
+                            provider_api_key::table
+                                .filter(
+                                    provider_api_key::dsl::deleted_at
+                                        .is_null()
+                                        .and(provider_api_key::dsl::is_enabled.eq(true)),
+                                )
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        let api_key_count = diesel_async::RunQueryDsl::first::<i64>(
+                            api_key::table
+                                .filter(api_key::dsl::deleted_at.is_null())
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        let enabled_api_key_count = diesel_async::RunQueryDsl::first::<i64>(
+                            api_key::table
+                                .filter(
+                                    api_key::dsl::deleted_at
+                                        .is_null()
+                                        .and(api_key::dsl::is_enabled.eq(true)),
+                                )
+                                .select(count_star()),
+                            &mut *$conn,
+                        )
+                        .await?;
+                        Ok(DashboardOverviewStats {
+                            provider_count,
+                            enabled_provider_count,
+                            model_count,
+                            enabled_model_count,
+                            provider_key_count,
+                            enabled_provider_key_count,
+                            api_key_count,
+                            enabled_api_key_count,
+                        })
+                    }};
+                }
+                match connection {
+                    RuntimeConnection::Postgres(conn) => {
+                        use crate::database::_postgres_schema::*;
+                        load_counts!(&mut **conn)
+                    }
+                    RuntimeConnection::Sqlite(conn) => {
+                        use crate::database::_sqlite_schema::*;
+                        load_counts!(&mut **conn)
+                    }
+                }
+            })
+        })
+        .await
 }
 
-pub fn get_today_request_log_stats(timezone: Option<&str>) -> DbResult<TodayRequestLogStats> {
-    let conn = &mut get_connection()?;
+pub async fn get_today_request_log_stats(
+    database: &DatabaseRuntime,
+    timezone: Option<&str>,
+) -> DbResult<TodayRequestLogStats> {
     let start_of_today = start_of_today_timestamp_ms(timezone)?;
-    let summary_row = load_today_request_log_summary(conn, start_of_today)?;
-
-    Ok(TodayRequestLogStats {
-        requests_count: summary_row.requests_count,
-        total_input_tokens: summary_row.total_input_tokens.unwrap_or(0),
-        total_output_tokens: summary_row.total_output_tokens.unwrap_or(0),
-        total_reasoning_tokens: summary_row.total_reasoning_tokens.unwrap_or(0),
-        total_tokens: summary_row.total_tokens.unwrap_or(0),
-        total_cost: load_today_cost_by_currency(conn, start_of_today)?,
-    })
+    database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                match connection {
+                    RuntimeConnection::Postgres(conn) => {
+                        use crate::database::_postgres_schema::*;
+                        let summary_query = request_log::table
+                            .filter(request_log::dsl::request_received_at.ge(start_of_today))
+                            .select((
+                                count_star(),
+                                sum(request_log::dsl::total_input_tokens),
+                                sum(request_log::dsl::total_output_tokens),
+                                sum(request_log::dsl::reasoning_tokens),
+                                sum(request_log::dsl::total_tokens),
+                            ));
+                        let row: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) =
+                            diesel_async::RunQueryDsl::first(summary_query, &mut **conn).await?;
+                        let cost_query = sql_query(
+                            "SELECT estimated_cost_currency AS currency,
+                                    CAST(SUM(estimated_cost_nanos) AS BIGINT) AS total_cost_nanos
+                             FROM request_log
+                             WHERE request_received_at >= $1
+                               AND estimated_cost_nanos IS NOT NULL
+                               AND estimated_cost_currency IS NOT NULL
+                             GROUP BY estimated_cost_currency",
+                        )
+                        .bind::<BigInt, _>(start_of_today);
+                        let costs = diesel_async::RunQueryDsl::load::<CostByCurrencyRow>(
+                            cost_query,
+                            &mut **conn,
+                        )
+                        .await?;
+                        Ok(TodayRequestLogStats {
+                            requests_count: row.0,
+                            total_input_tokens: row.1.unwrap_or(0),
+                            total_output_tokens: row.2.unwrap_or(0),
+                            total_reasoning_tokens: row.3.unwrap_or(0),
+                            total_tokens: row.4.unwrap_or(0),
+                            total_cost: costs
+                                .into_iter()
+                                .map(|row| (row.currency, row.total_cost_nanos))
+                                .collect(),
+                        })
+                    }
+                    RuntimeConnection::Sqlite(conn) => {
+                        use crate::database::_sqlite_schema::*;
+                        let summary_query = request_log::table
+                            .filter(request_log::dsl::request_received_at.ge(start_of_today))
+                            .select((
+                                count_star(),
+                                sum(request_log::dsl::total_input_tokens),
+                                sum(request_log::dsl::total_output_tokens),
+                                sum(request_log::dsl::reasoning_tokens),
+                                sum(request_log::dsl::total_tokens),
+                            ));
+                        let row: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) =
+                            diesel_async::RunQueryDsl::first(summary_query, &mut **conn).await?;
+                        let cost_query = sql_query(
+                            "SELECT estimated_cost_currency AS currency,
+                                    CAST(SUM(estimated_cost_nanos) AS BIGINT) AS total_cost_nanos
+                             FROM request_log
+                             WHERE request_received_at >= ?
+                               AND estimated_cost_nanos IS NOT NULL
+                               AND estimated_cost_currency IS NOT NULL
+                             GROUP BY estimated_cost_currency",
+                        )
+                        .bind::<BigInt, _>(start_of_today);
+                        let costs = diesel_async::RunQueryDsl::load::<CostByCurrencyRow>(
+                            cost_query,
+                            &mut **conn,
+                        )
+                        .await?;
+                        Ok(TodayRequestLogStats {
+                            requests_count: row.0,
+                            total_input_tokens: row.1.unwrap_or(0),
+                            total_output_tokens: row.2.unwrap_or(0),
+                            total_reasoning_tokens: row.3.unwrap_or(0),
+                            total_tokens: row.4.unwrap_or(0),
+                            total_cost: costs
+                                .into_iter()
+                                .map(|row| (row.currency, row.total_cost_nanos))
+                                .collect(),
+                        })
+                    }
+                }
+            })
+        })
+        .await
 }
 
-pub fn get_dashboard_overview_stats() -> DbResult<DashboardOverviewStats> {
-    let providers = Provider::list_all()?;
-    let models = Model::list_all()?;
-    let provider_keys = ProviderApiKeyRepository::list_all_summaries()?;
-    let conn = &mut get_connection()?;
-    let (api_key_count, enabled_api_key_count) = load_dashboard_api_key_counts(conn)?;
-
-    Ok(DashboardOverviewStats {
-        provider_count: providers.len() as i64,
-        enabled_provider_count: providers.iter().filter(|item| item.is_enabled).count() as i64,
-        model_count: models.len() as i64,
-        enabled_model_count: models.iter().filter(|item| item.is_enabled).count() as i64,
-        provider_key_count: provider_keys.len() as i64,
-        enabled_provider_key_count: provider_keys.iter().filter(|item| item.is_enabled).count()
-            as i64,
-        api_key_count,
-        enabled_api_key_count,
-    })
-}
-
-pub fn get_dashboard_today_stats(timezone: Option<&str>) -> DbResult<DashboardTodayStats> {
-    let conn = &mut get_connection()?;
+pub async fn get_dashboard_today_stats(
+    database: &DatabaseRuntime,
+    timezone: Option<&str>,
+) -> DbResult<DashboardTodayStats> {
     let start_of_today = start_of_today_timestamp_ms(timezone)?;
-    let aggregate = load_dashboard_today_aggregate(conn, start_of_today)?;
-
+    let aggregate = load_dashboard_today_aggregate(database, start_of_today).await?;
+    let today = get_today_request_log_stats(database, timezone).await?;
     Ok(DashboardTodayStats {
         request_count: aggregate.request_count,
         success_count: aggregate.success_count,
@@ -461,7 +575,7 @@ pub fn get_dashboard_today_stats(timezone: Option<&str>) -> DbResult<DashboardTo
         total_output_tokens: aggregate.total_output_tokens,
         total_reasoning_tokens: aggregate.total_reasoning_tokens,
         total_tokens: aggregate.total_tokens,
-        total_cost: load_today_cost_by_currency(conn, start_of_today)?,
+        total_cost: today.total_cost,
         avg_time_to_first_response_body_ms: aggregate.avg_time_to_first_response_body_ms,
         time_to_first_response_body_sample_count: aggregate
             .time_to_first_response_body_sample_count,
@@ -475,103 +589,374 @@ pub fn get_dashboard_today_stats(timezone: Option<&str>) -> DbResult<DashboardTo
     })
 }
 
-pub fn get_dashboard_top_models(
+async fn load_dashboard_today_aggregate(
+    database: &DatabaseRuntime,
+    start_of_today: i64,
+) -> DbResult<DashboardTodayAggregateRow> {
+    database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                let result = match connection {
+                    RuntimeConnection::Postgres(conn) => {
+                        let query = sql_query(
+                            "SELECT
+                                CAST(COUNT(*) AS BIGINT) AS request_count,
+                                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS BIGINT) AS success_count,
+                                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END), 0) AS BIGINT) AS error_count,
+                                CAST(COALESCE(SUM(total_input_tokens), 0) AS BIGINT) AS total_input_tokens,
+                                CAST(COALESCE(SUM(total_output_tokens), 0) AS BIGINT) AS total_output_tokens,
+                                CAST(COALESCE(SUM(reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens,
+                                CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens,
+                                CAST(AVG(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                    AND first_response_body_at IS NOT NULL
+                                    AND first_response_body_at >= upstream_request_sent_at
+                                    THEN (first_response_body_at - upstream_request_sent_at)::DOUBLE PRECISION
+                                    ELSE NULL
+                                END) AS DOUBLE PRECISION) AS avg_time_to_first_response_body_ms,
+                                CAST(COUNT(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                    AND first_response_body_at IS NOT NULL
+                                    AND first_response_body_at >= upstream_request_sent_at
+                                    THEN 1 ELSE NULL
+                                END) AS BIGINT) AS time_to_first_response_body_sample_count,
+                                CAST(AVG(CASE
+                                    WHEN is_stream = TRUE
+                                    AND upstream_request_sent_at IS NOT NULL
+                                    AND first_token_at IS NOT NULL
+                                    AND first_token_at >= upstream_request_sent_at
+                                    THEN (first_token_at - upstream_request_sent_at)::DOUBLE PRECISION
+                                    ELSE NULL
+                                END) AS DOUBLE PRECISION) AS avg_ttft_ms,
+                                CAST(COUNT(CASE
+                                    WHEN is_stream = TRUE
+                                    AND upstream_request_sent_at IS NOT NULL
+                                    AND first_token_at IS NOT NULL
+                                    AND first_token_at >= upstream_request_sent_at
+                                    THEN 1 ELSE NULL
+                                END) AS BIGINT) AS ttft_sample_count,
+                                CAST(AVG(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                     AND completed_at IS NOT NULL
+                                     AND completed_at >= upstream_request_sent_at
+                                    THEN (completed_at - upstream_request_sent_at)::DOUBLE PRECISION
+                                    ELSE NULL
+                                END) AS DOUBLE PRECISION) AS avg_total_latency_ms,
+                                CAST(COUNT(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                    AND completed_at IS NOT NULL
+                                    AND completed_at >= upstream_request_sent_at
+                                    THEN 1 ELSE NULL
+                                END) AS BIGINT) AS total_latency_sample_count,
+                                CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count,
+                                CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count,
+                                CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count
+                             FROM request_log
+                             WHERE request_received_at >= $1",
+                        )
+                        .bind::<BigInt, _>(start_of_today);
+                        diesel_async::RunQueryDsl::get_result::<DashboardTodayAggregateRow>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                    }
+                    RuntimeConnection::Sqlite(conn) => {
+                        let query = sql_query(
+                            "SELECT
+                                CAST(COUNT(*) AS BIGINT) AS request_count,
+                                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS BIGINT) AS success_count,
+                                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END), 0) AS BIGINT) AS error_count,
+                                CAST(COALESCE(SUM(total_input_tokens), 0) AS BIGINT) AS total_input_tokens,
+                                CAST(COALESCE(SUM(total_output_tokens), 0) AS BIGINT) AS total_output_tokens,
+                                CAST(COALESCE(SUM(reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens,
+                                CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens,
+                                CAST(AVG(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                    AND first_response_body_at IS NOT NULL
+                                    AND first_response_body_at >= upstream_request_sent_at
+                                    THEN (first_response_body_at - upstream_request_sent_at)
+                                    ELSE NULL
+                                END) AS REAL) AS avg_time_to_first_response_body_ms,
+                                CAST(COUNT(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                    AND first_response_body_at IS NOT NULL
+                                    AND first_response_body_at >= upstream_request_sent_at
+                                    THEN 1 ELSE NULL
+                                END) AS BIGINT) AS time_to_first_response_body_sample_count,
+                                CAST(AVG(CASE
+                                    WHEN is_stream = 1
+                                    AND upstream_request_sent_at IS NOT NULL
+                                    AND first_token_at IS NOT NULL
+                                    AND first_token_at >= upstream_request_sent_at
+                                    THEN (first_token_at - upstream_request_sent_at)
+                                    ELSE NULL
+                                END) AS REAL) AS avg_ttft_ms,
+                                CAST(COUNT(CASE
+                                    WHEN is_stream = 1
+                                    AND upstream_request_sent_at IS NOT NULL
+                                    AND first_token_at IS NOT NULL
+                                    AND first_token_at >= upstream_request_sent_at
+                                    THEN 1 ELSE NULL
+                                END) AS BIGINT) AS ttft_sample_count,
+                                CAST(AVG(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                     AND completed_at IS NOT NULL
+                                     AND completed_at >= upstream_request_sent_at
+                                    THEN (completed_at - upstream_request_sent_at)
+                                    ELSE NULL
+                                END) AS REAL) AS avg_total_latency_ms,
+                                CAST(COUNT(CASE
+                                    WHEN upstream_request_sent_at IS NOT NULL
+                                    AND completed_at IS NOT NULL
+                                    AND completed_at >= upstream_request_sent_at
+                                    THEN 1 ELSE NULL
+                                END) AS BIGINT) AS total_latency_sample_count,
+                                CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count,
+                                CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count,
+                                CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count
+                             FROM request_log
+                             WHERE request_received_at >= ?",
+                        )
+                        .bind::<BigInt, _>(start_of_today);
+                        diesel_async::RunQueryDsl::get_result::<DashboardTodayAggregateRow>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                    }
+                };
+                result.map_err(|error| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load dashboard today aggregate: {}",
+                        error
+                    )))
+                })
+            })
+        })
+        .await
+}
+
+pub async fn get_dashboard_top_models(
+    database: &DatabaseRuntime,
     limit: usize,
     timezone: Option<&str>,
 ) -> DbResult<Vec<DashboardTopModelItem>> {
-    let conn = &mut get_connection()?;
     let start_of_today = start_of_today_timestamp_ms(timezone)?;
-    let mut items = load_dashboard_top_model_base_rows(conn, start_of_today, limit)?
-        .into_iter()
-        .map(|row| {
-            (
-                (row.provider_id, row.model_id),
-                DashboardTopModelItem {
-                    provider_id: row.provider_id,
-                    provider_key: row.provider_key.unwrap_or_default(),
-                    model_id: row.model_id,
-                    model_name: row.model_name.unwrap_or_default(),
-                    real_model_name: row.real_model_name,
-                    request_count: row.request_count,
-                    total_tokens: row.total_tokens,
-                    total_cost: HashMap::new(),
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
-
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    for row in load_dashboard_top_model_cost_rows(conn, start_of_today)? {
-        if let Some(item) = items.get_mut(&(row.provider_id, row.model_id)) {
-            item.total_cost.insert(row.currency, row.total_cost_nanos);
-        }
-    }
-
-    let mut result = items.into_values().collect::<Vec<_>>();
-    result.sort_by(|left, right| {
-        right
-            .request_count
-            .cmp(&left.request_count)
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-            .then_with(|| left.model_id.cmp(&right.model_id))
-    });
-    result.truncate(limit);
-    Ok(result)
+    load_dashboard_top_models_runtime(database, start_of_today, limit, false).await
 }
 
-pub fn get_dashboard_top_cost_models(
+pub async fn get_dashboard_top_cost_models(
+    database: &DatabaseRuntime,
     limit: usize,
     timezone: Option<&str>,
 ) -> DbResult<Vec<DashboardTopModelItem>> {
-    let conn = &mut get_connection()?;
     let start_of_today = start_of_today_timestamp_ms(timezone)?;
-    let mut items = load_dashboard_top_model_base_rows_for_cost(conn, start_of_today, limit)?
-        .into_iter()
-        .map(|row| {
-            (
-                (row.provider_id, row.model_id),
-                DashboardTopModelItem {
-                    provider_id: row.provider_id,
-                    provider_key: row.provider_key.unwrap_or_default(),
-                    model_id: row.model_id,
-                    model_name: row.model_name.unwrap_or_default(),
-                    real_model_name: row.real_model_name,
-                    request_count: row.request_count,
-                    total_tokens: row.total_tokens,
-                    total_cost: HashMap::new(),
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
-
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    for row in load_dashboard_top_model_cost_rows(conn, start_of_today)? {
-        if let Some(item) = items.get_mut(&(row.provider_id, row.model_id)) {
-            item.total_cost.insert(row.currency, row.total_cost_nanos);
-        }
-    }
-
-    let mut result = items.into_values().collect::<Vec<_>>();
-    result.sort_by(|left, right| {
-        let left_cost = left.total_cost.values().copied().sum::<i64>();
-        let right_cost = right.total_cost.values().copied().sum::<i64>();
-        right_cost
-            .cmp(&left_cost)
-            .then_with(|| right.request_count.cmp(&left.request_count))
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-            .then_with(|| left.model_id.cmp(&right.model_id))
-    });
-    result.truncate(limit);
-    Ok(result)
+    load_dashboard_top_models_runtime(database, start_of_today, limit, true).await
 }
 
-pub fn get_usage_stats_aggregates(
+async fn load_dashboard_top_models_runtime(
+    database: &DatabaseRuntime,
+    start_of_today: i64,
+    limit: usize,
+    order_by_cost: bool,
+) -> DbResult<Vec<DashboardTopModelItem>> {
+    database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                let (base_rows, cost_rows) = match connection {
+                    RuntimeConnection::Postgres(conn) => {
+                        let order = if order_by_cost {
+                            "COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.provider_id ASC, rl.model_id ASC"
+                        } else {
+                            "request_count DESC, rl.provider_id ASC, rl.model_id ASC"
+                        };
+                        let base_query = sql_query(format!(
+                            "SELECT
+                                rl.provider_id AS provider_id,
+                                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
+                                rl.model_id AS model_id,
+                                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name,
+                                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name,
+                                CAST(COUNT(*) AS BIGINT) AS request_count,
+                                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens
+                             FROM request_log rl
+                             LEFT JOIN provider p ON p.id = rl.provider_id
+                             LEFT JOIN model m ON m.id = rl.model_id
+                             WHERE rl.request_received_at >= $1
+                               AND rl.provider_id IS NOT NULL
+                               AND rl.model_id IS NOT NULL
+                             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot,
+                                      rl.model_id, m.model_name, rl.model_name_snapshot,
+                                      m.real_model_name, rl.real_model_name_snapshot
+                             ORDER BY {order}
+                             LIMIT $2"
+                        ))
+                        .bind::<BigInt, _>(start_of_today)
+                        .bind::<BigInt, _>(limit as i64);
+                        let base_rows = diesel_async::RunQueryDsl::load::<DashboardTopModelBaseRow>(
+                            base_query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load dashboard top model rows: {}",
+                                error
+                            )))
+                        })?;
+                        let cost_query = sql_query(
+                            "SELECT
+                                rl.provider_id AS provider_id,
+                                rl.model_id AS model_id,
+                                rl.estimated_cost_currency AS currency,
+                                CAST(SUM(rl.estimated_cost_nanos) AS BIGINT) AS total_cost_nanos
+                             FROM request_log rl
+                             WHERE rl.request_received_at >= $1
+                               AND rl.provider_id IS NOT NULL
+                               AND rl.model_id IS NOT NULL
+                               AND rl.estimated_cost_nanos IS NOT NULL
+                               AND rl.estimated_cost_currency IS NOT NULL
+                             GROUP BY rl.provider_id, rl.model_id, rl.estimated_cost_currency",
+                        )
+                        .bind::<BigInt, _>(start_of_today);
+                        let cost_rows =
+                            diesel_async::RunQueryDsl::load::<DashboardTopModelCostRow>(
+                                cost_query,
+                                &mut **conn,
+                            )
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to load dashboard top model costs: {}",
+                                    error
+                                )))
+                            })?;
+                        (base_rows, cost_rows)
+                    }
+                    RuntimeConnection::Sqlite(conn) => {
+                        let order = if order_by_cost {
+                            "COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.provider_id ASC, rl.model_id ASC"
+                        } else {
+                            "request_count DESC, rl.provider_id ASC, rl.model_id ASC"
+                        };
+                        let base_query = sql_query(format!(
+                            "SELECT
+                                rl.provider_id AS provider_id,
+                                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
+                                rl.model_id AS model_id,
+                                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name,
+                                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name,
+                                CAST(COUNT(*) AS BIGINT) AS request_count,
+                                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens
+                             FROM request_log rl
+                             LEFT JOIN provider p ON p.id = rl.provider_id
+                             LEFT JOIN model m ON m.id = rl.model_id
+                             WHERE rl.request_received_at >= ?
+                               AND rl.provider_id IS NOT NULL
+                               AND rl.model_id IS NOT NULL
+                             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot,
+                                      rl.model_id, m.model_name, rl.model_name_snapshot,
+                                      m.real_model_name, rl.real_model_name_snapshot
+                             ORDER BY {order}
+                             LIMIT ?"
+                        ))
+                        .bind::<BigInt, _>(start_of_today)
+                        .bind::<BigInt, _>(limit as i64);
+                        let base_rows = diesel_async::RunQueryDsl::load::<DashboardTopModelBaseRow>(
+                            base_query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load dashboard top model rows: {}",
+                                error
+                            )))
+                        })?;
+                        let cost_query = sql_query(
+                            "SELECT
+                                rl.provider_id AS provider_id,
+                                rl.model_id AS model_id,
+                                rl.estimated_cost_currency AS currency,
+                                CAST(SUM(rl.estimated_cost_nanos) AS BIGINT) AS total_cost_nanos
+                             FROM request_log rl
+                             WHERE rl.request_received_at >= ?
+                               AND rl.provider_id IS NOT NULL
+                               AND rl.model_id IS NOT NULL
+                               AND rl.estimated_cost_nanos IS NOT NULL
+                               AND rl.estimated_cost_currency IS NOT NULL
+                             GROUP BY rl.provider_id, rl.model_id, rl.estimated_cost_currency",
+                        )
+                        .bind::<BigInt, _>(start_of_today);
+                        let cost_rows =
+                            diesel_async::RunQueryDsl::load::<DashboardTopModelCostRow>(
+                                cost_query,
+                                &mut **conn,
+                            )
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to load dashboard top model costs: {}",
+                                    error
+                                )))
+                            })?;
+                        (base_rows, cost_rows)
+                    }
+                };
+                let mut items = base_rows
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            (row.provider_id, row.model_id),
+                            DashboardTopModelItem {
+                                provider_id: row.provider_id,
+                                provider_key: row.provider_key.unwrap_or_default(),
+                                model_id: row.model_id,
+                                model_name: row.model_name.unwrap_or_default(),
+                                real_model_name: row.real_model_name,
+                                request_count: row.request_count,
+                                total_tokens: row.total_tokens,
+                                total_cost: HashMap::new(),
+                            },
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                for row in cost_rows {
+                    if let Some(item) = items.get_mut(&(row.provider_id, row.model_id)) {
+                        item.total_cost.insert(row.currency, row.total_cost_nanos);
+                    }
+                }
+                let mut result = items.into_values().collect::<Vec<_>>();
+                if order_by_cost {
+                    result.sort_by(|left, right| {
+                        let left_cost = left.total_cost.values().copied().sum::<i64>();
+                        let right_cost = right.total_cost.values().copied().sum::<i64>();
+                        right_cost
+                            .cmp(&left_cost)
+                            .then_with(|| right.request_count.cmp(&left.request_count))
+                            .then_with(|| left.provider_id.cmp(&right.provider_id))
+                            .then_with(|| left.model_id.cmp(&right.model_id))
+                    });
+                } else {
+                    result.sort_by(|left, right| {
+                        right
+                            .request_count
+                            .cmp(&left.request_count)
+                            .then_with(|| left.provider_id.cmp(&right.provider_id))
+                            .then_with(|| left.model_id.cmp(&right.model_id))
+                    });
+                }
+                result.truncate(limit);
+                Ok(result)
+            })
+        })
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn get_usage_stats_aggregates(
+    database: &DatabaseRuntime,
     start_time_ms: i64,
     end_time_ms: i64,
     interval: &str,
@@ -581,18 +966,252 @@ pub fn get_usage_stats_aggregates(
     api_key_id_filter: Option<i64>,
     provider_api_key_id_filter: Option<i64>,
 ) -> DbResult<Vec<UsageStatsQueryItem>> {
-    let conn = &mut get_connection()?;
-    let base_rows = load_usage_stats_base_rows(
-        conn,
-        start_time_ms,
-        end_time_ms,
-        interval,
-        group_by,
-        provider_id_filter,
-        model_id_filter,
-        api_key_id_filter,
-        provider_api_key_id_filter,
-    )?;
+    let interval = interval.to_string();
+    let (group_select_sql, group_by_sql, group_id_sql) = usage_group_sql(group_by);
+    let (base_rows, cost_rows) = database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                match connection {
+                    RuntimeConnection::Postgres(conn) => {
+                        let bucket_sql = usage_bucket_sql_postgres(&interval);
+                        let base_query = sql_query(format!(
+                            "SELECT
+                                {bucket_sql} AS time_bucket,
+                                {group_select_sql},
+                                CAST(COALESCE(SUM(rl.total_input_tokens), 0) AS BIGINT) AS total_input_tokens,
+                                CAST(COALESCE(SUM(rl.total_output_tokens), 0) AS BIGINT) AS total_output_tokens,
+                                CAST(COALESCE(SUM(rl.reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens,
+                                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens,
+                                CAST(COUNT(*) AS BIGINT) AS request_count,
+                                CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count,
+                                CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count,
+                                CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_response_body_at >= rl.upstream_request_sent_at
+                                             THEN (rl.first_response_body_at - rl.upstream_request_sent_at)::DOUBLE PRECISION
+                                             ELSE 0 END) AS DOUBLE PRECISION) AS time_to_first_response_body_sum_ms,
+                                CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_response_body_at >= rl.upstream_request_sent_at
+                                             THEN 1 ELSE 0 END) AS BIGINT) AS time_to_first_response_body_sample_count,
+                                CAST(SUM(CASE WHEN rl.is_stream = TRUE
+                                                  AND rl.first_token_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_token_at >= rl.upstream_request_sent_at
+                                             THEN (rl.first_token_at - rl.upstream_request_sent_at)::DOUBLE PRECISION
+                                             ELSE 0 END) AS DOUBLE PRECISION) AS ttft_sum_ms,
+                                CAST(SUM(CASE WHEN rl.is_stream = TRUE
+                                                  AND rl.first_token_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_token_at >= rl.upstream_request_sent_at
+                                             THEN 1 ELSE 0 END) AS BIGINT) AS ttft_sample_count,
+                                CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.completed_at >= rl.upstream_request_sent_at
+                                             THEN (rl.completed_at - rl.upstream_request_sent_at)::DOUBLE PRECISION
+                                             ELSE 0 END) AS DOUBLE PRECISION) AS total_latency_sum_ms,
+                                CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.completed_at >= rl.upstream_request_sent_at
+                                             THEN 1 ELSE 0 END) AS BIGINT) AS total_latency_sample_count
+                             FROM request_log rl
+                             LEFT JOIN provider p ON p.id = rl.provider_id
+                             LEFT JOIN model m ON m.id = rl.model_id
+                             LEFT JOIN api_key ak ON ak.id = rl.api_key_id
+                             WHERE rl.request_received_at >= $1
+                               AND rl.request_received_at < $2
+                               AND {group_id_sql} IS NOT NULL
+                               AND ($3 IS NULL OR rl.provider_id = $3)
+                               AND ($4 IS NULL OR rl.model_id = $4)
+                               AND ($5 IS NULL OR rl.api_key_id = $5)
+                               AND ($6 IS NULL OR rl.provider_api_key_id = $6)
+                             GROUP BY 1, {group_by_sql}
+                             ORDER BY 1 ASC"
+                        ))
+                        .bind::<BigInt, _>(start_time_ms)
+                        .bind::<BigInt, _>(end_time_ms)
+                        .bind::<Nullable<BigInt>, _>(provider_id_filter)
+                        .bind::<Nullable<BigInt>, _>(model_id_filter)
+                        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter);
+                        let base_rows = diesel_async::RunQueryDsl::load::<UsageStatsBaseRow>(
+                            base_query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load usage stats base rows: {}",
+                                error
+                            )))
+                        })?;
+                        let cost_query = sql_query(format!(
+                            "SELECT
+                                {bucket_sql} AS time_bucket,
+                                {group_id_sql} AS group_id,
+                                rl.estimated_cost_currency AS currency,
+                                CAST(COALESCE(SUM(rl.estimated_cost_nanos), 0) AS BIGINT) AS total_cost_nanos
+                             FROM request_log rl
+                             LEFT JOIN provider p ON p.id = rl.provider_id
+                             LEFT JOIN model m ON m.id = rl.model_id
+                             LEFT JOIN api_key ak ON ak.id = rl.api_key_id
+                             WHERE rl.request_received_at >= $1
+                               AND rl.request_received_at < $2
+                               AND {group_id_sql} IS NOT NULL
+                               AND ($3 IS NULL OR rl.provider_id = $3)
+                               AND ($4 IS NULL OR rl.model_id = $4)
+                               AND ($5 IS NULL OR rl.api_key_id = $5)
+                               AND ($6 IS NULL OR rl.provider_api_key_id = $6)
+                               AND rl.estimated_cost_nanos IS NOT NULL
+                               AND rl.estimated_cost_currency IS NOT NULL
+                             GROUP BY 1, {group_id_sql}, rl.estimated_cost_currency, {group_by_sql}
+                             ORDER BY 1 ASC"
+                        ))
+                        .bind::<BigInt, _>(start_time_ms)
+                        .bind::<BigInt, _>(end_time_ms)
+                        .bind::<Nullable<BigInt>, _>(provider_id_filter)
+                        .bind::<Nullable<BigInt>, _>(model_id_filter)
+                        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter);
+                        let cost_rows = diesel_async::RunQueryDsl::load::<UsageStatsCostRow>(
+                            cost_query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load usage stats cost rows: {}",
+                                error
+                            )))
+                        })?;
+                        Ok((base_rows, cost_rows))
+                    }
+                    RuntimeConnection::Sqlite(conn) => {
+                        let bucket_sql = usage_bucket_sql_sqlite(&interval);
+                        let base_query = sql_query(format!(
+                            "SELECT
+                                {bucket_sql} AS time_bucket,
+                                {group_select_sql},
+                                CAST(COALESCE(SUM(rl.total_input_tokens), 0) AS BIGINT) AS total_input_tokens,
+                                CAST(COALESCE(SUM(rl.total_output_tokens), 0) AS BIGINT) AS total_output_tokens,
+                                CAST(COALESCE(SUM(rl.reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens,
+                                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens,
+                                CAST(COUNT(*) AS BIGINT) AS request_count,
+                                CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count,
+                                CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count,
+                                CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_response_body_at >= rl.upstream_request_sent_at
+                                             THEN rl.first_response_body_at - rl.upstream_request_sent_at
+                                             ELSE 0 END) AS REAL) AS time_to_first_response_body_sum_ms,
+                                CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_response_body_at >= rl.upstream_request_sent_at
+                                             THEN 1 ELSE 0 END) AS BIGINT) AS time_to_first_response_body_sample_count,
+                                CAST(SUM(CASE WHEN rl.is_stream = 1
+                                                  AND rl.first_token_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_token_at >= rl.upstream_request_sent_at
+                                             THEN rl.first_token_at - rl.upstream_request_sent_at
+                                             ELSE 0 END) AS REAL) AS ttft_sum_ms,
+                                CAST(SUM(CASE WHEN rl.is_stream = 1
+                                                  AND rl.first_token_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.first_token_at >= rl.upstream_request_sent_at
+                                             THEN 1 ELSE 0 END) AS BIGINT) AS ttft_sample_count,
+                                CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.completed_at >= rl.upstream_request_sent_at
+                                             THEN rl.completed_at - rl.upstream_request_sent_at
+                                             ELSE 0 END) AS REAL) AS total_latency_sum_ms,
+                                CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL
+                                                  AND rl.upstream_request_sent_at IS NOT NULL
+                                                  AND rl.completed_at >= rl.upstream_request_sent_at
+                                             THEN 1 ELSE 0 END) AS BIGINT) AS total_latency_sample_count
+                             FROM request_log rl
+                             LEFT JOIN provider p ON p.id = rl.provider_id
+                             LEFT JOIN model m ON m.id = rl.model_id
+                             LEFT JOIN api_key ak ON ak.id = rl.api_key_id
+                             WHERE rl.request_received_at >= ?
+                               AND rl.request_received_at < ?
+                               AND {group_id_sql} IS NOT NULL
+                               AND (? IS NULL OR rl.provider_id = ?)
+                               AND (? IS NULL OR rl.model_id = ?)
+                               AND (? IS NULL OR rl.api_key_id = ?)
+                               AND (? IS NULL OR rl.provider_api_key_id = ?)
+                             GROUP BY 1, {group_by_sql}
+                             ORDER BY 1 ASC"
+                        ))
+                        .bind::<BigInt, _>(start_time_ms)
+                        .bind::<BigInt, _>(end_time_ms)
+                        .bind::<Nullable<BigInt>, _>(provider_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_id_filter)
+                        .bind::<Nullable<BigInt>, _>(model_id_filter)
+                        .bind::<Nullable<BigInt>, _>(model_id_filter)
+                        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter);
+                        let base_rows = diesel_async::RunQueryDsl::load::<UsageStatsBaseRow>(
+                            base_query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load usage stats base rows: {}",
+                                error
+                            )))
+                        })?;
+                        let cost_query = sql_query(format!(
+                            "SELECT
+                                {bucket_sql} AS time_bucket,
+                                {group_id_sql} AS group_id,
+                                rl.estimated_cost_currency AS currency,
+                                CAST(COALESCE(SUM(rl.estimated_cost_nanos), 0) AS BIGINT) AS total_cost_nanos
+                             FROM request_log rl
+                             LEFT JOIN provider p ON p.id = rl.provider_id
+                             LEFT JOIN model m ON m.id = rl.model_id
+                             LEFT JOIN api_key ak ON ak.id = rl.api_key_id
+                             WHERE rl.request_received_at >= ?
+                               AND rl.request_received_at < ?
+                               AND {group_id_sql} IS NOT NULL
+                               AND (? IS NULL OR rl.provider_id = ?)
+                               AND (? IS NULL OR rl.model_id = ?)
+                               AND (? IS NULL OR rl.api_key_id = ?)
+                               AND (? IS NULL OR rl.provider_api_key_id = ?)
+                               AND rl.estimated_cost_nanos IS NOT NULL
+                               AND rl.estimated_cost_currency IS NOT NULL
+                             GROUP BY 1, {group_id_sql}, rl.estimated_cost_currency, {group_by_sql}
+                             ORDER BY 1 ASC"
+                        ))
+                        .bind::<BigInt, _>(start_time_ms)
+                        .bind::<BigInt, _>(end_time_ms)
+                        .bind::<Nullable<BigInt>, _>(provider_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_id_filter)
+                        .bind::<Nullable<BigInt>, _>(model_id_filter)
+                        .bind::<Nullable<BigInt>, _>(model_id_filter)
+                        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
+                        .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter);
+                        let cost_rows = diesel_async::RunQueryDsl::load::<UsageStatsCostRow>(
+                            cost_query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load usage stats cost rows: {}",
+                                error
+                            )))
+                        })?;
+                        Ok((base_rows, cost_rows))
+                    }
+                }
+            })
+        })
+        .await?;
 
     let mut items = base_rows
         .into_iter()
@@ -608,19 +1227,11 @@ pub fn get_usage_stats_aggregates(
             } else {
                 None
             };
-            let ttft_sample_count = row.ttft_sample_count;
-            let avg_ttft_ms = if ttft_sample_count > 0 {
-                Some(row.ttft_sum_ms.unwrap_or(0.0) / ttft_sample_count as f64)
-            } else {
-                None
-            };
-            let total_latency_sample_count = row.total_latency_sample_count;
-            let avg_total_latency_ms = if total_latency_sample_count > 0 {
-                Some(row.total_latency_sum_ms.unwrap_or(0.0) / total_latency_sample_count as f64)
-            } else {
-                None
-            };
-
+            let avg_ttft_ms = (row.ttft_sample_count > 0)
+                .then(|| row.ttft_sum_ms.unwrap_or(0.0) / row.ttft_sample_count as f64);
+            let avg_total_latency_ms = (row.total_latency_sample_count > 0).then(|| {
+                row.total_latency_sum_ms.unwrap_or(0.0) / row.total_latency_sample_count as f64
+            });
             (
                 (row.time_bucket, row.group_id),
                 UsageStatsQueryItem {
@@ -646,35 +1257,19 @@ pub fn get_usage_stats_aggregates(
                     avg_time_to_first_response_body_ms,
                     time_to_first_response_body_sample_count,
                     avg_ttft_ms,
-                    ttft_sample_count,
+                    ttft_sample_count: row.ttft_sample_count,
                     avg_total_latency_ms,
-                    total_latency_sample_count,
+                    total_latency_sample_count: row.total_latency_sample_count,
                     total_cost: HashMap::new(),
                 },
             )
         })
         .collect::<HashMap<_, _>>();
-
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    for row in load_usage_stats_cost_rows(
-        conn,
-        start_time_ms,
-        end_time_ms,
-        interval,
-        group_by,
-        provider_id_filter,
-        model_id_filter,
-        api_key_id_filter,
-        provider_api_key_id_filter,
-    )? {
+    for row in cost_rows {
         if let Some(item) = items.get_mut(&(row.time_bucket, row.group_id)) {
             item.total_cost.insert(row.currency, row.total_cost_nanos);
         }
     }
-
     let mut result = items.into_values().collect::<Vec<_>>();
     result.sort_by(|left, right| {
         left.time
@@ -776,27 +1371,6 @@ fn usage_group_sql(group_by: UsageStatsGroupBy) -> (&'static str, &'static str, 
     }
 }
 
-fn load_dashboard_api_key_counts(conn: &mut DbConnection) -> DbResult<(i64, i64)> {
-    let api_key_count = db_execute!(conn, {
-        api_key::table
-            .filter(api_key::dsl::deleted_at.is_null())
-            .select(count_star())
-            .first(conn)
-    })?;
-    let enabled_api_key_count = db_execute!(conn, {
-        api_key::table
-            .filter(
-                api_key::dsl::deleted_at
-                    .is_null()
-                    .and(api_key::dsl::is_enabled.eq(true)),
-            )
-            .select(count_star())
-            .first(conn)
-    })?;
-
-    Ok((api_key_count, enabled_api_key_count))
-}
-
 fn usage_bucket_sql_postgres(interval: &str) -> &'static str {
     match interval {
         "minute" => {
@@ -837,675 +1411,15 @@ fn usage_bucket_sql_sqlite(interval: &str) -> &'static str {
     }
 }
 
-fn load_usage_stats_base_rows(
-    conn: &mut DbConnection,
-    start_time_ms: i64,
-    end_time_ms: i64,
-    interval: &str,
-    group_by: UsageStatsGroupBy,
-    provider_id_filter: Option<i64>,
-    model_id_filter: Option<i64>,
-    api_key_id_filter: Option<i64>,
-    provider_api_key_id_filter: Option<i64>,
-) -> DbResult<Vec<UsageStatsBaseRow>> {
-    let (group_select_sql, group_by_sql, group_id_sql) = usage_group_sql(group_by);
-    match conn {
-        DbConnection::Postgres(pg_conn) => {
-            let bucket_sql = usage_bucket_sql_postgres(interval);
-            let query = format!(
-                "SELECT \
-                    {bucket_sql} AS time_bucket, \
-                    {group_select_sql}, \
-                    CAST(COALESCE(SUM(rl.total_input_tokens), 0) AS BIGINT) AS total_input_tokens, \
-                    CAST(COALESCE(SUM(rl.total_output_tokens), 0) AS BIGINT) AS total_output_tokens, \
-                    CAST(COALESCE(SUM(rl.reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens, \
-                    CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens, \
-                    CAST(COUNT(*) AS BIGINT) AS request_count, \
-                    CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count, \
-                    CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count, \
-                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
-                                 THEN (rl.first_response_body_at - rl.upstream_request_sent_at)::DOUBLE PRECISION \
-                                 ELSE 0 END) AS DOUBLE PRECISION) AS time_to_first_response_body_sum_ms, \
-                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS time_to_first_response_body_sample_count, \
-                    CAST(SUM(CASE WHEN rl.is_stream = TRUE \
-                                      AND rl.first_token_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
-                                 THEN (rl.first_token_at - rl.upstream_request_sent_at)::DOUBLE PRECISION \
-                                 ELSE 0 END) AS DOUBLE PRECISION) AS ttft_sum_ms, \
-                    CAST(SUM(CASE WHEN rl.is_stream = TRUE \
-                                      AND rl.first_token_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS ttft_sample_count, \
-                    CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.upstream_request_sent_at \
-                                 THEN (rl.completed_at - rl.upstream_request_sent_at)::DOUBLE PRECISION \
-                                 ELSE 0 END) AS DOUBLE PRECISION) AS total_latency_sum_ms, \
-                    CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS total_latency_sample_count \
-                 FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.provider_id \
-                 LEFT JOIN model m ON m.id = rl.model_id \
-                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
-                 WHERE rl.request_received_at >= $1 \
-                   AND rl.request_received_at < $2 \
-                   AND {group_id_sql} IS NOT NULL \
-                   AND ($3 IS NULL OR rl.provider_id = $3) \
-                   AND ($4 IS NULL OR rl.model_id = $4) \
-                   AND ($5 IS NULL OR rl.api_key_id = $5) \
-                   AND ($6 IS NULL OR rl.provider_api_key_id = $6) \
-                 GROUP BY 1, {group_by_sql} \
-                 ORDER BY 1 ASC"
-            );
-            sql_query(query)
-                .bind::<BigInt, _>(start_time_ms)
-                .bind::<BigInt, _>(end_time_ms)
-                .bind::<Nullable<BigInt>, _>(provider_id_filter)
-                .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-                .load::<UsageStatsBaseRow>(pg_conn)
-                .map_err(|e| {
-                    crate::controller::BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load usage stats base rows: {}",
-                        e
-                    )))
-                })
-        }
-        DbConnection::Sqlite(sqlite_conn) => {
-            let bucket_sql = usage_bucket_sql_sqlite(interval);
-            let query = format!(
-                "SELECT \
-                    {bucket_sql} AS time_bucket, \
-                    {group_select_sql}, \
-                    CAST(COALESCE(SUM(rl.total_input_tokens), 0) AS BIGINT) AS total_input_tokens, \
-                    CAST(COALESCE(SUM(rl.total_output_tokens), 0) AS BIGINT) AS total_output_tokens, \
-                    CAST(COALESCE(SUM(rl.reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens, \
-                    CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens, \
-                    CAST(COUNT(*) AS BIGINT) AS request_count, \
-                    CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count, \
-                    CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count, \
-                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
-                                 THEN rl.first_response_body_at - rl.upstream_request_sent_at \
-                                 ELSE 0 END) AS REAL) AS time_to_first_response_body_sum_ms, \
-                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS time_to_first_response_body_sample_count, \
-                    CAST(SUM(CASE WHEN rl.is_stream = 1 \
-                                      AND rl.first_token_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
-                                 THEN rl.first_token_at - rl.upstream_request_sent_at \
-                                 ELSE 0 END) AS REAL) AS ttft_sum_ms, \
-                    CAST(SUM(CASE WHEN rl.is_stream = 1 \
-                                      AND rl.first_token_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS ttft_sample_count, \
-                    CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.upstream_request_sent_at \
-                                 THEN rl.completed_at - rl.upstream_request_sent_at \
-                                 ELSE 0 END) AS REAL) AS total_latency_sum_ms, \
-                    CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.upstream_request_sent_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS total_latency_sample_count \
-                 FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.provider_id \
-                 LEFT JOIN model m ON m.id = rl.model_id \
-                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
-                 WHERE rl.request_received_at >= ? \
-                   AND rl.request_received_at < ? \
-                   AND {group_id_sql} IS NOT NULL \
-                   AND (? IS NULL OR rl.provider_id = ?) \
-                   AND (? IS NULL OR rl.model_id = ?) \
-                   AND (? IS NULL OR rl.api_key_id = ?) \
-                   AND (? IS NULL OR rl.provider_api_key_id = ?) \
-                 GROUP BY 1, {group_by_sql} \
-                 ORDER BY 1 ASC"
-            );
-            sql_query(query)
-                .bind::<BigInt, _>(start_time_ms)
-                .bind::<BigInt, _>(end_time_ms)
-                .bind::<Nullable<BigInt>, _>(provider_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_id_filter)
-                .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-                .load::<UsageStatsBaseRow>(sqlite_conn)
-                .map_err(|e| {
-                    crate::controller::BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load usage stats base rows: {}",
-                        e
-                    )))
-                })
-        }
-    }
-}
-
-fn load_usage_stats_cost_rows(
-    conn: &mut DbConnection,
-    start_time_ms: i64,
-    end_time_ms: i64,
-    interval: &str,
-    group_by: UsageStatsGroupBy,
-    provider_id_filter: Option<i64>,
-    model_id_filter: Option<i64>,
-    api_key_id_filter: Option<i64>,
-    provider_api_key_id_filter: Option<i64>,
-) -> DbResult<Vec<UsageStatsCostRow>> {
-    let (_, group_by_sql, group_id_sql) = usage_group_sql(group_by);
-
-    match conn {
-        DbConnection::Postgres(pg_conn) => {
-            let bucket_sql = usage_bucket_sql_postgres(interval);
-            let query = format!(
-                "SELECT \
-                    {bucket_sql} AS time_bucket, \
-                    {group_id_sql} AS group_id, \
-                    rl.estimated_cost_currency AS currency, \
-                    CAST(COALESCE(SUM(rl.estimated_cost_nanos), 0) AS BIGINT) AS total_cost_nanos \
-                 FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.provider_id \
-                 LEFT JOIN model m ON m.id = rl.model_id \
-                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
-                 WHERE rl.request_received_at >= $1 \
-                   AND rl.request_received_at < $2 \
-                   AND {group_id_sql} IS NOT NULL \
-                   AND ($3 IS NULL OR rl.provider_id = $3) \
-                   AND ($4 IS NULL OR rl.model_id = $4) \
-                   AND ($5 IS NULL OR rl.api_key_id = $5) \
-                   AND ($6 IS NULL OR rl.provider_api_key_id = $6) \
-                   AND rl.estimated_cost_nanos IS NOT NULL \
-                   AND rl.estimated_cost_currency IS NOT NULL \
-                 GROUP BY 1, {group_id_sql}, rl.estimated_cost_currency, {group_by_sql} \
-                 ORDER BY 1 ASC"
-            );
-            sql_query(query)
-                .bind::<BigInt, _>(start_time_ms)
-                .bind::<BigInt, _>(end_time_ms)
-                .bind::<Nullable<BigInt>, _>(provider_id_filter)
-                .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-                .load::<UsageStatsCostRow>(pg_conn)
-                .map_err(|e| {
-                    crate::controller::BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load usage stats cost rows: {}",
-                        e
-                    )))
-                })
-        }
-        DbConnection::Sqlite(sqlite_conn) => {
-            let bucket_sql = usage_bucket_sql_sqlite(interval);
-            let query = format!(
-                "SELECT \
-                    {bucket_sql} AS time_bucket, \
-                    {group_id_sql} AS group_id, \
-                    rl.estimated_cost_currency AS currency, \
-                    CAST(COALESCE(SUM(rl.estimated_cost_nanos), 0) AS BIGINT) AS total_cost_nanos \
-                 FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.provider_id \
-                 LEFT JOIN model m ON m.id = rl.model_id \
-                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
-                 WHERE rl.request_received_at >= ? \
-                   AND rl.request_received_at < ? \
-                   AND {group_id_sql} IS NOT NULL \
-                   AND (? IS NULL OR rl.provider_id = ?) \
-                   AND (? IS NULL OR rl.model_id = ?) \
-                   AND (? IS NULL OR rl.api_key_id = ?) \
-                   AND (? IS NULL OR rl.provider_api_key_id = ?) \
-                   AND rl.estimated_cost_nanos IS NOT NULL \
-                   AND rl.estimated_cost_currency IS NOT NULL \
-                 GROUP BY 1, {group_id_sql}, rl.estimated_cost_currency, {group_by_sql} \
-                 ORDER BY 1 ASC"
-            );
-            sql_query(query)
-                .bind::<BigInt, _>(start_time_ms)
-                .bind::<BigInt, _>(end_time_ms)
-                .bind::<Nullable<BigInt>, _>(provider_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_id_filter)
-                .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
-                .load::<UsageStatsCostRow>(sqlite_conn)
-                .map_err(|e| {
-                    crate::controller::BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load usage stats cost rows: {}",
-                        e
-                    )))
-                })
-        }
-    }
-}
-
-fn load_today_request_log_summary(
-    conn: &mut DbConnection,
-    start_of_today: i64,
-) -> DbResult<TodayRequestLogSummaryRow> {
-    let row: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) = db_execute!(conn, {
-        request_log::table
-            .filter(request_log::dsl::request_received_at.ge(start_of_today))
-            .select((
-                count_star(),
-                sum(request_log::dsl::total_input_tokens),
-                sum(request_log::dsl::total_output_tokens),
-                sum(request_log::dsl::reasoning_tokens),
-                sum(request_log::dsl::total_tokens),
-            ))
-            .first(conn)
-    })?;
-
-    Ok(TodayRequestLogSummaryRow {
-        requests_count: row.0,
-        total_input_tokens: row.1,
-        total_output_tokens: row.2,
-        total_reasoning_tokens: row.3,
-        total_tokens: row.4,
-    })
-}
-
-fn load_today_cost_by_currency(
-    conn: &mut DbConnection,
-    start_of_today: i64,
-) -> DbResult<HashMap<String, i64>> {
-    let rows = match conn {
-        DbConnection::Postgres(pg_conn) => sql_query(
-            "SELECT estimated_cost_currency AS currency, \
-                    CAST(SUM(estimated_cost_nanos) AS BIGINT) AS total_cost_nanos \
-             FROM request_log \
-             WHERE request_received_at >= $1 \
-               AND estimated_cost_nanos IS NOT NULL \
-               AND estimated_cost_currency IS NOT NULL \
-             GROUP BY estimated_cost_currency",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .load::<CostByCurrencyRow>(pg_conn)?,
-        DbConnection::Sqlite(sqlite_conn) => sql_query(
-            "SELECT estimated_cost_currency AS currency, \
-                    CAST(SUM(estimated_cost_nanos) AS BIGINT) AS total_cost_nanos \
-             FROM request_log \
-             WHERE request_received_at >= ? \
-               AND estimated_cost_nanos IS NOT NULL \
-               AND estimated_cost_currency IS NOT NULL \
-             GROUP BY estimated_cost_currency",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .load::<CostByCurrencyRow>(sqlite_conn)?,
-    };
-
-    Ok(rows
-        .into_iter()
-        .map(|row| (row.currency, row.total_cost_nanos))
-        .collect())
-}
-
-fn load_dashboard_today_aggregate(
-    conn: &mut DbConnection,
-    start_of_today: i64,
-) -> DbResult<DashboardTodayAggregateRow> {
-    match conn {
-        DbConnection::Postgres(pg_conn) => sql_query(
-            "SELECT \
-                CAST(COUNT(*) AS BIGINT) AS request_count, \
-                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS BIGINT) AS success_count, \
-                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END), 0) AS BIGINT) AS error_count, \
-                CAST(COALESCE(SUM(total_input_tokens), 0) AS BIGINT) AS total_input_tokens, \
-                CAST(COALESCE(SUM(total_output_tokens), 0) AS BIGINT) AS total_output_tokens, \
-                CAST(COALESCE(SUM(reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens, \
-                CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens, \
-                CAST(AVG(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                    AND first_response_body_at IS NOT NULL \
-                    AND first_response_body_at >= upstream_request_sent_at \
-                    THEN (first_response_body_at - upstream_request_sent_at)::DOUBLE PRECISION \
-                    ELSE NULL \
-                END) AS DOUBLE PRECISION) AS avg_time_to_first_response_body_ms, \
-                CAST(COUNT(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                    AND first_response_body_at IS NOT NULL \
-                    AND first_response_body_at >= upstream_request_sent_at \
-                    THEN 1 ELSE NULL \
-                END) AS BIGINT) AS time_to_first_response_body_sample_count, \
-                CAST(AVG(CASE \
-                    WHEN is_stream = TRUE \
-                    AND upstream_request_sent_at IS NOT NULL \
-                    AND first_token_at IS NOT NULL \
-                    AND first_token_at >= upstream_request_sent_at \
-                    THEN (first_token_at - upstream_request_sent_at)::DOUBLE PRECISION \
-                    ELSE NULL \
-                END) AS DOUBLE PRECISION) AS avg_ttft_ms, \
-                CAST(COUNT(CASE \
-                    WHEN is_stream = TRUE \
-                    AND upstream_request_sent_at IS NOT NULL \
-                    AND first_token_at IS NOT NULL \
-                    AND first_token_at >= upstream_request_sent_at \
-                    THEN 1 ELSE NULL \
-                END) AS BIGINT) AS ttft_sample_count, \
-                CAST(AVG(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                     AND completed_at IS NOT NULL \
-                     AND completed_at >= upstream_request_sent_at \
-                    THEN (completed_at - upstream_request_sent_at)::DOUBLE PRECISION \
-                    ELSE NULL \
-                END) AS DOUBLE PRECISION) AS avg_total_latency_ms, \
-                CAST(COUNT(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                    AND completed_at IS NOT NULL \
-                    AND completed_at >= upstream_request_sent_at \
-                    THEN 1 ELSE NULL \
-                END) AS BIGINT) AS total_latency_sample_count, \
-                CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count, \
-                CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count, \
-                CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count \
-             FROM request_log \
-             WHERE request_received_at >= $1",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .get_result::<DashboardTodayAggregateRow>(pg_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard today aggregate: {}",
-                e
-            )))
-        }),
-        DbConnection::Sqlite(sqlite_conn) => sql_query(
-            "SELECT \
-                CAST(COUNT(*) AS BIGINT) AS request_count, \
-                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS BIGINT) AS success_count, \
-                CAST(COALESCE(SUM(CASE WHEN CAST(overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END), 0) AS BIGINT) AS error_count, \
-                CAST(COALESCE(SUM(total_input_tokens), 0) AS BIGINT) AS total_input_tokens, \
-                CAST(COALESCE(SUM(total_output_tokens), 0) AS BIGINT) AS total_output_tokens, \
-                CAST(COALESCE(SUM(reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens, \
-                CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens, \
-                CAST(AVG(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                    AND first_response_body_at IS NOT NULL \
-                    AND first_response_body_at >= upstream_request_sent_at \
-                    THEN (first_response_body_at - upstream_request_sent_at) \
-                    ELSE NULL \
-                END) AS REAL) AS avg_time_to_first_response_body_ms, \
-                CAST(COUNT(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                    AND first_response_body_at IS NOT NULL \
-                    AND first_response_body_at >= upstream_request_sent_at \
-                    THEN 1 ELSE NULL \
-                END) AS BIGINT) AS time_to_first_response_body_sample_count, \
-                CAST(AVG(CASE \
-                    WHEN is_stream = 1 \
-                    AND upstream_request_sent_at IS NOT NULL \
-                    AND first_token_at IS NOT NULL \
-                    AND first_token_at >= upstream_request_sent_at \
-                    THEN (first_token_at - upstream_request_sent_at) \
-                    ELSE NULL \
-                END) AS REAL) AS avg_ttft_ms, \
-                CAST(COUNT(CASE \
-                    WHEN is_stream = 1 \
-                    AND upstream_request_sent_at IS NOT NULL \
-                    AND first_token_at IS NOT NULL \
-                    AND first_token_at >= upstream_request_sent_at \
-                    THEN 1 ELSE NULL \
-                END) AS BIGINT) AS ttft_sample_count, \
-                CAST(AVG(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                     AND completed_at IS NOT NULL \
-                     AND completed_at >= upstream_request_sent_at \
-                    THEN (completed_at - upstream_request_sent_at) \
-                    ELSE NULL \
-                END) AS REAL) AS avg_total_latency_ms, \
-                CAST(COUNT(CASE \
-                    WHEN upstream_request_sent_at IS NOT NULL \
-                    AND completed_at IS NOT NULL \
-                    AND completed_at >= upstream_request_sent_at \
-                    THEN 1 ELSE NULL \
-                END) AS BIGINT) AS total_latency_sample_count, \
-                CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count, \
-                CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count, \
-                CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count \
-             FROM request_log \
-             WHERE request_received_at >= ?",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .get_result::<DashboardTodayAggregateRow>(sqlite_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard today aggregate: {}",
-                e
-            )))
-        }),
-    }
-}
-
-fn load_dashboard_top_model_base_rows(
-    conn: &mut DbConnection,
-    start_of_today: i64,
-    limit: usize,
-) -> DbResult<Vec<DashboardTopModelBaseRow>> {
-    match conn {
-        DbConnection::Postgres(pg_conn) => sql_query(
-            "SELECT \
-                rl.provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
-                rl.model_id AS model_id, \
-                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
-                COUNT(*)::BIGINT AS request_count, \
-                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
-             FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.provider_id \
-             LEFT JOIN model m ON m.id = rl.model_id \
-             WHERE rl.request_received_at >= $1 \
-               AND rl.provider_id IS NOT NULL \
-               AND rl.model_id IS NOT NULL \
-             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
-             ORDER BY request_count DESC, rl.provider_id ASC, rl.model_id ASC \
-             LIMIT $2",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .bind::<BigInt, _>(limit as i64)
-        .load::<DashboardTopModelBaseRow>(pg_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard top model rows: {}",
-                e
-            )))
-        }),
-        DbConnection::Sqlite(sqlite_conn) => sql_query(
-            "SELECT \
-                rl.provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
-                rl.model_id AS model_id, \
-                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
-                CAST(COUNT(*) AS BIGINT) AS request_count, \
-                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
-             FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.provider_id \
-             LEFT JOIN model m ON m.id = rl.model_id \
-             WHERE rl.request_received_at >= ? \
-               AND rl.provider_id IS NOT NULL \
-               AND rl.model_id IS NOT NULL \
-             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
-             ORDER BY request_count DESC, rl.provider_id ASC, rl.model_id ASC \
-             LIMIT ?",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .bind::<BigInt, _>(limit as i64)
-        .load::<DashboardTopModelBaseRow>(sqlite_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard top model rows: {}",
-                e
-            )))
-        }),
-    }
-}
-
-fn load_dashboard_top_model_base_rows_for_cost(
-    conn: &mut DbConnection,
-    start_of_today: i64,
-    limit: usize,
-) -> DbResult<Vec<DashboardTopModelBaseRow>> {
-    match conn {
-        DbConnection::Postgres(pg_conn) => sql_query(
-            "SELECT \
-                rl.provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
-                rl.model_id AS model_id, \
-                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
-                COUNT(*)::BIGINT AS request_count, \
-                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
-             FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.provider_id \
-             LEFT JOIN model m ON m.id = rl.model_id \
-             WHERE rl.request_received_at >= $1 \
-               AND rl.provider_id IS NOT NULL \
-               AND rl.model_id IS NOT NULL \
-             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
-             ORDER BY COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.provider_id ASC, rl.model_id ASC \
-             LIMIT $2",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .bind::<BigInt, _>(limit as i64)
-        .load::<DashboardTopModelBaseRow>(pg_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard top cost model rows: {}",
-                e
-            )))
-        }),
-        DbConnection::Sqlite(sqlite_conn) => sql_query(
-            "SELECT \
-                rl.provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
-                rl.model_id AS model_id, \
-                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
-                CAST(COUNT(*) AS BIGINT) AS request_count, \
-                CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
-             FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.provider_id \
-             LEFT JOIN model m ON m.id = rl.model_id \
-             WHERE rl.request_received_at >= ? \
-               AND rl.provider_id IS NOT NULL \
-               AND rl.model_id IS NOT NULL \
-             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
-             ORDER BY COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.provider_id ASC, rl.model_id ASC \
-             LIMIT ?",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .bind::<BigInt, _>(limit as i64)
-        .load::<DashboardTopModelBaseRow>(sqlite_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard top cost model rows: {}",
-                e
-            )))
-        }),
-    }
-}
-
-fn load_dashboard_top_model_cost_rows(
-    conn: &mut DbConnection,
-    start_of_today: i64,
-) -> DbResult<Vec<DashboardTopModelCostRow>> {
-    match conn {
-        DbConnection::Postgres(pg_conn) => sql_query(
-            "SELECT \
-                rl.provider_id AS provider_id, \
-                rl.model_id AS model_id, \
-                rl.estimated_cost_currency AS currency, \
-                CAST(SUM(rl.estimated_cost_nanos) AS BIGINT) AS total_cost_nanos \
-             FROM request_log rl \
-             WHERE rl.request_received_at >= $1 \
-               AND rl.provider_id IS NOT NULL \
-               AND rl.model_id IS NOT NULL \
-               AND rl.estimated_cost_nanos IS NOT NULL \
-               AND rl.estimated_cost_currency IS NOT NULL \
-             GROUP BY rl.provider_id, rl.model_id, rl.estimated_cost_currency",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .load::<DashboardTopModelCostRow>(pg_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard top model costs: {}",
-                e
-            )))
-        }),
-        DbConnection::Sqlite(sqlite_conn) => sql_query(
-            "SELECT \
-                rl.provider_id AS provider_id, \
-                rl.model_id AS model_id, \
-                rl.estimated_cost_currency AS currency, \
-                CAST(SUM(rl.estimated_cost_nanos) AS BIGINT) AS total_cost_nanos \
-             FROM request_log rl \
-             WHERE rl.request_received_at >= ? \
-               AND rl.provider_id IS NOT NULL \
-               AND rl.model_id IS NOT NULL \
-               AND rl.estimated_cost_nanos IS NOT NULL \
-               AND rl.estimated_cost_currency IS NOT NULL \
-             GROUP BY rl.provider_id, rl.model_id, rl.estimated_cost_currency",
-        )
-        .bind::<BigInt, _>(start_of_today)
-        .load::<DashboardTopModelCostRow>(sqlite_conn)
-        .map_err(|e| {
-            crate::controller::BaseError::DatabaseFatal(Some(format!(
-                "Failed to load dashboard top model costs: {}",
-                e
-            )))
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CostByCurrencyRow, TodayRequestLogSummaryRow, UsageStatsGroupBy, calculate_success_rate,
-        load_dashboard_api_key_counts, load_dashboard_today_aggregate,
-        load_dashboard_top_model_base_rows, load_dashboard_top_model_cost_rows,
-        load_usage_stats_base_rows, load_usage_stats_cost_rows, start_of_day_timestamp_ms_at,
+        CostByCurrencyRow, UsageStatsGroupBy, calculate_success_rate, get_dashboard_overview_stats,
+        get_dashboard_today_stats, get_dashboard_top_cost_models, get_dashboard_top_models,
+        get_system_overview_stats, get_usage_stats_aggregates, start_of_day_timestamp_ms_at,
     };
-    use crate::database::DbConnection;
+    use crate::database::TestDatabase;
     use chrono::TimeZone;
-    use diesel::connection::SimpleConnection;
-    use diesel::sqlite::SqliteConnection;
-
-    #[test]
-    fn today_summary_row_maps_missing_sums_to_zero() {
-        let row = TodayRequestLogSummaryRow {
-            requests_count: 3,
-            total_input_tokens: None,
-            total_output_tokens: Some(11),
-            total_reasoning_tokens: None,
-            total_tokens: Some(21),
-        };
-
-        assert_eq!(row.requests_count, 3);
-        assert_eq!(row.total_input_tokens.unwrap_or(0), 0);
-        assert_eq!(row.total_output_tokens.unwrap_or(0), 11);
-        assert_eq!(row.total_reasoning_tokens.unwrap_or(0), 0);
-        assert_eq!(row.total_tokens.unwrap_or(0), 21);
-    }
 
     #[test]
     fn calculate_success_rate_handles_empty_and_non_empty_windows() {
@@ -1603,16 +1517,7 @@ mod tests {
         );
     }
 
-    fn sqlite_stat_connection() -> (tempfile::TempDir, DbConnection) {
-        let (temp_dir, mut conn) =
-            crate::database::open_test_sqlite_pooled_connection_with_migrations("stat.sqlite");
-        seed_stat_rows(&mut conn);
-        (temp_dir, DbConnection::Sqlite(conn))
-    }
-
-    fn seed_stat_rows(conn: &mut SqliteConnection) {
-        conn.batch_execute(
-            "INSERT INTO api_key (
+    const STAT_SEED_SQL: &str = "INSERT INTO api_key (
                 id, api_key_hash, key_prefix, key_last4, name, description,
                 default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests,
                 quota_daily_requests, quota_daily_tokens, quota_monthly_tokens,
@@ -1719,153 +1624,98 @@ mod tests {
                 NULL, NULL,
                 1, 2, 0, 3,
                 3000, 3100
-            );",
-        )
-        .expect("stat seed rows should insert");
-    }
+            );";
 
-    #[test]
-    fn sqlite_dashboard_overview_counts_api_key_table_rows() {
-        let (_temp_dir, mut conn) = sqlite_stat_connection();
+    #[tokio::test]
+    async fn sqlite_runtime_dashboard_and_usage_queries_preserve_aggregate_results() {
+        let context = TestDatabase::new_sqlite_default("stat-runtime-parity.sqlite").await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        context
+            .execute_sqlite_batch(STAT_SEED_SQL)
+            .await
+            .expect("stat seed rows should insert");
+        context
+            .execute_sqlite_batch(format!(
+                "UPDATE request_log SET
+                    upstream_request_sent_at = upstream_request_sent_at +
+                        (({} - ((103 - id) * 1000)) - request_received_at),
+                    first_response_body_at = first_response_body_at +
+                        (({} - ((103 - id) * 1000)) - request_received_at),
+                    completed_at = completed_at +
+                        (({} - ((103 - id) * 1000)) - request_received_at),
+                    created_at = created_at +
+                        (({} - ((103 - id) * 1000)) - request_received_at),
+                    updated_at = updated_at +
+                        (({} - ((103 - id) * 1000)) - request_received_at),
+                    request_received_at = {} - ((103 - id) * 1000)",
+                now_ms, now_ms, now_ms, now_ms, now_ms, now_ms
+            ))
+            .await
+            .expect("request logs should move into today's window");
+        let database = context.runtime();
 
-        let (api_key_count, enabled_api_key_count) =
-            load_dashboard_api_key_counts(&mut conn).expect("api key counts should load");
+        let system = get_system_overview_stats(&database)
+            .await
+            .expect("system overview should load");
+        assert_eq!(system.providers_count, 1);
+        assert_eq!(system.models_count, 1);
+        assert_eq!(system.provider_keys_count, 1);
 
-        assert_eq!(api_key_count, 1);
-        assert_eq!(enabled_api_key_count, 1);
-    }
+        let overview = get_dashboard_overview_stats(&database)
+            .await
+            .expect("dashboard overview should load");
+        assert_eq!(overview.provider_count, 1);
+        assert_eq!(overview.enabled_provider_count, 1);
+        assert_eq!(overview.model_count, 1);
+        assert_eq!(overview.enabled_model_count, 1);
+        assert_eq!(overview.provider_key_count, 1);
+        assert_eq!(overview.enabled_provider_key_count, 1);
+        assert_eq!(overview.api_key_count, 1);
+        assert_eq!(overview.enabled_api_key_count, 1);
 
-    #[test]
-    fn sqlite_usage_stats_queries_request_log_aggregate_columns() {
-        let (_temp_dir, mut conn) = sqlite_stat_connection();
+        let today = get_dashboard_today_stats(&database, None)
+            .await
+            .expect("dashboard today stats should load");
+        assert_eq!(today.request_count, 3);
+        assert_eq!(today.success_count, 2);
+        assert_eq!(today.error_count, 1);
+        assert_eq!(today.total_tokens, 60);
+        assert_eq!(today.total_cost.get("USD"), Some(&800));
 
-        let rows = load_usage_stats_base_rows(
-            &mut conn,
-            0,
-            10_000,
-            "day",
-            UsageStatsGroupBy::Provider,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("usage stats base rows should load");
-        assert_eq!(rows.len(), 1);
-        let row = &rows[0];
-        assert_eq!(row.group_id, 10);
-        assert_eq!(row.provider_id, Some(10));
-        assert_eq!(row.provider_key.as_deref(), Some("openai-main"));
-        assert_eq!(row.request_count, 2);
-        assert_eq!(row.success_count, 1);
-        assert_eq!(row.error_count, 1);
-        assert_eq!(row.total_tokens, 57);
-        assert_eq!(row.time_to_first_response_body_sample_count, 2);
-        assert_eq!(row.time_to_first_response_body_sum_ms, Some(150.0));
-        assert_eq!(row.ttft_sample_count, 0);
-        assert_eq!(row.ttft_sum_ms, Some(0.0));
-        assert_eq!(row.total_latency_sample_count, 2);
-        assert_eq!(row.total_latency_sum_ms, Some(700.0));
-
-        let costs = load_usage_stats_cost_rows(
-            &mut conn,
-            0,
-            10_000,
-            "day",
-            UsageStatsGroupBy::Provider,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("usage stats cost rows should load");
-        assert_eq!(costs.len(), 1);
-        assert_eq!(costs[0].group_id, 10);
-        assert_eq!(costs[0].currency, "USD");
-        assert_eq!(costs[0].total_cost_nanos, 800);
-    }
-
-    #[test]
-    fn sqlite_usage_stats_group_by_api_key_uses_masked_api_key_fields() {
-        let (_temp_dir, mut conn) = sqlite_stat_connection();
-
-        let rows = load_usage_stats_base_rows(
-            &mut conn,
-            0,
-            10_000,
-            "day",
-            UsageStatsGroupBy::ApiKey,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("usage stats api key rows should load");
-        assert_eq!(rows.len(), 1);
-        let row = &rows[0];
-        assert_eq!(row.group_id, 1);
-        assert_eq!(row.api_key_id, Some(1));
-        assert_eq!(row.api_key_name.as_deref(), Some("Ops key"));
-        assert_eq!(row.group_label.as_deref(), Some("Ops key"));
-        assert_eq!(row.group_detail.as_deref(), Some("ck-test***test"));
-        assert_eq!(row.request_count, 3);
-        assert_eq!(row.success_count, 2);
-        assert_eq!(row.error_count, 1);
-        assert_eq!(row.total_tokens, 60);
-
-        let costs = load_usage_stats_cost_rows(
-            &mut conn,
-            0,
-            10_000,
-            "day",
-            UsageStatsGroupBy::ApiKey,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("usage stats api key cost rows should load");
-        assert_eq!(costs.len(), 1);
-        assert_eq!(costs[0].group_id, 1);
-        assert_eq!(costs[0].currency, "USD");
-        assert_eq!(costs[0].total_cost_nanos, 800);
-    }
-
-    #[test]
-    fn sqlite_dashboard_queries_request_log_aggregate_columns() {
-        let (_temp_dir, mut conn) = sqlite_stat_connection();
-
-        let aggregate =
-            load_dashboard_today_aggregate(&mut conn, 0).expect("dashboard aggregate should load");
-        assert_eq!(aggregate.request_count, 3);
-        assert_eq!(aggregate.success_count, 2);
-        assert_eq!(aggregate.error_count, 1);
-        assert_eq!(aggregate.total_tokens, 60);
-        assert_eq!(aggregate.avg_time_to_first_response_body_ms, Some(75.0));
-        assert_eq!(aggregate.time_to_first_response_body_sample_count, 2);
-        assert_eq!(aggregate.avg_ttft_ms, None);
-        assert_eq!(aggregate.ttft_sample_count, 0);
-        assert_eq!(aggregate.avg_total_latency_ms, Some(350.0));
-        assert_eq!(aggregate.total_latency_sample_count, 2);
-        assert_eq!(aggregate.active_provider_count, 1);
-        assert_eq!(aggregate.active_model_count, 1);
-        assert_eq!(aggregate.active_api_key_count, 1);
-
-        let top_models = load_dashboard_top_model_base_rows(&mut conn, 0, 10)
+        let top_models = get_dashboard_top_models(&database, 10, None)
+            .await
             .expect("dashboard top models should load");
         assert_eq!(top_models.len(), 1);
         assert_eq!(top_models[0].provider_id, 10);
         assert_eq!(top_models[0].model_id, 30);
-        assert_eq!(top_models[0].model_name.as_deref(), Some("gpt-test"));
         assert_eq!(top_models[0].request_count, 2);
         assert_eq!(top_models[0].total_tokens, 57);
 
-        let top_costs = load_dashboard_top_model_cost_rows(&mut conn, 0)
-            .expect("dashboard top model costs should load");
-        assert_eq!(top_costs.len(), 1);
-        assert_eq!(top_costs[0].provider_id, 10);
-        assert_eq!(top_costs[0].model_id, 30);
-        assert_eq!(top_costs[0].currency, "USD");
-        assert_eq!(top_costs[0].total_cost_nanos, 800);
+        let top_cost_models = get_dashboard_top_cost_models(&database, 10, None)
+            .await
+            .expect("dashboard top cost models should load");
+        assert_eq!(top_cost_models.len(), 1);
+        assert_eq!(top_cost_models[0].total_cost.get("USD"), Some(&800));
+
+        let usage = get_usage_stats_aggregates(
+            &database,
+            now_ms - 60_000,
+            now_ms + 1_000,
+            "day",
+            UsageStatsGroupBy::Provider,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("usage stats should load");
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].provider_id, Some(10));
+        assert_eq!(usage[0].request_count, 2);
+        assert_eq!(usage[0].success_count, 1);
+        assert_eq!(usage[0].error_count, 1);
+        assert_eq!(usage[0].total_tokens, 57);
+        assert_eq!(usage[0].total_cost.get("USD"), Some(&800));
     }
 }

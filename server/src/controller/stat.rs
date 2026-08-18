@@ -672,7 +672,7 @@ fn top_group_keys(items: &[UsageStatItem], metric: UsageMetric, top_n: usize) ->
 async fn system_overview_stats(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<SystemOverviewResponse>, BaseError> {
-    let stats = get_system_overview_stats()?;
+    let stats = get_system_overview_stats(&app_state.database).await?;
     let runtime_state_backend = app_state.runtime_state_backend_operator_status().await;
     Ok(HttpResult::new(SystemOverviewResponse {
         stats,
@@ -684,7 +684,7 @@ async fn today_request_log_stats(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<TodayRequestLogStats>, BaseError> {
     let timezone = configured_timezone(&app_state);
-    let stats = get_today_request_log_stats(timezone.as_deref())?;
+    let stats = get_today_request_log_stats(&app_state.database, timezone.as_deref()).await?;
     Ok(HttpResult::new(stats))
 }
 
@@ -747,7 +747,8 @@ async fn build_dashboard_operations_section(
         DashboardOperationalSignals::from(operational_signals_from_runtime_items(runtime_items));
     operational_signals.top_cost_models = app_state
         .metrics
-        .dashboard_top_cost_models(5, timezone)?
+        .dashboard_top_cost_models(5, timezone)
+        .await?
         .into_iter()
         .map(cost_model_item_from_top_model_item)
         .collect();
@@ -758,7 +759,7 @@ async fn build_dashboard_operations_section(
             .into_iter()
             .map(Into::into)
             .collect(),
-        top_models: app_state.metrics.dashboard_top_models(5, timezone)?,
+        top_models: app_state.metrics.dashboard_top_models(5, timezone).await?,
     })
 }
 
@@ -831,16 +832,19 @@ async fn system_usage_stats(
         )));
     }
 
-    let usage_rows = app_state.metrics.usage_stats_aggregates(
-        params.start_time,
-        params.end_time,
-        interval.as_str(),
-        params.group_by.to_database_group_by(),
-        params.provider_id,
-        params.model_id,
-        params.api_key_id,
-        params.provider_api_key_id,
-    )?;
+    let usage_rows = app_state
+        .metrics
+        .usage_stats_aggregates(
+            params.start_time,
+            params.end_time,
+            interval.as_str(),
+            params.group_by.to_database_group_by(),
+            params.provider_id,
+            params.model_id,
+            params.api_key_id,
+            params.provider_api_key_id,
+        )
+        .await?;
 
     let usage_items = usage_rows
         .iter()

@@ -1,7 +1,10 @@
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
+#[cfg(test)]
+use tokio::sync::Notify;
 
+use crate::database::runtime::DatabaseRuntime;
 use crate::logging::event_message_with_fields;
 use crate::service::app_state::AppStoreError;
 use crate::service::catalog::CatalogService;
@@ -114,6 +117,31 @@ pub(crate) struct AdminMutationRunner {
     audit_logger: AdminAuditLogger,
     #[cfg(test)]
     emitted_audit_events: Mutex<Vec<AdminAuditEvent>>,
+    #[cfg(test)]
+    before_effects_gate: Mutex<Option<AdminMutationTestGate>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct AdminMutationTestGate {
+    reached: Arc<Notify>,
+    resume: Arc<Notify>,
+    completed: Arc<Notify>,
+}
+
+#[cfg(test)]
+impl AdminMutationTestGate {
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.resume.notify_one();
+    }
+
+    pub(crate) async fn wait_until_completed(&self) {
+        self.completed.notified().await;
+    }
 }
 
 impl AdminMutationRunner {
@@ -123,10 +151,18 @@ impl AdminMutationRunner {
             audit_logger: AdminAuditLogger,
             #[cfg(test)]
             emitted_audit_events: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            before_effects_gate: Mutex::new(None),
         }
     }
 
+    pub(crate) fn database(&self) -> Arc<DatabaseRuntime> {
+        self.catalog.database()
+    }
+
     pub(crate) async fn execute(&self, effects: &[AdminMutationEffect]) -> AdminMutationReport {
+        #[cfg(test)]
+        let test_gate = self.wait_before_effects_for_test().await;
         let mut report = AdminMutationReport::default();
 
         // Post-commit effects always run in the same order:
@@ -151,7 +187,40 @@ impl AdminMutationRunner {
             }
         }
 
+        #[cfg(test)]
+        if let Some(gate) = test_gate {
+            gate.completed.notify_one();
+        }
+
         report
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_before_effects_for_test(&self) -> AdminMutationTestGate {
+        let gate = AdminMutationTestGate {
+            reached: Arc::new(Notify::new()),
+            resume: Arc::new(Notify::new()),
+            completed: Arc::new(Notify::new()),
+        };
+        *self
+            .before_effects_gate
+            .lock()
+            .expect("admin mutation test gate should lock") = Some(gate.clone());
+        gate
+    }
+
+    #[cfg(test)]
+    async fn wait_before_effects_for_test(&self) -> Option<AdminMutationTestGate> {
+        let gate = self
+            .before_effects_gate
+            .lock()
+            .expect("admin mutation test gate should lock")
+            .take();
+        if let Some(gate) = &gate {
+            gate.reached.notify_one();
+            gate.resume.notified().await;
+        }
+        gate
     }
 
     #[cfg(test)]

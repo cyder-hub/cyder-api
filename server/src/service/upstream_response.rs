@@ -293,6 +293,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn capture_error_response_body(
     response: Response,
     limits: &NonStreamResponseConfig,

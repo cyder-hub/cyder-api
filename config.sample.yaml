@@ -35,6 +35,16 @@ manager_auth:
 db_url: /data/cyder/db/cyder.sqlite
 # db_url: postgres://user:pass@host:port/schema_name
 # Supported database URL forms are SQLite paths and PostgreSQL URLs.
+db_pool_size: 5
+database_io:
+  # Number of callers allowed to wait after all immediately available database
+  # execution capacity is occupied. Set to 0 to reject instead of queueing.
+  max_waiters: 64
+  queue_wait_timeout_seconds: 1
+  operation_deadline_seconds: 30
+  # SQLite lock waiting is bounded independently and must not exceed the
+  # operation deadline. PostgreSQL does not use this setting.
+  sqlite_busy_timeout_seconds: 5
 secret_encryption:
   # one_time stores only the downstream API key authentication hash.
   # recoverable additionally stores downstream ciphertext and permits explicit reveal.

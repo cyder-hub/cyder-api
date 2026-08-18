@@ -2,7 +2,7 @@ use std::{fmt, sync::Arc};
 
 use crate::{
     proxy::auth::evaluate_access_control,
-    schema::enum_def::{DownstreamProtocol, ModelKind, UpstreamProfileType, UpstreamProtocol},
+    schema::enum_def::{DownstreamProtocol, ModelKind, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::{
@@ -30,18 +30,6 @@ pub struct ExecutionTarget {
     pub upstream_protocol: UpstreamProtocol,
     pub selection_reason: SourceSelectionReason,
     pub requested_patch_suffix: Option<String>,
-}
-
-impl ExecutionTarget {
-    pub(in crate::proxy) fn is_openai_compatible_generation(&self) -> bool {
-        self.upstream_protocol == UpstreamProtocol::Openai
-            && matches!(
-                self.upstream_source.profile_type,
-                UpstreamProfileType::Openai
-                    | UpstreamProfileType::OpenaiCompatible
-                    | UpstreamProfileType::GeminiOpenai
-            )
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,27 +71,6 @@ impl fmt::Display for ExecutionPlanBuildError {
 }
 
 impl std::error::Error for ExecutionPlanBuildError {}
-
-impl ExecutionPlan {
-    #[cfg(test)]
-    pub fn target_summary_for_log(&self) -> String {
-        let target = &self.target;
-        format!(
-            "base_name={}; provider={}/{}; model={}/{}; source={}({:?}); downstream_protocol={:?}; upstream_protocol={:?}; selection_reason={}; patch_suffix={:?}",
-            self.base_requested_name,
-            target.provider.id,
-            target.provider.provider_key,
-            target.model.id,
-            target.model.model_name,
-            target.upstream_source.id,
-            target.upstream_source.profile_type,
-            target.downstream_protocol,
-            target.upstream_protocol,
-            target.selection_reason.as_key(),
-            self.resolved_patch_suffix,
-        )
-    }
-}
 
 #[derive(Debug, Clone)]
 struct ResolvedCatalogModel {

@@ -13,6 +13,7 @@ use crate::database::model_source_binding::{
 };
 use crate::database::provider::Provider;
 use crate::database::request_patch::RequestPatchVariantRepository;
+use crate::database::runtime::DatabaseRuntime;
 use crate::database::upstream_source::UpstreamSource;
 use crate::schema::enum_def::{
     DownstreamProtocol, ModelKind, UpstreamProfileType, UpstreamProtocol,
@@ -99,9 +100,12 @@ pub struct ModelSourceSnapshotOwner {
     pub source_selection_mode: String,
 }
 
-pub fn load_cache_model_snapshots(models: &[Model]) -> Result<HashMap<i64, CacheModel>, BaseError> {
+pub async fn load_cache_model_snapshots(
+    database: &DatabaseRuntime,
+    models: &[Model],
+) -> Result<HashMap<i64, CacheModel>, BaseError> {
     let model_ids = models.iter().map(|model| model.id).collect::<Vec<_>>();
-    let bindings_by_model = list_visible_by_model_ids(&model_ids)?;
+    let bindings_by_model = list_visible_by_model_ids(database, &model_ids).await?;
     Ok(models
         .iter()
         .map(|model| {
@@ -132,7 +136,8 @@ pub fn load_cache_model_snapshots(models: &[Model]) -> Result<HashMap<i64, Cache
         .collect())
 }
 
-pub fn load_model_source_config_summaries(
+pub async fn load_model_source_config_summaries(
+    database: &DatabaseRuntime,
     owners: &[ModelSourceSnapshotOwner],
 ) -> Result<HashMap<i64, ModelSourceConfigSummary>, BaseError> {
     if owners.is_empty() {
@@ -155,8 +160,9 @@ pub fn load_model_source_config_summaries(
             updated_at: 0,
         })
         .collect::<Vec<_>>();
-    let snapshots = load_cache_model_snapshots(&models)?;
-    let providers = Provider::list_all()?
+    let snapshots = load_cache_model_snapshots(database, &models).await?;
+    let providers = Provider::list_all(database)
+        .await?
         .into_iter()
         .map(|aggregate| (aggregate.id, CacheProvider::from(aggregate)))
         .collect::<HashMap<_, _>>();
@@ -350,15 +356,18 @@ impl ModelAdminService {
         input: CreateModelInput,
         source_config: Option<ModelSourceConfig>,
     ) -> Result<Model, BaseError> {
-        let provider = Provider::get_by_id(input.provider_id)?;
+        let database = self.mutation_runner.database();
+        let provider = Provider::get_by_id(&database, input.provider_id).await?;
         let created = Model::create_with_source_config(
+            &database,
             input.provider_id,
             &input.model_name,
             input.real_model_name.as_deref(),
             input.model_kind,
             input.is_enabled,
             source_config.as_ref(),
-        )?;
+        )
+        .await?;
         let committed_source_config = source_config
             .clone()
             .unwrap_or_else(ModelSourceConfig::inherit_all);
@@ -389,20 +398,26 @@ impl ModelAdminService {
         &self,
         model_id: i64,
     ) -> Result<ModelSourceConfig, BaseError> {
-        Ok(get_model_source_config(model_id)?)
+        let database = self.mutation_runner.database();
+        Ok(get_model_source_config(&database, model_id).await?)
     }
 
-    pub fn get_model_source_config_summary(
+    pub async fn get_model_source_config_summary(
         &self,
         model_id: i64,
     ) -> Result<ModelSourceConfigSummary, BaseError> {
-        let model = Model::get_by_id(model_id)?;
-        let summary = load_model_source_config_summaries(&[ModelSourceSnapshotOwner {
-            model_id: model.id,
-            provider_id: model.provider_id,
-            model_kind: model.model_kind,
-            source_selection_mode: model.source_selection_mode,
-        }])?;
+        let database = self.mutation_runner.database();
+        let model = Model::get_by_id(&database, model_id).await?;
+        let summary = load_model_source_config_summaries(
+            &database,
+            &[ModelSourceSnapshotOwner {
+                model_id: model.id,
+                provider_id: model.provider_id,
+                model_kind: model.model_kind,
+                source_selection_mode: model.source_selection_mode,
+            }],
+        )
+        .await?;
         summary.get(&model.id).cloned().ok_or_else(|| {
             BaseError::DatabaseFatal(Some(format!(
                 "source config summary for model {} was not loaded",
@@ -411,14 +426,16 @@ impl ModelAdminService {
         })
     }
 
-    pub fn explain_model_source_config(
+    pub async fn explain_model_source_config(
         &self,
         model_id: i64,
     ) -> Result<ModelSourceExplain, BaseError> {
-        let model = Model::get_by_id(model_id)?;
-        let provider = Provider::get_by_id(model.provider_id)?;
+        let database = self.mutation_runner.database();
+        let model = Model::get_by_id(&database, model_id).await?;
+        let provider = Provider::get_by_id(&database, model.provider_id).await?;
         let cache_provider = CacheProvider::from(provider);
-        let cache_model = load_cache_model_snapshots(std::slice::from_ref(&model))?
+        let cache_model = load_cache_model_snapshots(&database, std::slice::from_ref(&model))
+            .await?
             .remove(&model.id)
             .ok_or_else(|| {
                 BaseError::DatabaseFatal(Some(format!(
@@ -434,8 +451,9 @@ impl ModelAdminService {
         model_id: i64,
         source_config: ModelSourceConfig,
     ) -> Result<ModelSourceConfig, BaseError> {
-        let model = Model::get_by_id(model_id)?;
-        let provider = Provider::get_by_id(model.provider_id)?;
+        let database = self.mutation_runner.database();
+        let model = Model::get_by_id(&database, model_id).await?;
+        let provider = Provider::get_by_id(&database, model.provider_id).await?;
         let reactivated_source_ids = if source_config.source_selection_mode == "EXPLICIT" {
             source_config
                 .bindings
@@ -443,7 +461,8 @@ impl ModelAdminService {
                 .map(|binding| binding.source_id)
                 .collect::<Vec<_>>()
         } else if source_config.source_selection_mode == "INHERIT_ALL" {
-            UpstreamSource::list_active_by_provider_id(provider.id)?
+            UpstreamSource::list_active_by_provider_id(&database, provider.id)
+                .await?
                 .into_iter()
                 .filter(|source| source.is_enabled)
                 .map(|source| source.id)
@@ -452,9 +471,12 @@ impl ModelAdminService {
             Vec::new()
         };
         for source_id in reactivated_source_ids {
-            RequestPatchVariantRepository::validate_model_source_reactivation(model_id, source_id)?;
+            RequestPatchVariantRepository::validate_model_source_reactivation(
+                &database, model_id, source_id,
+            )
+            .await?;
         }
-        let replaced = replace_model_source_config(model_id, &source_config)?;
+        let replaced = replace_model_source_config(&database, model_id, &source_config).await?;
 
         self.run_post_commit_effects(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Model {
@@ -476,9 +498,11 @@ impl ModelAdminService {
     }
 
     pub async fn update_model(&self, id: i64, input: UpdateModelInput) -> Result<Model, BaseError> {
-        let existing = Model::get_by_id(id)?;
-        let provider = Provider::get_by_id(existing.provider_id)?;
+        let database = self.mutation_runner.database();
+        let existing = Model::get_by_id(&database, id).await?;
+        let provider = Provider::get_by_id(&database, existing.provider_id).await?;
         let updated = Model::update(
+            &database,
             id,
             &UpdateModelData {
                 model_name: Some(input.model_name),
@@ -486,7 +510,8 @@ impl ModelAdminService {
                 is_enabled: Some(input.is_enabled),
                 cost_catalog_id: Some(input.cost_catalog_id),
             },
-        )?;
+        )
+        .await?;
 
         let previous_name = if existing.model_name != updated.model_name {
             Some(model_cache_name(&provider, &existing.model_name))
@@ -508,9 +533,10 @@ impl ModelAdminService {
     }
 
     pub async fn delete_model(&self, id: i64) -> Result<(), BaseError> {
-        let model = Model::get_by_id(id)?;
-        let provider = Provider::get_by_id(model.provider_id)?;
-        let num_deleted = Model::delete_with_dependents(id)?;
+        let database = self.mutation_runner.database();
+        let model = Model::get_by_id(&database, id).await?;
+        let provider = Provider::get_by_id(&database, model.provider_id).await?;
+        let num_deleted = Model::delete_with_dependents(&database, id).await?;
 
         if num_deleted == 0 {
             return Ok(());
@@ -594,7 +620,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::model_source_binding::{ModelSourceBindingInput, ModelSourceConfig};
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::request_patch::{
@@ -642,10 +668,13 @@ mod tests {
 
     #[tokio::test]
     async fn admin_model_source_config_is_atomic_and_core_update_preserves_it() {
-        let db = TestDbContext::new_sqlite("admin-model-source-config.sqlite");
-        db.run_async(async {
-            Provider::create(&provider_input(), &source_input()).expect("provider should seed");
-            let catalog = Arc::new(CatalogService::new(true).await);
+        let db = TestDatabase::new_sqlite_default("admin-model-source-config.sqlite").await;
+        let database = db.runtime();
+        (async {
+            Provider::create(&database, &provider_input(), &source_input())
+                .await
+                .expect("provider should seed");
+            let catalog = Arc::new(CatalogService::new(Arc::clone(&database), true).await);
             let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
             let service = ModelAdminService::new(Arc::clone(&runner));
 
@@ -749,23 +778,31 @@ mod tests {
 
     #[tokio::test]
     async fn inherit_all_rejects_dormant_model_variant_without_effective_suffix_rules() {
-        let db = TestDbContext::new_sqlite("admin-model-inherit-all-request-patch.sqlite");
-        db.run_async(async {
-            Provider::create(&provider_input(), &source_input()).expect("provider should seed");
-            let second_source = UpstreamSource::create(&NewUpstreamSource {
-                id: 8103,
-                provider_id: 8101,
-                profile_type: UpstreamProfileType::Anthropic,
-                base_url: "https://secondary.example.com/v1".to_string(),
-                use_proxy: false,
-                is_enabled: true,
-                is_default: false,
-                created_at: 1,
-                updated_at: 1,
-                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Anthropic)
-            })
+        let db =
+            TestDatabase::new_sqlite_default("admin-model-inherit-all-request-patch.sqlite").await;
+        let database = db.runtime();
+        (async {
+            Provider::create(&database, &provider_input(), &source_input())
+                .await
+                .expect("provider should seed");
+            let second_source = UpstreamSource::create(
+                &database,
+                &NewUpstreamSource {
+                    id: 8103,
+                    provider_id: 8101,
+                    profile_type: UpstreamProfileType::Anthropic,
+                    base_url: "https://secondary.example.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: false,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Anthropic)
+                },
+            )
+            .await
             .expect("second Source should seed");
-            let catalog = Arc::new(CatalogService::new(true).await);
+            let catalog = Arc::new(CatalogService::new(Arc::clone(&database), true).await);
             let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
             let service = ModelAdminService::new(Arc::clone(&runner));
             let model = service
@@ -781,36 +818,45 @@ mod tests {
                 )
                 .await
                 .expect("Model should be created in INHERIT_ALL mode");
-            let source_variant = RequestPatchVariantRepository::create(&RequestPatchVariantInput {
-                source_id: second_source.id,
-                model_id: None,
-                suffix: Some("fast".to_string()),
-                enabled: true,
-                expose_in_models: true,
-                rules: vec![RequestPatchRuleInput {
-                    placement: RequestPatchPlacement::Body,
-                    target: "/options/temperature".to_string(),
-                    operation: RequestPatchOperation::Set,
-                    value_json: Some(Some(serde_json::json!(0.2))),
-                    description: None,
-                }],
-            })
+            let source_variant = RequestPatchVariantRepository::create(
+                &database,
+                &RequestPatchVariantInput {
+                    source_id: second_source.id,
+                    model_id: None,
+                    suffix: Some("fast".to_string()),
+                    enabled: true,
+                    expose_in_models: true,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/options/temperature".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(serde_json::json!(0.2))),
+                        description: None,
+                    }],
+                },
+            )
+            .await
             .expect("Source suffix should be created");
-            RequestPatchVariantRepository::create(&RequestPatchVariantInput {
-                source_id: second_source.id,
-                model_id: Some(model.id),
-                suffix: Some("fast".to_string()),
-                enabled: true,
-                expose_in_models: false,
-                rules: Vec::new(),
-            })
+            RequestPatchVariantRepository::create(
+                &database,
+                &RequestPatchVariantInput {
+                    source_id: second_source.id,
+                    model_id: Some(model.id),
+                    suffix: Some("fast".to_string()),
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: Vec::new(),
+                },
+            )
+            .await
             .expect("empty Model suffix should inherit Source Rules");
 
             service
                 .replace_model_source_config(model.id, explicit_config())
                 .await
                 .expect("switching to the primary explicit Source should make S2 dormant");
-            RequestPatchVariantRepository::soft_delete(source_variant.variant.id)
+            RequestPatchVariantRepository::soft_delete(&database, source_variant.variant.id)
+                .await
                 .expect("dormant Source suffix may be removed");
 
             assert!(

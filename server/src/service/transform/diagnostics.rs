@@ -716,13 +716,6 @@ fn top_level_json_field_count(value: &Value) -> usize {
     }
 }
 
-pub(in crate::service::transform) fn json_value_log_summary(
-    value: &Value,
-) -> (usize, String, usize) {
-    let summary = TransformSafeSummary::from_json(value);
-    (summary.bytes, summary.sha256, summary.top_level_field_count)
-}
-
 thread_local! {
     static TRANSFORM_DIAGNOSTIC_STACK: RefCell<Vec<TransformDiagnosticCollector>> = const {
         RefCell::new(Vec::new())

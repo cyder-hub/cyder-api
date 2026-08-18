@@ -218,49 +218,51 @@ impl MetricsService {
         })
     }
 
-    pub fn provider_runtime_aggregates_in_range(
+    pub async fn provider_runtime_aggregates_in_range(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
         provider_id_filter: Option<i64>,
     ) -> Result<Vec<ProviderRuntimeAggregate>, BaseError> {
         if !self.config().enabled {
-            return self.provider_runtime_request_log_fallback(
-                start_time_ms,
-                end_time_ms,
-                provider_id_filter,
-                "metrics_disabled",
-            );
+            return self
+                .provider_runtime_request_log_fallback(
+                    start_time_ms,
+                    end_time_ms,
+                    provider_id_filter,
+                    "metrics_disabled",
+                )
+                .await;
         }
 
-        let rollup_aggregates = self.provider_runtime_rollup_aggregates(
-            start_time_ms,
-            end_time_ms,
-            provider_id_filter,
-        )?;
+        let rollup_aggregates = self
+            .provider_runtime_rollup_aggregates(start_time_ms, end_time_ms, provider_id_filter)
+            .await?;
         if !rollup_aggregates.is_empty() {
             return Ok(rollup_aggregates);
         }
 
         if self.config().request_log_query_fallback_enabled {
-            return self.provider_runtime_request_log_fallback(
-                start_time_ms,
-                end_time_ms,
-                provider_id_filter,
-                "rollup_empty",
-            );
+            return self
+                .provider_runtime_request_log_fallback(
+                    start_time_ms,
+                    end_time_ms,
+                    provider_id_filter,
+                    "rollup_empty",
+                )
+                .await;
         }
 
         Ok(Vec::new())
     }
 
-    fn provider_runtime_rollup_aggregates(
+    async fn provider_runtime_rollup_aggregates(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
         provider_id_filter: Option<i64>,
     ) -> Result<Vec<ProviderRuntimeAggregate>, BaseError> {
-        let providers = Provider::list_all()?;
+        let providers = Provider::list_all(self.database()).await?;
         let source_to_provider = providers
             .into_iter()
             .flat_map(|provider| {
@@ -274,8 +276,9 @@ impl MetricsService {
                 provider_id_filter.is_none_or(|filter| *provider_id == filter)
             })
             .collect::<HashMap<_, _>>();
-        let request_aggregates =
-            self.query_request_window_metrics(start_time_ms, end_time_ms, Some("source"), None)?;
+        let request_aggregates = self
+            .query_request_window_metrics(start_time_ms, end_time_ms, Some("source"), None)
+            .await?;
         let request_by_scope = request_aggregates
             .into_iter()
             .filter(|item| {
@@ -287,7 +290,15 @@ impl MetricsService {
             .map(|item| (item.scope_id.clone(), item))
             .collect::<HashMap<_, _>>();
         let mut status_by_scope = HashMap::<String, HashMap<i32, i64>>::new();
-        for row in list_http_status_rollup_minutes(start_time_ms, end_time_ms, "source", None)? {
+        for row in list_http_status_rollup_minutes(
+            self.database(),
+            start_time_ms,
+            end_time_ms,
+            "source",
+            None,
+        )
+        .await?
+        {
             if row
                 .scope_id
                 .parse::<i64>()
@@ -303,7 +314,15 @@ impl MetricsService {
                 .or_default() += row.count;
         }
         let mut cost_by_scope = HashMap::<String, BTreeMap<String, i64>>::new();
-        for row in list_cost_rollup_minutes(start_time_ms, end_time_ms, Some("source"), None)? {
+        for row in list_cost_rollup_minutes(
+            self.database(),
+            start_time_ms,
+            end_time_ms,
+            Some("source"),
+            None,
+        )
+        .await?
+        {
             if row
                 .scope_id
                 .parse::<i64>()
@@ -389,7 +408,7 @@ impl MetricsService {
         Ok(result)
     }
 
-    fn provider_runtime_request_log_fallback(
+    async fn provider_runtime_request_log_fallback(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -401,10 +420,12 @@ impl MetricsService {
         }
 
         let fallback = get_provider_runtime_aggregates_in_range(
+            self.database(),
             start_time_ms,
             end_time_ms,
             provider_id_filter,
-        )?;
+        )
+        .await?;
         if !fallback.is_empty() {
             let provider_filter = provider_id_filter
                 .map(|value| value.to_string())
@@ -426,18 +447,19 @@ impl MetricsService {
         window: ProviderRuntimeWindow,
         only_enabled: bool,
     ) -> Result<Vec<ProviderRuntimeItem>, BaseError> {
-        let providers = if only_enabled {
-            Provider::list_all_active()?
-        } else {
-            Provider::list_all()?
-        };
-        let models = Model::list_all()?;
-        let provider_api_keys = ProviderApiKeyRepository::list_all_summaries()?;
+        let mut providers = Provider::list_all(self.database()).await?;
+        if only_enabled {
+            providers.retain(|provider| provider.is_enabled);
+        }
+        let models = Model::list_all(self.database()).await?;
+        let provider_api_keys =
+            ProviderApiKeyRepository::list_all_summaries(self.database()).await?;
 
         let now = Utc::now().timestamp_millis();
         let start_time_ms = now - window.duration_ms();
-        let runtime_aggregates =
-            self.provider_runtime_aggregates_in_range(start_time_ms, now, None)?;
+        let runtime_aggregates = self
+            .provider_runtime_aggregates_in_range(start_time_ms, now, None)
+            .await?;
         let aggregate_map = runtime_aggregates
             .into_iter()
             .map(|item| (item.source_id, item))
@@ -577,11 +599,10 @@ impl MetricsService {
         let runtime_state_backend =
             runtime_backend_status_for_provider_items(app_state, items).await;
         apply_runtime_backend_status_to_items(items, &runtime_state_backend);
-        let providers = if only_enabled {
-            Provider::list_all_active()?
-        } else {
-            Provider::list_all()?
-        };
+        let mut providers = Provider::list_all(self.database()).await?;
+        if only_enabled {
+            providers.retain(|provider| provider.is_enabled);
+        }
         let mut summary = ProviderRuntimeSummary {
             total_provider_count: providers.len() as i64,
             enabled_provider_count: providers

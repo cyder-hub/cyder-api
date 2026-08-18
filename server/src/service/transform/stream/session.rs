@@ -380,11 +380,6 @@ impl SessionContext {
         self.diagnostics.snapshot().facts.last().cloned()
     }
 
-    #[cfg(test)]
-    pub(in crate::service::transform) fn last_error_is_some(&self) -> bool {
-        self.last_error.is_some()
-    }
-
     pub(in crate::service::transform) fn original_events(&self) -> &VecDeque<SseEvent> {
         &self.original_events
     }

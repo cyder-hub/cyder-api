@@ -77,7 +77,8 @@ async fn insert_model(
     let source_config = app_state
         .admin
         .model
-        .get_model_source_config_summary(created_model.id)?;
+        .get_model_source_config_summary(created_model.id)
+        .await?;
 
     Ok(HttpResult::new(ModelResponse {
         model: created_model,
@@ -131,8 +132,10 @@ async fn update_model(
     Ok(HttpResult::new(updated_model))
 }
 
-async fn list_models() -> Result<HttpResult<Vec<ModelResponse>>, BaseError> {
-    let models = Model::list_all()?; // Use list_all
+async fn list_models(
+    State(app_state): State<Arc<AppState>>,
+) -> Result<HttpResult<Vec<ModelResponse>>, BaseError> {
+    let models = Model::list_all(&app_state.database).await?;
     let owners = models
         .iter()
         .map(|model| ModelSourceSnapshotOwner {
@@ -142,7 +145,7 @@ async fn list_models() -> Result<HttpResult<Vec<ModelResponse>>, BaseError> {
             source_selection_mode: model.source_selection_mode.clone(),
         })
         .collect::<Vec<_>>();
-    let summaries = load_model_source_config_summaries(&owners)?;
+    let summaries = load_model_source_config_summaries(&app_state.database, &owners).await?;
     let response = models
         .into_iter()
         .map(|model| {
@@ -161,9 +164,11 @@ async fn list_models() -> Result<HttpResult<Vec<ModelResponse>>, BaseError> {
     Ok(HttpResult::new(response))
 }
 
-async fn list_model_summaries() -> Result<HttpResult<Vec<ModelSummaryResponse>>, BaseError> {
-    let summaries = Model::list_summary()?;
-    let models = Model::list_all()?;
+async fn list_model_summaries(
+    State(app_state): State<Arc<AppState>>,
+) -> Result<HttpResult<Vec<ModelSummaryResponse>>, BaseError> {
+    let summaries = Model::list_summary(&app_state.database).await?;
+    let models = Model::list_all(&app_state.database).await?;
     let owners = models
         .iter()
         .map(|model| ModelSourceSnapshotOwner {
@@ -173,7 +178,7 @@ async fn list_model_summaries() -> Result<HttpResult<Vec<ModelSummaryResponse>>,
             source_selection_mode: model.source_selection_mode.clone(),
         })
         .collect::<Vec<_>>();
-    let source_configs = load_model_source_config_summaries(&owners)?;
+    let source_configs = load_model_source_config_summaries(&app_state.database, &owners).await?;
     let response = summaries
         .into_iter()
         .map(|summary| {
@@ -193,30 +198,19 @@ async fn list_model_summaries() -> Result<HttpResult<Vec<ModelSummaryResponse>>,
 }
 
 async fn get_model_detail(
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ModelDetailResponse>, BaseError> {
-    let detail = Model::get_detail_by_id(id)?;
-    let source_config = app_state_source_config_summary(id)?;
+    let detail = Model::get_detail_by_id(&app_state.database, id).await?;
+    let source_config = app_state
+        .admin
+        .model
+        .get_model_source_config_summary(id)
+        .await?;
     Ok(HttpResult::new(ModelDetailResponse {
         detail,
         source_config,
     }))
-}
-
-fn app_state_source_config_summary(model_id: i64) -> Result<ModelSourceConfigSummary, BaseError> {
-    let model = Model::get_by_id(model_id)?;
-    let summaries = load_model_source_config_summaries(&[ModelSourceSnapshotOwner {
-        model_id: model.id,
-        provider_id: model.provider_id,
-        model_kind: model.model_kind,
-        source_selection_mode: model.source_selection_mode,
-    }])?;
-    summaries.get(&model.id).cloned().ok_or_else(|| {
-        BaseError::DatabaseFatal(Some(format!(
-            "source config summary for model {} was not loaded",
-            model.id
-        )))
-    })
 }
 
 async fn get_model_source_config(
@@ -224,7 +218,11 @@ async fn get_model_source_config(
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ModelSourceConfigSummary>, BaseError> {
     Ok(HttpResult::new(
-        app_state.admin.model.get_model_source_config_summary(id)?,
+        app_state
+            .admin
+            .model
+            .get_model_source_config_summary(id)
+            .await?,
     ))
 }
 
@@ -239,7 +237,11 @@ async fn put_model_source_config(
         .replace_model_source_config(id, source_config)
         .await?;
     Ok(HttpResult::new(
-        app_state.admin.model.get_model_source_config_summary(id)?,
+        app_state
+            .admin
+            .model
+            .get_model_source_config_summary(id)
+            .await?,
     ))
 }
 
@@ -248,7 +250,11 @@ async fn explain_model_source_config(
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ModelSourceExplain>, BaseError> {
     Ok(HttpResult::new(
-        app_state.admin.model.explain_model_source_config(id)?,
+        app_state
+            .admin
+            .model
+            .explain_model_source_config(id)
+            .await?,
     ))
 }
 
@@ -289,7 +295,7 @@ mod tests {
     use serde_json::{Value, json};
     use tower::util::ServiceExt;
 
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider, UpdateProviderData};
     use crate::database::upstream_source::{NewUpstreamSource, UpstreamSource};
@@ -298,8 +304,13 @@ mod tests {
 
     use super::create_model_controller_router;
 
-    fn seed_provider(provider_id: i64, source_id: i64) -> Provider {
+    async fn seed_provider(
+        database: &crate::database::runtime::DatabaseRuntime,
+        provider_id: i64,
+        source_id: i64,
+    ) -> Provider {
         Provider::create(
+            database,
             &NewProvider {
                 id: provider_id,
                 provider_key: format!("model-api-{provider_id}"),
@@ -327,11 +338,13 @@ mod tests {
                 updated_at: 1,
             },
         )
+        .await
         .expect("provider seed should succeed")
         .provider
     }
 
-    fn seed_source(
+    async fn seed_source(
+        database: &crate::database::runtime::DatabaseRuntime,
         provider_id: i64,
         source_id: i64,
         profile_type: UpstreamProfileType,
@@ -343,23 +356,27 @@ mod tests {
             UpstreamProfileType::OpenaiCompatible => (Some(true), Some(false), Some(false)),
             _ => (None, None, None),
         };
-        UpstreamSource::create(&NewUpstreamSource {
-            id: source_id,
-            provider_id,
-            profile_type,
-            base_url: format!("https://model-api-{source_id}.example.com/v1"),
-            use_proxy: false,
-            chat_completions_enabled,
-            chat_completions_path_override: None,
-            embeddings_enabled,
-            embeddings_path_override: None,
-            rerank_enabled,
-            rerank_path_override: None,
-            is_enabled: true,
-            is_default: false,
-            created_at: 1,
-            updated_at: 1,
-        })
+        UpstreamSource::create(
+            database,
+            &NewUpstreamSource {
+                id: source_id,
+                provider_id,
+                profile_type,
+                base_url: format!("https://model-api-{source_id}.example.com/v1"),
+                use_proxy: false,
+                chat_completions_enabled,
+                chat_completions_path_override: None,
+                embeddings_enabled,
+                embeddings_path_override: None,
+                rerank_enabled,
+                rerank_path_override: None,
+                is_enabled: true,
+                is_default: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
+        .await
         .expect("source seed should succeed")
     }
 
@@ -405,319 +422,332 @@ mod tests {
     #[tokio::test]
     async fn source_config_http_lifecycle_is_atomic_and_explain_survives_disabled_entities() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-model-source-config-http.sqlite");
+            TestDatabase::new_sqlite_default("controller-model-source-config-http.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let provider = seed_provider(24101, 24102);
-                let responses_source =
-                    seed_source(provider.id, 24103, UpstreamProfileType::Responses);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+        (async {
+            let provider = seed_provider(&test_db_context, 24101, 24102).await;
+            let responses_source = seed_source(
+                &test_db_context,
+                provider.id,
+                24103,
+                UpstreamProfileType::Responses,
+            )
+            .await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let create_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/model",
-                        json!({
-                            "provider_id": provider.id,
-                            "model_name": "configured-model",
-                            "real_model_name": null,
-                            "model_kind": "CHAT",
-                            "is_enabled": true,
-                            "source_config": {
-                                "source_selection_mode": "EXPLICIT",
-                                "bindings": [
-                                    {"source_id": 24102, "is_default": true},
-                                    {"source_id": responses_source.id, "is_default": false}
-                                ]
-                            }
-                        }),
-                    ),
-                )
-                .await;
-                let create_status = create_response.status();
-                let create_body = response_json(create_response).await;
-                assert_eq!(
-                    create_status,
-                    StatusCode::OK,
-                    "model create failed: {create_body}"
-                );
-                assert_eq!(create_body["code"], 0);
-                assert_eq!(
-                    create_body["data"]["source_config"]["source_selection_mode"],
-                    "EXPLICIT"
-                );
-                assert_eq!(
-                    create_body["data"]["source_config"]["declared_source_count"],
-                    2
-                );
-                assert_eq!(
-                    create_body["data"]["source_config"]["enabled_source_count"],
-                    2
-                );
-                assert_eq!(
-                    create_body["data"]["source_config"]["model_default_source_id"],
-                    24102
-                );
-                assert_eq!(
-                    create_body["data"]["source_config"]["bindings"]
-                        .as_array()
-                        .expect("bindings should be returned")
-                        .len(),
-                    2
-                );
-                let model_id = create_body["data"]["id"]
-                    .as_i64()
-                    .expect("created model id should exist");
+            let create_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/model",
+                    json!({
+                        "provider_id": provider.id,
+                        "model_name": "configured-model",
+                        "real_model_name": null,
+                        "model_kind": "CHAT",
+                        "is_enabled": true,
+                        "source_config": {
+                            "source_selection_mode": "EXPLICIT",
+                            "bindings": [
+                                {"source_id": 24102, "is_default": true},
+                                {"source_id": responses_source.id, "is_default": false}
+                            ]
+                        }
+                    }),
+                ),
+            )
+            .await;
+            let create_status = create_response.status();
+            let create_body = response_json(create_response).await;
+            assert_eq!(
+                create_status,
+                StatusCode::OK,
+                "model create failed: {create_body}"
+            );
+            assert_eq!(create_body["code"], 0);
+            assert_eq!(
+                create_body["data"]["source_config"]["source_selection_mode"],
+                "EXPLICIT"
+            );
+            assert_eq!(
+                create_body["data"]["source_config"]["declared_source_count"],
+                2
+            );
+            assert_eq!(
+                create_body["data"]["source_config"]["enabled_source_count"],
+                2
+            );
+            assert_eq!(
+                create_body["data"]["source_config"]["model_default_source_id"],
+                24102
+            );
+            assert_eq!(
+                create_body["data"]["source_config"]["bindings"]
+                    .as_array()
+                    .expect("bindings should be returned")
+                    .len(),
+                2
+            );
+            let model_id = create_body["data"]["id"]
+                .as_i64()
+                .expect("created model id should exist");
 
-                let immutable_kind_response = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/model/{model_id}"),
-                        json!({
-                            "model_name": "configured-model",
-                            "real_model_name": null,
-                            "model_kind": "EMBEDDING",
-                            "is_enabled": true,
-                            "cost_catalog_id": null
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(immutable_kind_response.status(), StatusCode::BAD_REQUEST);
-                let immutable_kind_body = response_json(immutable_kind_response).await;
-                assert_eq!(immutable_kind_body["code"], 1001);
-                assert_eq!(
-                    immutable_kind_body["msg"],
-                    "model_kind is immutable after model creation"
-                );
+            let immutable_kind_response = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/model/{model_id}"),
+                    json!({
+                        "model_name": "configured-model",
+                        "real_model_name": null,
+                        "model_kind": "EMBEDDING",
+                        "is_enabled": true,
+                        "cost_catalog_id": null
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(immutable_kind_response.status(), StatusCode::BAD_REQUEST);
+            let immutable_kind_body = response_json(immutable_kind_response).await;
+            assert_eq!(immutable_kind_body["code"], 1001);
+            assert_eq!(
+                immutable_kind_body["msg"],
+                "model_kind is immutable after model creation"
+            );
 
-                for uri in [
-                    format!("/model/{model_id}/source-config"),
-                    "/model/list".to_string(),
-                    "/model/summary/list".to_string(),
-                    format!("/model/{model_id}/detail"),
-                ] {
-                    let response = send(&app_state, empty_request(Method::GET, &uri)).await;
-                    assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
-                    let body = response_json(response).await;
-                    assert_eq!(body["code"], 0, "GET {uri}");
-                    let source_config = if uri.ends_with("/source-config") {
-                        &body["data"]
-                    } else if uri.ends_with("/list") || uri.ends_with("/summary/list") {
-                        &body["data"][0]
-                    } else {
-                        &body["data"]
-                    };
-                    let source_config = if uri.ends_with("/source-config") {
-                        source_config
-                    } else {
-                        &source_config["source_config"]
-                    };
-                    assert_eq!(source_config["source_selection_mode"], "EXPLICIT");
-                }
+            for uri in [
+                format!("/model/{model_id}/source-config"),
+                "/model/list".to_string(),
+                "/model/summary/list".to_string(),
+                format!("/model/{model_id}/detail"),
+            ] {
+                let response = send(&app_state, empty_request(Method::GET, &uri)).await;
+                assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+                let body = response_json(response).await;
+                assert_eq!(body["code"], 0, "GET {uri}");
+                let source_config = if uri.ends_with("/source-config") {
+                    &body["data"]
+                } else if uri.ends_with("/list") || uri.ends_with("/summary/list") {
+                    &body["data"][0]
+                } else {
+                    &body["data"]
+                };
+                let source_config = if uri.ends_with("/source-config") {
+                    source_config
+                } else {
+                    &source_config["source_config"]
+                };
+                assert_eq!(source_config["source_selection_mode"], "EXPLICIT");
+            }
 
-                let explain = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/model/{model_id}/source-config/explain"),
-                    ),
-                )
-                .await;
-                assert_eq!(explain.status(), StatusCode::OK);
-                let explain_body = response_json(explain).await;
-                assert_eq!(
-                    explain_body["data"]["protocols"].as_array().unwrap().len(),
-                    4
-                );
-                assert_eq!(explain_body["data"]["provider_enabled"], true);
-                assert_eq!(explain_body["data"]["model_enabled"], true);
-                let openai_protocol = explain_body["data"]["protocols"]
+            let explain = send(
+                &app_state,
+                empty_request(
+                    Method::GET,
+                    &format!("/model/{model_id}/source-config/explain"),
+                ),
+            )
+            .await;
+            assert_eq!(explain.status(), StatusCode::OK);
+            let explain_body = response_json(explain).await;
+            assert_eq!(
+                explain_body["data"]["protocols"].as_array().unwrap().len(),
+                4
+            );
+            assert_eq!(explain_body["data"]["provider_enabled"], true);
+            assert_eq!(explain_body["data"]["model_enabled"], true);
+            let openai_protocol = explain_body["data"]["protocols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
+                .expect("OpenAI explanation should exist");
+            assert_eq!(openai_protocol["selection_status"], "selected");
+            assert_eq!(openai_protocol["source_id"], 24102);
+            assert_eq!(openai_protocol["selection_reason"], "protocol_match");
+            assert!(
+                !openai_protocol["decision_trace"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                openai_protocol["generation_execution_status"],
+                "runtime_validation_required"
+            );
+
+            let replace_empty = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/model/{model_id}/source-config"),
+                    json!({
+                        "source_selection_mode": "EXPLICIT",
+                        "bindings": []
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(replace_empty.status(), StatusCode::OK);
+            let replace_empty_body = response_json(replace_empty).await;
+            assert_eq!(
+                replace_empty_body["data"]["warnings"],
+                json!(["explicit_empty"])
+            );
+
+            let empty_explain = send(
+                &app_state,
+                empty_request(
+                    Method::GET,
+                    &format!("/model/{model_id}/source-config/explain"),
+                ),
+            )
+            .await;
+            let empty_explain_body = response_json(empty_explain).await;
+            assert!(
+                empty_explain_body["data"]["protocols"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
-                    .expect("OpenAI explanation should exist");
-                assert_eq!(openai_protocol["selection_status"], "selected");
-                assert_eq!(openai_protocol["source_id"], 24102);
-                assert_eq!(openai_protocol["selection_reason"], "protocol_match");
-                assert!(
-                    !openai_protocol["decision_trace"]
-                        .as_array()
-                        .unwrap()
-                        .is_empty()
-                );
-                assert_eq!(
-                    openai_protocol["generation_execution_status"],
-                    "runtime_validation_required"
-                );
+                    .all(|protocol| protocol["selection_status"] == "unselectable")
+            );
 
-                let replace_empty = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/model/{model_id}/source-config"),
-                        json!({
-                            "source_selection_mode": "EXPLICIT",
-                            "bindings": []
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(replace_empty.status(), StatusCode::OK);
-                let replace_empty_body = response_json(replace_empty).await;
-                assert_eq!(
-                    replace_empty_body["data"]["warnings"],
-                    json!(["explicit_empty"])
-                );
-
-                let empty_explain = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/model/{model_id}/source-config/explain"),
-                    ),
-                )
-                .await;
-                let empty_explain_body = response_json(empty_explain).await;
-                assert!(
-                    empty_explain_body["data"]["protocols"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .all(|protocol| protocol["selection_status"] == "unselectable")
-                );
-
-                let core_update = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/model/{model_id}"),
-                        json!({
-                            "model_name": "configured-model-renamed",
-                            "real_model_name": null,
-                            "is_enabled": true,
-                            "cost_catalog_id": null
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(core_update.status(), StatusCode::OK);
-                let config_after_core_update = send(
-                    &app_state,
-                    empty_request(Method::GET, &format!("/model/{model_id}/source-config")),
-                )
-                .await;
-                let config_after_core_update_body = response_json(config_after_core_update).await;
-                assert_eq!(
-                    config_after_core_update_body["data"]["source_selection_mode"],
-                    "EXPLICIT"
-                );
-                assert_eq!(
-                    config_after_core_update_body["data"]["warnings"],
-                    json!(["explicit_empty"])
-                );
-
-                let restore_config = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/model/{model_id}/source-config"),
-                        json!({
-                            "source_selection_mode": "EXPLICIT",
-                            "bindings": [{"source_id": 24102, "is_default": true}]
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(restore_config.status(), StatusCode::OK);
-
-                Provider::update(
-                    provider.id,
-                    &UpdateProviderData {
-                        provider_key: None,
-                        name: None,
-                        is_enabled: Some(false),
-                        provider_api_key_mode: None,
-                    },
-                )
-                .expect("provider should be disabled");
-                Model::update(
-                    model_id,
-                    &crate::database::model::UpdateModelData {
-                        model_name: None,
-                        real_model_name: Some(None),
-                        is_enabled: Some(false),
-                        cost_catalog_id: Some(None),
-                    },
-                )
-                .expect("model should be disabled");
-
-                let disabled_explain = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/model/{model_id}/source-config/explain"),
-                    ),
-                )
-                .await;
-                assert_eq!(disabled_explain.status(), StatusCode::OK);
-                let disabled_explain_body = response_json(disabled_explain).await;
-                assert_eq!(disabled_explain_body["data"]["provider_enabled"], false);
-                assert_eq!(disabled_explain_body["data"]["model_enabled"], false);
-                assert_eq!(
-                    disabled_explain_body["data"]["protocols"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter(|protocol| protocol["selection_status"] == "selected")
-                        .count(),
-                    4
-                );
-            })
+            let core_update = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/model/{model_id}"),
+                    json!({
+                        "model_name": "configured-model-renamed",
+                        "real_model_name": null,
+                        "is_enabled": true,
+                        "cost_catalog_id": null
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(core_update.status(), StatusCode::OK);
+            let config_after_core_update = send(
+                &app_state,
+                empty_request(Method::GET, &format!("/model/{model_id}/source-config")),
+            )
+            .await;
+            let config_after_core_update_body = response_json(config_after_core_update).await;
+            assert_eq!(
+                config_after_core_update_body["data"]["source_selection_mode"],
+                "EXPLICIT"
+            );
+            assert_eq!(
+                config_after_core_update_body["data"]["warnings"],
+                json!(["explicit_empty"])
+            );
+
+            let restore_config = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/model/{model_id}/source-config"),
+                    json!({
+                        "source_selection_mode": "EXPLICIT",
+                        "bindings": [{"source_id": 24102, "is_default": true}]
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(restore_config.status(), StatusCode::OK);
+
+            Provider::update(
+                &test_db_context,
+                provider.id,
+                &UpdateProviderData {
+                    provider_key: None,
+                    name: None,
+                    is_enabled: Some(false),
+                    provider_api_key_mode: None,
+                },
+            )
+            .await
+            .expect("provider should be disabled");
+            Model::update(
+                &test_db_context,
+                model_id,
+                &crate::database::model::UpdateModelData {
+                    model_name: None,
+                    real_model_name: Some(None),
+                    is_enabled: Some(false),
+                    cost_catalog_id: Some(None),
+                },
+            )
+            .await
+            .expect("model should be disabled");
+
+            let disabled_explain = send(
+                &app_state,
+                empty_request(
+                    Method::GET,
+                    &format!("/model/{model_id}/source-config/explain"),
+                ),
+            )
+            .await;
+            assert_eq!(disabled_explain.status(), StatusCode::OK);
+            let disabled_explain_body = response_json(disabled_explain).await;
+            assert_eq!(disabled_explain_body["data"]["provider_enabled"], false);
+            assert_eq!(disabled_explain_body["data"]["model_enabled"], false);
+            assert_eq!(
+                disabled_explain_body["data"]["protocols"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|protocol| protocol["selection_status"] == "selected")
+                    .count(),
+                4
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn source_config_rejects_cross_provider_binding_without_creating_model() {
-        let test_db_context =
-            TestDbContext::new_sqlite("controller-model-source-config-ownership-http.sqlite");
+        let test_db_context = TestDatabase::new_sqlite_default(
+            "controller-model-source-config-ownership-http.sqlite",
+        )
+        .await;
 
-        test_db_context
-            .run_async(async {
-                let first_provider = seed_provider(24201, 24202);
-                let second_provider = seed_provider(24203, 24204);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/model",
-                        json!({
-                            "provider_id": first_provider.id,
-                            "model_name": "cross-provider-model",
-                            "real_model_name": null,
-                            "model_kind": "CHAT",
-                            "is_enabled": true,
-                            "source_config": {
-                                "source_selection_mode": "EXPLICIT",
-                                "bindings": [{"source_id": second_provider.id + 1, "is_default": true}]
-                            }
-                        }),
-                    ),
-                )
-                .await;
-                assert_ne!(response.status(), StatusCode::OK);
-                assert!(Model::get_by_name_and_provider_id(
+        (async {
+            let first_provider = seed_provider(&test_db_context, 24201, 24202).await;
+            let second_provider = seed_provider(&test_db_context, 24203, 24204).await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/model",
+                    json!({
+                        "provider_id": first_provider.id,
+                        "model_name": "cross-provider-model",
+                        "real_model_name": null,
+                        "model_kind": "CHAT",
+                        "is_enabled": true,
+                        "source_config": {
+                            "source_selection_mode": "EXPLICIT",
+                            "bindings": [{"source_id": second_provider.id + 1, "is_default": true}]
+                        }
+                    }),
+                ),
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::OK);
+            assert!(
+                Model::get_by_name_and_provider_id(
+                    &test_db_context,
                     "cross-provider-model",
                     first_provider.id
                 )
+                .await
                 .expect("model lookup should succeed")
-                .is_none());
-            })
-            .await;
+                .is_none()
+            );
+        })
+        .await;
     }
 }

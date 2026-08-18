@@ -4,13 +4,16 @@ use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{DbResult, get_connection};
+use super::{
+    DbResult,
+    runtime::{DatabaseRuntime, DatabaseWorkload, db_execute as async_db_execute},
+};
 use crate::controller::BaseError;
 use crate::database::model::Model;
 use crate::database::upstream_source::UpstreamSource;
+use crate::db_object;
 use crate::schema::enum_def::{RequestPatchOperation, RequestPatchPlacement};
 use crate::utils::ID_GENERATOR;
-use crate::{db_execute, db_object};
 
 const HARD_FORBIDDEN_HEADERS: &[&str] = &[
     "authorization",
@@ -465,40 +468,45 @@ fn validate_variant_shape(
     Ok(())
 }
 
-macro_rules! validate_owner {
+macro_rules! validate_owner_async {
     ($conn:expr, $source_id:expr, $model_id:expr) => {{
-        let source_row = upstream_source::table
+        let query = upstream_source::table
             .filter(upstream_source::dsl::id.eq($source_id))
             .select((
                 upstream_source::dsl::id,
                 upstream_source::dsl::provider_id,
                 upstream_source::dsl::deleted_at,
-            ))
-            .first::<(i64, i64, Option<i64>)>($conn)
-            .optional()
-            .map_err(|error| database_error("failed to validate request patch Source", error))?
-            .ok_or_else(|| {
-                BaseError::NotFound(Some(format!("upstream source {} not found", $source_id)))
-            })?;
+            ));
+        let source_row =
+            diesel_async::RunQueryDsl::first::<(i64, i64, Option<i64>)>(query, &mut *$conn)
+                .await
+                .optional()
+                .map_err(|error| database_error("failed to validate request patch Source", error))?
+                .ok_or_else(|| {
+                    BaseError::NotFound(Some(format!("upstream source {} not found", $source_id)))
+                })?;
         if source_row.2.is_some() {
             return Err(BaseError::NotFound(Some(format!(
                 "upstream source {} is deleted",
                 $source_id
             ))));
         }
-
         if let Some(model_id) = $model_id {
-            let model_row = model::table
-                .filter(model::dsl::id.eq(model_id))
-                .select((
-                    model::dsl::provider_id,
-                    model::dsl::deleted_at,
-                    model::dsl::source_selection_mode,
-                ))
-                .first::<(i64, Option<i64>, String)>($conn)
-                .optional()
-                .map_err(|error| database_error("failed to validate request patch Model", error))?
-                .ok_or_else(|| BaseError::NotFound(Some(format!("model {model_id} not found"))))?;
+            let query = model::table.filter(model::dsl::id.eq(model_id)).select((
+                model::dsl::provider_id,
+                model::dsl::deleted_at,
+                model::dsl::source_selection_mode,
+            ));
+            let model_row =
+                diesel_async::RunQueryDsl::first::<(i64, Option<i64>, String)>(query, &mut *$conn)
+                    .await
+                    .optional()
+                    .map_err(|error| {
+                        database_error("failed to validate request patch Model", error)
+                    })?
+                    .ok_or_else(|| {
+                        BaseError::NotFound(Some(format!("model {model_id} not found")))
+                    })?;
             if model_row.1.is_some() {
                 return Err(BaseError::NotFound(Some(format!(
                     "model {model_id} is deleted"
@@ -511,11 +519,12 @@ macro_rules! validate_owner {
                 ))));
             }
             if model_row.2 == "EXPLICIT" {
-                let bound = model_source_binding::table
+                let query = model_source_binding::table
                     .filter(model_source_binding::dsl::model_id.eq(model_id))
                     .filter(model_source_binding::dsl::source_id.eq($source_id))
-                    .select(model_source_binding::dsl::model_id)
-                    .first::<i64>($conn)
+                    .select(model_source_binding::dsl::model_id);
+                let bound = diesel_async::RunQueryDsl::first::<i64>(query, &mut *$conn)
+                    .await
                     .optional()
                     .map_err(|error| {
                         database_error("failed to validate explicit model Source binding", error)
@@ -536,25 +545,25 @@ macro_rules! validate_owner {
     }};
 }
 
-macro_rules! load_variant_snapshot {
+macro_rules! load_variant_snapshot_async {
     ($conn:expr, $variant_id:expr, $include_deleted:expr) => {{
         let mut variant_query = request_patch_variant::table.into_boxed();
         variant_query = variant_query.filter(request_patch_variant::dsl::id.eq($variant_id));
         if !$include_deleted {
             variant_query = variant_query.filter(request_patch_variant::dsl::deleted_at.is_null());
         }
-        let variant = variant_query
-            .select(RequestPatchVariantDb::as_select())
-            .first::<RequestPatchVariantDb>($conn)
+        let query = variant_query.select(RequestPatchVariantDb::as_select());
+        let variant = diesel_async::RunQueryDsl::first::<RequestPatchVariantDb>(query, &mut *$conn)
+            .await
+            .map(RequestPatchVariantDb::from_db)
             .map_err(|error| match error {
                 diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
                     "request patch Variant {} not found",
                     $variant_id
                 ))),
                 other => database_error("failed to load request patch Variant", other),
-            })?
-            .from_db();
-        let rules = request_patch_rule::table
+            })?;
+        let query = request_patch_rule::table
             .filter(request_patch_rule::dsl::variant_id.eq($variant_id))
             .filter(request_patch_rule::dsl::deleted_at.is_null())
             .order((
@@ -563,8 +572,9 @@ macro_rules! load_variant_snapshot {
                 request_patch_rule::dsl::created_at.asc(),
                 request_patch_rule::dsl::id.asc(),
             ))
-            .select(RequestPatchRuleDb::as_select())
-            .load::<RequestPatchRuleDb>($conn)
+            .select(RequestPatchRuleDb::as_select());
+        let rules = diesel_async::RunQueryDsl::load::<RequestPatchRuleDb>(query, &mut *$conn)
+            .await
             .map_err(|error| database_error("failed to load request patch Rules", error))?
             .into_iter()
             .map(RequestPatchRuleDb::from_db)
@@ -573,7 +583,7 @@ macro_rules! load_variant_snapshot {
     }};
 }
 
-macro_rules! load_existing_variants {
+macro_rules! load_existing_variants_async {
     ($conn:expr, $source_id:expr, $exclude_variant_id:expr) => {{
         let mut query = request_patch_variant::table
             .filter(request_patch_variant::dsl::source_id.eq($source_id))
@@ -582,59 +592,42 @@ macro_rules! load_existing_variants {
         if let Some(variant_id) = $exclude_variant_id {
             query = query.filter(request_patch_variant::dsl::id.ne(variant_id));
         }
-        let ids = query
+        let query = query
             .select(request_patch_variant::dsl::id)
-            .order(request_patch_variant::dsl::id.asc())
-            .load::<i64>($conn)
+            .order(request_patch_variant::dsl::id.asc());
+        let ids = diesel_async::RunQueryDsl::load::<i64>(query, &mut *$conn)
+            .await
             .map_err(|error| {
                 database_error("failed to load existing request patch Variants", error)
             })?;
-        ids.into_iter()
-            .map(|variant_id| load_variant_snapshot!($conn, variant_id, false))
-            .collect::<DbResult<Vec<_>>>()
+        let mut snapshots = Vec::with_capacity(ids.len());
+        for variant_id in ids {
+            snapshots.push(load_variant_snapshot_async!($conn, variant_id, false)?);
+        }
+        Ok::<Vec<VariantSnapshot>, BaseError>(snapshots)
     }};
 }
 
-macro_rules! load_variant_ids {
-    ($conn:expr, $query:expr, $include_deleted:expr) => {{
-        let ids = $query
-            .select(request_patch_variant::dsl::id)
-            .order((
-                request_patch_variant::dsl::suffix.asc(),
-                request_patch_variant::dsl::id.asc(),
-            ))
-            .load::<i64>($conn)
-            .map_err(|error| database_error("failed to list request patch Variants", error))?;
-        ids.into_iter()
-            .map(|variant_id| load_variant_snapshot!($conn, variant_id, $include_deleted))
-            .map(|result| {
-                result.map(|snapshot| RequestPatchVariantAggregate {
-                    variant: snapshot.variant,
-                    rules: snapshot.rules,
-                })
-            })
-            .collect::<DbResult<Vec<_>>>()
-    }};
-}
-
-macro_rules! load_executable_model_ids_for_source {
+macro_rules! load_executable_model_ids_for_source_async {
     ($conn:expr, $provider_id:expr, $source_id:expr) => {{
-        let model_rows = model::table
+        let query = model::table
             .filter(model::dsl::provider_id.eq($provider_id))
             .filter(model::dsl::deleted_at.is_null())
             .filter(model::dsl::is_enabled.eq(true))
-            .select((model::dsl::id, model::dsl::source_selection_mode))
-            .load::<(i64, String)>($conn)
+            .select((model::dsl::id, model::dsl::source_selection_mode));
+        let model_rows = diesel_async::RunQueryDsl::load::<(i64, String)>(query, &mut *$conn)
+            .await
             .map_err(|error| {
                 database_error(
                     "failed to load Models affected by request patch Source",
                     error,
                 )
             })?;
-        let explicitly_bound_model_ids = model_source_binding::table
+        let query = model_source_binding::table
             .filter(model_source_binding::dsl::source_id.eq($source_id))
-            .select(model_source_binding::dsl::model_id)
-            .load::<i64>($conn)
+            .select(model_source_binding::dsl::model_id);
+        let explicitly_bound_model_ids = diesel_async::RunQueryDsl::load::<i64>(query, &mut *$conn)
+            .await
             .map_err(|error| {
                 database_error("failed to load request patch Model Source bindings", error)
             })?;
@@ -656,16 +649,17 @@ macro_rules! load_executable_model_ids_for_source {
     }};
 }
 
-macro_rules! validate_source_post_state {
+macro_rules! validate_source_post_state_async {
     ($conn:expr, $source_id:expr, $snapshots:expr, $force_enabled:expr) => {{
-        let source_row = upstream_source::table
+        let query = upstream_source::table
             .filter(upstream_source::dsl::id.eq($source_id))
             .filter(upstream_source::dsl::deleted_at.is_null())
             .select((
                 upstream_source::dsl::provider_id,
                 upstream_source::dsl::is_enabled,
-            ))
-            .first::<(i64, bool)>($conn)
+            ));
+        let source_row = diesel_async::RunQueryDsl::first::<(i64, bool)>(query, &mut *$conn)
+            .await
             .optional()
             .map_err(|error| {
                 database_error("failed to load request patch Source lifecycle state", error)
@@ -674,28 +668,30 @@ macro_rules! validate_source_post_state {
                 BaseError::NotFound(Some(format!("upstream source {} not found", $source_id)))
             })?;
         if $force_enabled || source_row.1 {
-            let model_ids = load_executable_model_ids_for_source!($conn, source_row.0, $source_id)?;
+            let model_ids =
+                load_executable_model_ids_for_source_async!($conn, source_row.0, $source_id)?;
             validate_snapshot_combinations($snapshots, &model_ids)?;
         }
         Ok::<(), BaseError>(())
     }};
 }
 
-macro_rules! validate_model_suffix_inheritance {
+macro_rules! validate_model_suffix_inheritance_async {
     ($conn:expr, $input:expr, $suffix:expr, $normalized_rules:expr) => {{
         if $input.model_id.is_some()
             && $suffix.is_some()
             && $input.enabled
             && $normalized_rules.is_empty()
         {
-            let source_variant_id = request_patch_variant::table
+            let query = request_patch_variant::table
                 .filter(request_patch_variant::dsl::source_id.eq($input.source_id))
                 .filter(request_patch_variant::dsl::model_id.is_null())
                 .filter(request_patch_variant::dsl::suffix.eq($suffix.clone()))
                 .filter(request_patch_variant::dsl::enabled.eq(true))
                 .filter(request_patch_variant::dsl::deleted_at.is_null())
-                .select(request_patch_variant::dsl::id)
-                .first::<i64>($conn)
+                .select(request_patch_variant::dsl::id);
+            let source_variant_id = diesel_async::RunQueryDsl::first::<i64>(query, &mut *$conn)
+                .await
                 .optional()
                 .map_err(|error| {
                     database_error("failed to validate inherited suffix Variant", error)
@@ -706,12 +702,13 @@ macro_rules! validate_model_suffix_inheritance {
                         .to_string(),
                 )));
             };
-            let rule_count = request_patch_rule::table
+            let query = request_patch_rule::table
                 .filter(request_patch_rule::dsl::variant_id.eq(source_variant_id))
                 .filter(request_patch_rule::dsl::deleted_at.is_null())
                 .select(request_patch_rule::dsl::id)
-                .count()
-                .get_result::<i64>($conn)
+                .count();
+            let rule_count = diesel_async::RunQueryDsl::get_result::<i64>(query, &mut *$conn)
+                .await
                 .map_err(|error| {
                     database_error("failed to count inherited suffix Rules", error)
                 })?;
@@ -921,517 +918,714 @@ fn duplicate_variant_identity(
 pub struct RequestPatchVariantRepository;
 
 impl RequestPatchVariantRepository {
-    pub fn validate_source_reactivation(source_id: i64) -> DbResult<()> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let snapshots = load_existing_variants!(conn, source_id, None::<i64>)?;
-            validate_source_post_state!(conn, source_id, &snapshots, true)
-        })
-    }
-
-    pub fn validate_model_source_reactivation(model_id: i64, source_id: i64) -> DbResult<()> {
-        let model = Model::get_by_id(model_id)?;
-        let source = UpstreamSource::get_active_by_id_for_provider(source_id, model.provider_id)?;
-        if !source.is_enabled {
-            return Ok(());
-        }
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let snapshots = load_existing_variants!(conn, source_id, None::<i64>)?;
-            validate_snapshot_combinations(&snapshots, &[model_id])
-        })
-    }
-
-    pub fn preview(
-        input: &RequestPatchVariantInput,
-        exclude_variant_id: Option<i64>,
-    ) -> DbResult<RequestPatchVariantPreview> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            conn.transaction::<RequestPatchVariantPreview, BaseError, _>(|conn| {
-                validate_owner!(conn, input.source_id, input.model_id)?;
-                if let Some(variant_id) = exclude_variant_id {
-                    let owner = request_patch_variant::table
-                        .filter(request_patch_variant::dsl::id.eq(variant_id))
-                        .filter(request_patch_variant::dsl::deleted_at.is_null())
-                        .select((
-                            request_patch_variant::dsl::source_id,
-                            request_patch_variant::dsl::model_id,
-                        ))
-                        .first::<(i64, Option<i64>)>(conn)
-                        .optional()
-                        .map_err(|error| {
-                            database_error(
-                                "failed to load request patch Variant preview owner",
-                                error,
-                            )
-                        })?
-                        .ok_or_else(|| {
-                            BaseError::NotFound(Some(format!(
-                                "request patch Variant {variant_id} not found"
-                            )))
-                        })?;
-                    if owner != (input.source_id, input.model_id) {
-                        return Err(BaseError::ParamInvalid(Some(
-                            "request patch Variant preview owner cannot change".to_string(),
-                        )));
-                    }
-                }
-                for rule in &input.rules {
-                    let normalized_target = normalize_target(rule.placement, &rule.target)?;
-                    validate_reserved_target(rule.placement, &normalized_target)?;
-                }
-                let (suffix, normalized_rules) = if exclude_variant_id.is_some() {
-                    normalize_variant_input_for_replace(input)?
-                } else {
-                    normalize_variant_input(input)?
-                };
-                validate_model_suffix_inheritance!(conn, input, &suffix, &normalized_rules)?;
-                let candidate = RequestPatchVariant {
-                    id: exclude_variant_id.unwrap_or_default(),
-                    source_id: input.source_id,
-                    model_id: input.model_id,
-                    suffix: suffix.clone(),
-                    enabled: input.enabled,
-                    expose_in_models: input.expose_in_models,
-                    deleted_at: None,
-                    created_at: 0,
-                    updated_at: 0,
-                };
-                let existing = load_existing_variants!(conn, input.source_id, exclude_variant_id)?;
-                let duplicate_identity = duplicate_variant_identity(&candidate, &existing);
-                let conflicts =
-                    collect_cross_layer_conflicts(&candidate, &normalized_rules, &existing);
-                let provider_id = upstream_source::table
-                    .filter(upstream_source::dsl::id.eq(input.source_id))
-                    .select(upstream_source::dsl::provider_id)
-                    .first::<i64>(conn)
-                    .map_err(|error| {
-                        database_error("failed to load Source provider for Variant preview", error)
-                    })?;
-                let affected_model_count = if input.model_id.is_some() {
-                    1
-                } else {
-                    model::table
-                        .filter(model::dsl::provider_id.eq(provider_id))
-                        .filter(model::dsl::deleted_at.is_null())
-                        .select(model::dsl::id)
-                        .count()
-                        .get_result::<i64>(conn)
-                        .map_err(|error| database_error("failed to count affected Models", error))?
-                        as usize
-                };
-                let failure_reason = if duplicate_identity {
-                    Some(
-                        "an active request patch Variant already has this owner and suffix"
-                            .to_string(),
-                    )
-                } else if !conflicts.is_empty() {
-                    Some("BODY targets have an ancestor/descendant conflict".to_string())
-                } else {
-                    None
-                };
-                Ok(RequestPatchVariantPreview {
-                    suffix,
-                    rule_count: normalized_rules.len(),
-                    conflicts,
-                    affected_model_count,
-                    valid: failure_reason.is_none(),
-                    failure_reason,
+    #[cfg(test)]
+    pub(crate) async fn replace_rule_target_for_test(
+        database: &DatabaseRuntime,
+        rule_id: i64,
+        target: String,
+    ) -> DbResult<()> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(request_patch_rule::table.find(rule_id))
+                            .set(request_patch_rule::dsl::target.eq(target));
+                        diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "failed to replace test request patch rule target {rule_id}: {error}"
+                                )))
+                            })
+                    })
                 })
             })
-        })
+            .await
     }
 
-    pub fn create(input: &RequestPatchVariantInput) -> DbResult<RequestPatchVariantAggregate> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            conn.transaction::<RequestPatchVariantAggregate, BaseError, _>(|conn| {
-                validate_owner!(conn, input.source_id, input.model_id)?;
-                let variant_id = ID_GENERATOR.generate_id();
-                let (suffix, normalized_rules) = normalize_variant_input(input)?;
-                validate_model_suffix_inheritance!(conn, input, &suffix, &normalized_rules)?;
-                let candidate = RequestPatchVariant {
-                    id: variant_id,
-                    source_id: input.source_id,
-                    model_id: input.model_id,
-                    suffix: suffix.clone(),
-                    enabled: input.enabled,
-                    expose_in_models: input.expose_in_models,
-                    deleted_at: None,
-                    created_at: 0,
-                    updated_at: 0,
-                };
-                let existing = load_existing_variants!(conn, input.source_id, None::<i64>)?;
-                validate_cross_layer_conflicts(&candidate, &normalized_rules, &existing)?;
-                if candidate.model_id.is_none() {
-                    let mut post_state = existing.clone();
-                    post_state.push(candidate_snapshot(&candidate, &normalized_rules));
-                    validate_source_post_state!(conn, input.source_id, &post_state, false)?;
-                }
-
-                let now = Utc::now().timestamp_millis();
-                let new_variant = NewRequestPatchVariant {
-                    id: variant_id,
-                    source_id: input.source_id,
-                    model_id: input.model_id,
-                    suffix,
-                    enabled: input.enabled,
-                    expose_in_models: input.expose_in_models,
-                    created_at: now,
-                    updated_at: now,
-                };
-                diesel::insert_into(request_patch_variant::table)
-                    .values(NewRequestPatchVariantDb::to_db(&new_variant))
-                    .execute(conn)
-                    .map_err(|error| {
-                        map_write_error("failed to create request patch Variant", error)
-                    })?;
-                let rows = build_insert_rules(variant_id, &normalized_rules, now);
-                if !rows.is_empty() {
-                    diesel::insert_into(request_patch_rule::table)
-                        .values(
-                            rows.iter()
-                                .map(NewRequestPatchRuleDb::to_db)
-                                .collect::<Vec<_>>(),
-                        )
-                        .execute(conn)
-                        .map_err(|error| {
-                            map_write_error("failed to create request patch Rules", error)
-                        })?;
-                }
-                load_variant_snapshot!(conn, variant_id, false).map(|snapshot| {
-                    RequestPatchVariantAggregate {
-                        variant: snapshot.variant,
-                        rules: snapshot.rules,
-                    }
-                })
-            })
-        })
-    }
-
-    pub fn replace(
-        variant_id: i64,
-        input: &RequestPatchVariantInput,
-    ) -> DbResult<RequestPatchVariantAggregate> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            conn.transaction::<RequestPatchVariantAggregate, BaseError, _>(|conn| {
-                let current = request_patch_variant::table
-                    .filter(request_patch_variant::dsl::id.eq(variant_id))
-                    .filter(request_patch_variant::dsl::deleted_at.is_null())
-                    .select(RequestPatchVariantDb::as_select())
-                    .first::<RequestPatchVariantDb>(conn)
-                    .map(RequestPatchVariantDb::from_db)
-                    .map_err(|error| match error {
-                        diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                            "request patch Variant {variant_id} not found"
-                        ))),
-                        other => database_error("failed to load request patch Variant", other),
-                    })?;
-                if current.source_id != input.source_id || current.model_id != input.model_id {
-                    return Err(BaseError::ParamInvalid(Some(
-                        "request patch Variant owner cannot change".to_string(),
-                    )));
-                }
-                validate_owner!(conn, input.source_id, input.model_id)?;
-                let (suffix, normalized_rules) = normalize_variant_input_for_replace(input)?;
-                validate_model_suffix_inheritance!(conn, input, &suffix, &normalized_rules)?;
-                let candidate = RequestPatchVariant {
-                    id: variant_id,
-                    source_id: input.source_id,
-                    model_id: input.model_id,
-                    suffix: suffix.clone(),
-                    enabled: input.enabled,
-                    expose_in_models: input.expose_in_models,
-                    deleted_at: None,
-                    created_at: current.created_at,
-                    updated_at: 0,
-                };
-                let existing = load_existing_variants!(conn, input.source_id, Some(variant_id))?;
-                validate_cross_layer_conflicts(&candidate, &normalized_rules, &existing)?;
-                let deletes_empty_base = suffix.is_none() && normalized_rules.is_empty();
-                if candidate.model_id.is_none() {
-                    let mut post_state = existing.clone();
-                    if !deletes_empty_base {
-                        post_state.push(candidate_snapshot(&candidate, &normalized_rules));
-                    }
-                    validate_source_post_state!(conn, input.source_id, &post_state, false)?;
-                }
-
-                let now = Utc::now().timestamp_millis();
-                if deletes_empty_base {
-                    diesel::update(request_patch_variant::table.find(variant_id))
-                        .set((
-                            request_patch_variant::dsl::deleted_at.eq(Some(now)),
-                            request_patch_variant::dsl::enabled.eq(false),
-                            request_patch_variant::dsl::expose_in_models.eq(false),
-                            request_patch_variant::dsl::updated_at.eq(now),
-                        ))
-                        .execute(conn)
-                        .map_err(|error| {
-                            database_error("failed to delete empty base Variant", error)
-                        })?;
-                    diesel::update(
-                        request_patch_rule::table
-                            .filter(request_patch_rule::dsl::variant_id.eq(variant_id))
-                            .filter(request_patch_rule::dsl::deleted_at.is_null()),
-                    )
-                    .set(request_patch_rule::dsl::deleted_at.eq(Some(now)))
-                    .execute(conn)
-                    .map_err(|error| {
-                        database_error("failed to retire empty base Variant Rules", error)
-                    })?;
-                    return load_variant_snapshot!(conn, variant_id, true).map(|snapshot| {
-                        RequestPatchVariantAggregate {
-                            variant: snapshot.variant,
-                            rules: snapshot.rules,
-                        }
-                    });
-                }
-                diesel::update(request_patch_variant::table.find(variant_id))
-                    .set((
-                        request_patch_variant::dsl::suffix.eq(suffix),
-                        request_patch_variant::dsl::enabled.eq(input.enabled),
-                        request_patch_variant::dsl::expose_in_models.eq(input.expose_in_models),
-                        request_patch_variant::dsl::updated_at.eq(now),
-                    ))
-                    .execute(conn)
-                    .map_err(|error| {
-                        map_write_error("failed to replace request patch Variant", error)
-                    })?;
-                diesel::update(
-                    request_patch_rule::table
-                        .filter(request_patch_rule::dsl::variant_id.eq(variant_id))
-                        .filter(request_patch_rule::dsl::deleted_at.is_null()),
-                )
-                .set(request_patch_rule::dsl::deleted_at.eq(Some(now)))
-                .execute(conn)
-                .map_err(|error| {
-                    database_error("failed to retire old request patch Rules", error)
-                })?;
-                let rows = build_insert_rules(variant_id, &normalized_rules, now);
-                if !rows.is_empty() {
-                    diesel::insert_into(request_patch_rule::table)
-                        .values(
-                            rows.iter()
-                                .map(NewRequestPatchRuleDb::to_db)
-                                .collect::<Vec<_>>(),
-                        )
-                        .execute(conn)
-                        .map_err(|error| {
-                            map_write_error("failed to replace request patch Rules", error)
-                        })?;
-                }
-                load_variant_snapshot!(conn, variant_id, false).map(|snapshot| {
-                    RequestPatchVariantAggregate {
-                        variant: snapshot.variant,
-                        rules: snapshot.rules,
-                    }
-                })
-            })
-        })
-    }
-
-    pub fn get(variant_id: i64) -> DbResult<RequestPatchVariantAggregate> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            load_variant_snapshot!(conn, variant_id, false).map(|snapshot| {
-                RequestPatchVariantAggregate {
-                    variant: snapshot.variant,
-                    rules: snapshot.rules,
-                }
-            })
-        })
-    }
-
-    pub fn list_by_source(source_id: i64) -> DbResult<Vec<RequestPatchVariantAggregate>> {
-        Self::list_by_owner(source_id, None)
-    }
-
-    pub fn list_by_source_ids(source_ids: &[i64]) -> DbResult<Vec<RequestPatchVariantAggregate>> {
-        if source_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        Self::list_by_ids(source_ids, Some(&[]), false)
-    }
-
-    pub fn list_by_source_ids_including_deleted(
+    pub async fn list_by_source_ids(
+        database: &DatabaseRuntime,
         source_ids: &[i64],
     ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
         if source_ids.is_empty() {
             return Ok(Vec::new());
         }
-        Self::list_by_ids(source_ids, Some(&[]), true)
+        Self::list_by_ids(database, source_ids.to_vec(), Some(Vec::new()), false).await
     }
 
-    pub fn list_by_model_source(
-        model_id: i64,
-        source_id: i64,
+    pub async fn list_by_model_ids(
+        database: &DatabaseRuntime,
+        model_ids: &[i64],
     ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
-        Self::list_by_owner(source_id, Some(model_id))
-    }
-
-    pub fn list_by_model_ids(model_ids: &[i64]) -> DbResult<Vec<RequestPatchVariantAggregate>> {
         if model_ids.is_empty() {
             return Ok(Vec::new());
         }
-        Self::list_by_ids(&[], Some(model_ids), false)
+        Self::list_by_ids(database, Vec::new(), Some(model_ids.to_vec()), false).await
     }
 
-    pub fn list_by_model_ids_including_deleted(
-        model_ids: &[i64],
-    ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
-        Self::list_by_ids(&[], Some(model_ids), true)
-    }
-
-    fn list_by_owner(
-        source_id: i64,
-        model_id: Option<i64>,
-    ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let mut query = request_patch_variant::table
-                .filter(request_patch_variant::dsl::source_id.eq(source_id))
-                .filter(request_patch_variant::dsl::deleted_at.is_null())
-                .into_boxed();
-            query = match model_id {
-                Some(model_id) => query.filter(request_patch_variant::dsl::model_id.eq(model_id)),
-                None => query.filter(request_patch_variant::dsl::model_id.is_null()),
-            };
-            load_variant_ids!(conn, query, false)
-        })
-    }
-
-    fn list_by_ids(
-        source_ids: &[i64],
-        model_ids: Option<&[i64]>,
+    async fn list_by_ids(
+        database: &DatabaseRuntime,
+        source_ids: Vec<i64>,
+        model_ids: Option<Vec<i64>>,
         include_deleted: bool,
     ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let mut query = request_patch_variant::table.into_boxed();
-            if !source_ids.is_empty() {
-                query = query.filter(request_patch_variant::dsl::source_id.eq_any(source_ids));
-            }
-            if let Some(model_ids) = model_ids {
-                if model_ids.is_empty() {
-                    query = query.filter(request_patch_variant::dsl::model_id.is_null());
-                } else {
-                    query = query.filter(request_patch_variant::dsl::model_id.eq_any(model_ids));
-                }
-            }
-            if !include_deleted {
-                query = query.filter(request_patch_variant::dsl::deleted_at.is_null());
-            }
-            load_variant_ids!(conn, query, include_deleted)
-        })
-    }
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let mut query = request_patch_variant::table.into_boxed();
+                        if !source_ids.is_empty() {
+                            query = query
+                                .filter(request_patch_variant::dsl::source_id.eq_any(&source_ids));
+                        }
+                        if let Some(model_ids) = model_ids.as_ref() {
+                            if model_ids.is_empty() {
+                                query =
+                                    query.filter(request_patch_variant::dsl::model_id.is_null());
+                            } else {
+                                query = query
+                                    .filter(request_patch_variant::dsl::model_id.eq_any(model_ids));
+                            }
+                        }
+                        if !include_deleted {
+                            query = query.filter(request_patch_variant::dsl::deleted_at.is_null());
+                        }
+                        let query = query
+                            .order((
+                                request_patch_variant::dsl::suffix.asc(),
+                                request_patch_variant::dsl::id.asc(),
+                            ))
+                            .select(RequestPatchVariantDb::as_select());
+                        let variants: Vec<RequestPatchVariant> = diesel_async::RunQueryDsl::load::<
+                            RequestPatchVariantDb,
+                        >(
+                            query, &mut **conn
+                        )
+                        .await
+                        .map_err(|error| {
+                            database_error("failed to list request patch Variants", error)
+                        })?
+                        .into_iter()
+                        .map(RequestPatchVariantDb::from_db)
+                        .collect::<Vec<_>>();
+                        if variants.is_empty() {
+                            return Ok(Vec::new());
+                        }
 
-    pub fn soft_delete(variant_id: i64) -> DbResult<RequestPatchVariantAggregate> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            conn.transaction::<RequestPatchVariantAggregate, BaseError, _>(|conn| {
-                let current = load_variant_snapshot!(conn, variant_id, false)?;
-                if current.variant.model_id.is_none() {
-                    let post_state =
-                        load_existing_variants!(conn, current.variant.source_id, Some(variant_id))?;
-                    validate_source_post_state!(
-                        conn,
-                        current.variant.source_id,
-                        &post_state,
-                        false
-                    )?;
-                }
-                let now = Utc::now().timestamp_millis();
-                diesel::update(request_patch_variant::table.find(variant_id))
-                    .set((
-                        request_patch_variant::dsl::deleted_at.eq(Some(now)),
-                        request_patch_variant::dsl::enabled.eq(false),
-                        request_patch_variant::dsl::expose_in_models.eq(false),
-                        request_patch_variant::dsl::updated_at.eq(now),
-                    ))
-                    .execute(conn)
-                    .map_err(|error| {
-                        database_error("failed to delete request patch Variant", error)
-                    })?;
-                diesel::update(
-                    request_patch_rule::table
-                        .filter(request_patch_rule::dsl::variant_id.eq(variant_id))
-                        .filter(request_patch_rule::dsl::deleted_at.is_null()),
-                )
-                .set(request_patch_rule::dsl::deleted_at.eq(Some(now)))
-                .execute(conn)
-                .map_err(|error| database_error("failed to delete request patch Rules", error))?;
-                let mut deleted = current.variant;
-                deleted.deleted_at = Some(now);
-                deleted.enabled = false;
-                deleted.expose_in_models = false;
-                deleted.updated_at = now;
-                Ok(RequestPatchVariantAggregate {
-                    variant: deleted,
-                    rules: current.rules,
+                        let variant_ids = variants
+                            .iter()
+                            .map(|variant| variant.id)
+                            .collect::<Vec<_>>();
+                        let query = request_patch_rule::table
+                            .filter(request_patch_rule::dsl::variant_id.eq_any(&variant_ids))
+                            .filter(request_patch_rule::dsl::deleted_at.is_null())
+                            .order((
+                                request_patch_rule::dsl::variant_id.asc(),
+                                request_patch_rule::dsl::placement.asc(),
+                                request_patch_rule::dsl::target.asc(),
+                                request_patch_rule::dsl::created_at.asc(),
+                                request_patch_rule::dsl::id.asc(),
+                            ))
+                            .select(RequestPatchRuleDb::as_select());
+                        let rule_rows: Vec<RequestPatchRuleDb> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn)
+                                .await
+                                .map_err(|error| {
+                                    database_error("failed to load request patch Rules", error)
+                                })?;
+                        let mut rules_by_variant = std::collections::HashMap::new();
+                        for row in rule_rows {
+                            let rule = RequestPatchRuleDb::from_db(row);
+                            rules_by_variant
+                                .entry(rule.variant_id)
+                                .or_insert_with(Vec::new)
+                                .push(rule);
+                        }
+
+                        Ok(variants
+                            .into_iter()
+                            .map(|variant| {
+                                let rules =
+                                    rules_by_variant.remove(&variant.id).unwrap_or_default();
+                                RequestPatchVariantAggregate { variant, rules }
+                            })
+                            .collect())
+                    })
                 })
             })
-        })
+            .await
     }
 
-    pub fn soft_delete_by_source_id(source_id: i64) -> DbResult<usize> {
-        Self::soft_delete_by_filter(Some(source_id), None)
-    }
-
-    pub fn soft_delete_by_model_id(model_id: i64) -> DbResult<usize> {
-        Self::soft_delete_by_filter(None, Some(model_id))
-    }
-
-    fn soft_delete_by_filter(source_id: Option<i64>, model_id: Option<i64>) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            conn.transaction::<usize, BaseError, _>(|conn| {
-                let now = Utc::now().timestamp_millis();
-                let mut query = request_patch_variant::table
-                    .filter(request_patch_variant::dsl::deleted_at.is_null())
-                    .into_boxed();
-                if let Some(source_id) = source_id {
-                    query = query.filter(request_patch_variant::dsl::source_id.eq(source_id));
-                }
-                if let Some(model_id) = model_id {
-                    query = query.filter(request_patch_variant::dsl::model_id.eq(model_id));
-                }
-                let ids = query
-                    .select(request_patch_variant::dsl::id)
-                    .load::<i64>(conn)
-                    .map_err(|error| {
-                        database_error("failed to find request patch Variants to delete", error)
-                    })?;
-                if ids.is_empty() {
-                    return Ok(0);
-                }
-                diesel::update(
-                    request_patch_variant::table
-                        .filter(request_patch_variant::dsl::id.eq_any(&ids)),
-                )
-                .set((
-                    request_patch_variant::dsl::deleted_at.eq(Some(now)),
-                    request_patch_variant::dsl::enabled.eq(false),
-                    request_patch_variant::dsl::expose_in_models.eq(false),
-                    request_patch_variant::dsl::updated_at.eq(now),
-                ))
-                .execute(conn)
-                .map_err(|error| {
-                    database_error("failed to delete request patch Variants", error)
-                })?;
-                diesel::update(
-                    request_patch_rule::table
-                        .filter(request_patch_rule::dsl::variant_id.eq_any(&ids))
-                        .filter(request_patch_rule::dsl::deleted_at.is_null()),
-                )
-                .set(request_patch_rule::dsl::deleted_at.eq(Some(now)))
-                .execute(conn)
-                .map_err(|error| database_error("failed to delete request patch Rules", error))?;
-                Ok(ids.len())
+    pub async fn get(
+        database: &DatabaseRuntime,
+        variant_id: i64,
+    ) -> DbResult<RequestPatchVariantAggregate> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let snapshot = load_variant_snapshot_async!(conn, variant_id, false)?;
+                        Ok(RequestPatchVariantAggregate {
+                            variant: snapshot.variant,
+                            rules: snapshot.rules,
+                        })
+                    })
+                })
             })
-        })
+            .await
+    }
+
+    pub async fn list_by_source(
+        database: &DatabaseRuntime,
+        source_id: i64,
+    ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
+        Self::list_by_source_ids(database, &[source_id]).await
+    }
+
+    pub async fn list_by_model_source(
+        database: &DatabaseRuntime,
+        model_id: i64,
+        source_id: i64,
+    ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
+        Ok(Self::list_by_model_ids(database, &[model_id])
+            .await?
+            .into_iter()
+            .filter(|aggregate| aggregate.variant.source_id == source_id)
+            .collect())
+    }
+
+    pub async fn validate_source_reactivation(
+        database: &DatabaseRuntime,
+        source_id: i64,
+    ) -> DbResult<()> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let snapshots =
+                            load_existing_variants_async!(conn, source_id, None::<i64>)?;
+                        validate_source_post_state_async!(conn, source_id, &snapshots, true)
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn validate_model_source_reactivation(
+        database: &DatabaseRuntime,
+        model_id: i64,
+        source_id: i64,
+    ) -> DbResult<()> {
+        let model = Model::get_by_id(database, model_id).await?;
+        let source =
+            UpstreamSource::get_active_by_id_for_provider(database, source_id, model.provider_id)
+                .await?;
+        if !source.is_enabled {
+            return Ok(());
+        }
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let snapshots =
+                            load_existing_variants_async!(conn, source_id, None::<i64>)?;
+                        validate_snapshot_combinations(&snapshots, &[model_id])
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn preview(
+        database: &DatabaseRuntime,
+        input: &RequestPatchVariantInput,
+        exclude_variant_id: Option<i64>,
+    ) -> DbResult<RequestPatchVariantPreview> {
+        let input = input.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        use diesel_async::AsyncConnection;
+                        conn.transaction(async move |conn| {
+                            validate_owner_async!(conn, input.source_id, input.model_id)?;
+                            if let Some(variant_id) = exclude_variant_id {
+                                let query = request_patch_variant::table
+                                    .filter(request_patch_variant::dsl::id.eq(variant_id))
+                                    .filter(request_patch_variant::dsl::deleted_at.is_null())
+                                    .select((
+                                        request_patch_variant::dsl::source_id,
+                                        request_patch_variant::dsl::model_id,
+                                    ));
+                                let owner = diesel_async::RunQueryDsl::first::<(
+                                    i64,
+                                    Option<i64>,
+                                )>(query, &mut *conn)
+                                .await
+                                .optional()
+                                .map_err(|error| {
+                                    database_error(
+                                        "failed to load request patch Variant preview owner",
+                                        error,
+                                    )
+                                })?
+                                .ok_or_else(|| {
+                                    BaseError::NotFound(Some(format!(
+                                        "request patch Variant {variant_id} not found"
+                                    )))
+                                })?;
+                                if owner != (input.source_id, input.model_id) {
+                                    return Err(BaseError::ParamInvalid(Some(
+                                        "request patch Variant preview owner cannot change"
+                                            .to_string(),
+                                    )));
+                                }
+                            }
+                            for rule in &input.rules {
+                                let normalized_target =
+                                    normalize_target(rule.placement, &rule.target)?;
+                                validate_reserved_target(rule.placement, &normalized_target)?;
+                            }
+                            let (suffix, normalized_rules) = if exclude_variant_id.is_some() {
+                                normalize_variant_input_for_replace(&input)?
+                            } else {
+                                normalize_variant_input(&input)?
+                            };
+                            validate_model_suffix_inheritance_async!(
+                                conn,
+                                input,
+                                &suffix,
+                                &normalized_rules
+                            )?;
+                            let candidate = RequestPatchVariant {
+                                id: exclude_variant_id.unwrap_or_default(),
+                                source_id: input.source_id,
+                                model_id: input.model_id,
+                                suffix: suffix.clone(),
+                                enabled: input.enabled,
+                                expose_in_models: input.expose_in_models,
+                                deleted_at: None,
+                                created_at: 0,
+                                updated_at: 0,
+                            };
+                            let existing = load_existing_variants_async!(
+                                conn,
+                                input.source_id,
+                                exclude_variant_id
+                            )?;
+                            let duplicate_identity =
+                                duplicate_variant_identity(&candidate, &existing);
+                            let conflicts = collect_cross_layer_conflicts(
+                                &candidate,
+                                &normalized_rules,
+                                &existing,
+                            );
+                            let query = upstream_source::table
+                                .filter(upstream_source::dsl::id.eq(input.source_id))
+                                .select(upstream_source::dsl::provider_id);
+                            let provider_id = diesel_async::RunQueryDsl::first::<i64>(
+                                query,
+                                &mut *conn,
+                            )
+                            .await
+                            .map_err(|error| {
+                                database_error(
+                                    "failed to load Source provider for Variant preview",
+                                    error,
+                                )
+                            })?;
+                            let affected_model_count = if input.model_id.is_some() {
+                                1
+                            } else {
+                                let query = model::table
+                                    .filter(model::dsl::provider_id.eq(provider_id))
+                                    .filter(model::dsl::deleted_at.is_null())
+                                    .select(model::dsl::id)
+                                    .count();
+                                diesel_async::RunQueryDsl::get_result::<i64>(query, &mut *conn)
+                                    .await
+                                    .map_err(|error| {
+                                        database_error("failed to count affected Models", error)
+                                    })? as usize
+                            };
+                            let failure_reason = if duplicate_identity {
+                                Some(
+                                    "an active request patch Variant already has this owner and suffix"
+                                        .to_string(),
+                                )
+                            } else if !conflicts.is_empty() {
+                                Some(
+                                    "BODY targets have an ancestor/descendant conflict".to_string(),
+                                )
+                            } else {
+                                None
+                            };
+                            Ok(RequestPatchVariantPreview {
+                                suffix,
+                                rule_count: normalized_rules.len(),
+                                conflicts,
+                                affected_model_count,
+                                valid: failure_reason.is_none(),
+                                failure_reason,
+                            })
+                        })
+                        .await
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn create(
+        database: &DatabaseRuntime,
+        input: &RequestPatchVariantInput,
+    ) -> DbResult<RequestPatchVariantAggregate> {
+        let input = input.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        use diesel_async::AsyncConnection;
+                        conn.transaction(async move |conn| {
+                            validate_owner_async!(conn, input.source_id, input.model_id)?;
+                            let variant_id = ID_GENERATOR.generate_id();
+                            let (suffix, normalized_rules) = normalize_variant_input(&input)?;
+                            validate_model_suffix_inheritance_async!(
+                                conn,
+                                input,
+                                &suffix,
+                                &normalized_rules
+                            )?;
+                            let candidate = RequestPatchVariant {
+                                id: variant_id,
+                                source_id: input.source_id,
+                                model_id: input.model_id,
+                                suffix: suffix.clone(),
+                                enabled: input.enabled,
+                                expose_in_models: input.expose_in_models,
+                                deleted_at: None,
+                                created_at: 0,
+                                updated_at: 0,
+                            };
+                            let existing =
+                                load_existing_variants_async!(conn, input.source_id, None::<i64>)?;
+                            validate_cross_layer_conflicts(
+                                &candidate,
+                                &normalized_rules,
+                                &existing,
+                            )?;
+                            if candidate.model_id.is_none() {
+                                let mut post_state = existing.clone();
+                                post_state.push(candidate_snapshot(&candidate, &normalized_rules));
+                                validate_source_post_state_async!(
+                                    conn,
+                                    input.source_id,
+                                    &post_state,
+                                    false
+                                )?;
+                            }
+                            let now = Utc::now().timestamp_millis();
+                            let new_variant = NewRequestPatchVariant {
+                                id: variant_id,
+                                source_id: input.source_id,
+                                model_id: input.model_id,
+                                suffix,
+                                enabled: input.enabled,
+                                expose_in_models: input.expose_in_models,
+                                created_at: now,
+                                updated_at: now,
+                            };
+                            let query = diesel::insert_into(request_patch_variant::table)
+                                .values(NewRequestPatchVariantDb::to_db(&new_variant));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    map_write_error("failed to create request patch Variant", error)
+                                })?;
+                            for row in build_insert_rules(variant_id, &normalized_rules, now) {
+                                let query = diesel::insert_into(request_patch_rule::table)
+                                    .values(NewRequestPatchRuleDb::to_db(&row));
+                                diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                    .await
+                                    .map_err(|error| {
+                                        map_write_error(
+                                            "failed to create request patch Rules",
+                                            error,
+                                        )
+                                    })?;
+                            }
+                            let snapshot = load_variant_snapshot_async!(conn, variant_id, false)?;
+                            Ok(RequestPatchVariantAggregate {
+                                variant: snapshot.variant,
+                                rules: snapshot.rules,
+                            })
+                        })
+                        .await
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn replace(
+        database: &DatabaseRuntime,
+        variant_id: i64,
+        input: &RequestPatchVariantInput,
+    ) -> DbResult<RequestPatchVariantAggregate> {
+        let input = input.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        use diesel_async::AsyncConnection;
+                        conn.transaction(async move |conn| {
+                            let query = request_patch_variant::table
+                                .filter(request_patch_variant::dsl::id.eq(variant_id))
+                                .filter(request_patch_variant::dsl::deleted_at.is_null())
+                                .select(RequestPatchVariantDb::as_select());
+                            let current =
+                                diesel_async::RunQueryDsl::first::<RequestPatchVariantDb>(
+                                    query, &mut *conn,
+                                )
+                                .await
+                                .map(RequestPatchVariantDb::from_db)
+                                .map_err(|error| match error {
+                                    diesel::result::Error::NotFound => BaseError::NotFound(Some(
+                                        format!("request patch Variant {variant_id} not found"),
+                                    )),
+                                    other => database_error(
+                                        "failed to load request patch Variant",
+                                        other,
+                                    ),
+                                })?;
+                            if current.source_id != input.source_id
+                                || current.model_id != input.model_id
+                            {
+                                return Err(BaseError::ParamInvalid(Some(
+                                    "request patch Variant owner cannot change".to_string(),
+                                )));
+                            }
+                            validate_owner_async!(conn, input.source_id, input.model_id)?;
+                            let (suffix, normalized_rules) =
+                                normalize_variant_input_for_replace(&input)?;
+                            validate_model_suffix_inheritance_async!(
+                                conn,
+                                input,
+                                &suffix,
+                                &normalized_rules
+                            )?;
+                            let candidate = RequestPatchVariant {
+                                id: variant_id,
+                                source_id: input.source_id,
+                                model_id: input.model_id,
+                                suffix: suffix.clone(),
+                                enabled: input.enabled,
+                                expose_in_models: input.expose_in_models,
+                                deleted_at: None,
+                                created_at: current.created_at,
+                                updated_at: 0,
+                            };
+                            let existing = load_existing_variants_async!(
+                                conn,
+                                input.source_id,
+                                Some(variant_id)
+                            )?;
+                            validate_cross_layer_conflicts(
+                                &candidate,
+                                &normalized_rules,
+                                &existing,
+                            )?;
+                            let deletes_empty_base =
+                                suffix.is_none() && normalized_rules.is_empty();
+                            if candidate.model_id.is_none() {
+                                let mut post_state = existing.clone();
+                                if !deletes_empty_base {
+                                    post_state
+                                        .push(candidate_snapshot(&candidate, &normalized_rules));
+                                }
+                                validate_source_post_state_async!(
+                                    conn,
+                                    input.source_id,
+                                    &post_state,
+                                    false
+                                )?;
+                            }
+                            let now = Utc::now().timestamp_millis();
+                            if deletes_empty_base {
+                                let query =
+                                    diesel::update(request_patch_variant::table.find(variant_id))
+                                        .set((
+                                            request_patch_variant::dsl::deleted_at.eq(Some(now)),
+                                            request_patch_variant::dsl::enabled.eq(false),
+                                            request_patch_variant::dsl::expose_in_models.eq(false),
+                                            request_patch_variant::dsl::updated_at.eq(now),
+                                        ));
+                                diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                    .await
+                                    .map_err(|error| {
+                                        database_error("failed to delete empty base Variant", error)
+                                    })?;
+                                let query = diesel::update(
+                                    request_patch_rule::table
+                                        .filter(request_patch_rule::dsl::variant_id.eq(variant_id))
+                                        .filter(request_patch_rule::dsl::deleted_at.is_null()),
+                                )
+                                .set(request_patch_rule::dsl::deleted_at.eq(Some(now)));
+                                diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                    .await
+                                    .map_err(|error| {
+                                        database_error(
+                                            "failed to retire empty base Variant Rules",
+                                            error,
+                                        )
+                                    })?;
+                                let snapshot =
+                                    load_variant_snapshot_async!(conn, variant_id, true)?;
+                                return Ok(RequestPatchVariantAggregate {
+                                    variant: snapshot.variant,
+                                    rules: snapshot.rules,
+                                });
+                            }
+                            let query = diesel::update(
+                                request_patch_variant::table.find(variant_id),
+                            )
+                            .set((
+                                request_patch_variant::dsl::suffix.eq(suffix),
+                                request_patch_variant::dsl::enabled.eq(input.enabled),
+                                request_patch_variant::dsl::expose_in_models
+                                    .eq(input.expose_in_models),
+                                request_patch_variant::dsl::updated_at.eq(now),
+                            ));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    map_write_error(
+                                        "failed to replace request patch Variant",
+                                        error,
+                                    )
+                                })?;
+                            let query = diesel::update(
+                                request_patch_rule::table
+                                    .filter(request_patch_rule::dsl::variant_id.eq(variant_id))
+                                    .filter(request_patch_rule::dsl::deleted_at.is_null()),
+                            )
+                            .set(request_patch_rule::dsl::deleted_at.eq(Some(now)));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    database_error(
+                                        "failed to retire old request patch Rules",
+                                        error,
+                                    )
+                                })?;
+                            for row in build_insert_rules(variant_id, &normalized_rules, now) {
+                                let query = diesel::insert_into(request_patch_rule::table)
+                                    .values(NewRequestPatchRuleDb::to_db(&row));
+                                diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                    .await
+                                    .map_err(|error| {
+                                        map_write_error(
+                                            "failed to replace request patch Rules",
+                                            error,
+                                        )
+                                    })?;
+                            }
+                            let snapshot = load_variant_snapshot_async!(conn, variant_id, false)?;
+                            Ok(RequestPatchVariantAggregate {
+                                variant: snapshot.variant,
+                                rules: snapshot.rules,
+                            })
+                        })
+                        .await
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn soft_delete(
+        database: &DatabaseRuntime,
+        variant_id: i64,
+    ) -> DbResult<RequestPatchVariantAggregate> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        use diesel_async::AsyncConnection;
+                        conn.transaction(async move |conn| {
+                            let current = load_variant_snapshot_async!(conn, variant_id, false)?;
+                            if current.variant.model_id.is_none() {
+                                let post_state = load_existing_variants_async!(
+                                    conn,
+                                    current.variant.source_id,
+                                    Some(variant_id)
+                                )?;
+                                validate_source_post_state_async!(
+                                    conn,
+                                    current.variant.source_id,
+                                    &post_state,
+                                    false
+                                )?;
+                            }
+                            let now = Utc::now().timestamp_millis();
+                            let query = diesel::update(
+                                request_patch_variant::table.find(variant_id),
+                            )
+                            .set((
+                                request_patch_variant::dsl::deleted_at.eq(Some(now)),
+                                request_patch_variant::dsl::enabled.eq(false),
+                                request_patch_variant::dsl::expose_in_models.eq(false),
+                                request_patch_variant::dsl::updated_at.eq(now),
+                            ));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    database_error("failed to delete request patch Variant", error)
+                                })?;
+                            let query = diesel::update(
+                                request_patch_rule::table
+                                    .filter(request_patch_rule::dsl::variant_id.eq(variant_id))
+                                    .filter(request_patch_rule::dsl::deleted_at.is_null()),
+                            )
+                            .set(request_patch_rule::dsl::deleted_at.eq(Some(now)));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    database_error("failed to delete request patch Rules", error)
+                                })?;
+                            let mut deleted = current.variant;
+                            deleted.deleted_at = Some(now);
+                            deleted.enabled = false;
+                            deleted.expose_in_models = false;
+                            deleted.updated_at = now;
+                            Ok(RequestPatchVariantAggregate {
+                                variant: deleted,
+                                rules: current.rules,
+                            })
+                        })
+                        .await
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn list_by_source_ids_including_deleted(
+        database: &DatabaseRuntime,
+        source_ids: &[i64],
+    ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
+        if source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Self::list_by_ids(database, source_ids.to_vec(), Some(Vec::new()), true).await
+    }
+
+    pub async fn list_by_model_ids_including_deleted(
+        database: &DatabaseRuntime,
+        model_ids: &[i64],
+    ) -> DbResult<Vec<RequestPatchVariantAggregate>> {
+        Self::list_by_ids(database, Vec::new(), Some(model_ids.to_vec()), true).await
     }
 }
 
@@ -1507,7 +1701,7 @@ fn validate_active_variant_aggregates(aggregates: &[RequestPatchVariantAggregate
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::upstream_source::{
@@ -1934,8 +2128,13 @@ mod tests {
         assert!(validate_active_variant_aggregates(&[source_aggregate, model_aggregate]).is_ok());
     }
 
-    fn seed_provider(provider_id: i64, source_id: i64) -> (Provider, UpstreamSource) {
+    async fn seed_provider(
+        database: &DatabaseRuntime,
+        provider_id: i64,
+        source_id: i64,
+    ) -> (Provider, UpstreamSource) {
         let aggregate = Provider::create(
+            database,
             &NewProvider {
                 id: provider_id,
                 provider_key: format!("provider-{provider_id}"),
@@ -1958,6 +2157,7 @@ mod tests {
                 ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
+        .await
         .expect("provider seed should succeed");
         (aggregate.provider, aggregate.upstream_sources[0].clone())
     }
@@ -1991,403 +2191,497 @@ mod tests {
 
     #[tokio::test]
     async fn repository_writes_and_replaces_full_variant_atomically() {
-        let database = TestDbContext::new_sqlite("request-patch-variant-repository.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8101, 8111);
-                let created = RequestPatchVariantRepository::create(&variant_input(
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-variant-repository.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8101, 8111).await;
+            let created = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     None,
                     Some("fast"),
                     true,
                     true,
                     vec![body_set("/options/temperature", json!(0.2))],
-                ))
-                .expect("variant should be created");
-                assert_eq!(created.variant.source_id, source.id);
-                assert_eq!(created.variant.suffix.as_deref(), Some("fast"));
-                assert_eq!(created.rules.len(), 1);
+                ),
+            )
+            .await
+            .expect("variant should be created");
+            assert_eq!(created.variant.source_id, source.id);
+            assert_eq!(created.variant.suffix.as_deref(), Some("fast"));
+            assert_eq!(created.rules.len(), 1);
 
-                let replaced = RequestPatchVariantRepository::replace(
-                    created.variant.id,
-                    &variant_input(
-                        source.id,
-                        None,
-                        Some("fast"),
-                        true,
-                        false,
-                        vec![body_set("/options/top_p", json!(0.8))],
-                    ),
-                )
-                .expect("variant replacement should succeed");
-                assert_eq!(replaced.variant.id, created.variant.id);
-                assert!(!replaced.variant.expose_in_models);
-                assert_eq!(replaced.rules.len(), 1);
-                assert_eq!(replaced.rules[0].target, "/options/top_p");
-                assert_ne!(replaced.rules[0].id, created.rules[0].id);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn repository_rejects_invalid_write_without_partial_rows() {
-        let database = TestDbContext::new_sqlite("request-patch-variant-rollback.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8201, 8211);
-                let invalid = variant_input(
-                    source.id,
-                    None,
-                    None,
-                    true,
-                    false,
-                    vec![rule(
-                        RequestPatchPlacement::Header,
-                        "Authorization",
-                        RequestPatchOperation::Set,
-                        Some(json!("secret")),
-                    )],
-                );
-                assert!(RequestPatchVariantRepository::create(&invalid).is_err());
-                assert!(
-                    RequestPatchVariantRepository::list_by_source(source.id)
-                        .expect("variant list should succeed")
-                        .is_empty()
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn repository_enforces_owner_and_suffix_uniqueness_contracts() {
-        let database = TestDbContext::new_sqlite("request-patch-variant-owners.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8301, 8311);
-                let (_other_provider, other_source) = seed_provider(8302, 8312);
-                let model =
-                    Model::create(source.provider_id, "model-a", None, ModelKind::Chat, true)
-                        .expect("model should be created");
-                let first = RequestPatchVariantRepository::create(&variant_input(
-                    source.id,
-                    None,
-                    Some("fast"),
-                    true,
-                    true,
-                    vec![body_set("/options/temperature", json!(0.2))],
-                ))
-                .expect("first suffix should be created");
-                let duplicate = RequestPatchVariantRepository::create(&variant_input(
+            let replaced = RequestPatchVariantRepository::replace(
+                &database,
+                created.variant.id,
+                &variant_input(
                     source.id,
                     None,
                     Some("fast"),
                     true,
                     false,
                     vec![body_set("/options/top_p", json!(0.8))],
-                ));
-                assert!(duplicate.is_err());
+                ),
+            )
+            .await
+            .expect("variant replacement should succeed");
+            assert_eq!(replaced.variant.id, created.variant.id);
+            assert!(!replaced.variant.expose_in_models);
+            assert_eq!(replaced.rules.len(), 1);
+            assert_eq!(replaced.rules[0].target, "/options/top_p");
+            assert_ne!(replaced.rules[0].id, created.rules[0].id);
+        })
+        .await;
+    }
 
-                let cross_provider = RequestPatchVariantRepository::create(&variant_input(
+    #[tokio::test]
+    async fn repository_rejects_invalid_write_without_partial_rows() {
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-variant-rollback.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8201, 8211).await;
+            let invalid = variant_input(
+                source.id,
+                None,
+                None,
+                true,
+                false,
+                vec![rule(
+                    RequestPatchPlacement::Header,
+                    "Authorization",
+                    RequestPatchOperation::Set,
+                    Some(json!("secret")),
+                )],
+            );
+            assert!(
+                RequestPatchVariantRepository::create(&database, &invalid)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                RequestPatchVariantRepository::list_by_source(&database, source.id)
+                    .await
+                    .expect("variant list should succeed")
+                    .is_empty()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn repository_enforces_owner_and_suffix_uniqueness_contracts() {
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-variant-owners.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8301, 8311).await;
+            let (_other_provider, other_source) = seed_provider(&database, 8302, 8312).await;
+            let model = Model::create(
+                &database,
+                source.provider_id,
+                "model-a",
+                None,
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("model should be created");
+            let first = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
+                    source.id,
+                    None,
+                    Some("fast"),
+                    true,
+                    true,
+                    vec![body_set("/options/temperature", json!(0.2))],
+                ),
+            )
+            .await
+            .expect("first suffix should be created");
+            let duplicate = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
+                    source.id,
+                    None,
+                    Some("fast"),
+                    true,
+                    false,
+                    vec![body_set("/options/top_p", json!(0.8))],
+                ),
+            )
+            .await;
+            assert!(duplicate.is_err());
+
+            let cross_provider = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     other_source.id,
                     Some(model.id),
                     Some("cross"),
                     true,
                     false,
                     vec![body_set("/options/top_p", json!(0.8))],
-                ));
-                assert!(cross_provider.is_err());
-                assert_eq!(first.variant.source_id, source.id);
-            })
+                ),
+            )
             .await;
+            assert!(cross_provider.is_err());
+            assert_eq!(first.variant.source_id, source.id);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn repository_soft_delete_removes_active_rules_and_keeps_audit_rows() {
-        let database = TestDbContext::new_sqlite("request-patch-variant-soft-delete.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8401, 8411);
-                let created = RequestPatchVariantRepository::create(&variant_input(
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-variant-soft-delete.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8401, 8411).await;
+            let created = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     None,
                     Some("fast"),
                     true,
                     false,
                     vec![body_set("/options/temperature", json!(0.2))],
-                ))
-                .expect("variant should be created");
-                let deleted = RequestPatchVariantRepository::soft_delete(created.variant.id)
-                    .expect("variant should be deleted");
-                assert!(deleted.variant.deleted_at.is_some());
-                assert!(RequestPatchVariantRepository::get(created.variant.id).is_err());
-                assert!(
-                    RequestPatchVariantRepository::list_by_source(source.id)
-                        .expect("active list should succeed")
-                        .is_empty()
-                );
-                let historical =
-                    RequestPatchVariantRepository::list_by_source_ids_including_deleted(&[
-                        source.id
-                    ])
-                    .expect("historical list should succeed");
-                assert_eq!(historical.len(), 1);
-                assert!(historical[0].rules.is_empty());
-            })
-            .await;
+                ),
+            )
+            .await
+            .expect("variant should be created");
+            let deleted = RequestPatchVariantRepository::soft_delete(&database, created.variant.id)
+                .await
+                .expect("variant should be deleted");
+            assert!(deleted.variant.deleted_at.is_some());
+            assert!(
+                RequestPatchVariantRepository::get(&database, created.variant.id)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                RequestPatchVariantRepository::list_by_source(&database, source.id)
+                    .await
+                    .expect("active list should succeed")
+                    .is_empty()
+            );
+            let historical = RequestPatchVariantRepository::list_by_source_ids_including_deleted(
+                &database,
+                &[source.id],
+            )
+            .await
+            .expect("historical list should succeed");
+            assert_eq!(historical.len(), 1);
+            assert!(historical[0].rules.is_empty());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn replacing_empty_base_variant_retires_the_complete_aggregate() {
-        let database = TestDbContext::new_sqlite("request-patch-empty-base-delete.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8451, 8461);
-                let created = RequestPatchVariantRepository::create(&variant_input(
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-empty-base-delete.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8451, 8461).await;
+            let created = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     None,
                     None,
                     true,
                     false,
                     vec![body_set("/options/temperature", json!(0.2))],
-                ))
-                .expect("base Variant should be created");
+                ),
+            )
+            .await
+            .expect("base Variant should be created");
 
-                let deleted = RequestPatchVariantRepository::replace(
-                    created.variant.id,
-                    &variant_input(source.id, None, None, true, false, Vec::new()),
-                )
-                .expect("empty base replacement should delete the aggregate");
+            let deleted = RequestPatchVariantRepository::replace(
+                &database,
+                created.variant.id,
+                &variant_input(source.id, None, None, true, false, Vec::new()),
+            )
+            .await
+            .expect("empty base replacement should delete the aggregate");
 
-                assert!(deleted.variant.deleted_at.is_some());
-                assert!(deleted.rules.is_empty());
-                let historical =
-                    RequestPatchVariantRepository::list_by_source_ids_including_deleted(&[
-                        source.id
-                    ])
-                    .expect("historical aggregate should load");
-                assert_eq!(historical.len(), 1);
-                assert!(historical[0].rules.is_empty());
-            })
-            .await;
+            assert!(deleted.variant.deleted_at.is_some());
+            assert!(deleted.rules.is_empty());
+            let historical = RequestPatchVariantRepository::list_by_source_ids_including_deleted(
+                &database,
+                &[source.id],
+            )
+            .await
+            .expect("historical aggregate should load");
+            assert_eq!(historical.len(), 1);
+            assert!(historical[0].rules.is_empty());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn source_suffix_mutations_reject_post_states_that_break_model_inheritance() {
         let database =
-            TestDbContext::new_sqlite("request-patch-source-dependent-validation.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8471, 8481);
-                let model = Model::create(
-                    source.provider_id,
-                    "dependent-model",
-                    None,
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("model should be created");
-                let source_variant = RequestPatchVariantRepository::create(&variant_input(
+            TestDatabase::new_sqlite_default("request-patch-source-dependent-validation.sqlite")
+                .await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8471, 8481).await;
+            let model = Model::create(
+                &database,
+                source.provider_id,
+                "dependent-model",
+                None,
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("model should be created");
+            let source_variant = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     None,
                     Some("fast"),
                     true,
                     true,
                     vec![body_set("/options/temperature", json!(0.2))],
-                ))
-                .expect("source suffix should be created");
-                RequestPatchVariantRepository::create(&variant_input(
+                ),
+            )
+            .await
+            .expect("source suffix should be created");
+            RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     Some(model.id),
                     Some("fast"),
                     true,
                     false,
                     Vec::new(),
-                ))
-                .expect("empty Model suffix may inherit Source Rules");
+                ),
+            )
+            .await
+            .expect("empty Model suffix may inherit Source Rules");
 
-                for invalid_replacement in [
-                    variant_input(
-                        source.id,
-                        None,
-                        Some("fast"),
-                        false,
-                        false,
-                        vec![body_set("/options/temperature", json!(0.2))],
-                    ),
-                    variant_input(
-                        source.id,
-                        None,
-                        Some("slow"),
-                        true,
-                        true,
-                        vec![body_set("/options/temperature", json!(0.2))],
-                    ),
-                ] {
-                    assert!(
-                        RequestPatchVariantRepository::replace(
-                            source_variant.variant.id,
-                            &invalid_replacement,
-                        )
-                        .is_err()
-                    );
-                }
+            for invalid_replacement in [
+                variant_input(
+                    source.id,
+                    None,
+                    Some("fast"),
+                    false,
+                    false,
+                    vec![body_set("/options/temperature", json!(0.2))],
+                ),
+                variant_input(
+                    source.id,
+                    None,
+                    Some("slow"),
+                    true,
+                    true,
+                    vec![body_set("/options/temperature", json!(0.2))],
+                ),
+            ] {
                 assert!(
-                    RequestPatchVariantRepository::soft_delete(source_variant.variant.id).is_err()
+                    RequestPatchVariantRepository::replace(
+                        &database,
+                        source_variant.variant.id,
+                        &invalid_replacement,
+                    )
+                    .await
+                    .is_err()
                 );
+            }
+            assert!(
+                RequestPatchVariantRepository::soft_delete(&database, source_variant.variant.id)
+                    .await
+                    .is_err()
+            );
 
-                let persisted = RequestPatchVariantRepository::get(source_variant.variant.id)
+            let persisted =
+                RequestPatchVariantRepository::get(&database, source_variant.variant.id)
+                    .await
                     .expect("failed mutations must leave the Source suffix intact");
-                assert!(persisted.variant.enabled);
-                assert_eq!(persisted.variant.suffix.as_deref(), Some("fast"));
-            })
-            .await;
+            assert!(persisted.variant.enabled);
+            assert_eq!(persisted.variant.suffix.as_deref(), Some("fast"));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn source_reactivation_validates_model_variants_on_the_source() {
-        let database = TestDbContext::new_sqlite("request-patch-source-reactivation.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8491, 8501);
-                let model = Model::create(
-                    source.provider_id,
-                    "reactivated-model",
-                    None,
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("model should be created");
-                let source_variant = RequestPatchVariantRepository::create(&variant_input(
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-source-reactivation.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8491, 8501).await;
+            let model = Model::create(
+                &database,
+                source.provider_id,
+                "reactivated-model",
+                None,
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("model should be created");
+            let source_variant = RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     None,
                     Some("fast"),
                     true,
                     true,
                     vec![body_set("/options/temperature", json!(0.2))],
-                ))
-                .expect("source suffix should be created");
-                RequestPatchVariantRepository::create(&variant_input(
+                ),
+            )
+            .await
+            .expect("source suffix should be created");
+            RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     Some(model.id),
                     Some("fast"),
                     true,
                     false,
                     Vec::new(),
-                ))
-                .expect("empty Model suffix may inherit Source Rules");
-                UpstreamSource::update(
-                    source.id,
-                    source.provider_id,
-                    &UpdateUpstreamSourceData {
-                        base_url: None,
-                        use_proxy: None,
-                        is_enabled: Some(false),
-                        is_default: None,
-                        updated_at: 2,
-                        ..UpdateUpstreamSourceData::test_defaults()
-                    },
-                )
-                .expect("Source should be disabled");
-                RequestPatchVariantRepository::soft_delete(source_variant.variant.id)
-                    .expect("dormant Source suffix may be deleted while Source is disabled");
+                ),
+            )
+            .await
+            .expect("empty Model suffix may inherit Source Rules");
+            UpstreamSource::update(
+                &database,
+                source.id,
+                source.provider_id,
+                &UpdateUpstreamSourceData {
+                    base_url: None,
+                    use_proxy: None,
+                    is_enabled: Some(false),
+                    is_default: None,
+                    updated_at: 2,
+                    ..UpdateUpstreamSourceData::test_defaults()
+                },
+            )
+            .await
+            .expect("Source should be disabled");
+            RequestPatchVariantRepository::soft_delete(&database, source_variant.variant.id)
+                .await
+                .expect("dormant Source suffix may be deleted while Source is disabled");
 
-                assert!(
-                    RequestPatchVariantRepository::validate_source_reactivation(source.id).is_err(),
-                    "reactivation must reject the now-empty effective Model suffix"
-                );
-            })
-            .await;
+            assert!(
+                RequestPatchVariantRepository::validate_source_reactivation(&database, source.id)
+                    .await
+                    .is_err(),
+                "reactivation must reject the now-empty effective Model suffix"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn repository_preview_reports_conflicts_and_bounded_model_impact_without_writing() {
-        let database = TestDbContext::new_sqlite("request-patch-variant-preview.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8501, 8511);
-                let model = Model::create(
-                    source.provider_id,
-                    "preview-model",
-                    None,
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("model should be created");
-                RequestPatchVariantRepository::create(&variant_input(
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-variant-preview.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8501, 8511).await;
+            let model = Model::create(
+                &database,
+                source.provider_id,
+                "preview-model",
+                None,
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("model should be created");
+            RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     None,
                     Some("fast"),
                     true,
                     true,
                     vec![body_set("/options", json!({"temperature": 0.2}))],
-                ))
-                .expect("source Variant should be created");
+                ),
+            )
+            .await
+            .expect("source Variant should be created");
 
-                let preview = RequestPatchVariantRepository::preview(
-                    &variant_input(
-                        source.id,
-                        Some(model.id),
-                        Some("fast"),
-                        true,
-                        false,
-                        vec![body_set("/options/temperature", json!(0.8))],
-                    ),
-                    None,
-                )
-                .expect("preview should return conflicts as data");
-                assert!(!preview.valid);
-                assert_eq!(preview.conflicts.len(), 1);
-                assert_eq!(
-                    preview.conflicts[0].existing_suffix.as_deref(),
-                    Some("fast")
-                );
-                assert_eq!(preview.affected_model_count, 1);
-                assert!(preview.failure_reason.is_some());
-                assert!(
-                    RequestPatchVariantRepository::list_by_model_source(model.id, source.id)
-                        .expect("model Variants should load")
-                        .is_empty()
-                );
-            })
-            .await;
+            let preview = RequestPatchVariantRepository::preview(
+                &database,
+                &variant_input(
+                    source.id,
+                    Some(model.id),
+                    Some("fast"),
+                    true,
+                    false,
+                    vec![body_set("/options/temperature", json!(0.8))],
+                ),
+                None,
+            )
+            .await
+            .expect("preview should return conflicts as data");
+            assert!(!preview.valid);
+            assert_eq!(preview.conflicts.len(), 1);
+            assert_eq!(
+                preview.conflicts[0].existing_suffix.as_deref(),
+                Some("fast")
+            );
+            assert_eq!(preview.affected_model_count, 1);
+            assert!(preview.failure_reason.is_some());
+            assert!(
+                RequestPatchVariantRepository::list_by_model_source(&database, model.id, source.id)
+                    .await
+                    .expect("model Variants should load")
+                    .is_empty()
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn repository_preview_rejects_duplicate_variant_identity() {
-        let database = TestDbContext::new_sqlite("request-patch-preview-identity.sqlite");
-        database
-            .run_async(async {
-                let (_provider, source) = seed_provider(8521, 8531);
-                RequestPatchVariantRepository::create(&variant_input(
+        let database =
+            TestDatabase::new_sqlite_default("request-patch-preview-identity.sqlite").await;
+        (async {
+            let (_provider, source) = seed_provider(&database, 8521, 8531).await;
+            RequestPatchVariantRepository::create(
+                &database,
+                &variant_input(
                     source.id,
                     None,
                     Some("fast"),
                     true,
                     true,
                     vec![body_set("/options/temperature", json!(0.2))],
-                ))
-                .expect("existing suffix should be created");
+                ),
+            )
+            .await
+            .expect("existing suffix should be created");
 
-                let preview = RequestPatchVariantRepository::preview(
-                    &variant_input(
-                        source.id,
-                        None,
-                        Some("fast"),
-                        true,
-                        false,
-                        vec![body_set("/options/top_p", json!(0.8))],
-                    ),
+            let preview = RequestPatchVariantRepository::preview(
+                &database,
+                &variant_input(
+                    source.id,
                     None,
-                )
-                .expect("duplicate identity should be reported as Preview data");
-                assert!(!preview.valid);
-                assert!(
-                    preview
-                        .failure_reason
-                        .as_deref()
-                        .is_some_and(|reason| reason.contains("owner and suffix"))
-                );
-            })
-            .await;
+                    Some("fast"),
+                    true,
+                    false,
+                    vec![body_set("/options/top_p", json!(0.8))],
+                ),
+                None,
+            )
+            .await
+            .expect("duplicate identity should be reported as Preview data");
+            assert!(!preview.valid);
+            assert!(
+                preview
+                    .failure_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("owner and suffix"))
+            );
+        })
+        .await;
     }
 }

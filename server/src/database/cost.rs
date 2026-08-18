@@ -2,10 +2,13 @@ use chrono::Utc;
 use diesel::prelude::*;
 use serde::Deserialize;
 
-use super::{DbResult, get_connection};
+use super::{
+    DbResult,
+    runtime::{DatabaseRuntime, DatabaseWorkload, db_execute as async_db_execute},
+};
 use crate::controller::BaseError;
+use crate::db_object;
 use crate::utils::ID_GENERATOR;
-use crate::{db_execute, db_object};
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug, Clone, serde::Serialize)]
@@ -29,7 +32,7 @@ db_object! {
         pub updated_at: i64,
     }
 
-    #[derive(AsChangeset, Deserialize, Debug, Default)]
+    #[derive(AsChangeset, Deserialize, Debug, Default, Clone)]
     #[diesel(table_name = cost_catalogs)]
     pub struct UpdateCostCatalogData {
         pub name: Option<String>,
@@ -71,7 +74,7 @@ db_object! {
         pub updated_at: i64,
     }
 
-    #[derive(AsChangeset, Deserialize, Debug, Default)]
+    #[derive(AsChangeset, Deserialize, Debug, Default, Clone)]
     #[diesel(table_name = cost_catalog_versions)]
     pub struct UpdateCostCatalogVersionData {
         pub currency: Option<String>,
@@ -118,7 +121,7 @@ db_object! {
         pub updated_at: i64,
     }
 
-    #[derive(AsChangeset, Deserialize, Debug, Default)]
+    #[derive(AsChangeset, Deserialize, Debug, Default, Clone)]
     #[diesel(table_name = cost_components)]
     pub struct UpdateCostComponentData {
         pub meter_key: Option<String>,
@@ -132,13 +135,13 @@ db_object! {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct NewCostCatalogPayload {
     pub name: String,
     pub description: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct NewCostCatalogVersionPayload {
     pub catalog_id: i64,
     pub version: String,
@@ -149,7 +152,7 @@ pub struct NewCostCatalogVersionPayload {
     pub is_enabled: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct NewCostComponentPayload {
     pub catalog_version_id: i64,
     pub meter_key: String,
@@ -203,79 +206,93 @@ pub struct CostCatalogVersionWriteResult {
     pub reconciled_versions: Vec<CostCatalogVersion>,
 }
 
-macro_rules! reconcile_enabled_version_conflicts_in_tx {
+macro_rules! reconcile_enabled_version_conflicts_async_in_tx {
     ($conn:ident, $active_version:expr, $now:expr, $context:expr) => {{
         let active_version = $active_version;
         if !active_version.is_enabled || active_version.is_archived {
             Ok::<Vec<CostCatalogVersion>, BaseError>(Vec::new())
         } else {
-            let existing_enabled_versions = cost_catalog_versions::table
+            let query = cost_catalog_versions::table
                 .filter(
                     cost_catalog_versions::dsl::catalog_id
                         .eq(active_version.catalog_id)
                         .and(cost_catalog_versions::dsl::is_enabled.eq(true)),
                 )
-                .select(CostCatalogVersionDb::as_select())
-                .load::<CostCatalogVersionDb>($conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load enabled cost catalog versions {}: {}",
-                        $context, e
-                    )))
-                })?
-                .into_iter()
-                .map(CostCatalogVersionDb::from_db)
-                .collect::<Vec<_>>();
+                .select(CostCatalogVersionDb::as_select());
+            let existing_enabled_versions =
+                diesel_async::RunQueryDsl::load::<CostCatalogVersionDb>(query, &mut *$conn)
+                    .await
+                    .map_err(|error| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to load enabled cost catalog versions {}: {}",
+                            $context, error
+                        )))
+                    })?
+                    .into_iter()
+                    .map(CostCatalogVersionDb::from_db)
+                    .collect::<Vec<_>>();
             let mut reconciled_versions = Vec::new();
-
             for resolution in
                 reconcile_enabled_version_conflicts(&existing_enabled_versions, active_version)
             {
                 let reconciled = match resolution {
                     EnabledVersionResolution::Disable { version_id } => {
-                        diesel::update(cost_catalog_versions::table.find(version_id))
+                        let query = diesel::update(cost_catalog_versions::table.find(version_id))
                             .set((
                                 cost_catalog_versions::dsl::is_enabled.eq(false),
                                 cost_catalog_versions::dsl::updated_at.eq($now),
                             ))
-                            .returning(CostCatalogVersionDb::as_returning())
-                            .get_result::<CostCatalogVersionDb>($conn)
-                            .map_err(|e| {
-                                BaseError::DatabaseFatal(Some(format!(
-                                    "Failed to disable conflicting cost catalog version {} {}: {}",
-                                    version_id, $context, e
-                                )))
-                            })?
-                            .from_db()
+                            .returning(CostCatalogVersionDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<CostCatalogVersionDb>(
+                            query,
+                            &mut *$conn,
+                        )
+                        .await
+                        .map(CostCatalogVersionDb::from_db)
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to disable conflicting cost catalog version {} {}: {}",
+                                version_id, $context, error
+                            )))
+                        })?
                     }
                     EnabledVersionResolution::Truncate {
                         version_id,
                         effective_until,
-                    } => diesel::update(cost_catalog_versions::table.find(version_id))
-                        .set((
-                            cost_catalog_versions::dsl::effective_until.eq(Some(effective_until)),
-                            cost_catalog_versions::dsl::updated_at.eq($now),
-                        ))
-                        .returning(CostCatalogVersionDb::as_returning())
-                        .get_result::<CostCatalogVersionDb>($conn)
-                        .map_err(|e| {
+                    } => {
+                        let query = diesel::update(cost_catalog_versions::table.find(version_id))
+                            .set((
+                                cost_catalog_versions::dsl::effective_until
+                                    .eq(Some(effective_until)),
+                                cost_catalog_versions::dsl::updated_at.eq($now),
+                            ))
+                            .returning(CostCatalogVersionDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<CostCatalogVersionDb>(
+                            query,
+                            &mut *$conn,
+                        )
+                        .await
+                        .map(CostCatalogVersionDb::from_db)
+                        .map_err(|error| {
                             BaseError::DatabaseFatal(Some(format!(
                                 "Failed to truncate conflicting cost catalog version {} {}: {}",
-                                version_id, $context, e
+                                version_id, $context, error
                             )))
                         })?
-                        .from_db(),
+                    }
                 };
                 reconciled_versions.push(reconciled);
             }
-
             Ok::<Vec<CostCatalogVersion>, BaseError>(reconciled_versions)
         }
     }};
 }
 
 impl CostCatalog {
-    pub fn create(data: &NewCostCatalogPayload) -> DbResult<CostCatalog> {
+    pub async fn create(
+        database: &DatabaseRuntime,
+        data: &NewCostCatalogPayload,
+    ) -> DbResult<CostCatalog> {
         let now = Utc::now().timestamp_millis();
         let new_catalog = NewCostCatalog {
             id: ID_GENERATOR.generate_id(),
@@ -284,437 +301,592 @@ impl CostCatalog {
             created_at: now,
             updated_at: now,
         };
-
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let inserted = diesel::insert_into(cost_catalogs::table)
-                .values(NewCostCatalogDb::to_db(&new_catalog))
-                .returning(CostCatalogDb::as_returning())
-                .get_result::<CostCatalogDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to create cost catalog: {}", e)))
-                })?;
-            Ok(inserted.from_db())
-        })
-    }
-
-    pub fn get_by_id(id_value: i64) -> DbResult<CostCatalog> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let catalog = cost_catalogs::table
-                .filter(
-                    cost_catalogs::dsl::id
-                        .eq(id_value)
-                        .and(cost_catalogs::dsl::deleted_at.is_null()),
-                )
-                .select(CostCatalogDb::as_select())
-                .first::<CostCatalogDb>(conn)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(format!(
-                        "Cost catalog with id {} not found or deleted",
-                        id_value
-                    ))),
-                    _ => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to get cost catalog {}: {}",
-                        id_value, e
-                    ))),
-                })?;
-            Ok(catalog.from_db())
-        })
-    }
-
-    pub fn get_by_name(name_value: &str) -> DbResult<Option<CostCatalog>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let row = cost_catalogs::table
-                .filter(
-                    cost_catalogs::dsl::name
-                        .eq(name_value)
-                        .and(cost_catalogs::dsl::deleted_at.is_null()),
-                )
-                .select(CostCatalogDb::as_select())
-                .first::<CostCatalogDb>(conn)
-                .optional()
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to get cost catalog by name {}: {}",
-                        name_value, e
-                    )))
-                })?;
-            Ok(row.map(|catalog| catalog.from_db()))
-        })
-    }
-
-    pub fn update(id_value: i64, data: &UpdateCostCatalogData) -> DbResult<CostCatalog> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            let updated = diesel::update(cost_catalogs::table.find(id_value))
-                .set((
-                    UpdateCostCatalogDataDb::to_db(data),
-                    cost_catalogs::dsl::updated_at.eq(now),
-                ))
-                .returning(CostCatalogDb::as_returning())
-                .get_result::<CostCatalogDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to update cost catalog {}: {}",
-                        id_value, e
-                    )))
-                })?;
-            Ok(updated.from_db())
-        })
-    }
-
-    pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            diesel::update(cost_catalogs::table.find(id_value))
-                .set((
-                    cost_catalogs::dsl::deleted_at.eq(now),
-                    cost_catalogs::dsl::updated_at.eq(now),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete cost catalog {}: {}",
-                        id_value, e
-                    )))
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::insert_into(cost_catalogs::table)
+                            .values(NewCostCatalogDb::to_db(&new_catalog))
+                            .returning(CostCatalogDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<CostCatalogDb>(query, &mut **conn)
+                            .await
+                            .map(CostCatalogDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to create cost catalog: {}",
+                                    error
+                                )))
+                            })
+                    })
                 })
-        })
+            })
+            .await
     }
 
-    pub fn list_all() -> DbResult<Vec<CostCatalog>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = cost_catalogs::table
-                .filter(cost_catalogs::dsl::deleted_at.is_null())
-                .order(cost_catalogs::dsl::created_at.desc())
-                .select(CostCatalogDb::as_select())
-                .load::<CostCatalogDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to list cost catalogs: {}", e)))
-                })?;
-            Ok(rows.into_iter().map(|row| row.from_db()).collect())
-        })
+    pub async fn get_by_id(database: &DatabaseRuntime, id_value: i64) -> DbResult<CostCatalog> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_catalogs::table
+                            .filter(
+                                cost_catalogs::dsl::id
+                                    .eq(id_value)
+                                    .and(cost_catalogs::dsl::deleted_at.is_null()),
+                            )
+                            .select(CostCatalogDb::as_select());
+                        diesel_async::RunQueryDsl::first::<CostCatalogDb>(query, &mut **conn)
+                            .await
+                            .map(CostCatalogDb::from_db)
+                            .map_err(|error| match error {
+                                diesel::result::Error::NotFound => {
+                                    BaseError::ParamInvalid(Some(format!(
+                                        "Cost catalog with id {} not found or deleted",
+                                        id_value
+                                    )))
+                                }
+                                other => BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to get cost catalog {}: {}",
+                                    id_value, other
+                                ))),
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn get_by_name(
+        database: &DatabaseRuntime,
+        name_value: &str,
+    ) -> DbResult<Option<CostCatalog>> {
+        let name_value = name_value.to_string();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_catalogs::table
+                            .filter(
+                                cost_catalogs::dsl::name
+                                    .eq(&name_value)
+                                    .and(cost_catalogs::dsl::deleted_at.is_null()),
+                            )
+                            .select(CostCatalogDb::as_select());
+                        diesel_async::RunQueryDsl::first::<CostCatalogDb>(query, &mut **conn)
+                            .await
+                            .optional()
+                            .map(|row| row.map(CostCatalogDb::from_db))
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to get cost catalog by name {}: {}",
+                                    name_value, error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn update(
+        database: &DatabaseRuntime,
+        id_value: i64,
+        data: &UpdateCostCatalogData,
+    ) -> DbResult<CostCatalog> {
+        let now = Utc::now().timestamp_millis();
+        let data = data.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(cost_catalogs::table.find(id_value))
+                            .set((
+                                UpdateCostCatalogDataDb::to_db(&data),
+                                cost_catalogs::dsl::updated_at.eq(now),
+                            ))
+                            .returning(CostCatalogDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<CostCatalogDb>(query, &mut **conn)
+                            .await
+                            .map(CostCatalogDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to update cost catalog {}: {}",
+                                    id_value, error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn delete(database: &DatabaseRuntime, id_value: i64) -> DbResult<usize> {
+        let now = Utc::now().timestamp_millis();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(cost_catalogs::table.find(id_value)).set((
+                            cost_catalogs::dsl::deleted_at.eq(now),
+                            cost_catalogs::dsl::updated_at.eq(now),
+                        ));
+                        diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete cost catalog {}: {}",
+                                    id_value, error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+}
+
+async fn duplicate_cost_catalog_version_as_draft_runtime(
+    database: &DatabaseRuntime,
+    source_version_id: i64,
+    new_version_name: Option<&str>,
+) -> DbResult<CostCatalogVersion> {
+    let now = Utc::now().timestamp_millis();
+    let new_version_name = new_version_name.map(str::to_string);
+    database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        use diesel_async::AsyncConnection;
+                        conn.transaction(async move |conn| {
+                            let query = cost_catalog_versions::table
+                                .find(source_version_id)
+                                .select(CostCatalogVersionDb::as_select());
+                            let source_version = diesel_async::RunQueryDsl::first::<
+                                CostCatalogVersionDb,
+                            >(query, &mut *conn)
+                            .await
+                            .map(CostCatalogVersionDb::from_db)
+                            .map_err(|error| match error {
+                                diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(
+                                    format!(
+                                        "Cost catalog version with id {} not found",
+                                        source_version_id
+                                    ),
+                                )),
+                                other => BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to get source cost catalog version {} for duplication: {}",
+                                    source_version_id, other
+                                ))),
+                            })?;
+                            let query = cost_catalog_versions::table
+                                .filter(
+                                    cost_catalog_versions::dsl::catalog_id
+                                        .eq(source_version.catalog_id),
+                                )
+                                .select(CostCatalogVersionDb::as_select());
+                            let existing_versions = diesel_async::RunQueryDsl::load::<
+                                CostCatalogVersionDb,
+                            >(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to list cost catalog versions for catalog {} during duplication: {}",
+                                    source_version.catalog_id, error
+                                )))
+                            })?
+                            .into_iter()
+                            .map(CostCatalogVersionDb::from_db)
+                            .collect::<Vec<_>>();
+                            let version_name = match new_version_name {
+                                Some(name) => name,
+                                None => build_duplicate_version_name(
+                                    &source_version.version,
+                                    &existing_versions,
+                                ),
+                            };
+                            if existing_versions
+                                .iter()
+                                .any(|version| version.version == version_name)
+                            {
+                                return Err(BaseError::DatabaseDup(Some(format!(
+                                    "Cost catalog '{}' already has version '{}'",
+                                    source_version.catalog_id, version_name
+                                ))));
+                            }
+                            let new_version = NewCostCatalogVersion {
+                                id: ID_GENERATOR.generate_id(),
+                                catalog_id: source_version.catalog_id,
+                                version: version_name,
+                                currency: source_version.currency.clone(),
+                                source: source_version.source.clone(),
+                                effective_from: source_version.effective_from,
+                                effective_until: source_version.effective_until,
+                                first_used_at: None,
+                                is_archived: false,
+                                is_enabled: false,
+                                created_at: now,
+                                updated_at: now,
+                            };
+                            let query = diesel::insert_into(cost_catalog_versions::table)
+                                .values(NewCostCatalogVersionDb::to_db(&new_version))
+                                .returning(CostCatalogVersionDb::as_returning());
+                            let inserted_version = diesel_async::RunQueryDsl::get_result::<
+                                CostCatalogVersionDb,
+                            >(query, &mut *conn)
+                            .await
+                            .map(CostCatalogVersionDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to duplicate cost catalog version {}: {}",
+                                    source_version_id, error
+                                )))
+                            })?;
+                            let query = cost_components::table
+                                .filter(
+                                    cost_components::dsl::catalog_version_id
+                                        .eq(source_version_id),
+                                )
+                                .select(CostComponentDb::as_select());
+                            let source_components = diesel_async::RunQueryDsl::load::<
+                                CostComponentDb,
+                            >(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to load source cost components for version {}: {}",
+                                    source_version_id, error
+                                )))
+                            })?;
+                            for component in source_components {
+                                let component = CostComponentDb::from_db(component);
+                                let new_component = NewCostComponent {
+                                    id: ID_GENERATOR.generate_id(),
+                                    catalog_version_id: inserted_version.id,
+                                    meter_key: component.meter_key,
+                                    charge_kind: component.charge_kind,
+                                    unit_price_nanos: component.unit_price_nanos,
+                                    flat_fee_nanos: component.flat_fee_nanos,
+                                    tier_config_json: component.tier_config_json,
+                                    match_attributes_json: component.match_attributes_json,
+                                    priority: component.priority,
+                                    description: component.description,
+                                    created_at: now,
+                                    updated_at: now,
+                                };
+                                let query = diesel::insert_into(cost_components::table)
+                                    .values(NewCostComponentDb::to_db(&new_component));
+                                diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                    .await
+                                    .map_err(|error| {
+                                        BaseError::DatabaseFatal(Some(format!(
+                                            "Failed to duplicate cost component for new version {}: {}",
+                                            inserted_version.id, error
+                                        )))
+                                    })?;
+                            }
+                            Ok(inserted_version)
+                        })
+                        .await
+                    })
+                })
+            })
+            .await
+}
+
+impl CostCatalog {
+    pub async fn list_all(database: &DatabaseRuntime) -> DbResult<Vec<CostCatalog>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_catalogs::table
+                            .filter(cost_catalogs::dsl::deleted_at.is_null())
+                            .order(cost_catalogs::dsl::created_at.desc())
+                            .select(CostCatalogDb::as_select());
+                        diesel_async::RunQueryDsl::load::<CostCatalogDb>(query, &mut **conn)
+                            .await
+                            .map(|rows| rows.into_iter().map(CostCatalogDb::from_db).collect())
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to list cost catalogs: {}",
+                                    error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
     }
 }
 
 impl CostCatalogVersion {
-    pub fn create(data: &NewCostCatalogVersionPayload) -> DbResult<CostCatalogVersion> {
-        let now = Utc::now().timestamp_millis();
-        let new_version = new_cost_catalog_version_from_payload(data, now);
-
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let inserted = diesel::insert_into(cost_catalog_versions::table)
-                .values(NewCostCatalogVersionDb::to_db(&new_version))
-                .returning(CostCatalogVersionDb::as_returning())
-                .get_result::<CostCatalogVersionDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to create cost catalog version: {}",
-                        e
-                    )))
-                })?;
-            Ok(inserted.from_db())
-        })
+    pub async fn create(
+        database: &DatabaseRuntime,
+        data: &NewCostCatalogVersionPayload,
+    ) -> DbResult<CostCatalogVersion> {
+        Ok(Self::create_with_enabled_reconciliation(database, data)
+            .await?
+            .version)
     }
 
-    pub fn create_with_enabled_reconciliation(
+    pub async fn duplicate_as_draft(
+        database: &DatabaseRuntime,
+        source_version_id: i64,
+        new_version_name: Option<&str>,
+    ) -> DbResult<CostCatalogVersion> {
+        duplicate_cost_catalog_version_as_draft_runtime(
+            database,
+            source_version_id,
+            new_version_name,
+        )
+        .await
+    }
+
+    pub async fn get_by_id(
+        database: &DatabaseRuntime,
+        id_value: i64,
+    ) -> DbResult<CostCatalogVersion> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_catalog_versions::table
+                            .find(id_value)
+                            .select(CostCatalogVersionDb::as_select());
+                        let result: Result<CostCatalogVersionDb, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::first(query, &mut **conn).await;
+                        result
+                            .map(CostCatalogVersionDb::from_db)
+                            .map_err(|error| match error {
+                                diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(
+                                    format!("Cost catalog version with id {} not found", id_value),
+                                )),
+                                _ => BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to get cost catalog version {}: {}",
+                                    id_value, error
+                                ))),
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn list_all(database: &DatabaseRuntime) -> DbResult<Vec<CostCatalogVersion>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_catalog_versions::table
+                            .order(cost_catalog_versions::dsl::created_at.desc())
+                            .select(CostCatalogVersionDb::as_select());
+                        let result: Result<Vec<CostCatalogVersionDb>, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn).await;
+                        result
+                            .map(|rows| {
+                                rows.into_iter()
+                                    .map(CostCatalogVersionDb::from_db)
+                                    .collect()
+                            })
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to list cost catalog versions: {}",
+                                    error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn list_by_catalog_id(
+        database: &DatabaseRuntime,
+        catalog_id_value: i64,
+    ) -> DbResult<Vec<CostCatalogVersion>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_catalog_versions::table
+                            .filter(cost_catalog_versions::dsl::catalog_id.eq(catalog_id_value))
+                            .order(cost_catalog_versions::dsl::effective_from.desc())
+                            .select(CostCatalogVersionDb::as_select());
+                        let result: Result<Vec<CostCatalogVersionDb>, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn).await;
+                        result
+                            .map(|rows| {
+                                rows.into_iter()
+                                    .map(CostCatalogVersionDb::from_db)
+                                    .collect()
+                            })
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to list cost catalog versions by catalog {}: {}",
+                                    catalog_id_value, error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn get_active_by_catalog_id(
+        database: &DatabaseRuntime,
+        catalog_id_value: i64,
+        at_time_ms: i64,
+    ) -> DbResult<Option<CostCatalogVersion>> {
+        let versions = Self::list_by_catalog_id(database, catalog_id_value).await?;
+        select_active_cost_catalog_version(versions, at_time_ms)
+    }
+
+    pub async fn create_with_enabled_reconciliation(
+        database: &DatabaseRuntime,
         data: &NewCostCatalogVersionPayload,
     ) -> DbResult<CostCatalogVersionWriteResult> {
         let now = Utc::now().timestamp_millis();
         let new_version = new_cost_catalog_version_from_payload(data, now);
-        let conn = &mut get_connection()?;
-
-        db_execute!(conn, {
-            conn.transaction::<CostCatalogVersionWriteResult, BaseError, _>(|conn| {
-                let version = diesel::insert_into(cost_catalog_versions::table)
-                    .values(NewCostCatalogVersionDb::to_db(&new_version))
-                    .returning(CostCatalogVersionDb::as_returning())
-                    .get_result::<CostCatalogVersionDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to create cost catalog version: {}",
-                            e
-                        )))
-                    })?
-                    .from_db();
-                let reconciled_versions = reconcile_enabled_version_conflicts_in_tx!(
-                    conn,
-                    &version,
-                    now,
-                    "while creating enabled cost catalog version"
-                )?;
-
-                Ok(CostCatalogVersionWriteResult {
-                    version,
-                    reconciled_versions,
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        use diesel_async::AsyncConnection;
+                        conn.transaction(async move |conn| {
+                            let query = diesel::insert_into(cost_catalog_versions::table)
+                                .values(NewCostCatalogVersionDb::to_db(&new_version))
+                                .returning(CostCatalogVersionDb::as_returning());
+                            let version = diesel_async::RunQueryDsl::get_result::<
+                                CostCatalogVersionDb,
+                            >(query, &mut *conn)
+                            .await
+                            .map(CostCatalogVersionDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to create cost catalog version: {}",
+                                    error
+                                )))
+                            })?;
+                            let reconciled_versions =
+                                reconcile_enabled_version_conflicts_async_in_tx!(
+                                    conn,
+                                    &version,
+                                    now,
+                                    "while creating enabled cost catalog version"
+                                )?;
+                            Ok(CostCatalogVersionWriteResult {
+                                version,
+                                reconciled_versions,
+                            })
+                        })
+                        .await
+                    })
                 })
             })
-        })
+            .await
     }
 
-    pub fn get_by_id(id_value: i64) -> DbResult<CostCatalogVersion> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let row = cost_catalog_versions::table
-                .find(id_value)
-                .select(CostCatalogVersionDb::as_select())
-                .first::<CostCatalogVersionDb>(conn)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(format!(
-                        "Cost catalog version with id {} not found",
-                        id_value
-                    ))),
-                    _ => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to get cost catalog version {}: {}",
-                        id_value, e
-                    ))),
-                })?;
-            Ok(row.from_db())
-        })
-    }
-
-    pub fn update(
+    pub async fn update(
+        database: &DatabaseRuntime,
         id_value: i64,
         data: &UpdateCostCatalogVersionData,
     ) -> DbResult<CostCatalogVersion> {
-        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            let updated = diesel::update(cost_catalog_versions::table.find(id_value))
-                .set((
-                    UpdateCostCatalogVersionDataDb::to_db(data),
-                    cost_catalog_versions::dsl::updated_at.eq(now),
-                ))
-                .returning(CostCatalogVersionDb::as_returning())
-                .get_result::<CostCatalogVersionDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to update cost catalog version {}: {}",
-                        id_value, e
-                    )))
-                })?;
-            Ok(updated.from_db())
-        })
+        let data = data.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(cost_catalog_versions::table.find(id_value))
+                            .set((
+                                UpdateCostCatalogVersionDataDb::to_db(&data),
+                                cost_catalog_versions::dsl::updated_at.eq(now),
+                            ))
+                            .returning(CostCatalogVersionDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<CostCatalogVersionDb>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(CostCatalogVersionDb::from_db)
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to update cost catalog version {}: {}",
+                                id_value, error
+                            )))
+                        })
+                    })
+                })
+            })
+            .await
     }
 
-    pub fn enable_with_conflict_reconciliation(
+    pub async fn enable_with_conflict_reconciliation(
+        database: &DatabaseRuntime,
         id_value: i64,
     ) -> DbResult<CostCatalogVersionWriteResult> {
-        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
-
-        db_execute!(conn, {
-            conn.transaction::<CostCatalogVersionWriteResult, BaseError, _>(|conn| {
-                let version = diesel::update(cost_catalog_versions::table.find(id_value))
-                    .set((
-                        cost_catalog_versions::dsl::is_enabled.eq(true),
-                        cost_catalog_versions::dsl::updated_at.eq(now),
-                    ))
-                    .returning(CostCatalogVersionDb::as_returning())
-                    .get_result::<CostCatalogVersionDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to enable cost catalog version {}: {}",
-                            id_value, e
-                        )))
-                    })?
-                    .from_db();
-                let reconciled_versions = reconcile_enabled_version_conflicts_in_tx!(
-                    conn,
-                    &version,
-                    now,
-                    "while enabling cost catalog version"
-                )?;
-
-                Ok(CostCatalogVersionWriteResult {
-                    version,
-                    reconciled_versions,
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        use diesel_async::AsyncConnection;
+                        conn.transaction(async move |conn| {
+                            let query =
+                                diesel::update(cost_catalog_versions::table.find(id_value))
+                                    .set((
+                                        cost_catalog_versions::dsl::is_enabled.eq(true),
+                                        cost_catalog_versions::dsl::updated_at.eq(now),
+                                    ))
+                                    .returning(CostCatalogVersionDb::as_returning());
+                            let version = diesel_async::RunQueryDsl::get_result::<
+                                CostCatalogVersionDb,
+                            >(query, &mut *conn)
+                            .await
+                            .map(CostCatalogVersionDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to enable cost catalog version {}: {}",
+                                    id_value, error
+                                )))
+                            })?;
+                            let reconciled_versions =
+                                reconcile_enabled_version_conflicts_async_in_tx!(
+                                    conn,
+                                    &version,
+                                    now,
+                                    "while enabling cost catalog version"
+                                )?;
+                            Ok(CostCatalogVersionWriteResult {
+                                version,
+                                reconciled_versions,
+                            })
+                        })
+                        .await
+                    })
                 })
             })
-        })
+            .await
     }
 
-    pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            diesel::delete(cost_catalog_versions::table.find(id_value))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete cost catalog version {}: {}",
-                        id_value, e
-                    )))
+    pub async fn delete(database: &DatabaseRuntime, id_value: i64) -> DbResult<usize> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::delete(cost_catalog_versions::table.find(id_value));
+                        diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete cost catalog version {}: {}",
+                                    id_value, error
+                                )))
+                            })
+                    })
                 })
-        })
-    }
-
-    pub fn list_all() -> DbResult<Vec<CostCatalogVersion>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = cost_catalog_versions::table
-                .order(cost_catalog_versions::dsl::created_at.desc())
-                .select(CostCatalogVersionDb::as_select())
-                .load::<CostCatalogVersionDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list cost catalog versions: {}",
-                        e
-                    )))
-                })?;
-            Ok(rows.into_iter().map(|row| row.from_db()).collect())
-        })
-    }
-
-    pub fn list_by_catalog_id(catalog_id_value: i64) -> DbResult<Vec<CostCatalogVersion>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = cost_catalog_versions::table
-                .filter(cost_catalog_versions::dsl::catalog_id.eq(catalog_id_value))
-                .order(cost_catalog_versions::dsl::effective_from.desc())
-                .select(CostCatalogVersionDb::as_select())
-                .load::<CostCatalogVersionDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list cost catalog versions by catalog {}: {}",
-                        catalog_id_value, e
-                    )))
-                })?;
-            Ok(rows.into_iter().map(|row| row.from_db()).collect())
-        })
-    }
-
-    pub fn duplicate_as_draft(
-        source_version_id: i64,
-        new_version_name: Option<&str>,
-    ) -> DbResult<CostCatalogVersion> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
-
-        db_execute!(conn, {
-            conn.transaction::<CostCatalogVersion, BaseError, _>(|conn| {
-                let source_version = cost_catalog_versions::table
-                    .find(source_version_id)
-                    .select(CostCatalogVersionDb::as_select())
-                    .first::<CostCatalogVersionDb>(conn)
-                    .map_err(|e| match e {
-                        diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(
-                            format!("Cost catalog version with id {} not found", source_version_id),
-                        )),
-                        _ => BaseError::DatabaseFatal(Some(format!(
-                            "Failed to get source cost catalog version {} for duplication: {}",
-                            source_version_id, e
-                        ))),
-                    })?
-                    .from_db();
-
-                let existing_versions = cost_catalog_versions::table
-                    .filter(cost_catalog_versions::dsl::catalog_id.eq(source_version.catalog_id))
-                    .select(CostCatalogVersionDb::as_select())
-                    .load::<CostCatalogVersionDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to list cost catalog versions for catalog {} during duplication: {}",
-                            source_version.catalog_id, e
-                        )))
-                    })?
-                    .into_iter()
-                    .map(CostCatalogVersionDb::from_db)
-                    .collect::<Vec<_>>();
-
-                let version_name = match new_version_name {
-                    Some(name) => name.to_string(),
-                    None => build_duplicate_version_name(&source_version.version, &existing_versions),
-                };
-
-                if existing_versions.iter().any(|version| version.version == version_name) {
-                    return Err(BaseError::DatabaseDup(Some(format!(
-                        "Cost catalog '{}' already has version '{}'",
-                        source_version.catalog_id, version_name
-                    ))));
-                }
-
-                let new_version = NewCostCatalogVersion {
-                    id: ID_GENERATOR.generate_id(),
-                    catalog_id: source_version.catalog_id,
-                    version: version_name,
-                    currency: source_version.currency.clone(),
-                    source: source_version.source.clone(),
-                    effective_from: source_version.effective_from,
-                    effective_until: source_version.effective_until,
-                    first_used_at: None,
-                    is_archived: false,
-                    is_enabled: false,
-                    created_at: now,
-                    updated_at: now,
-                };
-
-                let inserted_version = diesel::insert_into(cost_catalog_versions::table)
-                    .values(NewCostCatalogVersionDb::to_db(&new_version))
-                    .returning(CostCatalogVersionDb::as_returning())
-                    .get_result::<CostCatalogVersionDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to duplicate cost catalog version {}: {}",
-                            source_version_id, e
-                        )))
-                    })?
-                    .from_db();
-
-                let source_components = cost_components::table
-                    .filter(cost_components::dsl::catalog_version_id.eq(source_version_id))
-                    .select(CostComponentDb::as_select())
-                    .load::<CostComponentDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to load source cost components for version {}: {}",
-                            source_version_id, e
-                        )))
-                    })?;
-
-                for component in source_components {
-                    let component = component.from_db();
-                    let new_component = NewCostComponent {
-                        id: ID_GENERATOR.generate_id(),
-                        catalog_version_id: inserted_version.id,
-                        meter_key: component.meter_key,
-                        charge_kind: component.charge_kind,
-                        unit_price_nanos: component.unit_price_nanos,
-                        flat_fee_nanos: component.flat_fee_nanos,
-                        tier_config_json: component.tier_config_json,
-                        match_attributes_json: component.match_attributes_json,
-                        priority: component.priority,
-                        description: component.description,
-                        created_at: now,
-                        updated_at: now,
-                    };
-
-                    diesel::insert_into(cost_components::table)
-                        .values(NewCostComponentDb::to_db(&new_component))
-                        .execute(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to duplicate cost component for new version {}: {}",
-                                inserted_version.id, e
-                            )))
-                        })?;
-                }
-
-                Ok(inserted_version)
             })
-        })
-    }
-
-    pub fn get_active_by_catalog_id(
-        catalog_id_value: i64,
-        at_time_ms: i64,
-    ) -> DbResult<Option<CostCatalogVersion>> {
-        let versions = Self::list_by_catalog_id(catalog_id_value)?;
-        select_active_cost_catalog_version(versions, at_time_ms)
+            .await
     }
 }
 
@@ -796,7 +968,72 @@ fn new_cost_catalog_version_from_payload(
 }
 
 impl CostComponent {
-    pub fn create(data: &NewCostComponentPayload) -> DbResult<CostComponent> {
+    pub async fn list_all(database: &DatabaseRuntime) -> DbResult<Vec<CostComponent>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_components::table
+                            .order((
+                                cost_components::dsl::catalog_version_id.asc(),
+                                cost_components::dsl::priority.asc(),
+                                cost_components::dsl::created_at.asc(),
+                            ))
+                            .select(CostComponentDb::as_select());
+                        let result: Result<Vec<CostComponentDb>, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn).await;
+                        result
+                            .map(|rows| rows.into_iter().map(CostComponentDb::from_db).collect())
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to list cost components: {}",
+                                    error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn list_by_catalog_version_id(
+        database: &DatabaseRuntime,
+        catalog_version_id_value: i64,
+    ) -> DbResult<Vec<CostComponent>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_components::table
+                            .filter(
+                                cost_components::dsl::catalog_version_id
+                                    .eq(catalog_version_id_value),
+                            )
+                            .order((
+                                cost_components::dsl::priority.asc(),
+                                cost_components::dsl::created_at.asc(),
+                            ))
+                            .select(CostComponentDb::as_select());
+                        let result: Result<Vec<CostComponentDb>, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn).await;
+                        result
+                            .map(|rows| rows.into_iter().map(CostComponentDb::from_db).collect())
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to list cost components for version {}: {}",
+                                    catalog_version_id_value, error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn create(
+        database: &DatabaseRuntime,
+        data: &NewCostComponentPayload,
+    ) -> DbResult<CostComponent> {
         let now = Utc::now().timestamp_millis();
         let new_component = NewCostComponent {
             id: ID_GENERATOR.generate_id(),
@@ -812,263 +1049,272 @@ impl CostComponent {
             created_at: now,
             updated_at: now,
         };
-
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let inserted = diesel::insert_into(cost_components::table)
-                .values(NewCostComponentDb::to_db(&new_component))
-                .returning(CostComponentDb::as_returning())
-                .get_result::<CostComponentDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to create cost component: {}",
-                        e
-                    )))
-                })?;
-            Ok(inserted.from_db())
-        })
-    }
-
-    pub fn get_by_id(id_value: i64) -> DbResult<CostComponent> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let row = cost_components::table
-                .find(id_value)
-                .select(CostComponentDb::as_select())
-                .first::<CostComponentDb>(conn)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(format!(
-                        "Cost component with id {} not found",
-                        id_value
-                    ))),
-                    _ => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to get cost component {}: {}",
-                        id_value, e
-                    ))),
-                })?;
-            Ok(row.from_db())
-        })
-    }
-
-    pub fn update(id_value: i64, data: &UpdateCostComponentData) -> DbResult<CostComponent> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            let updated = diesel::update(cost_components::table.find(id_value))
-                .set((
-                    UpdateCostComponentDataDb::to_db(data),
-                    cost_components::dsl::updated_at.eq(now),
-                ))
-                .returning(CostComponentDb::as_returning())
-                .get_result::<CostComponentDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to update cost component {}: {}",
-                        id_value, e
-                    )))
-                })?;
-            Ok(updated.from_db())
-        })
-    }
-
-    pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            diesel::delete(cost_components::table.find(id_value))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete cost component {}: {}",
-                        id_value, e
-                    )))
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::insert_into(cost_components::table)
+                            .values(NewCostComponentDb::to_db(&new_component))
+                            .returning(CostComponentDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<CostComponentDb>(query, &mut **conn)
+                            .await
+                            .map(CostComponentDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to create cost component: {}",
+                                    error
+                                )))
+                            })
+                    })
                 })
-        })
+            })
+            .await
     }
 
-    pub fn list_all() -> DbResult<Vec<CostComponent>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = cost_components::table
-                .order((
-                    cost_components::dsl::catalog_version_id.asc(),
-                    cost_components::dsl::priority.asc(),
-                    cost_components::dsl::created_at.asc(),
-                ))
-                .select(CostComponentDb::as_select())
-                .load::<CostComponentDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to list cost components: {}", e)))
-                })?;
-            Ok(rows.into_iter().map(|row| row.from_db()).collect())
-        })
+    pub async fn get_by_id(database: &DatabaseRuntime, id_value: i64) -> DbResult<CostComponent> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = cost_components::table
+                            .find(id_value)
+                            .select(CostComponentDb::as_select());
+                        diesel_async::RunQueryDsl::first::<CostComponentDb>(query, &mut **conn)
+                            .await
+                            .map(CostComponentDb::from_db)
+                            .map_err(|error| match error {
+                                diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(
+                                    format!("Cost component with id {} not found", id_value),
+                                )),
+                                other => BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to get cost component {}: {}",
+                                    id_value, other
+                                ))),
+                            })
+                    })
+                })
+            })
+            .await
     }
 
-    pub fn list_by_catalog_version_id(
-        catalog_version_id_value: i64,
-    ) -> DbResult<Vec<CostComponent>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = cost_components::table
-                .filter(cost_components::dsl::catalog_version_id.eq(catalog_version_id_value))
-                .order((
-                    cost_components::dsl::priority.asc(),
-                    cost_components::dsl::created_at.asc(),
-                ))
-                .select(CostComponentDb::as_select())
-                .load::<CostComponentDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list cost components for version {}: {}",
-                        catalog_version_id_value, e
-                    )))
-                })?;
-            Ok(rows.into_iter().map(|row| row.from_db()).collect())
-        })
+    pub async fn update(
+        database: &DatabaseRuntime,
+        id_value: i64,
+        data: &UpdateCostComponentData,
+    ) -> DbResult<CostComponent> {
+        let now = Utc::now().timestamp_millis();
+        let data = data.clone();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(cost_components::table.find(id_value))
+                            .set((
+                                UpdateCostComponentDataDb::to_db(&data),
+                                cost_components::dsl::updated_at.eq(now),
+                            ))
+                            .returning(CostComponentDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<CostComponentDb>(query, &mut **conn)
+                            .await
+                            .map(CostComponentDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to update cost component {}: {}",
+                                    id_value, error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn delete(database: &DatabaseRuntime, id_value: i64) -> DbResult<usize> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::delete(cost_components::table.find(id_value));
+                        diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete cost component {}: {}",
+                                    id_value, error
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
     }
 }
 
-pub fn import_cost_catalog_template(
+pub async fn import_cost_catalog_template(
+    database: &DatabaseRuntime,
     data: &CostCatalogTemplateImportPayload,
 ) -> DbResult<ImportedCostCatalogTemplate> {
-    let conn = &mut get_connection()?;
+    let data = data.clone();
     let now = Utc::now().timestamp_millis();
-
-    db_execute!(conn, {
-        conn.transaction::<ImportedCostCatalogTemplate, BaseError, _>(|conn| {
-            let existing_catalog = cost_catalogs::table
-                .filter(
-                    cost_catalogs::dsl::name
-                        .eq(&data.catalog_name)
-                        .and(cost_catalogs::dsl::deleted_at.is_null()),
-                )
-                .select(CostCatalogDb::as_select())
-                .first::<CostCatalogDb>(conn)
-                .optional()
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to lookup cost catalog {} during template import: {}",
-                        data.catalog_name, e
-                    )))
-                })?;
-
-            let (catalog, created_catalog) = match existing_catalog {
-                Some(catalog) => (catalog.from_db(), false),
-                None => {
-                    let new_catalog = NewCostCatalog {
-                        id: ID_GENERATOR.generate_id(),
-                        name: data.catalog_name.clone(),
-                        description: data.catalog_description.clone(),
-                        created_at: now,
-                        updated_at: now,
-                    };
-                    let inserted = diesel::insert_into(cost_catalogs::table)
-                        .values(NewCostCatalogDb::to_db(&new_catalog))
-                        .returning(CostCatalogDb::as_returning())
-                        .get_result::<CostCatalogDb>(conn)
-                        .map_err(|e| {
+    database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                async_db_execute!(connection as conn, {
+                    use diesel_async::AsyncConnection;
+                    conn.transaction(async move |conn| {
+                        let query = cost_catalogs::table
+                            .filter(
+                                cost_catalogs::dsl::name
+                                    .eq(&data.catalog_name)
+                                    .and(cost_catalogs::dsl::deleted_at.is_null()),
+                            )
+                            .select(CostCatalogDb::as_select());
+                        let existing_catalog = diesel_async::RunQueryDsl::first::<CostCatalogDb>(
+                            query,
+                            &mut *conn,
+                        )
+                        .await
+                        .optional()
+                        .map_err(|error| {
                             BaseError::DatabaseFatal(Some(format!(
-                                "Failed to create cost catalog during template import: {}",
-                                e
+                                "Failed to lookup cost catalog {} during template import: {}",
+                                data.catalog_name, error
                             )))
                         })?;
-                    (inserted.from_db(), true)
-                }
-            };
-
-            let existing_version = cost_catalog_versions::table
-                .filter(
-                    cost_catalog_versions::dsl::catalog_id
-                        .eq(catalog.id)
-                        .and(cost_catalog_versions::dsl::version.eq(&data.version)),
-                )
-                .select(CostCatalogVersionDb::as_select())
-                .first::<CostCatalogVersionDb>(conn)
-                .optional()
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to lookup version {} for catalog {} during template import: {}",
-                        data.version, catalog.id, e
-                    )))
-                })?;
-
-            if existing_version.is_some() {
-                return Err(BaseError::DatabaseDup(Some(format!(
-                    "Cost catalog '{}' already has version '{}'",
-                    catalog.name, data.version
-                ))));
-            }
-
-            let new_version = NewCostCatalogVersion {
-                id: ID_GENERATOR.generate_id(),
-                catalog_id: catalog.id,
-                version: data.version.clone(),
-                currency: data.currency.clone(),
-                source: data.source.clone(),
-                effective_from: data.effective_from,
-                effective_until: data.effective_until,
-                first_used_at: None,
-                is_archived: false,
-                is_enabled: data.is_enabled,
-                created_at: now,
-                updated_at: now,
-            };
-            let version = diesel::insert_into(cost_catalog_versions::table)
-                .values(NewCostCatalogVersionDb::to_db(&new_version))
-                .returning(CostCatalogVersionDb::as_returning())
-                .get_result::<CostCatalogVersionDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to create cost catalog version during template import: {}",
-                        e
-                    )))
-                })?
-                .from_db();
-
-            let reconciled_versions = reconcile_enabled_version_conflicts_in_tx!(
-                conn,
-                &version,
-                now,
-                "during template import"
-            )?;
-
-            let mut components = Vec::with_capacity(data.components.len());
-            for component in &data.components {
-                let new_component = NewCostComponent {
-                    id: ID_GENERATOR.generate_id(),
-                    catalog_version_id: version.id,
-                    meter_key: component.meter_key.clone(),
-                    charge_kind: component.charge_kind.clone(),
-                    unit_price_nanos: component.unit_price_nanos,
-                    flat_fee_nanos: component.flat_fee_nanos,
-                    tier_config_json: component.tier_config_json.clone(),
-                    match_attributes_json: component.match_attributes_json.clone(),
-                    priority: component.priority,
-                    description: component.description.clone(),
-                    created_at: now,
-                    updated_at: now,
-                };
-                let inserted = diesel::insert_into(cost_components::table)
-                    .values(NewCostComponentDb::to_db(&new_component))
-                    .returning(CostComponentDb::as_returning())
-                    .get_result::<CostComponentDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to create cost component during template import: {}",
-                            e
-                        )))
-                    })?;
-                components.push(inserted.from_db());
-            }
-
-            Ok(ImportedCostCatalogTemplate {
-                catalog,
-                version,
-                components,
-                created_catalog,
-                reconciled_versions,
+                        let (catalog, created_catalog) = match existing_catalog {
+                            Some(catalog) => (CostCatalogDb::from_db(catalog), false),
+                            None => {
+                                let new_catalog = NewCostCatalog {
+                                    id: ID_GENERATOR.generate_id(),
+                                    name: data.catalog_name.clone(),
+                                    description: data.catalog_description.clone(),
+                                    created_at: now,
+                                    updated_at: now,
+                                };
+                                let query = diesel::insert_into(cost_catalogs::table)
+                                    .values(NewCostCatalogDb::to_db(&new_catalog))
+                                    .returning(CostCatalogDb::as_returning());
+                                let inserted = diesel_async::RunQueryDsl::get_result::<
+                                    CostCatalogDb,
+                                >(query, &mut *conn)
+                                .await
+                                .map(CostCatalogDb::from_db)
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to create cost catalog during template import: {}",
+                                        error
+                                    )))
+                                })?;
+                                (inserted, true)
+                            }
+                        };
+                        let query = cost_catalog_versions::table
+                            .filter(
+                                cost_catalog_versions::dsl::catalog_id
+                                    .eq(catalog.id)
+                                    .and(
+                                        cost_catalog_versions::dsl::version.eq(&data.version),
+                                    ),
+                            )
+                            .select(CostCatalogVersionDb::as_select());
+                        let existing_version = diesel_async::RunQueryDsl::first::<
+                            CostCatalogVersionDb,
+                        >(query, &mut *conn)
+                        .await
+                        .optional()
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to lookup version {} for catalog {} during template import: {}",
+                                data.version, catalog.id, error
+                            )))
+                        })?;
+                        if existing_version.is_some() {
+                            return Err(BaseError::DatabaseDup(Some(format!(
+                                "Cost catalog '{}' already has version '{}'",
+                                catalog.name, data.version
+                            ))));
+                        }
+                        let new_version = NewCostCatalogVersion {
+                            id: ID_GENERATOR.generate_id(),
+                            catalog_id: catalog.id,
+                            version: data.version.clone(),
+                            currency: data.currency.clone(),
+                            source: data.source.clone(),
+                            effective_from: data.effective_from,
+                            effective_until: data.effective_until,
+                            first_used_at: None,
+                            is_archived: false,
+                            is_enabled: data.is_enabled,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        let query = diesel::insert_into(cost_catalog_versions::table)
+                            .values(NewCostCatalogVersionDb::to_db(&new_version))
+                            .returning(CostCatalogVersionDb::as_returning());
+                        let version = diesel_async::RunQueryDsl::get_result::<
+                            CostCatalogVersionDb,
+                        >(query, &mut *conn)
+                        .await
+                        .map(CostCatalogVersionDb::from_db)
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to create cost catalog version during template import: {}",
+                                error
+                            )))
+                        })?;
+                        let reconciled_versions =
+                            reconcile_enabled_version_conflicts_async_in_tx!(
+                                conn,
+                                &version,
+                                now,
+                                "during template import"
+                            )?;
+                        let mut components = Vec::with_capacity(data.components.len());
+                        for component in &data.components {
+                            let new_component = NewCostComponent {
+                                id: ID_GENERATOR.generate_id(),
+                                catalog_version_id: version.id,
+                                meter_key: component.meter_key.clone(),
+                                charge_kind: component.charge_kind.clone(),
+                                unit_price_nanos: component.unit_price_nanos,
+                                flat_fee_nanos: component.flat_fee_nanos,
+                                tier_config_json: component.tier_config_json.clone(),
+                                match_attributes_json: component.match_attributes_json.clone(),
+                                priority: component.priority,
+                                description: component.description.clone(),
+                                created_at: now,
+                                updated_at: now,
+                            };
+                            let query = diesel::insert_into(cost_components::table)
+                                .values(NewCostComponentDb::to_db(&new_component))
+                                .returning(CostComponentDb::as_returning());
+                            let inserted = diesel_async::RunQueryDsl::get_result::<CostComponentDb>(
+                                query,
+                                &mut *conn,
+                            )
+                            .await
+                            .map(CostComponentDb::from_db)
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to create cost component during template import: {}",
+                                    error
+                                )))
+                            })?;
+                            components.push(inserted);
+                        }
+                        Ok(ImportedCostCatalogTemplate {
+                            catalog,
+                            version,
+                            components,
+                            created_catalog,
+                            reconciled_versions,
+                        })
+                    })
+                    .await
+                })
             })
         })
-    })
+        .await
 }
 
 fn version_is_active(version: &CostCatalogVersion, at_time_ms: i64) -> bool {

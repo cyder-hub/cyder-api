@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 use crate::database::manager_credential::{
     MANAGER_ID, MANAGER_SUBJECT, ManagerCredential, ManagerCredentialRepositoryError,
 };
+use crate::database::runtime::DatabaseRuntime;
 use crate::service::admin::auth::totp::validate_manager_totp_secret;
 use crate::service::secret_encryption::{EncryptedSecret, SecretDomain, SecretEncryptionService};
 
@@ -122,8 +123,11 @@ pub enum ManagerCredentialSnapshot {
 }
 
 impl ManagerCredentialSnapshot {
-    pub fn load(secret_encryption: &SecretEncryptionService) -> Self {
-        Self::from_repository_result(ManagerCredential::load(), secret_encryption)
+    pub async fn load(
+        database: &DatabaseRuntime,
+        secret_encryption: &SecretEncryptionService,
+    ) -> Self {
+        Self::from_repository_result(ManagerCredential::load(database).await, secret_encryption)
     }
 
     pub fn from_credential(

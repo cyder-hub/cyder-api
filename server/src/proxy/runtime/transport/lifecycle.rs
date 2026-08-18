@@ -21,6 +21,7 @@ pub(crate) enum ProxyTerminationCause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum ReadyTerminationSignal {
     ClientCancelled,
     PhaseTimeout(TimeoutPhase),
@@ -31,13 +32,6 @@ pub(crate) enum ReadyTerminationSignal {
 pub(crate) enum TotalWatchdogResult {
     Expired,
     Cancelled,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TerminationSnapshot {
-    pub terminal: Option<ProxyTerminationCause>,
-    pub request_log_claimed: bool,
-    pub lease_release_claimed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +60,7 @@ impl TotalWatchdog {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -151,21 +146,6 @@ impl ProxyTerminationCoordinator {
         watchdog
     }
 
-    pub(crate) fn cancel_total_watchdog(&self) {
-        if let Some(watchdog) = self.lock().total_watchdog.clone() {
-            watchdog.cancel();
-        }
-    }
-
-    pub(crate) fn snapshot(&self) -> TerminationSnapshot {
-        let state = self.lock();
-        TerminationSnapshot {
-            terminal: state.terminal,
-            request_log_claimed: state.request_log_claimed,
-            lease_release_claimed: state.lease_release_claimed,
-        }
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, CoordinatorState> {
         self.state
             .lock()
@@ -207,6 +187,7 @@ pub(crate) async fn await_cleanup_with_total_watchdog<F>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn choose_ready_termination(
     client_cancelled: bool,
     phase_timeout: Option<TimeoutPhase>,
@@ -291,7 +272,6 @@ mod tests {
         assert_eq!(watchdog.deadline(), deadline);
         assert!(coordinator.try_terminate(ProxyTerminationCause::ClientCancelled));
         assert_eq!(watchdog.wait().await, TotalWatchdogResult::Cancelled);
-        coordinator.cancel_total_watchdog();
     }
 
     #[tokio::test]

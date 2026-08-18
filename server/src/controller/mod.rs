@@ -112,7 +112,7 @@ mod tests {
     use crate::service::app_state::create_test_app_state;
     use crate::{
         config::ClientIdentityConfig,
-        database::TestDbContext,
+        database::TestDatabase,
         ingress::client_identity::ClientIdentityResolver,
         ingress::web_security::{MANAGER_CONTENT_SECURITY_POLICY, MANAGER_PERMISSIONS_POLICY},
     };
@@ -152,103 +152,101 @@ mod tests {
 
     #[tokio::test]
     async fn client_identity_http_manager_fails_closed_and_ignores_untrusted_metadata() {
-        let database = TestDbContext::new_sqlite("manager-client-identity-http.sqlite");
-        database
-            .run_async(async {
-                let app_state = create_test_app_state(database.clone()).await;
-                let resolver = Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig {
-                    trusted_proxy_cidrs: vec![
-                        "10.0.0.0/8".parse().expect("test CIDR should parse"),
-                    ],
-                    max_forwarded_hops: 8,
-                }));
+        let database =
+            TestDatabase::new_sqlite_default("manager-client-identity-http.sqlite").await;
+        (async {
+            let app_state = create_test_app_state(database.clone()).await;
+            let resolver = Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig {
+                trusted_proxy_cidrs: vec!["10.0.0.0/8".parse().expect("test CIDR should parse")],
+                max_forwarded_hops: 8,
+            }));
 
-                let missing = send_with_resolver(
-                    &app_state,
-                    request(
-                        Method::GET,
-                        "/manager/api/auth/bootstrap/status",
-                        None,
-                        Body::empty(),
-                    ),
-                    Arc::clone(&resolver),
-                    None,
-                )
-                .await;
-                assert_eq!(missing.status(), StatusCode::INTERNAL_SERVER_ERROR);
-                assert_manager_security(&missing);
-                assert_no_store(&missing);
-                let body = to_bytes(missing.into_body(), usize::MAX)
-                    .await
-                    .expect("manager error body should read");
-                let body: serde_json::Value =
-                    serde_json::from_slice(&body).expect("manager error should be JSON");
-                assert_eq!(body["code"], 0);
-
-                let mut invalid_request = request(
+            let missing = send_with_resolver(
+                &app_state,
+                request(
                     Method::GET,
                     "/manager/api/auth/bootstrap/status",
                     None,
                     Body::empty(),
-                );
-                invalid_request
-                    .headers_mut()
-                    .insert("forwarded", HeaderValue::from_static("not-valid"));
-                let invalid = send_with_resolver(
-                    &app_state,
-                    invalid_request,
-                    Arc::clone(&resolver),
-                    Some(SocketAddr::from(([10, 0, 0, 9], 31_201))),
-                )
-                .await;
-                assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-                assert_manager_security(&invalid);
-                assert_no_store(&invalid);
-                let body = to_bytes(invalid.into_body(), usize::MAX)
-                    .await
-                    .expect("manager error body should read");
-                let body: serde_json::Value =
-                    serde_json::from_slice(&body).expect("manager error should be JSON");
-                assert_eq!(body["code"], 1001);
-
-                let mut forged_request = request(
-                    Method::GET,
-                    "/manager/api/auth/bootstrap/status",
-                    None,
-                    Body::empty(),
-                );
-                forged_request
-                    .headers_mut()
-                    .insert("forwarded", HeaderValue::from_static("not-valid"));
-                let ignored = send_with_resolver(
-                    &app_state,
-                    forged_request,
-                    resolver,
-                    Some(SocketAddr::from(([192, 0, 2, 9], 31_202))),
-                )
-                .await;
-                assert_eq!(ignored.status(), StatusCode::OK);
-
-                let system = create_system_router()
-                    .with_state(Arc::clone(&app_state))
-                    .oneshot(
-                        Request::builder()
-                            .method(Method::GET)
-                            .uri("/health")
-                            .body(Body::empty())
-                            .expect("system request should build"),
-                    )
-                    .await
-                    .expect("system router should respond without ConnectInfo");
-                assert_eq!(system.status(), StatusCode::OK);
-                assert!(
-                    system
-                        .headers()
-                        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-                        .is_none()
-                );
-            })
+                ),
+                Arc::clone(&resolver),
+                None,
+            )
             .await;
+            assert_eq!(missing.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_manager_security(&missing);
+            assert_no_store(&missing);
+            let body = to_bytes(missing.into_body(), usize::MAX)
+                .await
+                .expect("manager error body should read");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("manager error should be JSON");
+            assert_eq!(body["code"], 0);
+
+            let mut invalid_request = request(
+                Method::GET,
+                "/manager/api/auth/bootstrap/status",
+                None,
+                Body::empty(),
+            );
+            invalid_request
+                .headers_mut()
+                .insert("forwarded", HeaderValue::from_static("not-valid"));
+            let invalid = send_with_resolver(
+                &app_state,
+                invalid_request,
+                Arc::clone(&resolver),
+                Some(SocketAddr::from(([10, 0, 0, 9], 31_201))),
+            )
+            .await;
+            assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+            assert_manager_security(&invalid);
+            assert_no_store(&invalid);
+            let body = to_bytes(invalid.into_body(), usize::MAX)
+                .await
+                .expect("manager error body should read");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("manager error should be JSON");
+            assert_eq!(body["code"], 1001);
+
+            let mut forged_request = request(
+                Method::GET,
+                "/manager/api/auth/bootstrap/status",
+                None,
+                Body::empty(),
+            );
+            forged_request
+                .headers_mut()
+                .insert("forwarded", HeaderValue::from_static("not-valid"));
+            let ignored = send_with_resolver(
+                &app_state,
+                forged_request,
+                resolver,
+                Some(SocketAddr::from(([192, 0, 2, 9], 31_202))),
+            )
+            .await;
+            assert_eq!(ignored.status(), StatusCode::OK);
+
+            let system = create_system_router()
+                .with_state(Arc::clone(&app_state))
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/health")
+                        .body(Body::empty())
+                        .expect("system request should build"),
+                )
+                .await
+                .expect("system router should respond without ConnectInfo");
+            assert_eq!(system.status(), StatusCode::OK);
+            assert!(
+                system
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none()
+            );
+        })
+        .await;
     }
 
     fn request(method: Method, uri: &str, token: Option<&str>, body: Body) -> Request<Body> {
@@ -356,318 +354,316 @@ mod tests {
 
     #[tokio::test]
     async fn manager_api_overrides_cache_control_for_get_secret_post_and_errors() {
-        let database = TestDbContext::new_sqlite("manager-api-no-store.sqlite");
-        database
-            .run_async(async {
-                let app_state = create_test_app_state(database.clone()).await;
-                let tokens = app_state
-                    .admin
-                    .auth
-                    .bootstrap("manager no-store contract password")
-                    .await
-                    .expect("manager bootstrap should succeed");
+        let database = TestDatabase::new_sqlite_default("manager-api-no-store.sqlite").await;
+        (async {
+            let app_state = create_test_app_state(database.clone()).await;
+            let tokens = app_state
+                .admin
+                .auth
+                .bootstrap("manager no-store contract password")
+                .await
+                .expect("manager bootstrap should succeed");
 
-                let response = send(
-                    &app_state,
-                    request(
-                        Method::GET,
-                        "/manager/api/api_key/list",
-                        Some(&tokens.access_token),
-                        Body::empty(),
-                    ),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::OK);
-                assert_no_store(&response);
-
-                let response = send(
-                    &app_state,
-                    request(
-                        Method::POST,
-                        "/manager/api/api_key",
-                        Some(&tokens.access_token),
-                        Body::from(
-                            serde_json::to_vec(&json!({
-                                "name": "manager-no-store-secret",
-                                "default_action": "ALLOW"
-                            }))
-                            .expect("create payload should serialize"),
-                        ),
-                    ),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::OK);
-                assert_no_store(&response);
-
-                let response = send(
-                    &app_state,
-                    request(
-                        Method::GET,
-                        "/manager/api/api_key/list",
-                        None,
-                        Body::empty(),
-                    ),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-                assert_no_store(&response);
-
-                let response = send(
-                    &app_state,
-                    request(Method::GET, "/manager/ui/missing", None, Body::empty()),
-                )
-                .await;
-                assert_eq!(
-                    response
-                        .headers()
-                        .get(header::CACHE_CONTROL)
-                        .and_then(|value| value.to_str().ok()),
-                    Some("no-store")
-                );
-            })
+            let response = send(
+                &app_state,
+                request(
+                    Method::GET,
+                    "/manager/api/api_key/list",
+                    Some(&tokens.access_token),
+                    Body::empty(),
+                ),
+            )
             .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_no_store(&response);
+
+            let response = send(
+                &app_state,
+                request(
+                    Method::POST,
+                    "/manager/api/api_key",
+                    Some(&tokens.access_token),
+                    Body::from(
+                        serde_json::to_vec(&json!({
+                            "name": "manager-no-store-secret",
+                            "default_action": "ALLOW"
+                        }))
+                        .expect("create payload should serialize"),
+                    ),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_no_store(&response);
+
+            let response = send(
+                &app_state,
+                request(
+                    Method::GET,
+                    "/manager/api/api_key/list",
+                    None,
+                    Body::empty(),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_no_store(&response);
+
+            let response = send(
+                &app_state,
+                request(Method::GET, "/manager/ui/missing", None, Body::empty()),
+            )
+            .await;
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_web_security_applies_exact_headers_cache_matrix_and_no_cors() {
-        let database = TestDbContext::new_sqlite("manager-web-security.sqlite");
-        database
-            .run_async(async {
-                let app_state = create_test_app_state(database.clone()).await;
-                let public_dir = tempfile::tempdir().expect("manager public fixture should create");
-                fs::create_dir(public_dir.path().join("assets"))
-                    .expect("asset fixture directory should create");
-                fs::write(
-                    public_dir.path().join("index.html"),
-                    "<!doctype html><html><body><div id=\"app\"></div></body></html>",
-                )
-                .expect("index fixture should write");
-                fs::write(
-                    public_dir.path().join("assets/app-ABC123.js"),
-                    "console.log('fixture')",
-                )
-                .expect("fingerprinted asset fixture should write");
-                fs::write(public_dir.path().join("robots.txt"), "User-agent: *")
-                    .expect("static fixture should write");
+        let database = TestDatabase::new_sqlite_default("manager-web-security.sqlite").await;
+        (async {
+            let app_state = create_test_app_state(database.clone()).await;
+            let public_dir = tempfile::tempdir().expect("manager public fixture should create");
+            fs::create_dir(public_dir.path().join("assets"))
+                .expect("asset fixture directory should create");
+            fs::write(
+                public_dir.path().join("index.html"),
+                "<!doctype html><html><body><div id=\"app\"></div></body></html>",
+            )
+            .expect("index fixture should write");
+            fs::write(
+                public_dir.path().join("assets/app-ABC123.js"),
+                "console.log('fixture')",
+            )
+            .expect("fingerprinted asset fixture should write");
+            fs::write(public_dir.path().join("robots.txt"), "User-agent: *")
+                .expect("static fixture should write");
 
-                let cases = [
-                    (
-                        Method::GET,
-                        "/manager/ui/",
-                        Body::empty(),
-                        StatusCode::OK,
-                        "no-cache, no-store, must-revalidate",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/ui/spa/route",
-                        Body::empty(),
-                        StatusCode::OK,
-                        "no-cache, no-store, must-revalidate",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/ui/assets/app-ABC123.js",
-                        Body::empty(),
-                        StatusCode::OK,
-                        "public, max-age=31536000, immutable",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/ui/robots.txt",
-                        Body::empty(),
-                        StatusCode::OK,
-                        "no-cache",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/ui/assets/missing.js",
-                        Body::empty(),
-                        StatusCode::NOT_FOUND,
-                        "no-store",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/api/auth/bootstrap/status",
-                        Body::empty(),
-                        StatusCode::OK,
-                        "no-store",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/api/system/overview",
-                        Body::empty(),
-                        StatusCode::UNAUTHORIZED,
-                        "no-store",
-                    ),
-                    (
-                        Method::POST,
-                        "/manager/api/auth/login/password",
-                        Body::from("{"),
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "no-store",
-                    ),
-                    (
-                        Method::POST,
-                        "/manager/api/auth/login/totp",
-                        Body::from("{"),
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "no-store",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/api/auth/totp/status",
-                        Body::empty(),
-                        StatusCode::UNAUTHORIZED,
-                        "no-store",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/api/missing",
-                        Body::empty(),
-                        StatusCode::NOT_FOUND,
-                        "no-store",
-                    ),
-                    (
-                        Method::GET,
-                        "/manager/missing",
-                        Body::empty(),
-                        StatusCode::NOT_FOUND,
-                        "no-store",
-                    ),
-                ];
+            let cases = [
+                (
+                    Method::GET,
+                    "/manager/ui/",
+                    Body::empty(),
+                    StatusCode::OK,
+                    "no-cache, no-store, must-revalidate",
+                ),
+                (
+                    Method::GET,
+                    "/manager/ui/spa/route",
+                    Body::empty(),
+                    StatusCode::OK,
+                    "no-cache, no-store, must-revalidate",
+                ),
+                (
+                    Method::GET,
+                    "/manager/ui/assets/app-ABC123.js",
+                    Body::empty(),
+                    StatusCode::OK,
+                    "public, max-age=31536000, immutable",
+                ),
+                (
+                    Method::GET,
+                    "/manager/ui/robots.txt",
+                    Body::empty(),
+                    StatusCode::OK,
+                    "no-cache",
+                ),
+                (
+                    Method::GET,
+                    "/manager/ui/assets/missing.js",
+                    Body::empty(),
+                    StatusCode::NOT_FOUND,
+                    "no-store",
+                ),
+                (
+                    Method::GET,
+                    "/manager/api/auth/bootstrap/status",
+                    Body::empty(),
+                    StatusCode::OK,
+                    "no-store",
+                ),
+                (
+                    Method::GET,
+                    "/manager/api/system/overview",
+                    Body::empty(),
+                    StatusCode::UNAUTHORIZED,
+                    "no-store",
+                ),
+                (
+                    Method::POST,
+                    "/manager/api/auth/login/password",
+                    Body::from("{"),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "no-store",
+                ),
+                (
+                    Method::POST,
+                    "/manager/api/auth/login/totp",
+                    Body::from("{"),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "no-store",
+                ),
+                (
+                    Method::GET,
+                    "/manager/api/auth/totp/status",
+                    Body::empty(),
+                    StatusCode::UNAUTHORIZED,
+                    "no-store",
+                ),
+                (
+                    Method::GET,
+                    "/manager/api/missing",
+                    Body::empty(),
+                    StatusCode::NOT_FOUND,
+                    "no-store",
+                ),
+                (
+                    Method::GET,
+                    "/manager/missing",
+                    Body::empty(),
+                    StatusCode::NOT_FOUND,
+                    "no-store",
+                ),
+            ];
 
-                for (method, uri, body, status, cache_control) in cases {
-                    let response = send_with_public_dir(
-                        &app_state,
-                        Request::builder()
-                            .method(method)
-                            .uri(uri)
-                            .header(header::CONTENT_TYPE, "application/json")
-                            .header(header::ORIGIN, "http://127.0.0.1:29528")
-                            .header("sec-fetch-site", "same-origin")
-                            .header("x-cyder-manager-auth", "1")
-                            .body(body)
-                            .expect("manager matrix request should build"),
-                        public_dir.path(),
-                    )
-                    .await;
-                    assert_eq!(response.status(), status, "{uri}");
-                    assert_manager_security(&response);
-                    assert_cache_control(&response, cache_control);
-                }
-
-                let preflight = send_with_public_dir(
+            for (method, uri, body, status, cache_control) in cases {
+                let response = send_with_public_dir(
                     &app_state,
                     Request::builder()
-                        .method(Method::OPTIONS)
-                        .uri("/manager/api/auth/login/password")
-                        .header(header::ORIGIN, "https://external.example")
-                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                        .body(Body::empty())
-                        .expect("manager preflight request should build"),
-                    public_dir.path(),
-                )
-                .await;
-                assert_eq!(preflight.status(), StatusCode::METHOD_NOT_ALLOWED);
-                assert_manager_security(&preflight);
-                assert_no_store(&preflight);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn manager_web_security_preserves_cache_policy_under_configured_base_path() {
-        let database = TestDbContext::new_sqlite("manager-web-security-base-path.sqlite");
-        database
-            .run_async(async {
-                let app_state = create_test_app_state(database.clone()).await;
-                app_state
-                    .admin
-                    .auth
-                    .bootstrap("manager base path no-store password")
-                    .await
-                    .expect("manager bootstrap should succeed");
-
-                let public_dir = tempfile::tempdir().expect("manager public fixture should create");
-                fs::create_dir(public_dir.path().join("assets"))
-                    .expect("asset fixture directory should create");
-                fs::write(
-                    public_dir.path().join("assets/app-ABC123.js"),
-                    "console.log('fixture')",
-                )
-                .expect("fingerprinted asset fixture should write");
-
-                let login = send_with_public_dir_at_base_path(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri("/ai/manager/api/auth/login/password")
+                        .method(method)
+                        .uri(uri)
                         .header(header::CONTENT_TYPE, "application/json")
                         .header(header::ORIGIN, "http://127.0.0.1:29528")
                         .header("sec-fetch-site", "same-origin")
                         .header("x-cyder-manager-auth", "1")
-                        .body(Body::from(
-                            r#"{"password":"manager base path no-store password"}"#,
-                        ))
-                        .expect("manager login request should build"),
+                        .body(body)
+                        .expect("manager matrix request should build"),
                     public_dir.path(),
                 )
                 .await;
-                assert_eq!(login.status(), StatusCode::OK);
-                assert_manager_security(&login);
-                assert_no_store(&login);
-                let login_body = to_bytes(login.into_body(), usize::MAX)
-                    .await
-                    .expect("manager login body should read");
-                let login_body: serde_json::Value =
-                    serde_json::from_slice(&login_body).expect("manager login body should be JSON");
-                assert!(login_body["data"]["access_token"].as_str().is_some());
+                assert_eq!(response.status(), status, "{uri}");
+                assert_manager_security(&response);
+                assert_cache_control(&response, cache_control);
+            }
 
-                let asset = send_with_public_dir_at_base_path(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/ai/manager/ui/assets/app-ABC123.js")
-                        .body(Body::empty())
-                        .expect("manager asset request should build"),
-                    public_dir.path(),
-                )
-                .await;
-                assert_eq!(asset.status(), StatusCode::OK);
-                assert_manager_security(&asset);
-                assert_cache_control(&asset, "public, max-age=31536000, immutable");
-            })
+            let preflight = send_with_public_dir(
+                &app_state,
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/manager/api/auth/login/password")
+                    .header(header::ORIGIN, "https://external.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .expect("manager preflight request should build"),
+                public_dir.path(),
+            )
             .await;
+            assert_eq!(preflight.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert_manager_security(&preflight);
+            assert_no_store(&preflight);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn manager_web_security_preserves_cache_policy_under_configured_base_path() {
+        let database =
+            TestDatabase::new_sqlite_default("manager-web-security-base-path.sqlite").await;
+        (async {
+            let app_state = create_test_app_state(database.clone()).await;
+            app_state
+                .admin
+                .auth
+                .bootstrap("manager base path no-store password")
+                .await
+                .expect("manager bootstrap should succeed");
+
+            let public_dir = tempfile::tempdir().expect("manager public fixture should create");
+            fs::create_dir(public_dir.path().join("assets"))
+                .expect("asset fixture directory should create");
+            fs::write(
+                public_dir.path().join("assets/app-ABC123.js"),
+                "console.log('fixture')",
+            )
+            .expect("fingerprinted asset fixture should write");
+
+            let login = send_with_public_dir_at_base_path(
+                &app_state,
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/ai/manager/api/auth/login/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ORIGIN, "http://127.0.0.1:29528")
+                    .header("sec-fetch-site", "same-origin")
+                    .header("x-cyder-manager-auth", "1")
+                    .body(Body::from(
+                        r#"{"password":"manager base path no-store password"}"#,
+                    ))
+                    .expect("manager login request should build"),
+                public_dir.path(),
+            )
+            .await;
+            assert_eq!(login.status(), StatusCode::OK);
+            assert_manager_security(&login);
+            assert_no_store(&login);
+            let login_body = to_bytes(login.into_body(), usize::MAX)
+                .await
+                .expect("manager login body should read");
+            let login_body: serde_json::Value =
+                serde_json::from_slice(&login_body).expect("manager login body should be JSON");
+            assert!(login_body["data"]["access_token"].as_str().is_some());
+
+            let asset = send_with_public_dir_at_base_path(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/ai/manager/ui/assets/app-ABC123.js")
+                    .body(Body::empty())
+                    .expect("manager asset request should build"),
+                public_dir.path(),
+            )
+            .await;
+            assert_eq!(asset.status(), StatusCode::OK);
+            assert_manager_security(&asset);
+            assert_cache_control(&asset, "public, max-age=31536000, immutable");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_router_does_not_register_portable_config_routes() {
-        let database = TestDbContext::new_sqlite("manager-portable-routes-removed.sqlite");
-        database
-            .run_async(async {
-                let app_state = create_test_app_state(database.clone()).await;
-                let tokens = app_state
-                    .admin
-                    .auth
-                    .bootstrap("manager removed portable route password")
-                    .await
-                    .expect("manager bootstrap should succeed");
+        let database =
+            TestDatabase::new_sqlite_default("manager-portable-routes-removed.sqlite").await;
+        (async {
+            let app_state = create_test_app_state(database.clone()).await;
+            let tokens = app_state
+                .admin
+                .auth
+                .bootstrap("manager removed portable route password")
+                .await
+                .expect("manager bootstrap should succeed");
 
-                for (method, uri) in [
-                    (Method::GET, "/manager/api/system/portable/modules"),
-                    (Method::POST, "/manager/api/system/portable/export"),
-                    (Method::POST, "/manager/api/system/portable/import/preview"),
-                    (Method::POST, "/manager/api/system/portable/import/apply"),
-                ] {
-                    let response = send(
-                        &app_state,
-                        request(method, uri, Some(&tokens.access_token), Body::empty()),
-                    )
-                    .await;
-                    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-                }
-            })
-            .await;
+            for (method, uri) in [
+                (Method::GET, "/manager/api/system/portable/modules"),
+                (Method::POST, "/manager/api/system/portable/export"),
+                (Method::POST, "/manager/api/system/portable/import/preview"),
+                (Method::POST, "/manager/api/system/portable/import/apply"),
+            ] {
+                let response = send(
+                    &app_state,
+                    request(method, uri, Some(&tokens.access_token), Body::empty()),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+        })
+        .await;
     }
 }

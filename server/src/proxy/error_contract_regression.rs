@@ -582,9 +582,13 @@ fn router_and_ingress_rejections_use_protocol_contracts() {
 
         gemini_target.app_state.flush_proxy_logs().await;
         openai_target.app_state.flush_proxy_logs().await;
-        let utility_logs = RequestLog::list_full(RequestLogQueryPayload::default())
-            .expect("request logs should be queryable")
-            .list;
+        let utility_logs = RequestLog::list_full(
+            &openai_target.app_state.database,
+            RequestLogQueryPayload::default(),
+        )
+        .await
+        .expect("request logs should be queryable")
+        .list;
         assert_eq!(
             utility_logs.len(),
             3,
@@ -627,6 +631,7 @@ fn retry_after_uses_exact_producer_facts() {
                 .expect("test API key rate limit should update");
             let mut app_state = (*router.app_state).clone();
             app_state.api_key_governance = Arc::new(ApiKeyGovernanceService::new_with_clock(
+                Arc::clone(&app_state.database),
                 Arc::new(MemoryApiKeyRuntimeStore::default()),
                 Arc::new(FixedApiKeyGovernanceClock::new(FIXED_RPM_BOUNDARY_MS)),
             ));

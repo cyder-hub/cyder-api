@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use crate::service::catalog::CatalogService;
 use crate::service::secret_encryption::SecretEncryptionService;
@@ -20,6 +20,14 @@ pub mod mutation;
 pub mod provider;
 pub mod request_patch;
 
+async fn await_cancellation_safe<T, F>(future: F) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    tokio::spawn(future).await
+}
+
 // Management write paths must be owned here. Controllers may parse HTTP payloads and
 // shape responses, but cache invalidation, audit emission, and write orchestration
 // must stay inside service/admin to avoid owner drift back into handlers.
@@ -34,14 +42,15 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
-    pub fn new(
+    pub async fn new(
         catalog: Arc<CatalogService>,
         secret_encryption: Arc<SecretEncryptionService>,
     ) -> Self {
+        let database = catalog.database();
         let mutation_runner = Arc::new(AdminMutationRunner::new(catalog));
 
         Self {
-            auth: Arc::new(ManagerAuthService::new(Arc::clone(&secret_encryption))),
+            auth: Arc::new(ManagerAuthService::new(database, Arc::clone(&secret_encryption)).await),
             provider: Arc::new(ProviderAdminService::new(
                 Arc::clone(&mutation_runner),
                 Arc::clone(&secret_encryption),
@@ -62,7 +71,8 @@ impl AdminServices {
 mod tests {
     use std::sync::Arc;
 
-    use crate::config::SecretEncryptionConfig;
+    use crate::config::{DatabaseIoConfig, SecretEncryptionConfig};
+    use crate::database::test_support::TestDatabase;
     use crate::service::catalog::CatalogService;
     use crate::service::secret_encryption::SecretEncryptionService;
 
@@ -70,11 +80,14 @@ mod tests {
 
     #[tokio::test]
     async fn admin_services_share_one_mutation_runner() {
-        let catalog = Arc::new(CatalogService::new(true).await);
+        let database =
+            TestDatabase::new_sqlite("admin-services.sqlite", 2, DatabaseIoConfig::default()).await;
+        let catalog = Arc::new(CatalogService::new(database.runtime(), true).await);
         let secret_encryption = Arc::new(SecretEncryptionService::from_config(
             &SecretEncryptionConfig::default(),
         ));
-        let services = AdminServices::new(Arc::clone(&catalog), Arc::clone(&secret_encryption));
+        let services =
+            AdminServices::new(Arc::clone(&catalog), Arc::clone(&secret_encryption)).await;
 
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),

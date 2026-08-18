@@ -166,8 +166,10 @@ pub async fn resolve_saved_provider_credential(
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
     let client = auxiliary_client(app_state, source.use_proxy).await?;
-    let stored = ProviderApiKeyRepository::get_stored_by_id(provider.id, key_id)
-        .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
+    let stored =
+        ProviderApiKeyRepository::get_stored_by_id(&app_state.database, provider.id, key_id)
+            .await
+            .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     let encrypted = stored
         .encrypted_secret()
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;

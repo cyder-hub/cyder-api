@@ -1,11 +1,9 @@
 use diesel::prelude::*;
 
-use crate::db_execute;
-
 use super::manager_credential::{
     MANAGER_ID, ManagerCredentialRepositoryError, manager_credential_storage_error,
 };
-use super::{DbConnection, get_connection};
+use super::runtime::{DatabaseRuntime, DatabaseWorkload, db_execute as async_db_execute};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerTotpRecoveryCode {
@@ -81,47 +79,63 @@ pub(crate) mod _sqlite_model {
     recovery_code_model!(_sqlite_schema);
 }
 
-fn connection() -> Result<DbConnection, ManagerCredentialRepositoryError> {
-    get_connection().map_err(|error| {
-        manager_credential_storage_error("connection failed", format!("{error:?}"))
-    })
-}
-
 impl ManagerTotpRecoveryCode {
-    pub fn load_by_code_id(
+    pub async fn load_by_code_id(
+        database: &DatabaseRuntime,
         code_id_value: &str,
     ) -> Result<Option<Self>, ManagerCredentialRepositoryError> {
-        let conn = &mut connection()?;
-        db_execute!(conn, {
-            manager_totp_recovery_code::table
-                .filter(manager_totp_recovery_code::dsl::code_id.eq(code_id_value))
-                .filter(manager_totp_recovery_code::dsl::manager_id.eq(MANAGER_ID))
-                .select(ManagerTotpRecoveryCodeDb::as_select())
-                .first::<ManagerTotpRecoveryCodeDb>(conn)
-                .optional()
-                .map(|row| row.map(ManagerTotpRecoveryCodeDb::from_db))
-                .map_err(|error| {
-                    manager_credential_storage_error("recovery code load failed", error)
+        let code_id_value = code_id_value.to_string();
+        database
+            .run_domain_error(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = manager_totp_recovery_code::table
+                            .filter(manager_totp_recovery_code::dsl::code_id.eq(&code_id_value))
+                            .filter(manager_totp_recovery_code::dsl::manager_id.eq(MANAGER_ID))
+                            .select(ManagerTotpRecoveryCodeDb::as_select());
+                        diesel_async::RunQueryDsl::first::<ManagerTotpRecoveryCodeDb>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .optional()
+                        .map(|row| row.map(ManagerTotpRecoveryCodeDb::from_db))
+                        .map_err(|error| {
+                            manager_credential_storage_error("recovery code load failed", error)
+                        })
+                    })
                 })
-        })
+            })
+            .await
     }
 
-    pub fn list() -> Result<Vec<Self>, ManagerCredentialRepositoryError> {
-        let conn = &mut connection()?;
-        db_execute!(conn, {
-            manager_totp_recovery_code::table
-                .filter(manager_totp_recovery_code::dsl::manager_id.eq(MANAGER_ID))
-                .order(manager_totp_recovery_code::dsl::code_id.asc())
-                .select(ManagerTotpRecoveryCodeDb::as_select())
-                .load::<ManagerTotpRecoveryCodeDb>(conn)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(ManagerTotpRecoveryCodeDb::from_db)
-                        .collect()
+    pub async fn list(
+        database: &DatabaseRuntime,
+    ) -> Result<Vec<Self>, ManagerCredentialRepositoryError> {
+        database
+            .run_domain_error(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = manager_totp_recovery_code::table
+                            .filter(manager_totp_recovery_code::dsl::manager_id.eq(MANAGER_ID))
+                            .order(manager_totp_recovery_code::dsl::code_id.asc())
+                            .select(ManagerTotpRecoveryCodeDb::as_select());
+                        diesel_async::RunQueryDsl::load::<ManagerTotpRecoveryCodeDb>(
+                            query,
+                            &mut **conn,
+                        )
+                        .await
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(ManagerTotpRecoveryCodeDb::from_db)
+                                .collect()
+                        })
+                        .map_err(|error| {
+                            manager_credential_storage_error("recovery code list failed", error)
+                        })
+                    })
                 })
-                .map_err(|error| {
-                    manager_credential_storage_error("recovery code list failed", error)
-                })
-        })
+            })
+            .await
     }
 }

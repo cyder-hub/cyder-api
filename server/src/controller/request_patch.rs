@@ -122,11 +122,13 @@ async fn list_source_request_patch_variants(
     app_state
         .admin
         .request_patch
-        .validate_source_route(provider_id, source_id)?;
+        .validate_source_route(provider_id, source_id)
+        .await?;
     let variants = app_state
         .admin
         .request_patch
-        .list_source_variants(source_id)?;
+        .list_source_variants(source_id)
+        .await?;
     Ok(list_response(source_id, None, variants))
 }
 
@@ -138,7 +140,8 @@ async fn create_source_request_patch_variant(
     app_state
         .admin
         .request_patch
-        .validate_source_route(provider_id, source_id)?;
+        .validate_source_route(provider_id, source_id)
+        .await?;
     Ok(HttpResult::new(
         app_state
             .admin
@@ -156,7 +159,8 @@ async fn update_source_request_patch_variant(
     app_state
         .admin
         .request_patch
-        .validate_source_route(provider_id, source_id)?;
+        .validate_source_route(provider_id, source_id)
+        .await?;
     Ok(HttpResult::new(
         app_state
             .admin
@@ -173,7 +177,8 @@ async fn delete_source_request_patch_variant(
     app_state
         .admin
         .request_patch
-        .validate_source_route(provider_id, source_id)?;
+        .validate_source_route(provider_id, source_id)
+        .await?;
     Ok(HttpResult::new(
         app_state
             .admin
@@ -191,13 +196,15 @@ async fn preview_source_request_patch_variant(
     app_state
         .admin
         .request_patch
-        .validate_source_route(provider_id, source_id)?;
+        .validate_source_route(provider_id, source_id)
+        .await?;
     let variant_id = payload.variant_id;
     let input: RequestPatchVariantInput = payload.into();
     let preview = app_state
         .admin
         .request_patch
-        .preview_source_variant(source_id, input, variant_id)?;
+        .preview_source_variant(source_id, input, variant_id)
+        .await?;
     Ok(HttpResult::new(RequestPatchPreviewResponse {
         historical_snapshot: false,
         preview,
@@ -213,7 +220,8 @@ async fn explain_source_request_patch_variants(
     app_state
         .admin
         .request_patch
-        .validate_source_route(provider_id, source_id)?;
+        .validate_source_route(provider_id, source_id)
+        .await?;
     Ok(HttpResult::new(
         build_explain_response(&app_state, source_id, None, query.suffix).await?,
     ))
@@ -226,7 +234,8 @@ async fn list_model_request_patch_variants(
     let variants = app_state
         .admin
         .request_patch
-        .list_model_variants(model_id)?;
+        .list_model_variants(model_id)
+        .await?;
     let rule_count = variants.iter().map(|item| item.rules.len()).sum();
     Ok(HttpResult::new(ModelRequestPatchOverviewResponse {
         model_id,
@@ -243,7 +252,8 @@ async fn list_model_source_request_patch_variants(
     let variants = app_state
         .admin
         .request_patch
-        .list_model_source_variants(model_id, source_id)?;
+        .list_model_source_variants(model_id, source_id)
+        .await?;
     Ok(list_response(source_id, Some(model_id), variants))
 }
 
@@ -295,12 +305,11 @@ async fn preview_model_source_request_patch_variant(
 ) -> Result<HttpResult<RequestPatchPreviewResponse>, BaseError> {
     let variant_id = payload.variant_id;
     let input: RequestPatchVariantInput = payload.into();
-    let preview = app_state.admin.request_patch.preview_model_source_variant(
-        model_id,
-        source_id,
-        input.clone(),
-        variant_id,
-    )?;
+    let preview = app_state
+        .admin
+        .request_patch
+        .preview_model_source_variant(model_id, source_id, input.clone(), variant_id)
+        .await?;
     let candidate = cache_variant_from_preview_input(&input, variant_id)?;
     let mut variants = app_state
         .catalog
@@ -422,7 +431,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     use super::create_request_patch_router;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::upstream_source::NewUpstreamSource;
@@ -634,8 +643,13 @@ mod tests {
         }
     }
 
-    fn seed_provider(provider_id: i64, source_id: i64) -> (Provider, Model) {
+    async fn seed_provider(
+        database: &crate::database::runtime::DatabaseRuntime,
+        provider_id: i64,
+        source_id: i64,
+    ) -> (Provider, Model) {
         let provider = Provider::create(
+            database,
             &NewProvider {
                 id: provider_id,
                 provider_key: format!("provider-{provider_id}"),
@@ -664,15 +678,18 @@ mod tests {
                 ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
+        .await
         .expect("provider seed should succeed")
         .provider;
         let model = Model::create(
+            database,
             provider.id,
             "model-a",
             None,
             crate::schema::enum_def::ModelKind::Chat,
             true,
         )
+        .await
         .expect("model seed should succeed");
         (provider, model)
     }
@@ -722,524 +739,523 @@ mod tests {
 
     #[tokio::test]
     async fn responses_stateless_targets_are_rejected_by_preview_and_save_routes() {
-        let database = TestDbContext::new_sqlite("controller-request-patch-stateless.sqlite");
-        database
-            .run_async(async {
-                let (provider, _) = seed_provider(8451, 8461);
-                let app_state = create_test_app_state(database.clone()).await;
-                let source_id = 8461;
-                let base = format!(
-                    "/provider/{}/sources/{source_id}/request_patch",
-                    provider.id
-                );
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-stateless.sqlite").await;
+        (async {
+            let (provider, _) = seed_provider(&database, 8451, 8461).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let source_id = 8461;
+            let base = format!(
+                "/provider/{}/sources/{source_id}/request_patch",
+                provider.id
+            );
 
-                for (index, (operation, target)) in [
-                    (RequestPatchOperation::Set, "/store"),
-                    (RequestPatchOperation::Remove, "/store/enabled"),
-                    (RequestPatchOperation::Set, "/previous_response_id"),
-                    (RequestPatchOperation::Remove, "/conversation/id"),
-                    (RequestPatchOperation::Set, "/background"),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let payload = json!({
-                        "source_id": source_id,
-                        "model_id": null,
-                        "suffix": format!("stateless-{index}"),
-                        "enabled": true,
-                        "expose_in_models": true,
-                        "rules": [{
-                            "placement": RequestPatchPlacement::Body,
-                            "target": target,
-                            "operation": operation,
-                            "value_json": (operation == RequestPatchOperation::Set)
-                                .then_some("patch-private-marker"),
-                            "description": null
-                        }]
-                    });
-                    for uri in [format!("{base}/preview"), format!("{base}/variants")] {
-                        let response = send(
-                            &app_state,
-                            json_request(Method::POST, &uri, payload.clone()),
-                        )
-                        .await;
-                        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri} {target}");
-                        let body = response_json(response).await.to_string();
-                        assert!(body.contains("reserved"), "{uri} {target}");
-                        assert!(!body.contains("patch-private-marker"), "{uri} {target}");
-                    }
+            for (index, (operation, target)) in [
+                (RequestPatchOperation::Set, "/store"),
+                (RequestPatchOperation::Remove, "/store/enabled"),
+                (RequestPatchOperation::Set, "/previous_response_id"),
+                (RequestPatchOperation::Remove, "/conversation/id"),
+                (RequestPatchOperation::Set, "/background"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let payload = json!({
+                    "source_id": source_id,
+                    "model_id": null,
+                    "suffix": format!("stateless-{index}"),
+                    "enabled": true,
+                    "expose_in_models": true,
+                    "rules": [{
+                        "placement": RequestPatchPlacement::Body,
+                        "target": target,
+                        "operation": operation,
+                        "value_json": (operation == RequestPatchOperation::Set)
+                            .then_some("patch-private-marker"),
+                        "description": null
+                    }]
+                });
+                for uri in [format!("{base}/preview"), format!("{base}/variants")] {
+                    let response = send(
+                        &app_state,
+                        json_request(Method::POST, &uri, payload.clone()),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri} {target}");
+                    let body = response_json(response).await.to_string();
+                    assert!(body.contains("reserved"), "{uri} {target}");
+                    assert!(!body.contains("patch-private-marker"), "{uri} {target}");
                 }
-            })
-            .await;
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn aggregate_source_routes_support_crud_preview_explain_and_negative_legacy_route() {
-        let database = TestDbContext::new_sqlite("controller-request-patch-aggregate.sqlite");
-        database
-            .run_async(async {
-                let (provider, model) = seed_provider(8501, 8511);
-                let app_state = create_test_app_state(database.clone()).await;
-                let source_id = 8511;
-                let base = format!(
-                    "/provider/{}/sources/{source_id}/request_patch",
-                    provider.id
-                );
-                let variants = format!("{base}/variants");
-                assert!(
-                    app_state
-                        .admin
-                        .request_patch
-                        .mutation_runner()
-                        .drain_audit_events()
-                        .is_empty()
-                );
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-aggregate.sqlite").await;
+        (async {
+            let (provider, model) = seed_provider(&database, 8501, 8511).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let source_id = 8511;
+            let base = format!(
+                "/provider/{}/sources/{source_id}/request_patch",
+                provider.id
+            );
+            let variants = format!("{base}/variants");
+            assert!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .is_empty()
+            );
 
-                let created = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &variants,
-                        source_variant_payload(source_id, "fast", "/options/temperature"),
-                    ),
-                )
-                .await;
-                assert_eq!(created.status(), StatusCode::OK);
-                let created_body = response_json(created).await;
-                let variant_id = created_body["data"]["variant"]["id"]
-                    .as_i64()
-                    .expect("created Variant id should exist");
-                assert_eq!(
-                    app_state
-                        .admin
-                        .request_patch
-                        .mutation_runner()
-                        .drain_audit_events()
-                        .len(),
-                    1
-                );
-
-                let listed = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(&base)
-                        .body(Body::empty())
-                        .expect("list request should build"),
-                )
-                .await;
-                assert_eq!(listed.status(), StatusCode::OK);
-                let listed_body = response_json(listed).await;
-                assert_eq!(listed_body["data"]["variant_count"], 1);
-                assert_eq!(listed_body["data"]["rule_count"], 1);
-
-                let preview = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("{base}/preview"),
-                        json!({
-                            "source_id": source_id,
-                            "model_id": null,
-                            "suffix": "secret",
-                            "enabled": true,
-                            "expose_in_models": true,
-                            "rules": [{
-                                "placement": "HEADER",
-                                "target": "Authorization",
-                                "operation": "SET",
-                                "value_json": "would-not-be-saved",
-                                "description": null
-                            }]
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
-                let preview_body = response_json(preview).await;
-                assert!(preview_body.to_string().contains("reserved"));
-                assert!(!preview_body.to_string().contains("would-not-be-saved"));
-                assert!(
-                    app_state
-                        .admin
-                        .request_patch
-                        .mutation_runner()
-                        .drain_audit_events()
-                        .is_empty(),
-                    "Preview must not emit an audit event"
-                );
-
-                let mut legacy_rule = json!({
-                    "placement": "HEADER",
-                    "target": "Authorization",
-                    "operation": "SET",
-                    "value_json": "would-not-be-saved",
-                    "description": null
-                });
-                legacy_rule
-                    .as_object_mut()
-                    .expect("legacy rule should be an object")
-                    .insert(
-                        ["confirm", "dangerous", "target"].join("_"),
-                        Value::Bool(true),
-                    );
-                let legacy_confirmation = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("{base}/preview"),
-                        json!({
-                            "source_id": source_id,
-                            "model_id": null,
-                            "suffix": "secret",
-                            "enabled": true,
-                            "expose_in_models": true,
-                            "rules": [legacy_rule]
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    legacy_confirmation.status(),
-                    StatusCode::UNPROCESSABLE_ENTITY
-                );
-                let legacy_body = to_bytes(legacy_confirmation.into_body(), usize::MAX)
-                    .await
-                    .expect("legacy rejection body should read");
-                assert!(!String::from_utf8_lossy(&legacy_body).contains("would-not-be-saved"));
-                assert!(
-                    app_state
-                        .admin
-                        .request_patch
-                        .mutation_runner()
-                        .drain_audit_events()
-                        .is_empty(),
-                    "rejected legacy confirmation must not emit an audit event"
-                );
-
-                let listed_after_preview = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(&base)
-                        .body(Body::empty())
-                        .expect("post-preview list request should build"),
-                )
-                .await;
-                assert_eq!(listed_after_preview.status(), StatusCode::OK);
-                assert_eq!(
-                    response_json(listed_after_preview).await["data"]["variant_count"],
-                    1,
-                    "Preview must not persist a candidate Variant"
-                );
-
-                let explained = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(format!("{base}/explain?suffix=fast"))
-                        .body(Body::empty())
-                        .expect("explain request should build"),
-                )
-                .await;
-                assert_eq!(explained.status(), StatusCode::OK);
-                let explained_body = response_json(explained).await;
-                assert_eq!(explained_body["data"]["evaluation"]["executable"], true);
-                assert_eq!(
-                    explained_body["data"]["evaluation"]["effective_rules"]
-                        .as_array()
-                        .map(Vec::len),
-                    Some(1)
-                );
-
-                let updated = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("{variants}/{variant_id}"),
-                        source_variant_payload(source_id, "fast", "/options/top_p"),
-                    ),
-                )
-                .await;
-                assert_eq!(updated.status(), StatusCode::OK);
-                let updated_body = response_json(updated).await;
-                assert_eq!(updated_body["data"]["variant"]["id"], variant_id);
-                assert_eq!(updated_body["data"]["rules"][0]["target"], "/options/top_p");
-
-                let deleted = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::DELETE)
-                        .uri(format!("{variants}/{variant_id}"))
-                        .body(Body::empty())
-                        .expect("delete request should build"),
-                )
-                .await;
-                assert_eq!(deleted.status(), StatusCode::OK);
-                assert!(response_json(deleted).await["data"]["variant"]["deleted_at"].is_number());
-
-                let old_route = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(format!("/provider/{}/request_patch", provider.id))
-                        .body(Body::empty())
-                        .expect("legacy request should build"),
-                )
-                .await;
-                assert_eq!(old_route.status(), StatusCode::NOT_FOUND);
-
-                let _ = model;
-            })
+            let created = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &variants,
+                    source_variant_payload(source_id, "fast", "/options/temperature"),
+                ),
+            )
             .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let created_body = response_json(created).await;
+            let variant_id = created_body["data"]["variant"]["id"]
+                .as_i64()
+                .expect("created Variant id should exist");
+            assert_eq!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .len(),
+                1
+            );
+
+            let listed = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("list request should build"),
+            )
+            .await;
+            assert_eq!(listed.status(), StatusCode::OK);
+            let listed_body = response_json(listed).await;
+            assert_eq!(listed_body["data"]["variant_count"], 1);
+            assert_eq!(listed_body["data"]["rule_count"], 1);
+
+            let preview = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{base}/preview"),
+                    json!({
+                        "source_id": source_id,
+                        "model_id": null,
+                        "suffix": "secret",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": [{
+                            "placement": "HEADER",
+                            "target": "Authorization",
+                            "operation": "SET",
+                            "value_json": "would-not-be-saved",
+                            "description": null
+                        }]
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
+            let preview_body = response_json(preview).await;
+            assert!(preview_body.to_string().contains("reserved"));
+            assert!(!preview_body.to_string().contains("would-not-be-saved"));
+            assert!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .is_empty(),
+                "Preview must not emit an audit event"
+            );
+
+            let mut legacy_rule = json!({
+                "placement": "HEADER",
+                "target": "Authorization",
+                "operation": "SET",
+                "value_json": "would-not-be-saved",
+                "description": null
+            });
+            legacy_rule
+                .as_object_mut()
+                .expect("legacy rule should be an object")
+                .insert(
+                    ["confirm", "dangerous", "target"].join("_"),
+                    Value::Bool(true),
+                );
+            let legacy_confirmation = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{base}/preview"),
+                    json!({
+                        "source_id": source_id,
+                        "model_id": null,
+                        "suffix": "secret",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": [legacy_rule]
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                legacy_confirmation.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            let legacy_body = to_bytes(legacy_confirmation.into_body(), usize::MAX)
+                .await
+                .expect("legacy rejection body should read");
+            assert!(!String::from_utf8_lossy(&legacy_body).contains("would-not-be-saved"));
+            assert!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .is_empty(),
+                "rejected legacy confirmation must not emit an audit event"
+            );
+
+            let listed_after_preview = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("post-preview list request should build"),
+            )
+            .await;
+            assert_eq!(listed_after_preview.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(listed_after_preview).await["data"]["variant_count"],
+                1,
+                "Preview must not persist a candidate Variant"
+            );
+
+            let explained = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("{base}/explain?suffix=fast"))
+                    .body(Body::empty())
+                    .expect("explain request should build"),
+            )
+            .await;
+            assert_eq!(explained.status(), StatusCode::OK);
+            let explained_body = response_json(explained).await;
+            assert_eq!(explained_body["data"]["evaluation"]["executable"], true);
+            assert_eq!(
+                explained_body["data"]["evaluation"]["effective_rules"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            let updated = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("{variants}/{variant_id}"),
+                    source_variant_payload(source_id, "fast", "/options/top_p"),
+                ),
+            )
+            .await;
+            assert_eq!(updated.status(), StatusCode::OK);
+            let updated_body = response_json(updated).await;
+            assert_eq!(updated_body["data"]["variant"]["id"], variant_id);
+            assert_eq!(updated_body["data"]["rules"][0]["target"], "/options/top_p");
+
+            let deleted = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("{variants}/{variant_id}"))
+                    .body(Body::empty())
+                    .expect("delete request should build"),
+            )
+            .await;
+            assert_eq!(deleted.status(), StatusCode::OK);
+            assert!(response_json(deleted).await["data"]["variant"]["deleted_at"].is_number());
+
+            let old_route = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/provider/{}/request_patch", provider.id))
+                    .body(Body::empty())
+                    .expect("legacy request should build"),
+            )
+            .await;
+            assert_eq!(old_route.status(), StatusCode::NOT_FOUND);
+
+            let _ = model;
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn aggregate_model_source_route_rejects_cross_owner_payload() {
-        let database = TestDbContext::new_sqlite("controller-request-patch-owner.sqlite");
-        database
-            .run_async(async {
-                let (provider, model) = seed_provider(8601, 8611);
-                let app_state = create_test_app_state(database.clone()).await;
-                let response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!(
-                            "/model/{}/sources/{}/request_patch/variants",
-                            model.id, 8611
-                        ),
-                        json!({
-                            "source_id": 8611,
-                            "model_id": provider.id,
-                            "suffix": "fast",
-                            "enabled": true,
-                            "expose_in_models": true,
-                            "rules": []
-                        }),
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-owner.sqlite").await;
+        (async {
+            let (provider, model) = seed_provider(&database, 8601, 8611).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!(
+                        "/model/{}/sources/{}/request_patch/variants",
+                        model.id, 8611
                     ),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            })
+                    json!({
+                        "source_id": 8611,
+                        "model_id": provider.id,
+                        "suffix": "fast",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": []
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn aggregate_model_source_routes_cover_crud_overview_tombstone_preview_explain_and_rollback()
      {
-        let database = TestDbContext::new_sqlite("controller-request-patch-model-source.sqlite");
-        database
-            .run_async(async {
-                let (provider, model) = seed_provider(8701, 8711);
-                let app_state = create_test_app_state(database.clone()).await;
-                let source_base =
-                    format!("/provider/{}/sources/{}/request_patch", provider.id, 8711);
-                let source_variant = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("{source_base}/variants"),
-                        source_variant_payload(8711, "fast", "/options/temperature"),
-                    ),
-                )
-                .await;
-                assert_eq!(source_variant.status(), StatusCode::OK);
-
-                let base = format!("/model/{}/sources/{}/request_patch", model.id, 8711);
-                let variants = format!("{base}/variants");
-                let tombstone_payload = json!({
-                    "source_id": 8711,
-                    "model_id": model.id,
-                    "suffix": "fast",
-                    "enabled": true,
-                    "expose_in_models": true,
-                    "rules": []
-                });
-                let created = send(
-                    &app_state,
-                    json_request(Method::POST, &variants, tombstone_payload.clone()),
-                )
-                .await;
-                assert_eq!(created.status(), StatusCode::OK);
-                let created_body = response_json(created).await;
-                let variant_id = created_body["data"]["variant"]["id"]
-                    .as_i64()
-                    .expect("Model+Source Variant id should exist");
-                assert_eq!(
-                    created_body["data"]["rules"].as_array().map(Vec::len),
-                    Some(0)
-                );
-
-                let listed = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(&base)
-                        .body(Body::empty())
-                        .expect("Model+Source list request should build"),
-                )
-                .await;
-                assert_eq!(listed.status(), StatusCode::OK);
-                let listed_body = response_json(listed).await;
-                assert_eq!(listed_body["data"]["variant_count"], 1);
-                assert_eq!(listed_body["data"]["rule_count"], 0);
-
-                let overview = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(format!("/model/{}/request_patch", model.id))
-                        .body(Body::empty())
-                        .expect("Model overview request should build"),
-                )
-                .await;
-                assert_eq!(overview.status(), StatusCode::OK);
-                let overview_body = response_json(overview).await;
-                assert_eq!(overview_body["data"]["model_id"], model.id);
-                assert_eq!(overview_body["data"]["variant_count"], 1);
-                assert_eq!(overview_body["data"]["rule_count"], 0);
-
-                let preview = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("{base}/preview"),
-                        json!({
-                            "variant_id": variant_id,
-                            "source_id": 8711,
-                            "model_id": model.id,
-                            "suffix": "fast",
-                            "enabled": true,
-                            "expose_in_models": true,
-                            "rules": []
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(preview.status(), StatusCode::OK);
-                let preview_body = response_json(preview).await;
-                assert_eq!(preview_body["data"]["preview"]["valid"], true);
-                assert_eq!(preview_body["data"]["preview"]["rule_count"], 0);
-                assert_eq!(
-                    preview_body["data"]["evaluation"]["layers"]
-                        .as_array()
-                        .map(Vec::len),
-                    Some(4)
-                );
-                assert_eq!(
-                    preview_body["data"]["evaluation"]["effective_rules"]
-                        .as_array()
-                        .map(Vec::len),
-                    Some(1)
-                );
-
-                let explained = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(format!("{base}/explain?suffix=fast"))
-                        .body(Body::empty())
-                        .expect("Model+Source explain request should build"),
-                )
-                .await;
-                assert_eq!(explained.status(), StatusCode::OK);
-                let explained_body = response_json(explained).await;
-                assert_eq!(explained_body["data"]["model_id"], model.id);
-                assert_eq!(explained_body["data"]["evaluation"]["executable"], true);
-                assert_eq!(
-                    explained_body["data"]["evaluation"]["effective_rules"]
-                        .as_array()
-                        .map(Vec::len),
-                    Some(1),
-                    "empty Model suffix tombstone should inherit the Source rule"
-                );
-
-                let invalid_update = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("{variants}/{variant_id}"),
-                        json!({
-                            "source_id": 8711,
-                            "model_id": model.id,
-                            "suffix": "fast",
-                            "enabled": true,
-                            "expose_in_models": true,
-                            "rules": [{
-                                "placement": "BODY",
-                                "target": "not-a-json-pointer",
-                                "operation": "SET",
-                                "value_json": true,
-                                "description": null
-                            }]
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(invalid_update.status(), StatusCode::BAD_REQUEST);
-
-                let updated = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("{variants}/{variant_id}"),
-                        json!({
-                            "source_id": 8711,
-                            "model_id": model.id,
-                            "suffix": "fast",
-                            "enabled": false,
-                            "expose_in_models": false,
-                            "rules": []
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(updated.status(), StatusCode::OK);
-                assert_eq!(
-                    response_json(updated).await["data"]["variant"]["enabled"],
-                    false
-                );
-
-                let deleted = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::DELETE)
-                        .uri(format!("{variants}/{variant_id}"))
-                        .body(Body::empty())
-                        .expect("Model+Source delete request should build"),
-                )
-                .await;
-                assert_eq!(deleted.status(), StatusCode::OK);
-                assert!(response_json(deleted).await["data"]["variant"]["deleted_at"].is_number());
-
-                let listed_after_delete = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(&base)
-                        .body(Body::empty())
-                        .expect("post-delete Model+Source list request should build"),
-                )
-                .await;
-                assert_eq!(listed_after_delete.status(), StatusCode::OK);
-                assert_eq!(
-                    response_json(listed_after_delete).await["data"]["variant_count"],
-                    0
-                );
-
-                let old_route = send(
-                    &app_state,
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri(format!("/model/{}/request_patches", model.id))
-                        .body(Body::empty())
-                        .expect("legacy Model request should build"),
-                )
-                .await;
-                assert_eq!(old_route.status(), StatusCode::NOT_FOUND);
-            })
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-model-source.sqlite").await;
+        (async {
+            let (provider, model) = seed_provider(&database, 8701, 8711).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let source_base = format!("/provider/{}/sources/{}/request_patch", provider.id, 8711);
+            let source_variant = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{source_base}/variants"),
+                    source_variant_payload(8711, "fast", "/options/temperature"),
+                ),
+            )
             .await;
+            assert_eq!(source_variant.status(), StatusCode::OK);
+
+            let base = format!("/model/{}/sources/{}/request_patch", model.id, 8711);
+            let variants = format!("{base}/variants");
+            let tombstone_payload = json!({
+                "source_id": 8711,
+                "model_id": model.id,
+                "suffix": "fast",
+                "enabled": true,
+                "expose_in_models": true,
+                "rules": []
+            });
+            let created = send(
+                &app_state,
+                json_request(Method::POST, &variants, tombstone_payload.clone()),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let created_body = response_json(created).await;
+            let variant_id = created_body["data"]["variant"]["id"]
+                .as_i64()
+                .expect("Model+Source Variant id should exist");
+            assert_eq!(
+                created_body["data"]["rules"].as_array().map(Vec::len),
+                Some(0)
+            );
+
+            let listed = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("Model+Source list request should build"),
+            )
+            .await;
+            assert_eq!(listed.status(), StatusCode::OK);
+            let listed_body = response_json(listed).await;
+            assert_eq!(listed_body["data"]["variant_count"], 1);
+            assert_eq!(listed_body["data"]["rule_count"], 0);
+
+            let overview = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/model/{}/request_patch", model.id))
+                    .body(Body::empty())
+                    .expect("Model overview request should build"),
+            )
+            .await;
+            assert_eq!(overview.status(), StatusCode::OK);
+            let overview_body = response_json(overview).await;
+            assert_eq!(overview_body["data"]["model_id"], model.id);
+            assert_eq!(overview_body["data"]["variant_count"], 1);
+            assert_eq!(overview_body["data"]["rule_count"], 0);
+
+            let preview = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{base}/preview"),
+                    json!({
+                        "variant_id": variant_id,
+                        "source_id": 8711,
+                        "model_id": model.id,
+                        "suffix": "fast",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": []
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(preview.status(), StatusCode::OK);
+            let preview_body = response_json(preview).await;
+            assert_eq!(preview_body["data"]["preview"]["valid"], true);
+            assert_eq!(preview_body["data"]["preview"]["rule_count"], 0);
+            assert_eq!(
+                preview_body["data"]["evaluation"]["layers"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(4)
+            );
+            assert_eq!(
+                preview_body["data"]["evaluation"]["effective_rules"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            let explained = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("{base}/explain?suffix=fast"))
+                    .body(Body::empty())
+                    .expect("Model+Source explain request should build"),
+            )
+            .await;
+            assert_eq!(explained.status(), StatusCode::OK);
+            let explained_body = response_json(explained).await;
+            assert_eq!(explained_body["data"]["model_id"], model.id);
+            assert_eq!(explained_body["data"]["evaluation"]["executable"], true);
+            assert_eq!(
+                explained_body["data"]["evaluation"]["effective_rules"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1),
+                "empty Model suffix tombstone should inherit the Source rule"
+            );
+
+            let invalid_update = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("{variants}/{variant_id}"),
+                    json!({
+                        "source_id": 8711,
+                        "model_id": model.id,
+                        "suffix": "fast",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": [{
+                            "placement": "BODY",
+                            "target": "not-a-json-pointer",
+                            "operation": "SET",
+                            "value_json": true,
+                            "description": null
+                        }]
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(invalid_update.status(), StatusCode::BAD_REQUEST);
+
+            let updated = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("{variants}/{variant_id}"),
+                    json!({
+                        "source_id": 8711,
+                        "model_id": model.id,
+                        "suffix": "fast",
+                        "enabled": false,
+                        "expose_in_models": false,
+                        "rules": []
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(updated.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(updated).await["data"]["variant"]["enabled"],
+                false
+            );
+
+            let deleted = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("{variants}/{variant_id}"))
+                    .body(Body::empty())
+                    .expect("Model+Source delete request should build"),
+            )
+            .await;
+            assert_eq!(deleted.status(), StatusCode::OK);
+            assert!(response_json(deleted).await["data"]["variant"]["deleted_at"].is_number());
+
+            let listed_after_delete = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("post-delete Model+Source list request should build"),
+            )
+            .await;
+            assert_eq!(listed_after_delete.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(listed_after_delete).await["data"]["variant_count"],
+                0
+            );
+
+            let old_route = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/model/{}/request_patches", model.id))
+                    .body(Body::empty())
+                    .expect("legacy Model request should build"),
+            )
+            .await;
+            assert_eq!(old_route.status(), StatusCode::NOT_FOUND);
+        })
+        .await;
     }
 }

@@ -3,7 +3,7 @@ use bincode::{Decode, Encode};
 // These structures contain only the fields needed for cache operations,
 // reducing memory footprint and improving cache performance.
 
-use crate::database::model_source_binding::list_visible_by_model_id;
+use crate::database::model_source_binding::ModelSourceBinding;
 use crate::database::request_patch::RequestPatchVariantAggregate;
 use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
@@ -416,17 +416,11 @@ impl CacheApiKey {
 }
 
 impl CacheModel {
-    pub fn from_db(db: crate::database::model::Model) -> Result<Self, String> {
-        let source_bindings = list_visible_by_model_id(db.id)
-            .map_err(|error| format!("failed to load model source bindings: {error:?}"))?
-            .into_iter()
-            .map(|binding| CacheModelSourceBinding {
-                source_id: binding.source_id,
-                is_default: binding.is_default,
-            })
-            .collect();
-
-        Ok(Self {
+    pub fn from_db_with_bindings(
+        db: crate::database::model::Model,
+        source_bindings: Vec<ModelSourceBinding>,
+    ) -> Self {
+        Self {
             id: db.id,
             provider_id: db.provider_id,
             real_model_name: db.real_model_name,
@@ -434,9 +428,15 @@ impl CacheModel {
             model_kind: db.model_kind,
             cost_catalog_id: db.cost_catalog_id,
             source_selection_mode: db.source_selection_mode,
-            source_bindings,
+            source_bindings: source_bindings
+                .into_iter()
+                .map(|binding| CacheModelSourceBinding {
+                    source_id: binding.source_id,
+                    is_default: binding.is_default,
+                })
+                .collect(),
             is_enabled: db.is_enabled,
-        })
+        }
     }
 }
 

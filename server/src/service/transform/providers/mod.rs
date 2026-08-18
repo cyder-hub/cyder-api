@@ -16,10 +16,6 @@ mod tests {
     };
     use crate::utils::sse::SseEvent;
 
-    type EventEncoder =
-        fn(Vec<UnifiedStreamEvent>, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
-    type ChunkEncoder =
-        fn(UnifiedChunkResponse, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
     type FallibleEventEncoder = fn(
         Vec<UnifiedStreamEvent>,
         &mut StreamTransformContext<'_>,

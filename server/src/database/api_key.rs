@@ -7,14 +7,14 @@ use sha2::{Digest, Sha256};
 use super::{
     DbResult,
     api_key_acl_rule::{self as api_key_acl_repository, ApiKeyAclRule, ApiKeyAclRuleInput},
-    get_connection,
+    runtime::{DatabaseRuntime, DatabaseWorkload, db_execute as async_db_execute},
 };
 use crate::controller::BaseError;
+use crate::db_object;
 use crate::schema::enum_def::Action;
 use crate::service::secret_encryption::EncryptedSecret;
 #[cfg(test)]
 use crate::utils::ID_GENERATOR;
-use crate::{db_execute, db_object};
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug, Clone)]
@@ -351,38 +351,36 @@ fn map_write_error(context: &str, e: diesel::result::Error) -> BaseError {
     }
 }
 
-macro_rules! api_key_admin_db_execute {
-    ($conn:ident, $block:block) => {
-        match $conn {
-            crate::database::DbConnection::Postgres($conn) => {
+macro_rules! api_key_admin_async_transaction {
+    ($connection:ident as $conn:ident, $block:block) => {{
+        match $connection {
+            crate::database::runtime::RuntimeConnection::Postgres($conn) => {
                 #[allow(unused_imports)]
                 use self::_postgres_model::*;
                 use crate::database::_postgres_schema::*;
                 #[allow(unused_imports)]
                 use crate::database::api_key_acl_rule::_postgres_model::*;
-                #[allow(unused_imports)]
                 use diesel::prelude::*;
-
-                $block
+                use diesel_async::AsyncConnection;
+                $conn.transaction(async move |$conn| $block).await
             }
-            crate::database::DbConnection::Sqlite($conn) => {
+            crate::database::runtime::RuntimeConnection::Sqlite($conn) => {
                 #[allow(unused_imports)]
                 use self::_sqlite_model::*;
                 use crate::database::_sqlite_schema::*;
                 #[allow(unused_imports)]
                 use crate::database::api_key_acl_rule::_sqlite_model::*;
-                #[allow(unused_imports)]
                 use diesel::prelude::*;
-
-                $block
+                use diesel_async::AsyncConnection;
+                $conn.transaction(async move |$conn| $block).await
             }
         }
-    };
+    }};
 }
 
-macro_rules! load_api_key_acl_rules_in_tx {
+macro_rules! load_api_key_acl_rules_async_in_tx {
     ($conn:ident, $api_key_id:expr) => {{
-        let rows = api_key_acl_rule::table
+        let query = api_key_acl_rule::table
             .filter(
                 api_key_acl_rule::dsl::api_key_id
                     .eq($api_key_id)
@@ -393,56 +391,35 @@ macro_rules! load_api_key_acl_rules_in_tx {
                 api_key_acl_rule::dsl::created_at.asc(),
                 api_key_acl_rule::dsl::id.asc(),
             ))
-            .select(ApiKeyAclRuleDb::as_select())
-            .load::<ApiKeyAclRuleDb>($conn)
-            .map_err(|e| {
+            .select(ApiKeyAclRuleDb::as_select());
+        let rows: Vec<ApiKeyAclRuleDb> = diesel_async::RunQueryDsl::load(query, &mut *$conn)
+            .await
+            .map_err(|error| {
                 BaseError::DatabaseFatal(Some(format!(
                     "Failed to load api key ACL rules for {}: {}",
-                    $api_key_id, e
+                    $api_key_id, error
                 )))
             })?;
-
         Ok::<Vec<ApiKeyAclRule>, BaseError>(
-            rows.into_iter()
-                .map(ApiKeyAclRuleDb::from_db)
-                .collect::<Vec<_>>(),
+            rows.into_iter().map(ApiKeyAclRuleDb::from_db).collect(),
         )
     }};
 }
 
-macro_rules! insert_api_key_acl_rules_in_tx {
+macro_rules! insert_api_key_acl_rules_async_in_tx {
     ($conn:ident, $api_key_id:expr, $acl_rows:expr) => {{
-        let acl_rows = $acl_rows;
-        if !acl_rows.is_empty() {
-            let db_rows: Vec<_> = acl_rows.iter().map(NewApiKeyAclRuleDb::to_db).collect();
-            diesel::insert_into(api_key_acl_rule::table)
-                .values(&db_rows)
-                .execute($conn)
-                .map_err(|e| {
+        for acl_row in $acl_rows {
+            let db_row = NewApiKeyAclRuleDb::to_db(acl_row);
+            let query = diesel::insert_into(api_key_acl_rule::table).values(&db_row);
+            diesel_async::RunQueryDsl::execute(query, &mut *$conn)
+                .await
+                .map_err(|error| {
                     BaseError::DatabaseFatal(Some(format!(
                         "Failed to insert ACL rules for api key {}: {}",
-                        $api_key_id, e
+                        $api_key_id, error
                     )))
                 })?;
         }
-        Ok::<(), BaseError>(())
-    }};
-}
-
-macro_rules! replace_api_key_acl_rules_in_tx {
-    ($conn:ident, $api_key_id:expr, $acl_rows:expr) => {{
-        diesel::delete(
-            api_key_acl_rule::table.filter(api_key_acl_rule::dsl::api_key_id.eq($api_key_id)),
-        )
-        .execute($conn)
-        .map_err(|e| {
-            BaseError::DatabaseFatal(Some(format!(
-                "Failed to replace ACL rules for api key {}: {}",
-                $api_key_id, e
-            )))
-        })?;
-
-        insert_api_key_acl_rules_in_tx!($conn, $api_key_id, $acl_rows)?;
         Ok::<(), BaseError>(())
     }};
 }
@@ -515,11 +492,109 @@ fn build_detail(row: &ApiKey, acl_rules: Vec<ApiKeyAclRule>) -> ApiKeyDetail {
 }
 
 impl ApiKey {
-    pub(crate) fn create_issued(
+    #[cfg(test)]
+    pub async fn secret_tuple_for_test(
+        database: &DatabaseRuntime,
+        id_value: i64,
+    ) -> DbResult<(
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<i32>,
+        Option<String>,
+    )> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table.find(id_value).select((
+                            api_key::dsl::secret_ciphertext,
+                            api_key::dsl::secret_nonce,
+                            api_key::dsl::secret_format_version,
+                            api_key::dsl::secret_key_fingerprint,
+                        ));
+                        diesel_async::RunQueryDsl::first(query, &mut **conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to load API key test secret tuple {id_value}: {error}"
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub async fn update_secret_fingerprint_for_test(
+        database: &DatabaseRuntime,
+        id_value: i64,
+        fingerprint: String,
+    ) -> DbResult<()> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(api_key::table.find(id_value))
+                            .set(api_key::dsl::secret_key_fingerprint.eq(Some(fingerprint)));
+                        diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to update API key test fingerprint {id_value}: {error}"
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub async fn corrupt_secret_ciphertext_for_test(
+        database: &DatabaseRuntime,
+        id_value: i64,
+    ) -> DbResult<()> {
+        let mut tuple = Self::secret_tuple_for_test(database, id_value).await?;
+        let ciphertext = tuple.0.as_mut().ok_or(BaseError::ApiKeySecretUnavailable)?;
+        let Some(first) = ciphertext.first_mut() else {
+            return Err(BaseError::ApiKeySecretUnavailable);
+        };
+        *first ^= 1;
+        let ciphertext = tuple.0;
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(api_key::table.find(id_value))
+                            .set(api_key::dsl::secret_ciphertext.eq(ciphertext));
+                        diesel_async::RunQueryDsl::execute(query, &mut **conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to corrupt API key test ciphertext {id_value}: {error}"
+                                )))
+                            })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn load_acl_rules(
+        database: &DatabaseRuntime,
+        id_value: i64,
+    ) -> DbResult<Vec<ApiKeyAclRule>> {
+        ApiKeyAclRule::list_by_api_key_id(database, id_value).await
+    }
+
+    pub(crate) async fn create_issued(
+        database: &DatabaseRuntime,
         payload: &CreateApiKeyPayload,
         issuance: &ApiKeyIssuance,
     ) -> DbResult<ApiKeyDetail> {
-        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
         let new_key = NewApiKey {
             id: issuance.id,
@@ -551,55 +626,62 @@ impl ApiKey {
             Some(rules) => api_key_acl_repository::map_rule_inputs(new_key.id, rules, now)?,
             None => Vec::new(),
         };
-        api_key_admin_db_execute!(conn, {
-            conn.transaction::<ApiKeyDetail, BaseError, _>(|conn| {
-                let inserted = diesel::insert_into(api_key::table)
-                    .values(NewApiKeyDb::to_db(&new_key))
-                    .returning(ApiKeyDb::as_returning())
-                    .get_result::<ApiKeyDb>(conn)
-                    .map(ApiKeyDb::from_db)
-                    .map_err(|e| map_write_error("Failed to create api key", e))?;
+        let encrypted_secret = issuance.encrypted_secret.as_ref().map(|encrypted| {
+            (
+                encrypted.ciphertext().to_vec(),
+                encrypted.nonce().to_vec(),
+                encrypted.format_version(),
+                encrypted.key_fingerprint().as_str().to_string(),
+            )
+        });
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    api_key_admin_async_transaction!(connection as conn, {
+                        let query = diesel::insert_into(api_key::table)
+                            .values(NewApiKeyDb::to_db(&new_key))
+                            .returning(ApiKeyDb::as_returning());
+                        let inserted =
+                            diesel_async::RunQueryDsl::get_result::<ApiKeyDb>(query, &mut *conn)
+                                .await
+                                .map(ApiKeyDb::from_db)
+                                .map_err(|error| {
+                                    map_write_error("Failed to create api key", error)
+                                })?;
 
-                if let Some(encrypted) = issuance.encrypted_secret.as_ref() {
-                    diesel::update(api_key::table.filter(api_key::dsl::id.eq(inserted.id)))
-                        .set((
-                            api_key::dsl::secret_ciphertext
-                                .eq(Some(encrypted.ciphertext().to_vec())),
-                            api_key::dsl::secret_nonce.eq(Some(encrypted.nonce().to_vec())),
-                            api_key::dsl::secret_format_version
-                                .eq(Some(encrypted.format_version())),
-                            api_key::dsl::secret_key_fingerprint
-                                .eq(Some(encrypted.key_fingerprint().as_str().to_string())),
-                        ))
-                        .execute(conn)
-                        .map_err(|e| map_write_error("Failed to store api key secret", e))?;
-                }
+                        if let Some((ciphertext, nonce, format_version, fingerprint)) =
+                            encrypted_secret
+                        {
+                            let query = diesel::update(
+                                api_key::table.filter(api_key::dsl::id.eq(inserted.id)),
+                            )
+                            .set((
+                                api_key::dsl::secret_ciphertext.eq(Some(ciphertext)),
+                                api_key::dsl::secret_nonce.eq(Some(nonce)),
+                                api_key::dsl::secret_format_version.eq(Some(format_version)),
+                                api_key::dsl::secret_key_fingerprint.eq(Some(fingerprint)),
+                            ));
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    map_write_error("Failed to store api key secret", error)
+                                })?;
+                        }
 
-                insert_api_key_acl_rules_in_tx!(conn, inserted.id, &acl_rows)?;
-                let acl_rules = load_api_key_acl_rules_in_tx!(conn, inserted.id)?;
-
-                Ok(build_detail(&inserted, acl_rules))
+                        insert_api_key_acl_rules_async_in_tx!(conn, inserted.id, &acl_rows)?;
+                        let acl_rules = load_api_key_acl_rules_async_in_tx!(conn, inserted.id)?;
+                        Ok(build_detail(&inserted, acl_rules))
+                    })
+                })
             })
-        })
+            .await
     }
 
-    #[cfg(test)]
-    pub fn create(payload: &CreateApiKeyPayload) -> DbResult<ApiKeyDetailWithSecret> {
-        let secret = generate_api_key_secret();
-        let issuance = ApiKeyIssuance::new(ID_GENERATOR.generate_id(), &secret, None);
-        let detail = Self::create_issued(payload, &issuance)?;
-        let row = Self::get_by_id(detail.id)?;
-        Ok(ApiKeyDetailWithSecret {
-            detail,
-            reveal: build_reveal(&row, secret, false),
-        })
-    }
-
-    pub fn update_metadata(
+    pub async fn update_metadata(
+        database: &DatabaseRuntime,
         id_value: i64,
         payload: &UpdateApiKeyMetadataPayload,
     ) -> DbResult<ApiKeyDetail> {
-        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
         let update_data = UpdateApiKeyData {
             name: payload.name.clone(),
@@ -623,125 +705,164 @@ impl ApiKey {
             )?),
             None => None,
         };
-        api_key_admin_db_execute!(conn, {
-            conn.transaction::<ApiKeyDetail, BaseError, _>(|conn| {
-                let updated = diesel::update(
-                    api_key::table.filter(
-                        api_key::dsl::id
-                            .eq(id_value)
-                            .and(api_key::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    UpdateApiKeyDataDb::to_db(&update_data),
-                    api_key::dsl::updated_at.eq(now),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    map_write_error(&format!("Failed to update api key {}", id_value), e)
-                })?;
-
-                if updated == 0 {
-                    return Err(BaseError::NotFound(Some(format!(
-                        "Api key {} not found",
-                        id_value
-                    ))));
-                }
-
-                if let Some(acl_rows) = acl_rows.as_ref() {
-                    replace_api_key_acl_rules_in_tx!(conn, id_value, acl_rows)?;
-                }
-
-                let row = api_key::table
-                    .filter(
-                        api_key::dsl::id
-                            .eq(id_value)
-                            .and(api_key::dsl::deleted_at.is_null()),
-                    )
-                    .select(ApiKeyDb::as_select())
-                    .first::<ApiKeyDb>(conn)
-                    .map(ApiKeyDb::from_db)
-                    .map_err(|e| match e {
-                        diesel::result::Error::NotFound => {
-                            BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    api_key_admin_async_transaction!(connection as conn, {
+                        let query = diesel::update(
+                            api_key::table.filter(
+                                api_key::dsl::id
+                                    .eq(id_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            UpdateApiKeyDataDb::to_db(&update_data),
+                            api_key::dsl::updated_at.eq(now),
+                        ));
+                        let updated = diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                map_write_error(
+                                    &format!("Failed to update api key {}", id_value),
+                                    error,
+                                )
+                            })?;
+                        if updated == 0 {
+                            return Err(BaseError::NotFound(Some(format!(
+                                "Api key {} not found",
+                                id_value
+                            ))));
                         }
-                        other => BaseError::DatabaseFatal(Some(format!(
-                            "Failed to fetch api key {}: {}",
-                            id_value, other
-                        ))),
-                    })?;
-                let acl_rules = load_api_key_acl_rules_in_tx!(conn, id_value)?;
-
-                Ok(build_detail(&row, acl_rules))
+                        if let Some(acl_rows) = acl_rows.as_ref() {
+                            let query = diesel::delete(
+                                api_key_acl_rule::table
+                                    .filter(api_key_acl_rule::dsl::api_key_id.eq(id_value)),
+                            );
+                            diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to replace ACL rules for api key {}: {}",
+                                        id_value, error
+                                    )))
+                                })?;
+                            insert_api_key_acl_rules_async_in_tx!(conn, id_value, acl_rows)?;
+                        }
+                        let query = api_key::table
+                            .filter(
+                                api_key::dsl::id
+                                    .eq(id_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            )
+                            .select(ApiKeyDb::as_select());
+                        let row = diesel_async::RunQueryDsl::first::<ApiKeyDb>(query, &mut *conn)
+                            .await
+                            .map(ApiKeyDb::from_db)
+                            .map_err(|error| match error {
+                                diesel::result::Error::NotFound => BaseError::NotFound(Some(
+                                    format!("Api key {} not found", id_value),
+                                )),
+                                other => BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to fetch api key {}: {}",
+                                    id_value, other
+                                ))),
+                            })?;
+                        let acl_rules = load_api_key_acl_rules_async_in_tx!(conn, id_value)?;
+                        Ok(build_detail(&row, acl_rules))
+                    })
+                })
             })
+            .await
+    }
+
+    pub async fn delete(database: &DatabaseRuntime, id_value: i64) -> DbResult<usize> {
+        let now = Utc::now().timestamp_millis();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    api_key_admin_async_transaction!(connection as conn, {
+                        let query = diesel::update(
+                            api_key::table.filter(
+                                api_key::dsl::id
+                                    .eq(id_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            api_key::dsl::deleted_at.eq(Some(now)),
+                            api_key::dsl::is_enabled.eq(false),
+                            api_key::dsl::secret_ciphertext.eq(None::<Vec<u8>>),
+                            api_key::dsl::secret_nonce.eq(None::<Vec<u8>>),
+                            api_key::dsl::secret_format_version.eq(None::<i32>),
+                            api_key::dsl::secret_key_fingerprint.eq(None::<String>),
+                            api_key::dsl::updated_at.eq(now),
+                        ));
+                        let updated = diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete api key {}: {}",
+                                    id_value, error
+                                )))
+                            })?;
+                        if updated == 0 {
+                            return Err(BaseError::NotFound(Some(format!(
+                                "Api key {} not found",
+                                id_value
+                            ))));
+                        }
+                        let query = diesel::update(
+                            api_key_acl_rule::table.filter(
+                                api_key_acl_rule::dsl::api_key_id
+                                    .eq(id_value)
+                                    .and(api_key_acl_rule::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            api_key_acl_rule::dsl::deleted_at.eq(Some(now)),
+                            api_key_acl_rule::dsl::is_enabled.eq(false),
+                            api_key_acl_rule::dsl::updated_at.eq(now),
+                        ));
+                        diesel_async::RunQueryDsl::execute(query, &mut *conn)
+                            .await
+                            .map_err(|error| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to delete ACL rules for api key {}: {}",
+                                    id_value, error
+                                )))
+                            })?;
+                        Ok(1)
+                    })
+                })
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub async fn create(
+        database: &DatabaseRuntime,
+        payload: &CreateApiKeyPayload,
+    ) -> DbResult<ApiKeyDetailWithSecret> {
+        let secret = generate_api_key_secret();
+        let issuance = ApiKeyIssuance::new(ID_GENERATOR.generate_id(), &secret, None);
+        let detail = Self::create_issued(database, payload, &issuance).await?;
+        let row = Self::get_by_id(database, detail.id).await?;
+        Ok(ApiKeyDetailWithSecret {
+            detail,
+            reveal: build_reveal(&row, secret, false),
         })
     }
 
-    pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
+    pub(crate) async fn rotate_issued(
+        database: &DatabaseRuntime,
+        id_value: i64,
+        issuance: &ApiKeyIssuance,
+    ) -> DbResult<ApiKey> {
         let now = Utc::now().timestamp_millis();
-
-        api_key_admin_db_execute!(conn, {
-            conn.transaction::<usize, BaseError, _>(|conn| {
-                let updated = diesel::update(
-                    api_key::table.filter(
-                        api_key::dsl::id
-                            .eq(id_value)
-                            .and(api_key::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    api_key::dsl::deleted_at.eq(Some(now)),
-                    api_key::dsl::is_enabled.eq(false),
-                    api_key::dsl::secret_ciphertext.eq(None::<Vec<u8>>),
-                    api_key::dsl::secret_nonce.eq(None::<Vec<u8>>),
-                    api_key::dsl::secret_format_version.eq(None::<i32>),
-                    api_key::dsl::secret_key_fingerprint.eq(None::<String>),
-                    api_key::dsl::updated_at.eq(now),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete api key {}: {}",
-                        id_value, e
-                    )))
-                })?;
-
-                if updated == 0 {
-                    return Err(BaseError::NotFound(Some(format!(
-                        "Api key {} not found",
-                        id_value
-                    ))));
-                }
-
-                diesel::update(
-                    api_key_acl_rule::table.filter(
-                        api_key_acl_rule::dsl::api_key_id
-                            .eq(id_value)
-                            .and(api_key_acl_rule::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    api_key_acl_rule::dsl::deleted_at.eq(Some(now)),
-                    api_key_acl_rule::dsl::is_enabled.eq(false),
-                    api_key_acl_rule::dsl::updated_at.eq(now),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete ACL rules for api key {}: {}",
-                        id_value, e
-                    )))
-                })?;
-
-                Ok(1)
-            })
-        })
-    }
-
-    pub(crate) fn rotate_issued(id_value: i64, issuance: &ApiKeyIssuance) -> DbResult<ApiKey> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
+        let api_key_hash = issuance.api_key_hash.clone();
+        let key_prefix = issuance.key_prefix.clone();
+        let key_last4 = issuance.key_last4.clone();
         let (ciphertext, nonce, format_version, fingerprint) = issuance
             .encrypted_secret
             .as_ref()
@@ -754,314 +875,451 @@ impl ApiKey {
                 )
             })
             .unwrap_or((None, None, None, None));
-        let rotated = db_execute!(conn, {
-            diesel::update(
-                api_key::table.filter(
-                    api_key::dsl::id
-                        .eq(id_value)
-                        .and(api_key::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set((
-                api_key::dsl::api_key_hash.eq(&issuance.api_key_hash),
-                api_key::dsl::key_prefix.eq(&issuance.key_prefix),
-                api_key::dsl::key_last4.eq(&issuance.key_last4),
-                api_key::dsl::secret_ciphertext.eq(ciphertext),
-                api_key::dsl::secret_nonce.eq(nonce),
-                api_key::dsl::secret_format_version.eq(format_version),
-                api_key::dsl::secret_key_fingerprint.eq(fingerprint),
-                api_key::dsl::updated_at.eq(now),
-            ))
-            .returning(ApiKeyDb::as_returning())
-            .get_result::<ApiKeyDb>(conn)
-            .map(ApiKeyDb::from_db)
-            .map_err(|e| map_write_error(&format!("Failed to rotate api key {}", id_value), e))
-        })?;
-
-        Ok(rotated)
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = diesel::update(
+                            api_key::table.filter(
+                                api_key::dsl::id
+                                    .eq(id_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            ),
+                        )
+                        .set((
+                            api_key::dsl::api_key_hash.eq(api_key_hash),
+                            api_key::dsl::key_prefix.eq(key_prefix),
+                            api_key::dsl::key_last4.eq(key_last4),
+                            api_key::dsl::secret_ciphertext.eq(ciphertext),
+                            api_key::dsl::secret_nonce.eq(nonce),
+                            api_key::dsl::secret_format_version.eq(format_version),
+                            api_key::dsl::secret_key_fingerprint.eq(fingerprint),
+                            api_key::dsl::updated_at.eq(now),
+                        ))
+                        .returning(ApiKeyDb::as_returning());
+                        diesel_async::RunQueryDsl::get_result::<ApiKeyDb>(query, &mut **conn)
+                            .await
+                            .map(ApiKeyDb::from_db)
+                            .map_err(|error| {
+                                map_write_error(
+                                    &format!("Failed to rotate api key {}", id_value),
+                                    error,
+                                )
+                            })
+                    })
+                })
+            })
+            .await
     }
 
     #[cfg(test)]
-    pub fn rotate_key(id_value: i64) -> DbResult<ApiKeyReveal> {
+    pub async fn rotate_key(database: &DatabaseRuntime, id_value: i64) -> DbResult<ApiKeyReveal> {
         let secret = generate_api_key_secret();
         let issuance = ApiKeyIssuance::new(id_value, &secret, None);
-        let rotated = Self::rotate_issued(id_value, &issuance)?;
+        let rotated = Self::rotate_issued(database, id_value, &issuance).await?;
         Ok(build_reveal(&rotated, secret, false))
     }
 
-    pub(crate) fn list_reveal_metadata() -> DbResult<Vec<ApiKeyRevealMetadata>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = api_key::table
-                .filter(api_key::dsl::deleted_at.is_null())
-                .select((
-                    api_key::dsl::id,
-                    api_key::dsl::secret_ciphertext.is_not_null(),
-                    api_key::dsl::secret_nonce.is_not_null(),
-                    api_key::dsl::secret_format_version.is_not_null(),
-                    api_key::dsl::secret_key_fingerprint,
-                ))
-                .load::<(i64, bool, bool, bool, Option<String>)>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load api key reveal metadata: {e}"
-                    )))
-                })?;
-            Ok(rows
-                .into_iter()
-                .map(
-                    |(id, has_ciphertext, has_nonce, has_version, fingerprint)| {
-                        ApiKeyRevealMetadata {
+    pub(crate) async fn list_reveal_metadata(
+        database: &DatabaseRuntime,
+    ) -> DbResult<Vec<ApiKeyRevealMetadata>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(api_key::dsl::deleted_at.is_null())
+                            .select((
+                                api_key::dsl::id,
+                                api_key::dsl::secret_ciphertext.is_not_null(),
+                                api_key::dsl::secret_nonce.is_not_null(),
+                                api_key::dsl::secret_format_version.is_not_null(),
+                                api_key::dsl::secret_key_fingerprint,
+                            ));
+                        let rows: Vec<(i64, bool, bool, bool, Option<String>)> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to load api key reveal metadata: {error}"
+                                    )))
+                                })?;
+                        Ok(rows
+                            .into_iter()
+                            .map(
+                                |(id, has_ciphertext, has_nonce, has_version, fingerprint)| {
+                                    ApiKeyRevealMetadata {
+                                        id,
+                                        secret_tuple_complete: has_ciphertext
+                                            && has_nonce
+                                            && has_version
+                                            && fingerprint.is_some(),
+                                        secret_key_fingerprint: fingerprint,
+                                    }
+                                },
+                            )
+                            .collect())
+                    })
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn get_reveal_metadata(
+        database: &DatabaseRuntime,
+        id_value: i64,
+    ) -> DbResult<ApiKeyRevealMetadata> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(
+                                api_key::dsl::id
+                                    .eq(id_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            )
+                            .select((
+                                api_key::dsl::id,
+                                api_key::dsl::secret_ciphertext.is_not_null(),
+                                api_key::dsl::secret_nonce.is_not_null(),
+                                api_key::dsl::secret_format_version.is_not_null(),
+                                api_key::dsl::secret_key_fingerprint,
+                            ));
+                        let row: Result<(i64, bool, bool, bool, Option<String>), _> =
+                            diesel_async::RunQueryDsl::first(query, &mut **conn).await;
+                        let (id, has_ciphertext, has_nonce, has_version, fingerprint) = row
+                            .map_err(|error| match error {
+                                diesel::result::Error::NotFound => BaseError::NotFound(Some(
+                                    format!("Api key {id_value} not found"),
+                                )),
+                                other => BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to load api key reveal metadata {id_value}: {other}"
+                                ))),
+                            })?;
+                        Ok(ApiKeyRevealMetadata {
                             id,
                             secret_tuple_complete: has_ciphertext
                                 && has_nonce
                                 && has_version
                                 && fingerprint.is_some(),
                             secret_key_fingerprint: fingerprint,
+                        })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn get_stored_secret(
+        database: &DatabaseRuntime,
+        id_value: i64,
+    ) -> DbResult<ApiKeyStoredSecret> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(
+                                api_key::dsl::id
+                                    .eq(id_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            )
+                            .select((
+                                api_key::dsl::id,
+                                api_key::dsl::name,
+                                api_key::dsl::key_prefix,
+                                api_key::dsl::key_last4,
+                                api_key::dsl::updated_at,
+                                api_key::dsl::secret_ciphertext,
+                                api_key::dsl::secret_nonce,
+                                api_key::dsl::secret_format_version,
+                                api_key::dsl::secret_key_fingerprint,
+                            ));
+                        let row = diesel_async::RunQueryDsl::first::<(
+                            i64,
+                            String,
+                            String,
+                            String,
+                            i64,
+                            Option<Vec<u8>>,
+                            Option<Vec<u8>>,
+                            Option<i32>,
+                            Option<String>,
+                        )>(query, &mut **conn)
+                        .await
+                        .map_err(|error| match error {
+                            diesel::result::Error::NotFound => {
+                                BaseError::NotFound(Some(format!("Api key {id_value} not found")))
+                            }
+                            other => BaseError::DatabaseFatal(Some(format!(
+                                "Failed to load api key secret {id_value}: {other}"
+                            ))),
+                        })?;
+                        let (
+                            id,
+                            name,
+                            key_prefix,
+                            key_last4,
+                            updated_at,
+                            Some(ciphertext),
+                            Some(nonce),
+                            Some(format_version),
+                            Some(key_fingerprint),
+                        ) = row
+                        else {
+                            return Err(BaseError::ApiKeySecretUnavailable);
+                        };
+                        Ok(ApiKeyStoredSecret {
+                            id,
+                            name,
+                            key_prefix,
+                            key_last4,
+                            updated_at,
+                            ciphertext,
+                            nonce,
+                            format_version,
+                            key_fingerprint,
+                        })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn get_detail(database: &DatabaseRuntime, id_value: i64) -> DbResult<ApiKeyDetail> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    match connection {
+                        crate::database::runtime::RuntimeConnection::Postgres(conn) => {
+                            use self::_postgres_model::*;
+                            use crate::database::_postgres_schema::*;
+                            use crate::database::api_key_acl_rule::_postgres_model::*;
+                            use diesel::prelude::*;
+                            let query = api_key::table
+                                .filter(
+                                    api_key::dsl::id
+                                        .eq(id_value)
+                                        .and(api_key::dsl::deleted_at.is_null()),
+                                )
+                                .select(ApiKeyDb::as_select());
+                            let row =
+                                diesel_async::RunQueryDsl::first::<ApiKeyDb>(query, &mut **conn)
+                                    .await
+                                    .map(ApiKeyDb::from_db)
+                                    .map_err(|error| match error {
+                                        diesel::result::Error::NotFound => BaseError::NotFound(
+                                            Some(format!("Api key {} not found", id_value)),
+                                        ),
+                                        other => BaseError::DatabaseFatal(Some(format!(
+                                            "Failed to fetch api key {}: {}",
+                                            id_value, other
+                                        ))),
+                                    })?;
+                            let rules = load_api_key_acl_rules_async_in_tx!(conn, id_value)?;
+                            Ok(build_detail(&row, rules))
                         }
-                    },
-                )
-                .collect())
-        })
-    }
-
-    pub(crate) fn get_reveal_metadata(id_value: i64) -> DbResult<ApiKeyRevealMetadata> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let (id, has_ciphertext, has_nonce, has_version, fingerprint) = api_key::table
-                .filter(
-                    api_key::dsl::id
-                        .eq(id_value)
-                        .and(api_key::dsl::deleted_at.is_null()),
-                )
-                .select((
-                    api_key::dsl::id,
-                    api_key::dsl::secret_ciphertext.is_not_null(),
-                    api_key::dsl::secret_nonce.is_not_null(),
-                    api_key::dsl::secret_format_version.is_not_null(),
-                    api_key::dsl::secret_key_fingerprint,
-                ))
-                .first::<(i64, bool, bool, bool, Option<String>)>(conn)
-                .map_err(|error| match error {
-                    diesel::result::Error::NotFound => {
-                        BaseError::NotFound(Some(format!("Api key {id_value} not found")))
+                        crate::database::runtime::RuntimeConnection::Sqlite(conn) => {
+                            use self::_sqlite_model::*;
+                            use crate::database::_sqlite_schema::*;
+                            use crate::database::api_key_acl_rule::_sqlite_model::*;
+                            use diesel::prelude::*;
+                            let query = api_key::table
+                                .filter(
+                                    api_key::dsl::id
+                                        .eq(id_value)
+                                        .and(api_key::dsl::deleted_at.is_null()),
+                                )
+                                .select(ApiKeyDb::as_select());
+                            let row =
+                                diesel_async::RunQueryDsl::first::<ApiKeyDb>(query, &mut **conn)
+                                    .await
+                                    .map(ApiKeyDb::from_db)
+                                    .map_err(|error| match error {
+                                        diesel::result::Error::NotFound => BaseError::NotFound(
+                                            Some(format!("Api key {} not found", id_value)),
+                                        ),
+                                        other => BaseError::DatabaseFatal(Some(format!(
+                                            "Failed to fetch api key {}: {}",
+                                            id_value, other
+                                        ))),
+                                    })?;
+                            let rules = load_api_key_acl_rules_async_in_tx!(conn, id_value)?;
+                            Ok(build_detail(&row, rules))
+                        }
                     }
-                    other => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load api key reveal metadata {id_value}: {other}"
-                    ))),
-                })?;
-            Ok(ApiKeyRevealMetadata {
-                id,
-                secret_tuple_complete: has_ciphertext
-                    && has_nonce
-                    && has_version
-                    && fingerprint.is_some(),
-                secret_key_fingerprint: fingerprint,
+                })
             })
-        })
+            .await
     }
 
-    pub(crate) fn get_stored_secret(id_value: i64) -> DbResult<ApiKeyStoredSecret> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let row = api_key::table
-                .filter(
-                    api_key::dsl::id
-                        .eq(id_value)
-                        .and(api_key::dsl::deleted_at.is_null()),
-                )
-                .select((
-                    api_key::dsl::id,
-                    api_key::dsl::name,
-                    api_key::dsl::key_prefix,
-                    api_key::dsl::key_last4,
-                    api_key::dsl::updated_at,
-                    api_key::dsl::secret_ciphertext,
-                    api_key::dsl::secret_nonce,
-                    api_key::dsl::secret_format_version,
-                    api_key::dsl::secret_key_fingerprint,
-                ))
-                .first::<(
-                    i64,
-                    String,
-                    String,
-                    String,
-                    i64,
-                    Option<Vec<u8>>,
-                    Option<Vec<u8>>,
-                    Option<i32>,
-                    Option<String>,
-                )>(conn)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => {
-                        BaseError::NotFound(Some(format!("Api key {id_value} not found")))
-                    }
-                    other => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load api key secret {id_value}: {other}"
-                    ))),
-                })?;
-            let (
-                id,
-                name,
-                key_prefix,
-                key_last4,
-                updated_at,
-                Some(ciphertext),
-                Some(nonce),
-                Some(format_version),
-                Some(key_fingerprint),
-            ) = row
-            else {
-                return Err(BaseError::ApiKeySecretUnavailable);
-            };
-            Ok(ApiKeyStoredSecret {
-                id,
-                name,
-                key_prefix,
-                key_last4,
-                updated_at,
-                ciphertext,
-                nonce,
-                format_version,
-                key_fingerprint,
+    pub async fn list_summary(database: &DatabaseRuntime) -> DbResult<Vec<ApiKeySummary>> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(api_key::dsl::deleted_at.is_null())
+                            .order(api_key::dsl::created_at.desc())
+                            .select(ApiKeyDb::as_select());
+                        let rows: Vec<ApiKeyDb> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to list api keys: {}",
+                                        error
+                                    )))
+                                })?;
+                        Ok(rows
+                            .into_iter()
+                            .map(ApiKeyDb::from_db)
+                            .map(|row| build_summary(&row))
+                            .collect())
+                    })
+                })
             })
-        })
+            .await
     }
 
-    pub fn load_acl_rules(id_value: i64) -> DbResult<Vec<ApiKeyAclRule>> {
-        ApiKeyAclRule::list_by_api_key_id(id_value)
-    }
-
-    pub fn get_detail(id_value: i64) -> DbResult<ApiKeyDetail> {
-        let row = Self::get_by_id(id_value)?;
-        let rules = Self::load_acl_rules(id_value)?;
-        Ok(build_detail(&row, rules))
-    }
-
-    pub fn list_summary() -> DbResult<Vec<ApiKeySummary>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let rows = api_key::table
-                .filter(api_key::dsl::deleted_at.is_null())
-                .order(api_key::dsl::created_at.desc())
-                .select(ApiKeyDb::as_select())
-                .load::<ApiKeyDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to list api keys: {}", e)))
-                })?;
-
-            Ok(rows
-                .into_iter()
-                .map(ApiKeyDb::from_db)
-                .map(|row| build_summary(&row))
-                .collect())
-        })
-    }
-
-    pub fn list_all_active() -> DbResult<Vec<ApiKey>> {
-        let conn = &mut get_connection()?;
+    pub async fn list_all_active(database: &DatabaseRuntime) -> DbResult<Vec<ApiKey>> {
         let now = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            let rows = api_key::table
-                .filter(
-                    api_key::dsl::deleted_at
-                        .is_null()
-                        .and(api_key::dsl::is_enabled.eq(true))
-                        .and(
-                            api_key::dsl::expires_at
-                                .is_null()
-                                .or(api_key::dsl::expires_at.gt(now)),
-                        ),
-                )
-                .order(api_key::dsl::created_at.desc())
-                .select(ApiKeyDb::as_select())
-                .load::<ApiKeyDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to list active api keys: {}", e)))
-                })?;
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(
+                                api_key::dsl::deleted_at
+                                    .is_null()
+                                    .and(api_key::dsl::is_enabled.eq(true))
+                                    .and(
+                                        api_key::dsl::expires_at
+                                            .is_null()
+                                            .or(api_key::dsl::expires_at.gt(now)),
+                                    ),
+                            )
+                            .order(api_key::dsl::created_at.desc())
+                            .select(ApiKeyDb::as_select());
+                        let rows: Vec<ApiKeyDb> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to list active api keys: {}",
+                                        error
+                                    )))
+                                })?;
 
-            Ok(rows.into_iter().map(ApiKeyDb::from_db).collect())
-        })
-    }
-
-    pub fn get_by_id(id_value: i64) -> DbResult<ApiKey> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            api_key::table
-                .filter(
-                    api_key::dsl::id
-                        .eq(id_value)
-                        .and(api_key::dsl::deleted_at.is_null()),
-                )
-                .select(ApiKeyDb::as_select())
-                .first::<ApiKeyDb>(conn)
-                .map(ApiKeyDb::from_db)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => {
-                        BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
-                    }
-                    other => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to fetch api key {}: {}",
-                        id_value, other
-                    ))),
+                        Ok(rows.into_iter().map(ApiKeyDb::from_db).collect())
+                    })
                 })
-        })
+            })
+            .await
     }
 
-    pub fn get_by_hash(api_key_hash_value: &str) -> DbResult<ApiKey> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            api_key::table
-                .filter(
-                    api_key::dsl::api_key_hash
-                        .eq(api_key_hash_value)
-                        .and(api_key::dsl::deleted_at.is_null()),
-                )
-                .select(ApiKeyDb::as_select())
-                .first::<ApiKeyDb>(conn)
-                .map(ApiKeyDb::from_db)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => {
-                        BaseError::NotFound(Some("Api key hash not found".to_string()))
-                    }
-                    other => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to fetch api key by hash: {}",
-                        other
-                    ))),
+    pub async fn get_by_id(database: &DatabaseRuntime, id_value: i64) -> DbResult<ApiKey> {
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(
+                                api_key::dsl::id
+                                    .eq(id_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            )
+                            .select(ApiKeyDb::as_select());
+                        let result: Result<ApiKeyDb, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::first(query, &mut **conn).await;
+                        result.map(ApiKeyDb::from_db).map_err(|error| match error {
+                            diesel::result::Error::NotFound => {
+                                BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
+                            }
+                            other => BaseError::DatabaseFatal(Some(format!(
+                                "Failed to fetch api key {}: {}",
+                                id_value, other
+                            ))),
+                        })
+                    })
                 })
-        })
+            })
+            .await
     }
 
-    pub fn get_active_by_hash(api_key_hash_value: &str) -> DbResult<ApiKey> {
-        let conn = &mut get_connection()?;
+    pub async fn get_by_hash(
+        database: &DatabaseRuntime,
+        api_key_hash_value: &str,
+    ) -> DbResult<ApiKey> {
+        let api_key_hash_value = api_key_hash_value.to_string();
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(
+                                api_key::dsl::api_key_hash
+                                    .eq(&api_key_hash_value)
+                                    .and(api_key::dsl::deleted_at.is_null()),
+                            )
+                            .select(ApiKeyDb::as_select());
+                        let result: Result<ApiKeyDb, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::first(query, &mut **conn).await;
+                        result.map(ApiKeyDb::from_db).map_err(|error| match error {
+                            diesel::result::Error::NotFound => {
+                                BaseError::NotFound(Some("Api key hash not found".to_string()))
+                            }
+                            other => BaseError::DatabaseFatal(Some(format!(
+                                "Failed to fetch api key by hash: {}",
+                                other
+                            ))),
+                        })
+                    })
+                })
+            })
+            .await
+    }
+
+    pub async fn get_active_by_hash(
+        database: &DatabaseRuntime,
+        api_key_hash_value: &str,
+    ) -> DbResult<ApiKey> {
+        let api_key_hash_value = api_key_hash_value.to_string();
         let now = Utc::now().timestamp_millis();
-        db_execute!(conn, {
-            api_key::table
-                .filter(
-                    api_key::dsl::api_key_hash
-                        .eq(api_key_hash_value)
-                        .and(api_key::dsl::deleted_at.is_null())
-                        .and(api_key::dsl::is_enabled.eq(true))
-                        .and(
-                            api_key::dsl::expires_at
-                                .is_null()
-                                .or(api_key::dsl::expires_at.gt(now)),
-                        ),
-                )
-                .select(ApiKeyDb::as_select())
-                .first::<ApiKeyDb>(conn)
-                .map(ApiKeyDb::from_db)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                        "Api key hash {} not found",
-                        api_key_hash_value
-                    ))),
-                    other => BaseError::DatabaseFatal(Some(format!(
-                        "Failed to fetch api key by hash: {}",
-                        other
-                    ))),
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key::table
+                            .filter(
+                                api_key::dsl::api_key_hash
+                                    .eq(&api_key_hash_value)
+                                    .and(api_key::dsl::deleted_at.is_null())
+                                    .and(api_key::dsl::is_enabled.eq(true))
+                                    .and(
+                                        api_key::dsl::expires_at
+                                            .is_null()
+                                            .or(api_key::dsl::expires_at.gt(now)),
+                                    ),
+                            )
+                            .select(ApiKeyDb::as_select());
+                        let result: Result<ApiKeyDb, diesel::result::Error> =
+                            diesel_async::RunQueryDsl::first(query, &mut **conn).await;
+                        result.map(ApiKeyDb::from_db).map_err(|error| match error {
+                            diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                                "Api key hash {} not found",
+                                api_key_hash_value
+                            ))),
+                            other => BaseError::DatabaseFatal(Some(format!(
+                                "Failed to fetch api key by hash: {}",
+                                other
+                            ))),
+                        })
+                    })
                 })
-        })
+            })
+            .await
     }
 }
 
@@ -1127,15 +1385,16 @@ mod tests {
         assert_eq!(key_last4(secret), "wxyz");
     }
 
-    #[test]
-    fn missing_hash_error_does_not_echo_authentication_material() {
-        let context = crate::database::TestDbContext::new_sqlite("api-key-hash-error.sqlite");
-        context.run_sync(|| {
-            let hash = "f".repeat(64);
-            let error = ApiKey::get_by_hash(&hash).expect_err("hash should not exist");
-            let debug = format!("{error:?}");
-            assert!(!debug.contains(&hash));
-            assert!(!debug.contains("api_key_hash="));
-        });
+    #[tokio::test]
+    async fn missing_hash_error_does_not_echo_authentication_material() {
+        let database =
+            crate::database::TestDatabase::new_sqlite_default("api-key-hash-error.sqlite").await;
+        let hash = "f".repeat(64);
+        let error = ApiKey::get_by_hash(database.runtime().as_ref(), &hash)
+            .await
+            .expect_err("hash should not exist");
+        let debug = format!("{error:?}");
+        assert!(!debug.contains(&hash));
+        assert!(!debug.contains("api_key_hash="));
     }
 }

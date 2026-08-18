@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -14,7 +14,10 @@ use tokio::{
 
 use crate::{
     cost::{CostLedger, CostRatingContext, CostSnapshot, UsageNormalization, rate_cost},
-    database::request_log::{RequestLog, RequestLogRecord},
+    database::{
+        request_log::{RequestLog, RequestLogRecord},
+        runtime::DatabaseRuntime,
+    },
     proxy::{
         ExecutionStage, ResponseVisibility,
         request_context::{ClientRequestId, ProxyRequestContext, RequestId},
@@ -41,9 +44,6 @@ use crate::{
     },
     utils::{ID_GENERATOR, usage::UsageInfo},
 };
-
-#[cfg(test)]
-use crate::database::TestDbContext;
 
 #[derive(Debug, Clone)]
 pub struct RequestLogContext {
@@ -589,34 +589,19 @@ pub struct RequestLogPersistedContext {
 }
 
 pub struct LogManager {
-    sender: mpsc::Sender<LogCommand>,
+    sender: Mutex<Option<mpsc::Sender<LogCommand>>>,
+    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    drain_overdue_after: Duration,
     metrics: LogManagerMetrics,
     request_log_persisted_sink: Arc<RwLock<Option<Arc<dyn RequestLogPersistedSink>>>>,
 }
 
+const LOG_MANAGER_QUEUE_CAPACITY: usize = 100;
+const REQUEST_LOG_INSERT_ATTEMPTS: u64 = 3;
+
 enum LogCommand {
     Record(RequestLogContext),
     Flush(oneshot::Sender<()>),
-}
-
-#[derive(Clone)]
-enum LogManagerRuntime {
-    Global,
-    #[cfg(test)]
-    Test(TestDbContext),
-}
-
-impl LogManagerRuntime {
-    async fn run<F>(&self, future: F) -> F::Output
-    where
-        F: std::future::Future,
-    {
-        match self {
-            Self::Global => future.await,
-            #[cfg(test)]
-            Self::Test(test_db_context) => test_db_context.run_async(future).await,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -651,30 +636,20 @@ fn decrement(counter: &AtomicU64) {
 }
 
 impl LogManager {
-    pub fn new() -> Self {
-        Self::new_with_runtime(LogManagerRuntime::Global)
-    }
-
-    #[cfg(test)]
-    pub fn new_for_test(test_db_context: TestDbContext) -> Self {
-        Self::new_with_runtime(LogManagerRuntime::Test(test_db_context))
-    }
-
-    fn new_with_runtime(runtime: LogManagerRuntime) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<LogCommand>(100);
+    pub fn new(database: Arc<DatabaseRuntime>) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<LogCommand>(LOG_MANAGER_QUEUE_CAPACITY);
         let metrics = LogManagerMetrics::new();
         let worker_metrics = metrics.clone();
         let sink = Arc::new(RwLock::new(None));
         let worker_sink = Arc::clone(&sink);
-        tokio::spawn(async move {
+        let drain_overdue_after = database.operation_deadline();
+        let worker = tokio::spawn(async move {
             while let Some(command) = receiver.recv().await {
                 match command {
                     LogCommand::Record(context) => {
                         decrement(&worker_metrics.pending);
                         worker_metrics.in_flight.fetch_add(1, Ordering::Relaxed);
-                        runtime
-                            .run(process_log(context, &worker_metrics, &worker_sink))
-                            .await;
+                        process_log(&database, context, &worker_metrics, &worker_sink).await;
                         decrement(&worker_metrics.in_flight);
                         worker_metrics.processed.fetch_add(1, Ordering::Relaxed);
                     }
@@ -685,7 +660,9 @@ impl LogManager {
             }
         });
         Self {
-            sender,
+            sender: Mutex::new(Some(sender)),
+            worker: Mutex::new(Some(worker)),
+            drain_overdue_after,
             metrics,
             request_log_persisted_sink: sink,
         }
@@ -702,7 +679,16 @@ impl LogManager {
         let log_id = context.id;
         self.metrics.enqueued.fetch_add(1, Ordering::Relaxed);
         self.metrics.pending.fetch_add(1, Ordering::Relaxed);
-        if self.sender.send(LogCommand::Record(context)).await.is_err() {
+        let sender = self
+            .sender
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned());
+        let send_result = match sender {
+            Some(sender) => sender.send(LogCommand::Record(context)).await,
+            None => Err(mpsc::error::SendError(LogCommand::Record(context))),
+        };
+        if send_result.is_err() {
             decrement(&self.metrics.pending);
             self.metrics
                 .enqueue_failures
@@ -717,26 +703,63 @@ impl LogManager {
 
     pub async fn flush(&self) {
         let (sender, receiver) = oneshot::channel();
-        if self.sender.send(LogCommand::Flush(sender)).await.is_ok() {
+        let command_sender = self
+            .sender
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned());
+        if let Some(command_sender) = command_sender
+            && command_sender.send(LogCommand::Flush(sender)).await.is_ok()
+        {
             let _ = receiver.await;
+        }
+    }
+
+    pub async fn close_and_drain(&self) {
+        let sender = self.sender.lock().ok().and_then(|mut guard| guard.take());
+        drop(sender);
+        let worker = self.worker.lock().ok().and_then(|mut guard| guard.take());
+        let Some(mut worker) = worker else {
+            return;
+        };
+        let overdue = sleep(self.drain_overdue_after);
+        tokio::pin!(overdue);
+        let result = tokio::select! {
+            result = &mut worker => result,
+            () = &mut overdue => {
+                crate::warn_event!(
+                    "logging.request_log_drain_overdue",
+                    pending = self.metrics.pending.load(Ordering::Relaxed),
+                    in_flight = self.metrics.in_flight.load(Ordering::Relaxed),
+                    operation_deadline_ms = self.drain_overdue_after.as_millis(),
+                );
+                worker.await
+            }
+        };
+        if let Err(error) = result {
+            crate::error_event!(
+                "logging.request_log_worker_join_failed",
+                error = error.to_string(),
+            );
         }
     }
 }
 
 async fn process_log(
+    database: &DatabaseRuntime,
     context: RequestLogContext,
     metrics: &LogManagerMetrics,
     sink: &Arc<RwLock<Option<Arc<dyn RequestLogPersistedSink>>>>,
 ) {
     let request_log = build_request_log(&context, Utc::now().timestamp_millis());
     let mut inserted: Option<RequestLogRecord> = None;
-    for retry in 0..3 {
-        match RequestLog::insert(&request_log) {
+    for retry in 0..REQUEST_LOG_INSERT_ATTEMPTS {
+        match RequestLog::insert(database, &request_log).await {
             Ok(row) => {
                 inserted = Some(row);
                 break;
             }
-            Err(err) if retry < 2 => {
+            Err(err) if retry + 1 < REQUEST_LOG_INSERT_ATTEMPTS => {
                 metrics.retries.fetch_add(1, Ordering::Relaxed);
                 crate::warn_event!(
                     "logging.request_log_insert_retry",
@@ -959,10 +982,163 @@ fn build_cost_outcome(context: &RequestLogContext) -> CostOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DatabaseIoConfig;
+    use crate::database::error::PersistenceError;
+    use crate::database::runtime::DatabaseWorkload;
+    use crate::database::test_support::TestDatabase;
     use crate::service::transform::{
         TransformDiagnosticCollector, TransformDiagnosticFact, TransformPhase, TransformReasonCode,
         TransformSafeSummary,
     };
+    use tokio::sync::Notify;
+
+    fn test_log_context(id: i64) -> RequestLogContext {
+        RequestLogContext {
+            id,
+            request_id: RequestId::new(),
+            client_request_id: None,
+            api_key_id: 1,
+            provider_id: 1,
+            provider_key: "provider".to_string(),
+            provider_name: "Provider".to_string(),
+            model_id: 1,
+            source_id: 1,
+            source_selection_reason: Some("protocol_match".to_string()),
+            source_profile_type: UpstreamProfileType::Openai,
+            source_base_url: Some("https://example.com/v1".to_string()),
+            provider_api_key_id: None,
+            requested_model_name: "test-model".to_string(),
+            base_requested_model_name: "test-model".to_string(),
+            resolved_patch_suffix: None,
+            model_name: "test-model".to_string(),
+            real_model_name: "test-model".to_string(),
+            model_kind: ModelKind::Chat,
+            downstream_protocol: DownstreamProtocol::Openai,
+            upstream_protocol: UpstreamProtocol::Openai,
+            request_received_at: 1_000,
+            client_ip: None,
+            completed_at: Some(1_100),
+            request_url: None,
+            llm_status: Some(StatusCode::OK),
+            is_stream: false,
+            transport_timing: None,
+            usage: None,
+            usage_normalization: None,
+            cost_catalog_id: None,
+            cost_catalog_version: None,
+            overall_status: RequestStatus::Success,
+            final_error_code: None,
+            final_error_message: None,
+            final_error_stage: None,
+            response_visibility: ResponseVisibility::NotVisible,
+            completion_coordinator: None,
+        }
+    }
+
+    #[test]
+    fn log_manager_queue_and_retry_product_contract_is_stable() {
+        assert_eq!(LOG_MANAGER_QUEUE_CAPACITY, 100);
+        assert_eq!(REQUEST_LOG_INSERT_ATTEMPTS, 3);
+    }
+
+    #[tokio::test]
+    async fn log_manager_close_waits_for_accepted_write_and_rejects_new_commands_after_drain() {
+        let database = TestDatabase::new_sqlite(
+            "log-manager-shutdown.sqlite",
+            1,
+            DatabaseIoConfig {
+                max_waiters: 1,
+                queue_wait_timeout_seconds: 1,
+                operation_deadline_seconds: 3,
+                sqlite_busy_timeout_seconds: 1,
+            },
+        )
+        .await;
+        let runtime = database.runtime();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let holder = {
+            let runtime = Arc::clone(&runtime);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                runtime
+                    .run(DatabaseWorkload::Foreground, move |_connection| {
+                        Box::pin(async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<(), PersistenceError>(())
+                        })
+                    })
+                    .await
+            })
+        };
+        started.notified().await;
+
+        let manager = Arc::new(LogManager::new(Arc::clone(&runtime)));
+        manager.log(test_log_context(1)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if manager.metrics.in_flight.load(Ordering::Acquire) == 1
+                    && runtime.snapshot().waiting == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted log command should wait on the occupied database");
+
+        let drain_manager = Arc::clone(&manager);
+        let mut drain = tokio::spawn(async move {
+            drain_manager.close_and_drain().await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut drain)
+                .await
+                .is_err(),
+            "drain must wait for the accepted write"
+        );
+        release.notify_one();
+        holder
+            .await
+            .expect("database holder should join")
+            .expect("database holder should complete");
+        drain.await.expect("log drain should join");
+
+        assert_eq!(manager.metrics.processed.load(Ordering::Acquire), 1);
+        assert_eq!(manager.metrics.pending.load(Ordering::Acquire), 0);
+        assert_eq!(manager.metrics.in_flight.load(Ordering::Acquire), 0);
+        assert_eq!(manager.metrics.db_failures.load(Ordering::Acquire), 1);
+        assert_eq!(manager.metrics.retries.load(Ordering::Acquire), 2);
+
+        manager.log(test_log_context(2)).await;
+        assert_eq!(manager.metrics.enqueue_failures.load(Ordering::Acquire), 1);
+        assert_eq!(manager.metrics.pending.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn log_manager_drains_accepted_command_when_database_is_unavailable() {
+        let database = TestDatabase::new_sqlite(
+            "log-manager-database-unavailable.sqlite",
+            1,
+            DatabaseIoConfig::default(),
+        )
+        .await;
+        let runtime = database.runtime();
+        let manager = LogManager::new(Arc::clone(&runtime));
+        runtime.close_and_drain().await;
+
+        manager.log(test_log_context(3)).await;
+        manager.close_and_drain().await;
+
+        assert_eq!(manager.metrics.processed.load(Ordering::Acquire), 1);
+        assert_eq!(manager.metrics.db_failures.load(Ordering::Acquire), 1);
+        assert_eq!(manager.metrics.retries.load(Ordering::Acquire), 2);
+        assert_eq!(manager.metrics.pending.load(Ordering::Acquire), 0);
+        assert_eq!(manager.metrics.in_flight.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn source_base_url_snapshot_is_normalized_and_rejects_secret_bearing_urls() {

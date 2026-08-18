@@ -21,7 +21,6 @@ use axum::{
     routing::any,
     serve,
 };
-use diesel::prelude::*;
 use flate2::{Compression, write::GzEncoder};
 use futures::StreamExt;
 use serde::Deserialize;
@@ -45,18 +44,19 @@ use crate::{
     config::{ClientIdentityConfig, OutboundHttpConfig, ProxyRequestConfig},
     cost::{CostSnapshot, MeterKey},
     database::{
-        DbConnection, TestDbContext,
+        TestDatabase,
         api_key::{ApiKey, CreateApiKeyPayload},
         cost::{
             CostCatalog, CostCatalogVersion, CostComponent, NewCostCatalogPayload,
             NewCostCatalogVersionPayload, NewCostComponentPayload,
         },
-        get_connection,
         model::{Model, UpdateModelData},
         model_source_binding::{ModelSourceBindingInput, ModelSourceConfig, replace_for_model},
         provider::Provider,
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
-        request_patch::{RequestPatchRuleInput, RequestPatchVariantInput},
+        request_patch::{
+            RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
+        },
         upstream_source::{NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource},
     },
     ingress::client_identity::ClientIdentityResolver,
@@ -942,20 +942,21 @@ fn validate_fixture(name: &str, fixture: &DirectExecutionFixture) {
 
 pub(super) fn run_case<F, Fut>(name: &str, test: F)
 where
-    F: FnOnce(TestDbContext) -> Fut,
+    F: FnOnce(TestDatabase) -> Fut,
     Fut: Future<Output = ()> + 'static,
 {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("direct execution runtime should build");
-    let context = TestDbContext::new_sqlite(&format!(
-        "direct-execution-{name}-{}.sqlite",
-        ID_GENERATOR.generate_id()
-    ));
     runtime.block_on(async move {
+        let context = TestDatabase::new_sqlite_default(&format!(
+            "direct-execution-{name}-{}.sqlite",
+            ID_GENERATOR.generate_id()
+        ))
+        .await;
         let test = Box::pin(test(context.clone()));
-        context.run_async(test).await;
+        (test).await;
     });
 }
 
@@ -1324,7 +1325,7 @@ impl RequestLogPersistedSink for RecordingPersistedSink {
 
 impl RouterFixture {
     pub(super) async fn new(
-        context: TestDbContext,
+        context: TestDatabase,
         fixture: &DirectExecutionFixture,
         base_url: &str,
     ) -> Self {
@@ -1332,7 +1333,7 @@ impl RouterFixture {
     }
 
     pub(super) async fn new_deepseek(
-        context: TestDbContext,
+        context: TestDatabase,
         fixture: &DirectExecutionFixture,
         base_url: &str,
     ) -> Self {
@@ -1349,7 +1350,7 @@ impl RouterFixture {
     }
 
     pub(super) async fn new_zen(
-        context: TestDbContext,
+        context: TestDatabase,
         fixture: &DirectExecutionFixture,
         base_url: &str,
     ) -> Self {
@@ -1366,7 +1367,7 @@ impl RouterFixture {
     }
 
     async fn new_with_model_kind(
-        context: TestDbContext,
+        context: TestDatabase,
         fixture: &DirectExecutionFixture,
         base_url: &str,
         model_kind: ModelKind,
@@ -1385,7 +1386,7 @@ impl RouterFixture {
     }
 
     async fn new_with_default_action(
-        context: TestDbContext,
+        context: TestDatabase,
         fixture: &DirectExecutionFixture,
         base_url: &str,
         default_action: Action,
@@ -1403,7 +1404,7 @@ impl RouterFixture {
     }
 
     async fn new_with_default_action_and_identity(
-        context: TestDbContext,
+        context: TestDatabase,
         fixture: &DirectExecutionFixture,
         base_url: &str,
         default_action: Action,
@@ -1426,7 +1427,7 @@ impl RouterFixture {
 
     #[allow(clippy::too_many_arguments)]
     async fn new_with_default_action_identity_and_kind(
-        context: TestDbContext,
+        context: TestDatabase,
         fixture: &DirectExecutionFixture,
         base_url: &str,
         default_action: Action,
@@ -1473,23 +1474,27 @@ impl RouterFixture {
             .await
             .expect("provider fixture should bootstrap");
         let downstream_key_name = format!("direct-execution-key-{nonce}");
-        let created_key = ApiKey::create(&CreateApiKeyPayload {
-            name: downstream_key_name.clone(),
-            description: Some("direct execution regression".to_string()),
-            default_action: Some(default_action),
-            is_enabled: Some(true),
-            expires_at: None,
-            rate_limit_rpm: None,
-            max_concurrent_requests: None,
-            quota_daily_requests: None,
-            quota_daily_tokens: None,
-            quota_monthly_tokens: None,
-            budget_daily_nanos: None,
-            budget_daily_currency: None,
-            budget_monthly_nanos: None,
-            budget_monthly_currency: None,
-            acl_rules: None,
-        })
+        let created_key = ApiKey::create(
+            &app_state.database,
+            &CreateApiKeyPayload {
+                name: downstream_key_name.clone(),
+                description: Some("direct execution regression".to_string()),
+                default_action: Some(default_action),
+                is_enabled: Some(true),
+                expires_at: None,
+                rate_limit_rpm: None,
+                max_concurrent_requests: None,
+                quota_daily_requests: None,
+                quota_daily_tokens: None,
+                quota_monthly_tokens: None,
+                budget_daily_nanos: None,
+                budget_daily_currency: None,
+                budget_monthly_nanos: None,
+                budget_monthly_currency: None,
+                acl_rules: None,
+            },
+        )
+        .await
         .expect("downstream key fixture should create");
         let downstream_api_key_id = created_key.reveal.id;
         let downstream_key = created_key.reveal.api_key;
@@ -1512,18 +1517,14 @@ impl RouterFixture {
         format!("{}/{}", self.provider_key, self.model_name)
     }
 
-    async fn replace_proxy_request_config(
-        &mut self,
-        context: TestDbContext,
-        proxy_request: ProxyRequestConfig,
-    ) {
+    async fn replace_proxy_request_config(&mut self, proxy_request: ProxyRequestConfig) {
         let mut app_state = (*self.app_state).clone();
         app_state.infra = Arc::new(
             AppInfra::new_with_config(
+                Arc::clone(&self.app_state.database),
                 OutboundHttpConfig::default(),
                 proxy_request,
                 None,
-                Some(context),
             )
             .await,
         );
@@ -1543,20 +1544,25 @@ impl RouterFixture {
             _ => format!("{base_url}/v1"),
         };
         let now = chrono::Utc::now().timestamp_millis();
-        let source = UpstreamSource::create(&NewUpstreamSource {
-            id: ID_GENERATOR.generate_id(),
-            provider_id: self.provider_id,
-            profile_type: profile_type.clone(),
-            base_url: endpoint,
-            use_proxy: false,
-            is_enabled: true,
-            is_default: false,
-            created_at: now,
-            updated_at: now,
-            ..NewUpstreamSource::test_defaults(profile_type)
-        })
+        let source = UpstreamSource::create(
+            &self.app_state.database,
+            &NewUpstreamSource {
+                id: ID_GENERATOR.generate_id(),
+                provider_id: self.provider_id,
+                profile_type: profile_type.clone(),
+                base_url: endpoint,
+                use_proxy: false,
+                is_enabled: true,
+                is_default: false,
+                created_at: now,
+                updated_at: now,
+                ..NewUpstreamSource::test_defaults(profile_type)
+            },
+        )
+        .await
         .expect("replacement Source should be created");
         UpstreamSource::update(
+            &self.app_state.database,
             self.source_id,
             self.provider_id,
             &UpdateUpstreamSourceData {
@@ -1568,8 +1574,10 @@ impl RouterFixture {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("original Source should be disabled");
         UpstreamSource::update(
+            &self.app_state.database,
             source.id,
             self.provider_id,
             &UpdateUpstreamSourceData {
@@ -1581,6 +1589,7 @@ impl RouterFixture {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("replacement Source should become default");
         self.app_state
             .catalog
@@ -1595,29 +1604,23 @@ impl RouterFixture {
         base_url: &str,
         profile_type: UpstreamProfileType,
     ) -> i64 {
-        let profile_name = match profile_type {
-            UpstreamProfileType::Openai => "OPENAI",
-            UpstreamProfileType::OpenaiCompatible => "OPENAI_COMPATIBLE",
-            UpstreamProfileType::GeminiOpenai => "GEMINI_OPENAI",
+        match profile_type {
+            UpstreamProfileType::Openai
+            | UpstreamProfileType::OpenaiCompatible
+            | UpstreamProfileType::GeminiOpenai => {}
             _ => panic!("in-place replacement is only for the unique OpenAI wire family"),
-        };
+        }
         let endpoint = format!("{base_url}/v1");
         let now = chrono::Utc::now().timestamp_millis();
-        let mut connection = get_connection().expect("test database connection");
-        match &mut connection {
-            DbConnection::Sqlite(connection) => diesel::sql_query(
-                "UPDATE upstream_source SET profile_type = ?, base_url = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind::<diesel::sql_types::Text, _>(profile_name)
-            .bind::<diesel::sql_types::Text, _>(&endpoint)
-            .bind::<diesel::sql_types::BigInt, _>(now)
-            .bind::<diesel::sql_types::BigInt, _>(self.source_id)
-            .execute(connection)
-            .expect("OpenAI wire Profile should update in place"),
-            DbConnection::Postgres(_) => {
-                panic!("direct execution regression uses the isolated SQLite fixture")
-            }
-        };
+        UpstreamSource::replace_profile_for_test(
+            &self.app_state.database,
+            self.source_id,
+            profile_type,
+            endpoint,
+            now,
+        )
+        .await
+        .expect("OpenAI wire Profile should update in place");
         self.app_state
             .catalog
             .invalidate_provider(self.provider_id, Some(&self.provider_key))
@@ -1631,12 +1634,11 @@ impl RouterFixture {
         base_url: &str,
         profile_type: UpstreamProfileType,
     ) -> i64 {
-        let profile_name = match profile_type {
-            UpstreamProfileType::Gemini => "GEMINI",
-            UpstreamProfileType::Vertex => "VERTEX",
+        match profile_type {
+            UpstreamProfileType::Gemini | UpstreamProfileType::Vertex => {}
             _ => panic!("in-place replacement is only for the unique Gemini wire family"),
-        };
-        let endpoint = match profile_type {
+        }
+        let endpoint = match &profile_type {
             UpstreamProfileType::Gemini => format!("{base_url}/v1beta/models"),
             UpstreamProfileType::Vertex => format!(
                 "{base_url}/v1/projects/project-fixture/locations/us-central1/publishers/google/models"
@@ -1644,21 +1646,15 @@ impl RouterFixture {
             _ => unreachable!(),
         };
         let now = chrono::Utc::now().timestamp_millis();
-        let mut connection = get_connection().expect("test database connection");
-        match &mut connection {
-            DbConnection::Sqlite(connection) => diesel::sql_query(
-                "UPDATE upstream_source SET profile_type = ?, base_url = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind::<diesel::sql_types::Text, _>(profile_name)
-            .bind::<diesel::sql_types::Text, _>(&endpoint)
-            .bind::<diesel::sql_types::BigInt, _>(now)
-            .bind::<diesel::sql_types::BigInt, _>(self.source_id)
-            .execute(connection)
-            .expect("Gemini wire Profile should update in place"),
-            DbConnection::Postgres(_) => {
-                panic!("direct execution regression uses the isolated SQLite fixture")
-            }
-        };
+        UpstreamSource::replace_profile_for_test(
+            &self.app_state.database,
+            self.source_id,
+            profile_type,
+            endpoint,
+            now,
+        )
+        .await
+        .expect("Gemini wire Profile should update in place");
         self.app_state
             .catalog
             .invalidate_provider(self.provider_id, Some(&self.provider_key))
@@ -1685,8 +1681,14 @@ impl RouterFixture {
     }
 
     async fn update_source_operation(&self, update: UpdateUpstreamSourceData) {
-        UpstreamSource::update(self.source_id, self.provider_id, &update)
-            .expect("Source operation test state should update");
+        UpstreamSource::update(
+            &self.app_state.database,
+            self.source_id,
+            self.provider_id,
+            &update,
+        )
+        .await
+        .expect("Source operation test state should update");
         self.app_state
             .catalog
             .invalidate_provider(self.provider_id, Some(&self.provider_key))
@@ -1700,51 +1702,68 @@ impl RouterFixture {
         input_token_price_nanos: Option<i64>,
     ) -> (i64, i64) {
         let nonce = ID_GENERATOR.generate_id();
-        let catalog = CostCatalog::create(&NewCostCatalogPayload {
-            name: format!("direct execution cost {nonce}"),
-            description: Some("direct execution cost regression".to_string()),
-        })
+        let catalog = CostCatalog::create(
+            &self.app_state.database,
+            &NewCostCatalogPayload {
+                name: format!("direct execution cost {nonce}"),
+                description: Some("direct execution cost regression".to_string()),
+            },
+        )
+        .await
         .expect("cost catalog should create");
         let now = chrono::Utc::now().timestamp_millis();
-        let version = CostCatalogVersion::create(&NewCostCatalogVersionPayload {
-            catalog_id: catalog.id,
-            version: format!("v-{nonce}"),
-            currency: "USD".to_string(),
-            source: Some("direct-execution".to_string()),
-            effective_from: now.saturating_sub(1_000),
-            effective_until: None,
-            is_enabled: true,
-        })
+        let version = CostCatalogVersion::create(
+            &self.app_state.database,
+            &NewCostCatalogVersionPayload {
+                catalog_id: catalog.id,
+                version: format!("v-{nonce}"),
+                currency: "USD".to_string(),
+                source: Some("direct-execution".to_string()),
+                effective_from: now.saturating_sub(1_000),
+                effective_until: None,
+                is_enabled: true,
+            },
+        )
+        .await
         .expect("cost catalog version should create");
         if let Some(flat_fee_nanos) = invocation_fee_nanos {
-            CostComponent::create(&NewCostComponentPayload {
-                catalog_version_id: version.id,
-                meter_key: "invoke.request_calls".to_string(),
-                charge_kind: "flat".to_string(),
-                unit_price_nanos: None,
-                flat_fee_nanos: Some(flat_fee_nanos),
-                tier_config_json: None,
-                match_attributes_json: None,
-                priority: 0,
-                description: Some("request fee".to_string()),
-            })
+            CostComponent::create(
+                &self.app_state.database,
+                &NewCostComponentPayload {
+                    catalog_version_id: version.id,
+                    meter_key: "invoke.request_calls".to_string(),
+                    charge_kind: "flat".to_string(),
+                    unit_price_nanos: None,
+                    flat_fee_nanos: Some(flat_fee_nanos),
+                    tier_config_json: None,
+                    match_attributes_json: None,
+                    priority: 0,
+                    description: Some("request fee".to_string()),
+                },
+            )
+            .await
             .expect("invocation component should create");
         }
         if let Some(unit_price_nanos) = input_token_price_nanos {
-            CostComponent::create(&NewCostComponentPayload {
-                catalog_version_id: version.id,
-                meter_key: "llm.input_text_tokens".to_string(),
-                charge_kind: "per_unit".to_string(),
-                unit_price_nanos: Some(unit_price_nanos),
-                flat_fee_nanos: None,
-                tier_config_json: None,
-                match_attributes_json: None,
-                priority: 0,
-                description: Some("input tokens".to_string()),
-            })
+            CostComponent::create(
+                &self.app_state.database,
+                &NewCostComponentPayload {
+                    catalog_version_id: version.id,
+                    meter_key: "llm.input_text_tokens".to_string(),
+                    charge_kind: "per_unit".to_string(),
+                    unit_price_nanos: Some(unit_price_nanos),
+                    flat_fee_nanos: None,
+                    tier_config_json: None,
+                    match_attributes_json: None,
+                    priority: 0,
+                    description: Some("input tokens".to_string()),
+                },
+            )
+            .await
             .expect("input token component should create");
         }
         Model::update(
+            &self.app_state.database,
             self.model_id,
             &UpdateModelData {
                 model_name: None,
@@ -1753,6 +1772,7 @@ impl RouterFixture {
                 cost_catalog_id: Some(Some(catalog.id)),
             },
         )
+        .await
         .expect("model cost catalog should update");
         self.app_state
             .catalog
@@ -2050,17 +2070,28 @@ impl RouterFixture {
         let deadline = Instant::now() + WAIT_TIMEOUT;
         loop {
             self.app_state.flush_proxy_logs().await;
-            let logs = RequestLog::list_full(RequestLogQueryPayload {
-                provider_id: Some(self.provider_id),
-                model_id: Some(self.model_id),
-                source_id: Some(source_id),
-                page: Some(1),
-                page_size: Some(10),
-                ..Default::default()
-            })
+            let logs = RequestLog::list(
+                &self.app_state.database,
+                RequestLogQueryPayload {
+                    provider_id: Some(self.provider_id),
+                    model_id: Some(self.model_id),
+                    source_id: Some(source_id),
+                    page: Some(1),
+                    page_size: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await
             .expect("request logs should be queryable")
             .list;
-            if let Some(log) = logs.into_iter().find(|log| log.overall_status == expected) {
+            if let Some(log_id) = logs
+                .into_iter()
+                .find(|log| log.overall_status == expected)
+                .map(|log| log.id)
+            {
+                let log = RequestLog::get_by_id(&self.app_state.database, log_id)
+                    .await
+                    .expect("request log detail should be queryable");
                 assert_eq!(log.source_id, Some(source_id));
                 assert!(log.source_profile_type_snapshot.is_some());
                 if expected == RequestStatus::Success {
@@ -2089,16 +2120,29 @@ impl RouterFixture {
 
     pub(super) async fn request_logs(&self) -> Vec<RequestLogRecord> {
         self.app_state.flush_proxy_logs().await;
-        RequestLog::list_full(RequestLogQueryPayload {
-            provider_id: Some(self.provider_id),
-            model_id: Some(self.model_id),
-            source_id: Some(self.source_id),
-            page: Some(1),
-            page_size: Some(10),
-            ..Default::default()
-        })
+        let logs = RequestLog::list(
+            &self.app_state.database,
+            RequestLogQueryPayload {
+                provider_id: Some(self.provider_id),
+                model_id: Some(self.model_id),
+                source_id: Some(self.source_id),
+                page: Some(1),
+                page_size: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
         .expect("request logs should be queryable")
-        .list
+        .list;
+        let mut details = Vec::with_capacity(logs.len());
+        for log in logs {
+            details.push(
+                RequestLog::get_by_id(&self.app_state.database, log.id)
+                    .await
+                    .expect("request log detail should be queryable"),
+            );
+        }
+        details
     }
 
     async fn wait_for_api_key_lease_release(&self) {
@@ -3182,6 +3226,7 @@ fn r3_19_gemini_invalid_model_fails_before_credentials_and_network() {
                     .await;
             }
             Model::update(
+                &router.app_state.database,
                 router.model_id,
                 &UpdateModelData {
                     model_name: None,
@@ -3190,6 +3235,7 @@ fn r3_19_gemini_invalid_model_fails_before_credentials_and_network() {
                     cost_catalog_id: None,
                 },
             )
+            .await
             .expect("invalid legacy model state should seed");
             router
                 .app_state
@@ -7154,6 +7200,7 @@ fn r3_19_gemini_and_vertex_unsafe_collection_query_is_precredential_zero_call() 
                 _ => unreachable!(),
             };
             UpstreamSource::update(
+                &router.app_state.database,
                 router.source_id,
                 router.provider_id,
                 &UpdateUpstreamSourceData {
@@ -7162,6 +7209,7 @@ fn r3_19_gemini_and_vertex_unsafe_collection_query_is_precredential_zero_call() 
                     ..UpdateUpstreamSourceData::test_defaults()
                 },
             )
+            .await
             .expect("unsafe legacy collection URL should seed");
             router
                 .app_state
@@ -12058,10 +12106,7 @@ fn responses_target_http_429_is_authentic_bounded_and_never_retried_for_all_down
             let mut router =
                 RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
             router
-                .replace_proxy_request_config(
-                    context,
-                    one_mib_non_stream_proxy_config(DISCLOSURE_LIMIT),
-                )
+                .replace_proxy_request_config(one_mib_non_stream_proxy_config(DISCLOSURE_LIMIT))
                 .await;
             router.attach_cost_catalog(Some(100), Some(2)).await;
 
@@ -12167,7 +12212,7 @@ fn responses_target_success_body_limits_fail_without_cost_for_all_downstreams() 
                 let mut router =
                     RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
                 router
-                    .replace_proxy_request_config(context, one_mib_non_stream_proxy_config(65_536))
+                    .replace_proxy_request_config(one_mib_non_stream_proxy_config(65_536))
                     .await;
                 router.attach_cost_catalog(Some(100), Some(2)).await;
 
@@ -12645,6 +12690,7 @@ fn responses_target_invalid_base_url_fails_before_credentials_and_network() {
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
         UpstreamSource::update(
+            &router.app_state.database,
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -12656,6 +12702,7 @@ fn responses_target_invalid_base_url_fails_before_credentials_and_network() {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("legacy invalid Responses base URL should be seeded directly");
         router
             .app_state
@@ -12713,6 +12760,7 @@ fn responses_target_falls_back_to_model_name_when_real_model_name_is_absent() {
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
         Model::update(
+            &router.app_state.database,
             router.model_id,
             &UpdateModelData {
                 model_name: None,
@@ -12721,6 +12769,7 @@ fn responses_target_falls_back_to_model_name_when_real_model_name_is_absent() {
                 cost_catalog_id: None,
             },
         )
+        .await
         .expect("real model name should clear");
         router
             .app_state
@@ -13239,6 +13288,7 @@ fn acl_rejection_precedes_model_kind_and_invalid_provider_base_url_preflight() {
         )
         .await;
         UpstreamSource::update(
+            &router.app_state.database,
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -13250,6 +13300,7 @@ fn acl_rejection_precedes_model_kind_and_invalid_provider_base_url_preflight() {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("legacy invalid base URL should be seeded directly");
         router
             .app_state
@@ -13373,7 +13424,6 @@ fn acl_rejection_precedes_missing_proxy_preflight() {
         .find(|(name, _)| *name == "openai")
         .expect("openai fixture");
     run_case(name, move |context| async move {
-        let infra_context = context.clone();
         let upstream = TestUpstream::spawn(ScriptedReply::Json {
             status: StatusCode::OK,
             body: fixture.non_stream.upstream_response.clone(),
@@ -13389,15 +13439,16 @@ fn acl_rejection_precedes_missing_proxy_preflight() {
         let mut app_state = (*router.app_state).clone();
         app_state.infra = Arc::new(
             AppInfra::new_with_config(
+                Arc::clone(&app_state.database),
                 OutboundHttpConfig::default(),
                 ProxyRequestConfig::default(),
                 None,
-                Some(infra_context),
             )
             .await,
         );
         router.app_state = Arc::new(app_state);
         UpstreamSource::update(
+            &router.app_state.database,
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -13409,6 +13460,7 @@ fn acl_rejection_precedes_missing_proxy_preflight() {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("proxy requirement should be seeded directly");
         router
             .app_state
@@ -13484,18 +13536,13 @@ fn request_patch_conflict_rejection_does_not_decrypt_provider_credential() {
             )
             .await
             .expect("model source patch should create");
-        let mut connection = get_connection().expect("test database connection");
-        match &mut connection {
-            DbConnection::Sqlite(connection) => diesel::sql_query(format!(
-                "UPDATE request_patch_rule SET target = '/generation_config/temperature' WHERE id = {}",
-                model_variant.rules[0].id
-            ))
-            .execute(connection)
-            .expect("test corruption should update the model rule target"),
-            DbConnection::Postgres(_) => {
-                panic!("direct execution regression uses the isolated SQLite fixture")
-            }
-        };
+        RequestPatchVariantRepository::replace_rule_target_for_test(
+            &router.app_state.database,
+            model_variant.rules[0].id,
+            "/generation_config/temperature".to_string(),
+        )
+        .await
+        .expect("test corruption should update the model rule target");
         router
             .app_state
             .catalog
@@ -13752,7 +13799,9 @@ fn request_patch_query_value_reaches_upstream_but_not_request_log() {
 
         let log = router.wait_for_log(RequestStatus::Success).await;
         router.app_state.flush_proxy_logs().await;
-        let persisted_log = RequestLog::get_by_id(log.id).expect("flushed request log exists");
+        let persisted_log = RequestLog::get_by_id(&router.app_state.database, log.id)
+            .await
+            .expect("flushed request log exists");
         assert_eq!(
             persisted_log.resolved_patch_suffix.as_deref(),
             Some("tool-use-v2")
@@ -13964,18 +14013,22 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                 }
                 _ => unreachable!("the DeepSeek regression uses four-wire alternates"),
             };
-            let alternate_source = UpstreamSource::create(&NewUpstreamSource {
-                id: ID_GENERATOR.generate_id(),
-                provider_id: router.provider_id,
-                profile_type: alternate_profile.clone(),
-                base_url: alternate_endpoint,
-                use_proxy: false,
-                is_enabled: true,
-                is_default: false,
-                created_at: 1,
-                updated_at: 1,
-                ..NewUpstreamSource::test_defaults(alternate_profile)
-            })
+            let alternate_source = UpstreamSource::create(
+                &router.app_state.database,
+                &NewUpstreamSource {
+                    id: ID_GENERATOR.generate_id(),
+                    provider_id: router.provider_id,
+                    profile_type: alternate_profile.clone(),
+                    base_url: alternate_endpoint,
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: false,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(alternate_profile)
+                },
+            )
+            .await
             .expect("DeepSeek alternate Source should be created");
             router
                 .app_state
@@ -14013,6 +14066,7 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
 
             let mutation_time = chrono::Utc::now().timestamp_millis();
             UpstreamSource::update(
+                &router.app_state.database,
                 router.source_id,
                 router.provider_id,
                 &UpdateUpstreamSourceData {
@@ -14024,8 +14078,10 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                     ..UpdateUpstreamSourceData::test_defaults()
                 },
             )
+            .await
             .expect("the initial Source should be disabled");
             UpstreamSource::update(
+                &router.app_state.database,
                 alternate_source.id,
                 router.provider_id,
                 &UpdateUpstreamSourceData {
@@ -14037,6 +14093,7 @@ fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_publi
                     ..UpdateUpstreamSourceData::test_defaults()
                 },
             )
+            .await
             .expect("the alternate Source should become default");
             router
                 .app_state
@@ -14163,6 +14220,7 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
 
         let mutation_time = chrono::Utc::now().timestamp_millis();
         UpstreamSource::update(
+            &router.app_state.database,
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -14174,19 +14232,24 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("exact Source should be disabled");
-        let default_source = UpstreamSource::create(&NewUpstreamSource {
-            id: ID_GENERATOR.generate_id(),
-            provider_id: router.provider_id,
-            profile_type: UpstreamProfileType::Responses,
-            base_url: format!("{}/v1", upstream.base_url),
-            use_proxy: false,
-            is_enabled: true,
-            is_default: true,
-            created_at: mutation_time,
-            updated_at: mutation_time,
-            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
-        })
+        let default_source = UpstreamSource::create(
+            &router.app_state.database,
+            &NewUpstreamSource {
+                id: ID_GENERATOR.generate_id(),
+                provider_id: router.provider_id,
+                profile_type: UpstreamProfileType::Responses,
+                base_url: format!("{}/v1", upstream.base_url),
+                use_proxy: false,
+                is_enabled: true,
+                is_default: true,
+                created_at: mutation_time,
+                updated_at: mutation_time,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
+            },
+        )
+        .await
         .expect("default fallback Source should be created");
         router
             .app_state
@@ -14217,10 +14280,20 @@ fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
         );
         router.wait_for_api_key_lease_release().await;
 
-        UpstreamSource::delete(router.source_id, router.provider_id)
-            .expect("exact Source should be soft deleted");
-        UpstreamSource::delete(default_source.id, router.provider_id)
-            .expect("default Source should be soft deleted");
+        UpstreamSource::delete(
+            &router.app_state.database,
+            router.source_id,
+            router.provider_id,
+        )
+        .await
+        .expect("exact Source should be soft deleted");
+        UpstreamSource::delete(
+            &router.app_state.database,
+            default_source.id,
+            router.provider_id,
+        )
+        .await
+        .expect("default Source should be soft deleted");
         router
             .app_state
             .catalog
@@ -14259,18 +14332,22 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
         let mutation_time = chrono::Utc::now().timestamp_millis();
-        let alternate_source = UpstreamSource::create(&NewUpstreamSource {
-            id: ID_GENERATOR.generate_id(),
-            provider_id: router.provider_id,
-            profile_type: UpstreamProfileType::Responses,
-            base_url: "not-a-url".to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            is_default: false,
-            created_at: mutation_time,
-            updated_at: mutation_time,
-            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
-        })
+        let alternate_source = UpstreamSource::create(
+            &router.app_state.database,
+            &NewUpstreamSource {
+                id: ID_GENERATOR.generate_id(),
+                provider_id: router.provider_id,
+                profile_type: UpstreamProfileType::Responses,
+                base_url: "not-a-url".to_string(),
+                use_proxy: false,
+                is_enabled: true,
+                is_default: false,
+                created_at: mutation_time,
+                updated_at: mutation_time,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
+            },
+        )
+        .await
         .expect("explicit-scope alternate Source should be created");
 
         let assert_configuration_failure = |response: Response<Body>| async {
@@ -14287,12 +14364,14 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
         };
 
         replace_for_model(
+            &router.app_state.database,
             router.model_id,
             &ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
                 source_id: alternate_source.id,
                 is_default: false,
             }]),
         )
+        .await
         .expect("singleton explicit Source should be saved");
         router
             .app_state
@@ -14307,8 +14386,13 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
         )
         .await;
 
-        replace_for_model(router.model_id, &ModelSourceConfig::explicit(Vec::new()))
-            .expect("explicit empty Source Config should be saved");
+        replace_for_model(
+            &router.app_state.database,
+            router.model_id,
+            &ModelSourceConfig::explicit(Vec::new()),
+        )
+        .await
+        .expect("explicit empty Source Config should be saved");
         router
             .app_state
             .catalog
@@ -14323,14 +14407,17 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
         .await;
 
         replace_for_model(
+            &router.app_state.database,
             router.model_id,
             &ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
                 source_id: alternate_source.id,
                 is_default: true,
             }]),
         )
+        .await
         .expect("disabled model default Source should be saved");
         UpstreamSource::update(
+            &router.app_state.database,
             alternate_source.id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -14342,6 +14429,7 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("model default Source should be disabled");
         router
             .app_state
@@ -14356,8 +14444,13 @@ fn direct_execution_explicit_scope_is_closed_and_fail_closed() {
         )
         .await;
 
-        UpstreamSource::delete(alternate_source.id, router.provider_id)
-            .expect("model default Source should be soft deleted");
+        UpstreamSource::delete(
+            &router.app_state.database,
+            alternate_source.id,
+            router.provider_id,
+        )
+        .await
+        .expect("model default Source should be soft deleted");
         router
             .app_state
             .catalog
@@ -14392,26 +14485,32 @@ fn direct_execution_model_default_selection_reason_is_persisted_after_flush() {
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
-        let model_default_source = UpstreamSource::create(&NewUpstreamSource {
-            id: ID_GENERATOR.generate_id(),
-            provider_id: router.provider_id,
-            profile_type: UpstreamProfileType::Responses,
-            base_url: format!("{}/v1", upstream.base_url),
-            use_proxy: false,
-            is_enabled: true,
-            is_default: false,
-            created_at: 1,
-            updated_at: 1,
-            ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
-        })
+        let model_default_source = UpstreamSource::create(
+            &router.app_state.database,
+            &NewUpstreamSource {
+                id: ID_GENERATOR.generate_id(),
+                provider_id: router.provider_id,
+                profile_type: UpstreamProfileType::Responses,
+                base_url: format!("{}/v1", upstream.base_url),
+                use_proxy: false,
+                is_enabled: true,
+                is_default: false,
+                created_at: 1,
+                updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Responses)
+            },
+        )
+        .await
         .expect("model default Source should be created");
         replace_for_model(
+            &router.app_state.database,
             router.model_id,
             &ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
                 source_id: model_default_source.id,
                 is_default: true,
             }]),
         )
+        .await
         .expect("model Source Config should be replaced atomically");
         router
             .app_state
@@ -15399,7 +15498,7 @@ fn compatible_rerank_errors_and_success_body_limits_are_bounded_single_calls() {
                 router.attach_cost_catalog(Some(37), Some(2)).await;
             if upstream_status.is_success() {
                 router
-                    .replace_proxy_request_config(context, one_mib_non_stream_proxy_config(65_536))
+                    .replace_proxy_request_config(one_mib_non_stream_proxy_config(65_536))
                     .await;
             }
 
@@ -18140,9 +18239,7 @@ fn direct_execution_sse_resource_limits_finalize_once() {
             .await;
             let mut router =
                 RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
-            router
-                .replace_proxy_request_config(context, proxy_config)
-                .await;
+            router.replace_proxy_request_config(proxy_config).await;
             let persisted_sink = router.install_recording_persisted_sink();
 
             let response = router
@@ -18835,7 +18932,7 @@ fn direct_execution_non_stream_identity_and_gzip_enforce_exact_and_plus_one_limi
             let mut router =
                 RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
             router
-                .replace_proxy_request_config(context, one_mib_non_stream_proxy_config(65_536))
+                .replace_proxy_request_config(one_mib_non_stream_proxy_config(65_536))
                 .await;
 
             let response = router
@@ -18905,7 +19002,7 @@ fn four_public_protocols_use_existing_envelopes_for_non_stream_response_limit() 
             let mut router =
                 RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
             router
-                .replace_proxy_request_config(context, one_mib_non_stream_proxy_config(65_536))
+                .replace_proxy_request_config(one_mib_non_stream_proxy_config(65_536))
                 .await;
 
             let response = router
@@ -18959,7 +19056,7 @@ fn four_public_protocols_use_existing_envelopes_for_decoded_response_limit() {
             let mut router =
                 RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
             router
-                .replace_proxy_request_config(context, one_mib_non_stream_proxy_config(65_536))
+                .replace_proxy_request_config(one_mib_non_stream_proxy_config(65_536))
                 .await;
 
             let response = router
@@ -19010,10 +19107,7 @@ fn four_public_protocols_preserve_bounded_provider_error_when_body_reaches_hard_
             let mut router =
                 RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
             router
-                .replace_proxy_request_config(
-                    context,
-                    one_mib_non_stream_proxy_config(DISCLOSURE_LIMIT),
-                )
+                .replace_proxy_request_config(one_mib_non_stream_proxy_config(DISCLOSURE_LIMIT))
                 .await;
 
             let response = router
@@ -19123,10 +19217,7 @@ fn direct_execution_provider_error_hard_limit_preserves_status_and_disclosure_pr
             let mut router =
                 RouterFixture::new(context.clone(), &fixture, &upstream.base_url).await;
             router
-                .replace_proxy_request_config(
-                    context,
-                    one_mib_non_stream_proxy_config(DISCLOSURE_LIMIT),
-                )
+                .replace_proxy_request_config(one_mib_non_stream_proxy_config(DISCLOSURE_LIMIT))
                 .await;
 
             let response = router
@@ -19662,20 +19753,24 @@ fn models_routes_apply_static_kind_and_source_operation_filters_without_exposing
         let upstream = TestUpstream::spawn_json(StatusCode::OK, json!({"unexpected": true})).await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
         Model::create(
+            &router.app_state.database,
             router.provider_id,
             "embedding-model",
             None,
             ModelKind::Embedding,
             true,
         )
+        .await
         .expect("embedding model should create");
         Model::create(
+            &router.app_state.database,
             router.provider_id,
             "rerank-model",
             None,
             ModelKind::Rerank,
             true,
         )
+        .await
         .expect("rerank model should create");
         router
             .app_state
@@ -19756,6 +19851,7 @@ fn direct_execution_legacy_invalid_base_url_fails_before_upstream_access() {
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
         UpstreamSource::update(
+            &router.app_state.database,
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -19767,6 +19863,7 @@ fn direct_execution_legacy_invalid_base_url_fails_before_upstream_access() {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("legacy invalid base URL should be seeded directly");
         router
             .app_state
@@ -19826,15 +19923,9 @@ fn direct_execution_missing_source_fails_before_upstream_access() {
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
-        let conn = &mut get_connection().expect("test connection should load");
-        let DbConnection::Sqlite(conn) = conn else {
-            panic!("direct execution test must use SQLite");
-        };
-        diesel::delete(
-            crate::database::_sqlite_schema::upstream_source::table.find(router.source_id),
-        )
-        .execute(conn)
-        .expect("source should be removed for corruption fixture");
+        UpstreamSource::hard_delete_for_test(&router.app_state.database, router.source_id)
+            .await
+            .expect("source should be removed for corruption fixture");
         let invalidation = router
             .app_state
             .catalog
@@ -19874,6 +19965,7 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
             upstream.base_url.replacen("http://", "HTTP://", 1)
         );
         UpstreamSource::update(
+            &router.app_state.database,
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -19885,6 +19977,7 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("legacy noncanonical endpoint should be seeded directly");
         router
             .app_state
@@ -19899,7 +19992,8 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(upstream.requests().await.len(), 1);
         assert_eq!(
-            Provider::get_by_id(router.provider_id)
+            Provider::get_by_id(&router.app_state.database, router.provider_id)
+                .await
                 .expect("provider should remain persisted")
                 .upstream_sources[0]
                 .base_url,
@@ -19920,7 +20014,6 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
         .find(|(name, _)| *name == "openai")
         .expect("openai fixture");
     run_case(name, move |context| async move {
-        let infra_context = context.clone();
         let upstream = TestUpstream::spawn(ScriptedReply::Json {
             status: StatusCode::OK,
             body: fixture.non_stream.upstream_response.clone(),
@@ -19930,15 +20023,16 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
         let mut app_state = (*router.app_state).clone();
         app_state.infra = Arc::new(
             AppInfra::new_with_config(
+                Arc::clone(&app_state.database),
                 OutboundHttpConfig::default(),
                 ProxyRequestConfig::default(),
                 None,
-                Some(infra_context),
             )
             .await,
         );
         router.app_state = Arc::new(app_state);
         UpstreamSource::update(
+            &router.app_state.database,
             router.source_id,
             router.provider_id,
             &UpdateUpstreamSourceData {
@@ -19950,6 +20044,7 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
                 ..UpdateUpstreamSourceData::test_defaults()
             },
         )
+        .await
         .expect("proxy requirement should be seeded directly");
         router
             .app_state

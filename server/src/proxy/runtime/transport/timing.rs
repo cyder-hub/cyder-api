@@ -106,6 +106,7 @@ impl TransportTimingState {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn time_to_first_token_ms(&self) -> Option<i64> {
         let state = self.lock();
         state

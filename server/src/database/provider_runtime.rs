@@ -2,7 +2,10 @@ use diesel::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::database::{DbConnection, DbResult, get_connection};
+use crate::database::{
+    DbResult,
+    runtime::{DatabaseRuntime, DatabaseWorkload, db_execute as async_db_execute},
+};
 use crate::schema::enum_def::RequestStatus;
 
 #[derive(Queryable, Debug, Clone)]
@@ -214,71 +217,58 @@ pub fn aggregate_provider_runtime_entries(
     result
 }
 
-pub fn get_provider_runtime_aggregates_in_range(
+pub async fn get_provider_runtime_aggregates_in_range(
+    database: &DatabaseRuntime,
     start_time_ms: i64,
     end_time_ms: i64,
     provider_id_filter: Option<i64>,
 ) -> DbResult<Vec<ProviderRuntimeAggregate>> {
-    let entries = match &mut get_connection()? {
-        DbConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::request_log;
-
-            let mut query = request_log::table
-                .filter(request_log::dsl::request_received_at.ge(start_time_ms))
-                .filter(request_log::dsl::request_received_at.lt(end_time_ms))
-                .filter(request_log::dsl::provider_id.is_not_null())
-                .filter(request_log::dsl::source_id.is_not_null())
-                .into_boxed();
-
-            if let Some(provider_id) = provider_id_filter {
-                query = query.filter(request_log::dsl::provider_id.eq(Some(provider_id)));
-            }
-
-            query
-                .select((
-                    request_log::dsl::provider_id,
-                    request_log::dsl::source_id,
-                    request_log::dsl::request_received_at,
-                    request_log::dsl::upstream_request_sent_at,
-                    request_log::dsl::first_response_body_at,
-                    request_log::dsl::first_token_at,
-                    request_log::dsl::is_stream,
-                    request_log::dsl::completed_at,
-                    request_log::dsl::status,
-                    request_log::dsl::estimated_cost_nanos,
-                    request_log::dsl::estimated_cost_currency.nullable(),
-                ))
-                .order(request_log::dsl::request_received_at.asc())
-                .load::<(
-                    Option<i64>,
-                    Option<i64>,
-                    i64,
-                    Option<i64>,
-                    Option<i64>,
-                    Option<i64>,
-                    bool,
-                    Option<i64>,
-                    RequestStatus,
-                    Option<i64>,
-                    Option<String>,
-                )>(conn)?
-                .into_iter()
-                .filter_map(
-                    |(
-                        provider_id,
-                        source_id,
-                        request_received_at,
-                        upstream_request_sent_at,
-                        first_response_body_at,
-                        first_token_at,
-                        is_stream,
-                        completed_at,
-                        status,
-                        estimated_cost_nanos,
-                        estimated_cost_currency,
-                    )| {
-                        provider_id.zip(source_id).map(|(provider_id, source_id)| {
-                            RequestLogEntryForProviderRuntime {
+    let entries = database
+        .run_db(DatabaseWorkload::Foreground, move |connection| {
+            Box::pin(async move {
+                async_db_execute!(connection as conn, no_models, {
+                    let mut query = request_log::table
+                        .filter(request_log::dsl::request_received_at.ge(start_time_ms))
+                        .filter(request_log::dsl::request_received_at.lt(end_time_ms))
+                        .filter(request_log::dsl::provider_id.is_not_null())
+                        .filter(request_log::dsl::source_id.is_not_null())
+                        .into_boxed();
+                    if let Some(provider_id) = provider_id_filter {
+                        query = query.filter(request_log::dsl::provider_id.eq(Some(provider_id)));
+                    }
+                    let query = query
+                        .select((
+                            request_log::dsl::provider_id,
+                            request_log::dsl::source_id,
+                            request_log::dsl::request_received_at,
+                            request_log::dsl::upstream_request_sent_at,
+                            request_log::dsl::first_response_body_at,
+                            request_log::dsl::first_token_at,
+                            request_log::dsl::is_stream,
+                            request_log::dsl::completed_at,
+                            request_log::dsl::status,
+                            request_log::dsl::estimated_cost_nanos,
+                            request_log::dsl::estimated_cost_currency.nullable(),
+                        ))
+                        .order(request_log::dsl::request_received_at.asc());
+                    let rows = diesel_async::RunQueryDsl::load::<(
+                        Option<i64>,
+                        Option<i64>,
+                        i64,
+                        Option<i64>,
+                        Option<i64>,
+                        Option<i64>,
+                        bool,
+                        Option<i64>,
+                        RequestStatus,
+                        Option<i64>,
+                        Option<String>,
+                    )>(query, &mut **conn)
+                    .await?;
+                    Ok(rows
+                        .into_iter()
+                        .filter_map(
+                            |(
                                 provider_id,
                                 source_id,
                                 request_received_at,
@@ -290,90 +280,29 @@ pub fn get_provider_runtime_aggregates_in_range(
                                 status,
                                 estimated_cost_nanos,
                                 estimated_cost_currency,
-                            }
-                        })
-                    },
-                )
-                .collect()
-        }
-        DbConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::request_log;
-
-            let mut query = request_log::table
-                .filter(request_log::dsl::request_received_at.ge(start_time_ms))
-                .filter(request_log::dsl::request_received_at.lt(end_time_ms))
-                .filter(request_log::dsl::provider_id.is_not_null())
-                .filter(request_log::dsl::source_id.is_not_null())
-                .into_boxed();
-
-            if let Some(provider_id) = provider_id_filter {
-                query = query.filter(request_log::dsl::provider_id.eq(Some(provider_id)));
-            }
-
-            query
-                .select((
-                    request_log::dsl::provider_id,
-                    request_log::dsl::source_id,
-                    request_log::dsl::request_received_at,
-                    request_log::dsl::upstream_request_sent_at,
-                    request_log::dsl::first_response_body_at,
-                    request_log::dsl::first_token_at,
-                    request_log::dsl::is_stream,
-                    request_log::dsl::completed_at,
-                    request_log::dsl::status,
-                    request_log::dsl::estimated_cost_nanos,
-                    request_log::dsl::estimated_cost_currency.nullable(),
-                ))
-                .order(request_log::dsl::request_received_at.asc())
-                .load::<(
-                    Option<i64>,
-                    Option<i64>,
-                    i64,
-                    Option<i64>,
-                    Option<i64>,
-                    Option<i64>,
-                    bool,
-                    Option<i64>,
-                    RequestStatus,
-                    Option<i64>,
-                    Option<String>,
-                )>(conn)?
-                .into_iter()
-                .filter_map(
-                    |(
-                        provider_id,
-                        source_id,
-                        request_received_at,
-                        upstream_request_sent_at,
-                        first_response_body_at,
-                        first_token_at,
-                        is_stream,
-                        completed_at,
-                        status,
-                        estimated_cost_nanos,
-                        estimated_cost_currency,
-                    )| {
-                        provider_id.zip(source_id).map(|(provider_id, source_id)| {
-                            RequestLogEntryForProviderRuntime {
-                                provider_id,
-                                source_id,
-                                request_received_at,
-                                upstream_request_sent_at,
-                                first_response_body_at,
-                                first_token_at,
-                                is_stream,
-                                completed_at,
-                                status,
-                                estimated_cost_nanos,
-                                estimated_cost_currency,
-                            }
-                        })
-                    },
-                )
-                .collect()
-        }
-    };
-
+                            )| {
+                                provider_id.zip(source_id).map(|(provider_id, source_id)| {
+                                    RequestLogEntryForProviderRuntime {
+                                        provider_id,
+                                        source_id,
+                                        request_received_at,
+                                        upstream_request_sent_at,
+                                        first_response_body_at,
+                                        first_token_at,
+                                        is_stream,
+                                        completed_at,
+                                        status,
+                                        estimated_cost_nanos,
+                                        estimated_cost_currency,
+                                    }
+                                })
+                            },
+                        )
+                        .collect::<Vec<_>>())
+                })
+            })
+        })
+        .await?;
     Ok(aggregate_provider_runtime_entries(entries))
 }
 
@@ -608,11 +537,20 @@ mod tests {
         assert_eq!(result[1].provider_id, 2);
     }
 
-    #[test]
-    fn provider_runtime_db_query_returns_empty_when_no_logs_match() {
-        let result =
-            get_provider_runtime_aggregates_in_range(9_000_000_000_000, 9_000_000_000_100, None)
-                .expect("query should succeed");
+    #[tokio::test]
+    async fn provider_runtime_db_query_returns_empty_when_no_logs_match() {
+        let database = crate::database::TestDatabase::new_sqlite_default(
+            "provider-runtime-empty-range.sqlite",
+        )
+        .await;
+        let result = get_provider_runtime_aggregates_in_range(
+            &database,
+            9_000_000_000_000,
+            9_000_000_000_100,
+            None,
+        )
+        .await
+        .expect("query should succeed");
         assert!(result.is_empty());
     }
 }

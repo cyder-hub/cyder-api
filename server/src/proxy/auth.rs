@@ -405,7 +405,7 @@ pub async fn check_system_api_key(
     if key_str.starts_with("cyder-") {
         match app_state.catalog.get_api_key(key_str).await {
             Ok(Some(api_key)) => Ok(ApiKeyCheckResult { api_key, position }),
-            Ok(None) => classify_missing_active_api_key(key_str),
+            Ok(None) => classify_missing_active_api_key(app_state, key_str).await,
             Err(AppStoreError::LockError(e)) => {
                 crate::error_event!("auth.app_state_lock_error", error = e);
                 Err(internal_error(
@@ -429,9 +429,12 @@ pub async fn check_system_api_key(
     }
 }
 
-fn classify_missing_active_api_key(key_str: &str) -> Result<ApiKeyCheckResult, ProxyError> {
+async fn classify_missing_active_api_key(
+    app_state: &AppState,
+    key_str: &str,
+) -> Result<ApiKeyCheckResult, ProxyError> {
     let key_hash = hash_api_key(key_str);
-    let row = match ApiKey::get_by_hash(&key_hash) {
+    let row = match ApiKey::get_by_hash(&app_state.database, &key_hash).await {
         Ok(row) => row,
         Err(crate::controller::BaseError::NotFound(_)) => {
             return Err(authentication_error(
@@ -491,7 +494,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use crate::config::SecretEncryptionConfig;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::api_key::{ApiKey, CreateApiKeyPayload};
     use crate::schema::enum_def::Action;
     use crate::service::admin::AdminServices;
@@ -520,6 +523,30 @@ mod tests {
             budget_monthly_nanos: None,
             budget_monthly_currency: None,
             acl_rules: vec![],
+        }
+    }
+
+    fn persisted_api_key_payload(
+        name: &str,
+        is_enabled: bool,
+        expires_at: Option<i64>,
+    ) -> CreateApiKeyPayload {
+        CreateApiKeyPayload {
+            name: name.to_string(),
+            description: None,
+            default_action: Some(Action::Allow),
+            is_enabled: Some(is_enabled),
+            expires_at,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: None,
         }
     }
 
@@ -643,10 +670,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_auth_cache_and_database_failure_contracts_are_stable() {
+        let database =
+            TestDatabase::new_sqlite_default("proxy-auth-async-database-contract.sqlite").await;
+        (async {
+            let active =
+                ApiKey::create(&database, &persisted_api_key_payload("active", true, None))
+                    .await
+                    .expect("active api key should create");
+            let disabled = ApiKey::create(
+                &database,
+                &persisted_api_key_payload("disabled", false, None),
+            )
+            .await
+            .expect("disabled api key should create");
+            let expired = ApiKey::create(
+                &database,
+                &persisted_api_key_payload(
+                    "expired",
+                    true,
+                    Some(Utc::now().timestamp_millis() + 100),
+                ),
+            )
+            .await
+            .expect("expired api key should create");
+            let deleted =
+                ApiKey::create(&database, &persisted_api_key_payload("deleted", true, None))
+                    .await
+                    .expect("deleted api key should create");
+            ApiKey::delete(&database, deleted.detail.id)
+                .await
+                .expect("api key should soft delete");
+
+            tokio::time::sleep(Duration::from_millis(120)).await;
+
+            let app_state = create_test_app_state(database.clone()).await;
+            app_state.catalog.clear_cache().await;
+
+            check_system_api_key(
+                &app_state,
+                &active.reveal.api_key,
+                ApiKeyPosition::AuthorizationHeader,
+            )
+            .await
+            .expect("cold active key should load through DatabaseRuntime");
+
+            let disabled_error = check_system_api_key(
+                &app_state,
+                &disabled.reveal.api_key,
+                ApiKeyPosition::AuthorizationHeader,
+            )
+            .await
+            .err()
+            .expect("disabled key should fail closed");
+            assert_eq!(disabled_error.code(), ProxyErrorCode::ApiKeyDisabledError);
+
+            let expired_error = check_system_api_key(
+                &app_state,
+                &expired.reveal.api_key,
+                ApiKeyPosition::AuthorizationHeader,
+            )
+            .await
+            .err()
+            .expect("expired key should fail closed");
+            assert_eq!(expired_error.code(), ProxyErrorCode::ApiKeyExpiredError);
+
+            let deleted_error = check_system_api_key(
+                &app_state,
+                &deleted.reveal.api_key,
+                ApiKeyPosition::AuthorizationHeader,
+            )
+            .await
+            .err()
+            .expect("deleted key should remain invalid");
+            assert_eq!(deleted_error.code(), ProxyErrorCode::AuthenticationError);
+
+            database
+                .execute_sqlite_batch("ALTER TABLE api_key RENAME TO api_key_unavailable")
+                .await
+                .expect("api key table should become unavailable");
+
+            check_system_api_key(
+                &app_state,
+                &active.reveal.api_key,
+                ApiKeyPosition::AuthorizationHeader,
+            )
+            .await
+            .expect("warm active key must not be gated by database health");
+
+            let unavailable_error = check_system_api_key(
+                &app_state,
+                "cyder-database-unavailable",
+                ApiKeyPosition::AuthorizationHeader,
+            )
+            .await
+            .err()
+            .expect("cold lookup should fail closed while database is unavailable");
+            assert_eq!(unavailable_error.code(), ProxyErrorCode::ServerError);
+
+            database
+                .execute_sqlite_batch("ALTER TABLE api_key_unavailable RENAME TO api_key")
+                .await
+                .expect("api key table should recover");
+
+            let recovered_error = check_system_api_key(
+                &app_state,
+                "cyder-database-unavailable",
+                ApiKeyPosition::AuthorizationHeader,
+            )
+            .await
+            .err()
+            .expect("unknown key should be classified after recovery");
+            assert_eq!(recovered_error.code(), ProxyErrorCode::AuthenticationError);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn proxy_auth_api_key_rotation_immediately_replaces_hash_authentication() {
-        let database = TestDbContext::new_sqlite("proxy-api-key-rotation.sqlite");
-        database
-            .run_async(async {
+        let database = TestDatabase::new_sqlite_default("proxy-api-key-rotation.sqlite").await;
+        (async {
                 let base = create_test_app_state(database.clone()).await;
                 let config: SecretEncryptionConfig = serde_yaml::from_str(
                     "downstream_mode: one_time\nencryption_key: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
@@ -656,7 +799,7 @@ mod tests {
     let admin = Arc::new(AdminServices::new(
         Arc::clone(&base.catalog),
         Arc::clone(&encryption),
-    ));
+    ).await);
                 let mut configured = (*base).clone();
                 configured.admin = admin;
                 configured.secret_encryption = encryption;

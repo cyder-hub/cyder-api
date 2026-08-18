@@ -24,6 +24,9 @@ pub(crate) enum TransformValueKind {
     ToolCallDelta,
     ReasoningDelta,
     BlobDelta,
+    // Source stream errors currently fail closed before policy evaluation, but this
+    // discriminator keeps the structured-error capability contract explicit.
+    #[allow(dead_code)]
     StreamError,
 }
 

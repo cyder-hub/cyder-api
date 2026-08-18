@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use crate::{
     schema::enum_def::{
         DownstreamProtocol, ModelKind, RequestStatus, UpstreamProfileType, UpstreamProtocol,
     },
-    service::app_state::StateRouter,
+    service::app_state::{AppState, StateRouter},
     utils::HttpResult,
 };
 
@@ -256,9 +256,10 @@ impl From<RequestLogRecord> for RequestLogResponse {
 }
 
 async fn list_request_log(
+    State(app_state): State<std::sync::Arc<AppState>>,
     Query(params): Query<RequestLogQueryParams>,
 ) -> Result<HttpResult<ListResult<RequestLogListItemResponse>>, BaseError> {
-    let result = RequestLog::list(params.into())?;
+    let result = RequestLog::list(&app_state.database, params.into()).await?;
     Ok(HttpResult::new(ListResult {
         total: result.total,
         page: result.page,
@@ -267,8 +268,13 @@ async fn list_request_log(
     }))
 }
 
-async fn get_request_log(Path(id): Path<i64>) -> Result<HttpResult<RequestLogResponse>, BaseError> {
-    Ok(HttpResult::new(RequestLog::get_by_id(id)?.into()))
+async fn get_request_log(
+    State(app_state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<HttpResult<RequestLogResponse>, BaseError> {
+    Ok(HttpResult::new(
+        RequestLog::get_by_id(&app_state.database, id).await?.into(),
+    ))
 }
 
 pub fn create_record_router() -> StateRouter {

@@ -23,6 +23,8 @@ mod error_contract_regression;
 #[cfg(test)]
 mod log_regression;
 
+#[cfg(test)]
+pub(crate) use auth::{ApiKeyPosition, admit_api_key_request, check_system_api_key};
 pub(crate) use cancellation::ProxyCancellationContext;
 use error::classify_request_body_error;
 #[cfg(test)]

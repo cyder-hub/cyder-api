@@ -12,8 +12,10 @@ use crate::controller::BaseError;
 use crate::database::api_key::ApiKey;
 use crate::database::cost::{CostCatalogVersion, CostComponent};
 use crate::database::model::Model;
+use crate::database::model_source_binding::list_visible_by_model_id;
 use crate::database::provider::{Provider, ProviderApiKeyRepository};
 use crate::database::request_patch::RequestPatchVariantRepository;
+use crate::database::runtime::DatabaseRuntime;
 use crate::service::app_state::AppStoreError;
 use crate::service::cache::memory::MemoryCacheBackend;
 use crate::service::cache::redis::RedisCacheBackend;
@@ -51,6 +53,7 @@ pub struct CatalogCacheBackendStatus {
 }
 
 pub struct CatalogService {
+    database: Arc<DatabaseRuntime>,
     api_key_cache: CacheRepo<CacheApiKey>,
     models_catalog_cache: CacheRepo<CacheModelsCatalog>,
     provider_cache: CacheRepo<CacheProvider>,
@@ -67,7 +70,7 @@ pub struct CatalogService {
 }
 
 impl CatalogService {
-    pub async fn new(force_memory_cache: bool) -> Self {
+    pub async fn new(database: Arc<DatabaseRuntime>, force_memory_cache: bool) -> Self {
         let negative_cache_ttl = CONFIG.cache.catalog_negative_ttl();
         let ttl = Some(CONFIG.cache.catalog_ttl());
         let redis_pool = if force_memory_cache {
@@ -94,6 +97,7 @@ impl CatalogService {
         let pool = if use_redis { redis_pool.as_ref() } else { None };
 
         Self {
+            database,
             api_key_cache: Self::create_repo(ttl, pool),
             models_catalog_cache: Self::create_repo(ttl, pool),
             provider_cache: Self::create_repo(ttl, pool),
@@ -110,6 +114,10 @@ impl CatalogService {
 
     pub fn backend_status(&self) -> CatalogCacheBackendStatus {
         self.backend_status.clone()
+    }
+
+    pub(crate) fn database(&self) -> Arc<DatabaseRuntime> {
+        Arc::clone(&self.database)
     }
 
     pub(crate) async fn set_provider_api_keys_invalidation_hook(
@@ -154,15 +162,28 @@ impl CatalogService {
         format!("{:x}", hasher.finalize())
     }
 
-    fn load_cache_api_key(row: ApiKey) -> Result<CacheApiKey, AppStoreError> {
-        let acl_rules = ApiKey::load_acl_rules(row.id).map_err(|err| {
-            AppStoreError::DatabaseError(format!(
-                "failed to load api key ACL rules for {}: {:?}",
-                row.id, err
-            ))
-        })?;
+    async fn load_cache_api_key(&self, row: ApiKey) -> Result<CacheApiKey, AppStoreError> {
+        let acl_rules = ApiKey::load_acl_rules(&self.database, row.id)
+            .await
+            .map_err(|err| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to load api key ACL rules for {}: {:?}",
+                    row.id, err
+                ))
+            })?;
 
         Ok(CacheApiKey::from_db(row, acl_rules))
+    }
+
+    async fn load_cache_model(&self, row: Model) -> Result<CacheModel, AppStoreError> {
+        let source_bindings = list_visible_by_model_id(&self.database, row.id)
+            .await
+            .map_err(|error| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to load model source bindings: {error:?}"
+                ))
+            })?;
+        Ok(CacheModel::from_db_with_bindings(row, source_bindings))
     }
 
     pub async fn reload(&self) {
@@ -179,12 +200,12 @@ impl CatalogService {
         let mut request_patch_variant_count = 0usize;
         let mut cost_catalog_version_count = 0usize;
 
-        match ApiKey::list_all_active() {
+        match ApiKey::list_all_active(&self.database).await {
             Ok(keys) => {
                 api_key_count = keys.len();
                 let now = chrono::Utc::now().timestamp_millis();
                 for key in keys {
-                    match Self::load_cache_api_key(key) {
+                    match self.load_cache_api_key(key).await {
                         Ok(cache_item) if cache_item.is_active_at(now) => {
                             let api_key_cache_key =
                                 CacheKey::ApiKeyHash(&cache_item.api_key_hash).to_compact_string();
@@ -206,7 +227,7 @@ impl CatalogService {
         }
 
         let mut provider_id_to_key: HashMap<i64, String> = HashMap::new();
-        match Provider::list_all() {
+        match Provider::list_all(&self.database).await {
             Ok(providers) => {
                 provider_count = providers.len();
                 for provider in providers {
@@ -234,11 +255,11 @@ impl CatalogService {
             }
         }
 
-        match Model::list_all() {
+        match Model::list_all(&self.database).await {
             Ok(models) => {
                 model_count = models.len();
                 for model in models {
-                    let Ok(cache_item) = CacheModel::from_db(model) else {
+                    let Ok(cache_item) = self.load_cache_model(model).await else {
                         increment_failure_counter(
                             &mut failure_counts,
                             "model_source_binding_snapshot",
@@ -278,17 +299,23 @@ impl CatalogService {
             .iter()
             .map(|model| model.id)
             .collect::<Vec<_>>();
-        match RequestPatchVariantRepository::list_by_source_ids(&source_ids).and_then(
-            |source_variants| {
-                RequestPatchVariantRepository::list_by_model_ids(&model_ids).map(|model_variants| {
-                    source_variants
-                        .into_iter()
-                        .chain(model_variants)
-                        .map(CacheRequestPatchVariant::from)
-                        .collect::<Vec<_>>()
-                })
-            },
-        ) {
+        let request_patch_variants = async {
+            let source_variants =
+                RequestPatchVariantRepository::list_by_source_ids(&self.database, &source_ids)
+                    .await?;
+            let model_variants =
+                RequestPatchVariantRepository::list_by_model_ids(&self.database, &model_ids)
+                    .await?;
+            Ok::<_, BaseError>(
+                source_variants
+                    .into_iter()
+                    .chain(model_variants)
+                    .map(CacheRequestPatchVariant::from)
+                    .collect::<Vec<_>>(),
+            )
+        }
+        .await;
+        match request_patch_variants {
             Ok(variants) => {
                 request_patch_variant_count = variants.len();
                 catalog_request_patch_variants = variants;
@@ -311,7 +338,7 @@ impl CatalogService {
             )
             .await;
 
-        match ProviderApiKeyRepository::list_all_selections() {
+        match ProviderApiKeyRepository::list_all_selections(&self.database).await {
             Ok(keys) => {
                 provider_api_key_count = keys.len();
                 let mut by_provider: HashMap<i64, Vec<CacheProviderKey>> = HashMap::new();
@@ -355,11 +382,11 @@ impl CatalogService {
             }
         }
 
-        match CostCatalogVersion::list_all() {
+        match CostCatalogVersion::list_all(&self.database).await {
             Ok(versions) => {
                 cost_catalog_version_count = versions.len();
                 let mut components_by_version: HashMap<i64, Vec<CostComponent>> = HashMap::new();
-                match CostComponent::list_all() {
+                match CostComponent::list_all(&self.database).await {
                     Ok(components) => {
                         for component in components {
                             components_by_version
@@ -522,8 +549,8 @@ impl CatalogService {
 
         let result = self
             .get_or_load(&self.api_key_cache, &cache_key, || async {
-                match ApiKey::get_active_by_hash(&hashed_key) {
-                    Ok(db_key) => Ok(Some(Self::load_cache_api_key(db_key)?)),
+                match ApiKey::get_active_by_hash(&self.database, &hashed_key).await {
+                    Ok(db_key) => Ok(Some(self.load_cache_api_key(db_key).await?)),
                     Err(BaseError::NotFound(_)) => Ok(None),
                     Err(err) => Err(AppStoreError::DatabaseError(format!(
                         "failed to load api key by hash: {:?}",
@@ -554,8 +581,8 @@ impl CatalogService {
 
         let result = self
             .get_or_load(&self.api_key_cache, &cache_key, || async {
-                match ApiKey::get_active_by_hash(api_key_hash) {
-                    Ok(db_key) => Ok(Some(Self::load_cache_api_key(db_key)?)),
+                match ApiKey::get_active_by_hash(&self.database, api_key_hash).await {
+                    Ok(db_key) => Ok(Some(self.load_cache_api_key(db_key).await?)),
                     Err(BaseError::NotFound(_)) => Ok(None),
                     Err(err) => Err(AppStoreError::DatabaseError(format!(
                         "failed to load api key by hash: {:?}",
@@ -584,8 +611,14 @@ impl CatalogService {
     }
 
     pub async fn invalidate_api_key_id(&self, id: i64) -> Result<(), AppStoreError> {
-        if let Ok(row) = ApiKey::get_by_id(id) {
-            self.invalidate_api_key_hash(&row.api_key_hash).await?;
+        match ApiKey::get_by_id(&self.database, id).await {
+            Ok(row) => self.invalidate_api_key_hash(&row.api_key_hash).await?,
+            Err(BaseError::NotFound(_)) => {}
+            Err(error) => {
+                return Err(AppStoreError::DatabaseError(format!(
+                    "failed to load api key {id} for cache invalidation: {error:?}"
+                )));
+            }
         }
 
         Ok(())
@@ -600,7 +633,7 @@ impl CatalogService {
 
         let catalog = self
             .get_or_load(&self.models_catalog_cache, &cache_key, || async {
-                Ok(Some(Self::load_models_catalog()?))
+                Ok(Some(self.load_models_catalog().await?))
             })
             .await?;
 
@@ -619,7 +652,7 @@ impl CatalogService {
         let cache_key = CacheKey::ProviderById(id).to_compact_string();
 
         self.get_or_load(&self.provider_cache, &cache_key, || async {
-            match Provider::get_by_id(id) {
+            match Provider::get_by_id(&self.database, id).await {
                 Ok(db_provider) => {
                     let cache_item = CacheProvider::from(db_provider.clone());
                     self.provider_cache
@@ -656,7 +689,7 @@ impl CatalogService {
         let cache_key = CacheKey::ProviderByKey(key).to_compact_string();
 
         self.get_or_load(&self.provider_cache, &cache_key, || async {
-            match Provider::get_by_key(key) {
+            match Provider::get_by_key(&self.database, key).await {
                 Ok(Some(db_provider)) => {
                     let cache_item = CacheProvider::from(db_provider.clone());
                     self.provider_cache
@@ -704,18 +737,27 @@ impl CatalogService {
 
         self.get_or_load(&self.model_cache, &cache_key, || async {
             if let Some(provider) = self.get_provider_by_key(provider_key).await? {
-                if let Ok(Some(db_model)) =
-                    Model::get_by_name_and_provider_id(model_name, provider.id)
+                match Model::get_by_name_and_provider_id(&self.database, model_name, provider.id)
+                    .await
                 {
-                    let cache_item = CacheModel::from_db(db_model.clone())
-                        .map_err(|error| AppStoreError::DatabaseError(error))?;
-                    self.model_cache
-                        .set_positive(
-                            &CacheKey::ModelById(db_model.id).to_compact_string(),
-                            &cache_item,
-                        )
-                        .await?;
-                    return Ok(Some(cache_item));
+                    Ok(Some(db_model)) => {
+                        let model_id = db_model.id;
+                        let cache_item = self.load_cache_model(db_model).await?;
+                        self.model_cache
+                            .set_positive(
+                                &CacheKey::ModelById(model_id).to_compact_string(),
+                                &cache_item,
+                            )
+                            .await?;
+                        return Ok(Some(cache_item));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(AppStoreError::DatabaseError(format!(
+                            "failed to load model {model_name} for provider {}: {error:?}",
+                            provider.id
+                        )));
+                    }
                 }
             }
             Ok(None)
@@ -727,21 +769,26 @@ impl CatalogService {
         let cache_key = CacheKey::ModelById(id).to_compact_string();
 
         self.get_or_load(&self.model_cache, &cache_key, || async {
-            if let Ok(db_model) = Model::get_by_id(id) {
-                let cache_item = CacheModel::from_db(db_model.clone())
-                    .map_err(|error| AppStoreError::DatabaseError(error))?;
-                if let Some(provider) = self.get_provider_by_id(db_model.provider_id).await? {
-                    self.model_cache
-                        .set_positive(
-                            &CacheKey::ModelByName(&provider.provider_key, &db_model.model_name)
-                                .to_compact_string(),
-                            &cache_item,
-                        )
-                        .await?;
+            match Model::get_by_id(&self.database, id).await {
+                Ok(db_model) => {
+                    let provider_id = db_model.provider_id;
+                    let model_name = db_model.model_name.clone();
+                    let cache_item = self.load_cache_model(db_model).await?;
+                    if let Some(provider) = self.get_provider_by_id(provider_id).await? {
+                        self.model_cache
+                            .set_positive(
+                                &CacheKey::ModelByName(&provider.provider_key, &model_name)
+                                    .to_compact_string(),
+                                &cache_item,
+                            )
+                            .await?;
+                    }
+                    Ok(Some(cache_item))
                 }
-                Ok(Some(cache_item))
-            } else {
-                Ok(None)
+                Err(BaseError::ParamInvalid(_)) => Ok(None),
+                Err(error) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load model {id}: {error:?}"
+                ))),
             }
         })
         .await
@@ -804,7 +851,7 @@ impl CatalogService {
             .write()
             .await
             .insert(provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed);
-        let snapshot = Arc::new(Self::load_provider_api_key_snapshot(provider_id)?);
+        let snapshot = Arc::new(self.load_provider_api_key_snapshot(provider_id).await?);
         self.provider_api_key_runtime_snapshots
             .write()
             .await
@@ -829,10 +876,12 @@ impl CatalogService {
         }
     }
 
-    fn load_provider_api_key_snapshot(
+    async fn load_provider_api_key_snapshot(
+        &self,
         provider_id: i64,
     ) -> Result<Vec<CacheProviderKey>, AppStoreError> {
-        ProviderApiKeyRepository::list_selections_by_provider_id(provider_id)
+        ProviderApiKeyRepository::list_selections_by_provider_id(&self.database, provider_id)
+            .await
             .map(|rows| rows.into_iter().map(CacheProviderKey::from).collect())
             .map_err(|_| {
                 AppStoreError::DatabaseError(format!(
@@ -891,7 +940,7 @@ impl CatalogService {
             .write()
             .await
             .insert(provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed);
-        let snapshot = Arc::new(Self::load_provider_api_key_snapshot(provider_id)?);
+        let snapshot = Arc::new(self.load_provider_api_key_snapshot(provider_id).await?);
         if let Err(error) = self
             .run_provider_api_keys_invalidation_hook(provider_id)
             .await
@@ -942,10 +991,11 @@ impl CatalogService {
         let cache_key = CacheKey::CostCatalogVersion(id).to_compact_string();
 
         self.get_or_load(&self.cost_catalog_version_cache, &cache_key, || async {
-            match CostCatalogVersion::get_by_id(id) {
+            match CostCatalogVersion::get_by_id(&self.database, id).await {
                 Ok(version) => {
-                    let components =
-                        CostComponent::list_by_catalog_version_id(id).map_err(|e| {
+                    let components = CostComponent::list_by_catalog_version_id(&self.database, id)
+                        .await
+                        .map_err(|e| {
                             AppStoreError::DatabaseError(format!(
                                 "failed to list cost components for version {}: {:?}",
                                 id, e
@@ -977,15 +1027,18 @@ impl CatalogService {
             return Ok(None);
         };
 
-        let active_version =
-            CostCatalogVersion::get_active_by_catalog_id(cost_catalog_id, at_time_ms).map_err(
-                |e| {
-                    AppStoreError::DatabaseError(format!(
-                        "failed to resolve active cost catalog version for catalog {} at {}: {:?}",
-                        cost_catalog_id, at_time_ms, e
-                    ))
-                },
-            )?;
+        let active_version = CostCatalogVersion::get_active_by_catalog_id(
+            &self.database,
+            cost_catalog_id,
+            at_time_ms,
+        )
+        .await
+        .map_err(|e| {
+            AppStoreError::DatabaseError(format!(
+                "failed to resolve active cost catalog version for catalog {} at {}: {:?}",
+                cost_catalog_id, at_time_ms, e
+            ))
+        })?;
 
         match active_version {
             Some(version) => self.get_cost_catalog_version_by_id(version.id).await,
@@ -998,37 +1051,46 @@ impl CatalogService {
         Ok(self.cost_catalog_version_cache.delete(&cache_key).await?)
     }
 
-    fn load_models_catalog() -> Result<CacheModelsCatalog, AppStoreError> {
-        let providers: Vec<CacheProvider> = Provider::list_all()
+    async fn load_models_catalog(&self) -> Result<CacheModelsCatalog, AppStoreError> {
+        let providers: Vec<CacheProvider> = Provider::list_all(&self.database)
+            .await
             .map_err(|e| AppStoreError::DatabaseError(format!("failed to list providers: {e:?}")))?
             .into_iter()
             .map(CacheProvider::from)
             .collect();
-        let models = Model::list_all()
-            .map_err(|e| AppStoreError::DatabaseError(format!("failed to list models: {e:?}")))?
-            .into_iter()
-            .map(|model| CacheModel::from_db(model).map_err(AppStoreError::DatabaseError))
-            .collect::<Result<Vec<_>, _>>()?;
+        let model_rows = Model::list_all(&self.database)
+            .await
+            .map_err(|e| AppStoreError::DatabaseError(format!("failed to list models: {e:?}")))?;
+        let mut models = Vec::with_capacity(model_rows.len());
+        for model in model_rows {
+            models.push(self.load_cache_model(model).await?);
+        }
         let source_ids = providers
             .iter()
             .flat_map(|provider| provider.upstream_sources.iter().map(|source| source.id))
             .collect::<Vec<_>>();
         let model_ids = models.iter().map(|model| model.id).collect::<Vec<_>>();
-        let request_patch_variants = RequestPatchVariantRepository::list_by_source_ids(&source_ids)
-            .and_then(|source_variants| {
-                RequestPatchVariantRepository::list_by_model_ids(&model_ids).map(|model_variants| {
-                    source_variants
-                        .into_iter()
-                        .chain(model_variants)
-                        .map(CacheRequestPatchVariant::from)
-                        .collect()
-                })
-            })
-            .map_err(|e| {
-                AppStoreError::DatabaseError(format!(
-                    "failed to list request patch Variants: {e:?}"
-                ))
-            })?;
+        let source_variants =
+            RequestPatchVariantRepository::list_by_source_ids(&self.database, &source_ids)
+                .await
+                .map_err(|e| {
+                    AppStoreError::DatabaseError(format!(
+                        "failed to list request patch Variants: {e:?}"
+                    ))
+                })?;
+        let model_variants =
+            RequestPatchVariantRepository::list_by_model_ids(&self.database, &model_ids)
+                .await
+                .map_err(|e| {
+                    AppStoreError::DatabaseError(format!(
+                        "failed to list request patch Variants: {e:?}"
+                    ))
+                })?;
+        let request_patch_variants = source_variants
+            .into_iter()
+            .chain(model_variants)
+            .map(CacheRequestPatchVariant::from)
+            .collect();
 
         Ok(CacheModelsCatalog {
             providers,
@@ -1079,8 +1141,8 @@ fn select_catalog_cache_backend_status(
 #[cfg(test)]
 mod tests {
     use super::{CATALOG_CACHE_SCHEMA_PREFIX, CatalogService, select_catalog_cache_backend_status};
-    use crate::config::CacheBackendType;
-    use crate::database::TestDbContext;
+    use crate::config::{CacheBackendType, DatabaseIoConfig};
+    use crate::database::TestDatabase;
     use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
     use crate::database::request_patch::{
@@ -1091,10 +1153,7 @@ mod tests {
         Action, ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement,
         UpstreamProfileType,
     };
-    use crate::service::cache::types::{
-        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelsCatalog,
-        CacheProvider,
-    };
+    use crate::service::cache::types::{CacheApiKey, CacheEntry, CacheModel, CacheModelsCatalog};
     use crate::service::catalog::keys::CacheKey;
     use chrono::Utc;
 
@@ -1122,8 +1181,13 @@ mod tests {
         }
     }
 
-    fn seed_provider(id: i64, provider_key: &str) -> ProviderAggregate {
+    async fn seed_provider(
+        database: &crate::database::runtime::DatabaseRuntime,
+        id: i64,
+        provider_key: &str,
+    ) -> ProviderAggregate {
         Provider::create(
+            database,
             &NewProvider {
                 id,
                 provider_key: provider_key.to_string(),
@@ -1146,19 +1210,30 @@ mod tests {
                 ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
+        .await
         .expect("provider seed should succeed")
     }
 
-    fn seed_model(provider_id: i64, model_name: &str) -> CacheModel {
+    async fn seed_model(
+        database: &crate::database::runtime::DatabaseRuntime,
+        provider_id: i64,
+        model_name: &str,
+    ) -> CacheModel {
         let model = Model::create(
+            database,
             provider_id,
             model_name,
             None,
             crate::schema::enum_def::ModelKind::Chat,
             true,
         )
+        .await
         .expect("model seed should succeed");
-        CacheModel::from_db(model).expect("model source snapshot should load")
+        let bindings =
+            crate::database::model_source_binding::list_visible_by_model_id(database, model.id)
+                .await
+                .expect("model source snapshot should load");
+        CacheModel::from_db_with_bindings(model, bindings)
     }
 
     #[test]
@@ -1221,13 +1296,16 @@ mod tests {
 
     #[tokio::test]
     async fn reload_preheats_source_bound_request_patch_variants_and_roundtrips_catalog() {
-        let database = TestDbContext::new_sqlite("catalog-source-bound-request-patch.sqlite");
-        database
-            .run_async(async {
-                let provider = seed_provider(301, "catalog-provider");
-                let model = seed_model(provider.id, "catalog-model");
-                let source_id = provider.upstream_sources[0].id;
-                let variant = RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+        let database =
+            TestDatabase::new_sqlite_default("catalog-source-bound-request-patch.sqlite").await;
+        let runtime = database.runtime();
+        (async {
+            let provider = seed_provider(&runtime, 301, "catalog-provider").await;
+            let model = seed_model(&runtime, provider.id, "catalog-model").await;
+            let source_id = provider.upstream_sources[0].id;
+            let variant = RequestPatchVariantRepository::create(
+                &runtime,
+                &RequestPatchVariantInput {
                     source_id,
                     model_id: None,
                     suffix: Some("fast".to_string()),
@@ -1240,65 +1318,76 @@ mod tests {
                         value_json: Some(Some(serde_json::json!(0.2))),
                         description: Some("catalog test".to_string()),
                     }],
-                })
-                .expect("request patch Variant should be persisted");
-                let model_variant =
-                    RequestPatchVariantRepository::create(&RequestPatchVariantInput {
-                        source_id,
-                        model_id: Some(model.id),
-                        suffix: Some("fast".to_string()),
-                        enabled: true,
-                        expose_in_models: false,
-                        rules: vec![RequestPatchRuleInput {
-                            placement: RequestPatchPlacement::Body,
-                            target: "/options/top_p".to_string(),
-                            operation: RequestPatchOperation::Set,
-                            value_json: Some(Some(serde_json::json!(0.8))),
-                            description: Some("model catalog test".to_string()),
-                        }],
-                    })
-                    .expect("model request patch Variant should be persisted");
+                },
+            )
+            .await
+            .expect("request patch Variant should be persisted");
+            let model_variant = RequestPatchVariantRepository::create(
+                &runtime,
+                &RequestPatchVariantInput {
+                    source_id,
+                    model_id: Some(model.id),
+                    suffix: Some("fast".to_string()),
+                    enabled: true,
+                    expose_in_models: false,
+                    rules: vec![RequestPatchRuleInput {
+                        placement: RequestPatchPlacement::Body,
+                        target: "/options/top_p".to_string(),
+                        operation: RequestPatchOperation::Set,
+                        value_json: Some(Some(serde_json::json!(0.8))),
+                        description: Some("model catalog test".to_string()),
+                    }],
+                },
+            )
+            .await
+            .expect("model request patch Variant should be persisted");
 
-                let catalog = CatalogService::new(true).await;
-                catalog.reload().await;
-                let snapshot = catalog
-                    .get_models_catalog()
-                    .await
-                    .expect("catalog should load");
-                let cached = snapshot
+            let catalog = CatalogService::new(runtime, true).await;
+            catalog.reload().await;
+            let snapshot = catalog
+                .get_models_catalog()
+                .await
+                .expect("catalog should load");
+            let cached = snapshot
+                .request_patch_variants
+                .iter()
+                .find(|item| item.id == variant.variant.id)
+                .expect("request patch Variant should be in catalog");
+            assert_eq!(cached.source_id, source_id);
+            assert_eq!(cached.model_id, None);
+            assert_eq!(cached.suffix.as_deref(), Some("fast"));
+            assert_eq!(cached.rules.len(), 1);
+            assert!(snapshot.models.iter().any(|item| item.id == model.id));
+            assert_eq!(snapshot.request_patch_variants.len(), 2);
+            assert!(
+                snapshot
                     .request_patch_variants
                     .iter()
-                    .find(|item| item.id == variant.variant.id)
-                    .expect("request patch Variant should be in catalog");
-                assert_eq!(cached.source_id, source_id);
-                assert_eq!(cached.model_id, None);
-                assert_eq!(cached.suffix.as_deref(), Some("fast"));
-                assert_eq!(cached.rules.len(), 1);
-                assert!(snapshot.models.iter().any(|item| item.id == model.id));
-                assert_eq!(snapshot.request_patch_variants.len(), 2);
-                assert!(
-                    snapshot
-                        .request_patch_variants
-                        .iter()
-                        .any(|item| item.id == model_variant.variant.id)
-                );
+                    .any(|item| item.id == model_variant.variant.id)
+            );
 
-                let encoded = bincode::encode_to_vec(&*snapshot, bincode::config::standard())
-                    .expect("catalog should encode");
-                let (decoded, _): (CacheModelsCatalog, usize) =
-                    bincode::decode_from_slice(&encoded, bincode::config::standard())
-                        .expect("catalog should decode");
-                assert_eq!(
-                    decoded.request_patch_variants,
-                    snapshot.request_patch_variants
-                );
-            })
-            .await;
+            let encoded = bincode::encode_to_vec(&*snapshot, bincode::config::standard())
+                .expect("catalog should encode");
+            let (decoded, _): (CacheModelsCatalog, usize) =
+                bincode::decode_from_slice(&encoded, bincode::config::standard())
+                    .expect("catalog should decode");
+            assert_eq!(
+                decoded.request_patch_variants,
+                snapshot.request_patch_variants
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn expired_api_key_cache_hit_is_evicted() {
-        let catalog = CatalogService::new(true).await;
+        let database = TestDatabase::new_sqlite(
+            "catalog-expired-api-key.sqlite",
+            2,
+            DatabaseIoConfig::default(),
+        )
+        .await;
+        let catalog = CatalogService::new(database.runtime(), true).await;
         let expired_at = Utc::now().timestamp_millis() - 1;
         let api_key_hash = "expired-hash".to_string();
         let cache_key = CacheKey::ApiKeyHash(&api_key_hash).to_compact_string();
@@ -1330,7 +1419,10 @@ mod tests {
 
     #[tokio::test]
     async fn get_or_load_rehydrates_after_cache_clear() {
-        let catalog = CatalogService::new(true).await;
+        let database =
+            TestDatabase::new_sqlite("catalog-rehydrate.sqlite", 2, DatabaseIoConfig::default())
+                .await;
+        let catalog = CatalogService::new(database.runtime(), true).await;
         let cache_key = CacheKey::ApiKeyHash("rehydrate").to_compact_string();
         let cached_key = cache_api_key();
 

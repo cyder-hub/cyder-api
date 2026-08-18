@@ -59,43 +59,54 @@ impl RequestPatchAdminService {
         &self.mutation_runner
     }
 
-    pub fn list_source_variants(
+    pub async fn list_source_variants(
         &self,
         source_id: i64,
     ) -> Result<Vec<RequestPatchVariantAggregate>, BaseError> {
-        RequestPatchVariantRepository::list_by_source(source_id)
+        let database = self.mutation_runner.database();
+        RequestPatchVariantRepository::list_by_source(&database, source_id).await
     }
 
-    pub fn validate_source_route(&self, provider_id: i64, source_id: i64) -> Result<(), BaseError> {
-        UpstreamSource::get_active_by_id_for_provider(source_id, provider_id).map(|_| ())
+    pub async fn validate_source_route(
+        &self,
+        provider_id: i64,
+        source_id: i64,
+    ) -> Result<(), BaseError> {
+        let database = self.mutation_runner.database();
+        UpstreamSource::get_active_by_id_for_provider(&database, source_id, provider_id)
+            .await
+            .map(|_| ())
     }
 
-    pub fn list_model_source_variants(
+    pub async fn list_model_source_variants(
         &self,
         model_id: i64,
         source_id: i64,
     ) -> Result<Vec<RequestPatchVariantAggregate>, BaseError> {
-        RequestPatchVariantRepository::list_by_model_source(model_id, source_id)
+        let database = self.mutation_runner.database();
+        RequestPatchVariantRepository::list_by_model_source(&database, model_id, source_id).await
     }
 
-    pub fn list_model_variants(
+    pub async fn list_model_variants(
         &self,
         model_id: i64,
     ) -> Result<Vec<RequestPatchVariantAggregate>, BaseError> {
-        RequestPatchVariantRepository::list_by_model_ids(&[model_id])
+        let database = self.mutation_runner.database();
+        RequestPatchVariantRepository::list_by_model_ids(&database, &[model_id]).await
     }
 
-    pub fn preview_source_variant(
+    pub async fn preview_source_variant(
         &self,
         source_id: i64,
         input: RequestPatchVariantInput,
         exclude_variant_id: Option<i64>,
     ) -> Result<RequestPatchVariantPreview, BaseError> {
         validate_owner_input(RequestPatchAdminOwner::Source { source_id }, &input)?;
-        RequestPatchVariantRepository::preview(&input, exclude_variant_id)
+        let database = self.mutation_runner.database();
+        RequestPatchVariantRepository::preview(&database, &input, exclude_variant_id).await
     }
 
-    pub fn preview_model_source_variant(
+    pub async fn preview_model_source_variant(
         &self,
         model_id: i64,
         source_id: i64,
@@ -109,7 +120,8 @@ impl RequestPatchAdminService {
             },
             &input,
         )?;
-        RequestPatchVariantRepository::preview(&input, exclude_variant_id)
+        let database = self.mutation_runner.database();
+        RequestPatchVariantRepository::preview(&database, &input, exclude_variant_id).await
     }
 
     pub async fn create_source_variant(
@@ -118,7 +130,8 @@ impl RequestPatchAdminService {
         input: RequestPatchVariantInput,
     ) -> Result<RequestPatchVariantAggregate, BaseError> {
         validate_owner_input(RequestPatchAdminOwner::Source { source_id }, &input)?;
-        let aggregate = RequestPatchVariantRepository::create(&input)?;
+        let database = self.mutation_runner.database();
+        let aggregate = RequestPatchVariantRepository::create(&database, &input).await?;
         self.run_saved_effects(
             RequestPatchAdminOwner::Source { source_id },
             "create",
@@ -135,7 +148,9 @@ impl RequestPatchAdminService {
         input: RequestPatchVariantInput,
     ) -> Result<RequestPatchVariantAggregate, BaseError> {
         validate_owner_input(RequestPatchAdminOwner::Source { source_id }, &input)?;
-        let aggregate = RequestPatchVariantRepository::replace(variant_id, &input)?;
+        let database = self.mutation_runner.database();
+        let aggregate =
+            RequestPatchVariantRepository::replace(&database, variant_id, &input).await?;
         self.run_saved_effects(
             RequestPatchAdminOwner::Source { source_id },
             "update",
@@ -150,7 +165,8 @@ impl RequestPatchAdminService {
         source_id: i64,
         variant_id: i64,
     ) -> Result<RequestPatchVariantAggregate, BaseError> {
-        let aggregate = RequestPatchVariantRepository::get(variant_id)?;
+        let database = self.mutation_runner.database();
+        let aggregate = RequestPatchVariantRepository::get(&database, variant_id).await?;
         validate_owner_input(
             RequestPatchAdminOwner::Source { source_id },
             &RequestPatchVariantInput {
@@ -162,7 +178,7 @@ impl RequestPatchAdminService {
                 rules: Vec::new(),
             },
         )?;
-        let deleted = RequestPatchVariantRepository::soft_delete(variant_id)?;
+        let deleted = RequestPatchVariantRepository::soft_delete(&database, variant_id).await?;
         self.run_saved_effects(
             RequestPatchAdminOwner::Source { source_id },
             "delete",
@@ -185,7 +201,8 @@ impl RequestPatchAdminService {
             },
             &input,
         )?;
-        let aggregate = RequestPatchVariantRepository::create(&input)?;
+        let database = self.mutation_runner.database();
+        let aggregate = RequestPatchVariantRepository::create(&database, &input).await?;
         self.run_saved_effects(
             RequestPatchAdminOwner::ModelSource {
                 model_id,
@@ -212,7 +229,9 @@ impl RequestPatchAdminService {
             },
             &input,
         )?;
-        let aggregate = RequestPatchVariantRepository::replace(variant_id, &input)?;
+        let database = self.mutation_runner.database();
+        let aggregate =
+            RequestPatchVariantRepository::replace(&database, variant_id, &input).await?;
         self.run_saved_effects(
             RequestPatchAdminOwner::ModelSource {
                 model_id,
@@ -231,7 +250,8 @@ impl RequestPatchAdminService {
         source_id: i64,
         variant_id: i64,
     ) -> Result<RequestPatchVariantAggregate, BaseError> {
-        let aggregate = RequestPatchVariantRepository::get(variant_id)?;
+        let database = self.mutation_runner.database();
+        let aggregate = RequestPatchVariantRepository::get(&database, variant_id).await?;
         validate_owner_input(
             RequestPatchAdminOwner::ModelSource {
                 model_id,
@@ -246,7 +266,7 @@ impl RequestPatchAdminService {
                 rules: Vec::new(),
             },
         )?;
-        let deleted = RequestPatchVariantRepository::soft_delete(variant_id)?;
+        let deleted = RequestPatchVariantRepository::soft_delete(&database, variant_id).await?;
         self.run_saved_effects(
             RequestPatchAdminOwner::ModelSource {
                 model_id,
@@ -341,7 +361,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::RequestPatchAdminService;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::request_patch::{
         RequestPatchRuleInput, RequestPatchVariantInput, RequestPatchVariantRepository,
@@ -372,117 +392,121 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_mutations_invalidate_catalog_and_audit_without_rule_values() {
-        let database = TestDbContext::new_sqlite("admin-request-patch-aggregate.sqlite");
-        database
-            .run_async(async {
-                Provider::create(
-                    &NewProvider {
-                        id: 9101,
-                        provider_key: "request-patch-admin".to_string(),
-                        name: "Request Patch Admin".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
+        let database =
+            TestDatabase::new_sqlite_default("admin-request-patch-aggregate.sqlite").await;
+        let runtime = database.runtime();
+        (async {
+            Provider::create(
+                &runtime,
+                &NewProvider {
+                    id: 9101,
+                    provider_key: "request-patch-admin".to_string(),
+                    name: "Request Patch Admin".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &NewUpstreamSource {
+                    id: 9102,
+                    provider_id: 9101,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: "https://request-patch-admin.example/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
+                },
+            )
+            .await
+            .expect("provider should be seeded");
+            let catalog = Arc::new(CatalogService::new(Arc::clone(&runtime), true).await);
+            let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
+            let service = RequestPatchAdminService::new(Arc::clone(&runner));
+
+            let preview_error = service
+                .preview_source_variant(
+                    9102,
+                    RequestPatchVariantInput {
+                        rules: vec![RequestPatchRuleInput {
+                            placement: RequestPatchPlacement::Header,
+                            target: "authorization".to_string(),
+                            operation: RequestPatchOperation::Set,
+                            value_json: Some(Some(serde_json::json!("Bearer preview"))),
+                            description: None,
+                        }],
+                        ..variant_input(9102, "/options/temperature")
                     },
-                    &NewUpstreamSource {
-                        id: 9102,
-                        provider_id: 9101,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: "https://request-patch-admin.example/v1".to_string(),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
-                    },
+                    None,
                 )
-                .expect("provider should be seeded");
-                let catalog = Arc::new(CatalogService::new(true).await);
-                let runner = Arc::new(AdminMutationRunner::new(Arc::clone(&catalog)));
-                let service = RequestPatchAdminService::new(Arc::clone(&runner));
-
-                let preview_error = service
-                    .preview_source_variant(
-                        9102,
-                        RequestPatchVariantInput {
-                            rules: vec![RequestPatchRuleInput {
-                                placement: RequestPatchPlacement::Header,
-                                target: "authorization".to_string(),
-                                operation: RequestPatchOperation::Set,
-                                value_json: Some(Some(serde_json::json!("Bearer preview"))),
-                                description: None,
-                            }],
-                            ..variant_input(9102, "/options/temperature")
-                        },
-                        None,
-                    )
-                    .expect_err("reserved targets must fail Preview without an override");
-                assert!(format!("{preview_error:?}").contains("reserved"));
-                assert!(
-                    RequestPatchVariantRepository::list_by_source(9102)
-                        .expect("preview should not write")
-                        .is_empty()
-                );
-                assert!(runner.drain_audit_events().is_empty());
-
-                let created = service
-                    .create_source_variant(9102, variant_input(9102, "/options/temperature"))
+                .await
+                .expect_err("reserved targets must fail Preview without an override");
+            assert!(format!("{preview_error:?}").contains("reserved"));
+            assert!(
+                RequestPatchVariantRepository::list_by_source(&runtime, 9102)
                     .await
-                    .expect("variant create should commit");
-                let events = runner.drain_audit_events();
-                let event = events
+                    .expect("preview should not write")
+                    .is_empty()
+            );
+            assert!(runner.drain_audit_events().is_empty());
+
+            let created = service
+                .create_source_variant(9102, variant_input(9102, "/options/temperature"))
+                .await
+                .expect("variant create should commit");
+            let events = runner.drain_audit_events();
+            let event = events
+                .iter()
+                .find(|event| event.event_name() == "manager.source_request_patch_variant_created")
+                .expect("create should emit an audit event");
+            assert!(
+                event
+                    .fields()
                     .iter()
-                    .find(|event| {
-                        event.event_name() == "manager.source_request_patch_variant_created"
-                    })
-                    .expect("create should emit an audit event");
-                assert!(
-                    event
-                        .fields()
-                        .iter()
-                        .any(|field| { field.key() == "rule_count" && field.value() == "1" })
-                );
-                assert!(
-                    event
-                        .fields()
-                        .iter()
-                        .all(|field| { field.key() != "value_json" && field.key() != "target" })
-                );
-                let catalog_snapshot = catalog
-                    .get_models_catalog()
-                    .await
-                    .expect("catalog should reload after invalidation");
-                assert_eq!(catalog_snapshot.request_patch_variants.len(), 1);
+                    .any(|field| { field.key() == "rule_count" && field.value() == "1" })
+            );
+            assert!(
+                event
+                    .fields()
+                    .iter()
+                    .all(|field| { field.key() != "value_json" && field.key() != "target" })
+            );
+            let catalog_snapshot = catalog
+                .get_models_catalog()
+                .await
+                .expect("catalog should reload after invalidation");
+            assert_eq!(catalog_snapshot.request_patch_variants.len(), 1);
 
-                let updated = service
-                    .update_source_variant(
-                        9102,
-                        created.variant.id,
-                        variant_input(9102, "/options/top_p"),
-                    )
-                    .await
-                    .expect("variant update should commit");
-                assert_eq!(updated.rules[0].target, "/options/top_p");
-                assert!(runner.drain_audit_events().iter().any(|event| {
-                    event.event_name() == "manager.source_request_patch_variant_updated"
-                }));
+            let updated = service
+                .update_source_variant(
+                    9102,
+                    created.variant.id,
+                    variant_input(9102, "/options/top_p"),
+                )
+                .await
+                .expect("variant update should commit");
+            assert_eq!(updated.rules[0].target, "/options/top_p");
+            assert!(runner.drain_audit_events().iter().any(|event| {
+                event.event_name() == "manager.source_request_patch_variant_updated"
+            }));
 
+            service
+                .delete_source_variant(9102, created.variant.id)
+                .await
+                .expect("variant delete should commit");
+            assert!(
                 service
-                    .delete_source_variant(9102, created.variant.id)
+                    .list_source_variants(9102)
                     .await
-                    .expect("variant delete should commit");
-                assert!(
-                    service
-                        .list_source_variants(9102)
-                        .expect("active variants should load")
-                        .is_empty()
-                );
-                assert!(runner.drain_audit_events().iter().any(|event| {
-                    event.event_name() == "manager.source_request_patch_variant_deleted"
-                }));
-            })
-            .await;
+                    .expect("active variants should load")
+                    .is_empty()
+            );
+            assert!(runner.drain_audit_events().iter().any(|event| {
+                event.event_name() == "manager.source_request_patch_variant_deleted"
+            }));
+        })
+        .await;
     }
 }

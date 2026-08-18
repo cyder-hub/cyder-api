@@ -6,8 +6,7 @@ use std::time::Duration;
 use reqwest::{Client, Proxy, Url, redirect};
 
 use crate::config::{OutboundHttpConfig, ProxyRequestConfig};
-#[cfg(test)]
-use crate::database::TestDbContext;
+use crate::database::runtime::DatabaseRuntime;
 use crate::proxy::logging::LogManager;
 use crate::service::provider_http::parse_proxy_url;
 
@@ -129,70 +128,24 @@ impl HttpClientBundle {
 pub struct AppInfra {
     http_clients: Arc<HttpClientBundle>,
     log_manager: Arc<LogManager>,
-    #[cfg(test)]
-    test_db_context: Option<TestDbContext>,
 }
 
 impl AppInfra {
     pub(crate) async fn new_with_config(
+        database: Arc<DatabaseRuntime>,
         outbound_http: OutboundHttpConfig,
         proxy_request: ProxyRequestConfig,
         proxy: Option<String>,
-        #[cfg(test)] test_db_context: Option<TestDbContext>,
     ) -> Self {
         let http_clients = Arc::new(
             HttpClientBundle::build(outbound_http, proxy_request, proxy)
                 .expect("failed to build initial HTTP client bundle"),
         );
-        let log_manager = Arc::new({
-            #[cfg(test)]
-            {
-                match test_db_context.clone() {
-                    Some(test_db_context) => LogManager::new_for_test(test_db_context),
-                    None => LogManager::new(),
-                }
-            }
-
-            #[cfg(not(test))]
-            {
-                LogManager::new()
-            }
-        });
+        let log_manager = Arc::new(LogManager::new(database));
 
         Self {
             http_clients,
             log_manager,
-            #[cfg(test)]
-            test_db_context,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn new_with_config_and_test_resolver(
-        outbound_http: OutboundHttpConfig,
-        proxy_request: ProxyRequestConfig,
-        proxy: Option<String>,
-        resolver: Arc<dyn reqwest::dns::Resolve>,
-        test_db_context: Option<TestDbContext>,
-    ) -> Self {
-        let http_clients = Arc::new(
-            HttpClientBundle::build_with_test_resolver(
-                outbound_http,
-                proxy_request,
-                proxy,
-                resolver,
-            )
-            .expect("failed to build initial test HTTP client bundle"),
-        );
-        let log_manager = Arc::new(match test_db_context.clone() {
-            Some(test_db_context) => LogManager::new_for_test(test_db_context),
-            None => LogManager::new(),
-        });
-
-        Self {
-            http_clients,
-            log_manager,
-            test_db_context,
         }
     }
 
@@ -232,16 +185,15 @@ impl AppInfra {
         self.log_manager.flush().await;
     }
 
+    pub async fn close_and_drain_proxy_logs(&self) {
+        self.log_manager.close_and_drain().await;
+    }
+
     pub(crate) fn spawn_background_task<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        #[cfg(test)]
-        if let Some(test_db_context) = &self.test_db_context {
-            return test_db_context.spawn(future);
-        }
-
         tokio::spawn(future)
     }
 }

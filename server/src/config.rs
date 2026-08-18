@@ -1157,6 +1157,8 @@ pub struct FinalConfig {
     #[serde(default)]
     pub metrics: MetricsConfig,
     pub db_pool_size: u32,
+    #[serde(default)]
+    pub database_io: DatabaseIoConfig,
     pub redis: Option<RedisConfig>,
     #[serde(default)]
     pub deployment: DeploymentConfig,
@@ -1179,6 +1181,13 @@ pub struct FinalConfig {
 }
 
 impl FinalConfig {
+    pub fn validate_database(&self) -> Result<(), String> {
+        if !(1..=128).contains(&self.db_pool_size) {
+            return Err("db_pool_size must be in 1..=128".to_string());
+        }
+        self.database_io.validate()
+    }
+
     pub fn validate_manager_auth(&self) -> Result<(), String> {
         if self.jwt_secret.len() < 32 {
             return Err("jwt_secret must contain at least 32 bytes".to_string());
@@ -1202,6 +1211,102 @@ impl FinalConfig {
             Err(errors.join("; "))
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseIoConfig {
+    #[serde(default = "default_database_max_waiters")]
+    pub max_waiters: u32,
+    #[serde(default = "default_database_queue_wait_timeout_seconds")]
+    pub queue_wait_timeout_seconds: u64,
+    #[serde(default = "default_database_operation_deadline_seconds")]
+    pub operation_deadline_seconds: u64,
+    #[serde(default = "default_sqlite_busy_timeout_seconds")]
+    pub sqlite_busy_timeout_seconds: u64,
+}
+
+impl Default for DatabaseIoConfig {
+    fn default() -> Self {
+        Self {
+            max_waiters: default_database_max_waiters(),
+            queue_wait_timeout_seconds: default_database_queue_wait_timeout_seconds(),
+            operation_deadline_seconds: default_database_operation_deadline_seconds(),
+            sqlite_busy_timeout_seconds: default_sqlite_busy_timeout_seconds(),
+        }
+    }
+}
+
+impl DatabaseIoConfig {
+    pub const MAX_WAITERS: u32 = 4_096;
+    pub const MIN_QUEUE_WAIT_TIMEOUT_SECONDS: u64 = 1;
+    pub const MAX_QUEUE_WAIT_TIMEOUT_SECONDS: u64 = 60;
+    pub const MIN_OPERATION_DEADLINE_SECONDS: u64 = 1;
+    pub const MAX_OPERATION_DEADLINE_SECONDS: u64 = 300;
+    pub const MIN_SQLITE_BUSY_TIMEOUT_SECONDS: u64 = 1;
+    pub const MAX_SQLITE_BUSY_TIMEOUT_SECONDS: u64 = 60;
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_waiters > Self::MAX_WAITERS {
+            return Err(format!(
+                "database_io.max_waiters must be in 0..={}",
+                Self::MAX_WAITERS
+            ));
+        }
+        if !(Self::MIN_QUEUE_WAIT_TIMEOUT_SECONDS..=Self::MAX_QUEUE_WAIT_TIMEOUT_SECONDS)
+            .contains(&self.queue_wait_timeout_seconds)
+        {
+            return Err(format!(
+                "database_io.queue_wait_timeout_seconds must be in {}..={}",
+                Self::MIN_QUEUE_WAIT_TIMEOUT_SECONDS,
+                Self::MAX_QUEUE_WAIT_TIMEOUT_SECONDS
+            ));
+        }
+        if !(Self::MIN_OPERATION_DEADLINE_SECONDS..=Self::MAX_OPERATION_DEADLINE_SECONDS)
+            .contains(&self.operation_deadline_seconds)
+        {
+            return Err(format!(
+                "database_io.operation_deadline_seconds must be in {}..={}",
+                Self::MIN_OPERATION_DEADLINE_SECONDS,
+                Self::MAX_OPERATION_DEADLINE_SECONDS
+            ));
+        }
+        if !(Self::MIN_SQLITE_BUSY_TIMEOUT_SECONDS..=Self::MAX_SQLITE_BUSY_TIMEOUT_SECONDS)
+            .contains(&self.sqlite_busy_timeout_seconds)
+        {
+            return Err(format!(
+                "database_io.sqlite_busy_timeout_seconds must be in {}..={}",
+                Self::MIN_SQLITE_BUSY_TIMEOUT_SECONDS,
+                Self::MAX_SQLITE_BUSY_TIMEOUT_SECONDS
+            ));
+        }
+        if self.sqlite_busy_timeout_seconds > self.operation_deadline_seconds {
+            return Err(
+                "database_io.sqlite_busy_timeout_seconds must be <= database_io.operation_deadline_seconds"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn sqlite_busy_timeout(&self) -> Duration {
+        Duration::from_secs(self.sqlite_busy_timeout_seconds)
+    }
+}
+
+const fn default_database_max_waiters() -> u32 {
+    64
+}
+
+const fn default_database_queue_wait_timeout_seconds() -> u64 {
+    1
+}
+
+const fn default_database_operation_deadline_seconds() -> u64 {
+    30
+}
+
+const fn default_sqlite_busy_timeout_seconds() -> u64 {
+    5
 }
 
 fn generate_random_string(len: usize) -> String {
@@ -1254,6 +1359,7 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         max_body_size: 100 * 1024 * 1024, // 100MB
         metrics: MetricsConfig::default(),
         db_pool_size: 5,
+        database_io: DatabaseIoConfig::default(),
         redis: None,
         deployment: DeploymentConfig::default(),
         manager_auth: ManagerAuthConfig::default(),

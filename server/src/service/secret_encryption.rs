@@ -18,10 +18,11 @@ use std::sync::{
 
 use crate::config::{DownstreamSecretMode, SecretEncryptionConfig, SecretEncryptionKey};
 use crate::controller::BaseError;
-use crate::database::api_key::{_postgres_model, _sqlite_model};
-use crate::database::get_connection;
 use crate::database::manager_credential::MANAGER_ID;
-use crate::db_execute;
+use crate::database::startup::{
+    DownstreamSecretRotation, ManagerTotpSecretRotation, ProviderSecretRotation,
+    StartupDatabaseConnection, StoredManagerTotpSecret, with_startup_secret_transaction,
+};
 use crate::service::admin::auth::totp::validate_manager_totp_secret;
 
 pub const SECRET_FORMAT_VERSION: i32 = 1;
@@ -29,34 +30,6 @@ pub const SECRET_NONCE_LEN: usize = 24;
 const PROVIDER_SECRET_INDEX_KEY_LABEL: &[u8] = b"cyder-secret-index-key:v1:provider-api-key";
 
 type HmacSha256 = Hmac<Sha256>;
-
-type StoredSecretTuple = (
-    i64,
-    Option<Vec<u8>>,
-    Option<Vec<u8>>,
-    Option<i32>,
-    Option<String>,
-);
-
-type StoredProviderSecretTuple = (
-    i64,
-    i64,
-    Option<Vec<u8>>,
-    Option<Vec<u8>>,
-    Option<i32>,
-    Option<String>,
-    Option<String>,
-);
-
-type StoredManagerTotpTuple = (
-    String,
-    Option<Vec<u8>>,
-    Option<Vec<u8>>,
-    Option<i32>,
-    Option<String>,
-    Option<i64>,
-    Option<i64>,
-);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SecretRotationSummary {
@@ -418,7 +391,7 @@ struct ManagerTotpInspection {
 }
 
 fn inspect_manager_totp(
-    row: Option<StoredManagerTotpTuple>,
+    row: Option<StoredManagerTotpSecret>,
     current_key: &SecretEncryptionKey,
     current_fingerprint: &KeyFingerprint,
     previous_key: Option<&SecretEncryptionKey>,
@@ -623,6 +596,7 @@ fn short_fingerprint_bytes(value: &str) -> Option<[u8; 8]> {
 
 pub fn prepare_secrets_before_startup(
     config: &SecretEncryptionConfig,
+    connection: &mut StartupDatabaseConnection,
 ) -> Result<SecretPreparationSummary, BaseError> {
     let current_key = config.encryption_key().cloned().ok_or_else(|| {
         BaseError::InternalServerError(Some(
@@ -632,347 +606,227 @@ pub fn prepare_secrets_before_startup(
     let previous_key = config.previous_encryption_key();
     let current_fingerprint = key_fingerprint(&current_key);
     let previous_fingerprint = previous_key.as_ref().map(key_fingerprint);
-    let conn = &mut get_connection()?;
+    let result = with_startup_secret_transaction(connection, |transaction| {
+        let rows = transaction.load_downstream_secrets()?;
+        let mut downstream = SecretRotationSummary::default();
 
-    let result = db_execute!(conn, {
-        conn.transaction::<SecretPreparationSummary, BaseError, _>(|conn| {
-            let rows = api_key::table
-                .filter(api_key::dsl::secret_ciphertext.is_not_null())
-                .order(api_key::dsl::id.asc())
-                .select((
-                    api_key::dsl::id,
-                    api_key::dsl::secret_ciphertext,
-                    api_key::dsl::secret_nonce,
-                    api_key::dsl::secret_format_version,
-                    api_key::dsl::secret_key_fingerprint,
-                ))
-                .load::<StoredSecretTuple>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to scan downstream api key secrets: {error}"
-                    )))
-                })?;
-            let mut downstream = SecretRotationSummary::default();
+        for (id, ciphertext, nonce, format_version, fingerprint) in rows {
+            let (Some(ciphertext), Some(nonce), Some(format_version), Some(fingerprint)) =
+                (ciphertext, nonce, format_version, fingerprint)
+            else {
+                downstream.unavailable_preserved += 1;
+                continue;
+            };
 
-            for (id, ciphertext, nonce, format_version, fingerprint) in rows {
-                let (Some(ciphertext), Some(nonce), Some(format_version), Some(fingerprint)) =
-                    (ciphertext, nonce, format_version, fingerprint)
-                else {
-                    downstream.unavailable_preserved += 1;
-                    continue;
-                };
-
-                if fingerprint.eq_ignore_ascii_case(current_fingerprint.as_str()) {
-                    downstream.current += 1;
-                    continue;
-                }
-
-                let Some(previous_key) = previous_key.as_ref().filter(|_| {
-                    previous_fingerprint
-                        .as_ref()
-                        .is_some_and(|previous| fingerprint.eq_ignore_ascii_case(previous.as_str()))
-                }) else {
-                    downstream.unavailable_preserved += 1;
-                    continue;
-                };
-
-                let old_encrypted = match EncryptedSecret::from_parts(
-                    ciphertext.clone(),
-                    nonce.clone(),
-                    format_version,
-                    fingerprint.clone(),
-                ) {
-                    Ok(encrypted) => encrypted,
-                    Err(_) => {
-                        downstream.unavailable_preserved += 1;
-                        continue;
-                    }
-                };
-                let plaintext = match decrypt_with_key(
-                    previous_key,
-                    SecretDomain::DownstreamApiKey(id),
-                    &old_encrypted,
-                ) {
-                    Ok(plaintext) => plaintext,
-                    Err(_) => {
-                        downstream.unavailable_preserved += 1;
-                        continue;
-                    }
-                };
-                let new_encrypted =
-                    encrypt_with_key(&current_key, SecretDomain::DownstreamApiKey(id), &plaintext)
-                        .map_err(|_| {
-                            BaseError::InternalServerError(Some(
-                                "Failed to re-encrypt downstream api key secret".to_string(),
-                            ))
-                        })?;
-
-                let updated = diesel::update(
-                    api_key::table.filter(
-                        api_key::dsl::id
-                            .eq(id)
-                            .and(api_key::dsl::secret_ciphertext.eq(Some(ciphertext)))
-                            .and(api_key::dsl::secret_nonce.eq(Some(nonce)))
-                            .and(api_key::dsl::secret_format_version.eq(Some(format_version)))
-                            .and(api_key::dsl::secret_key_fingerprint.eq(Some(fingerprint))),
-                    ),
-                )
-                .set((
-                    api_key::dsl::secret_ciphertext.eq(Some(new_encrypted.ciphertext().to_vec())),
-                    api_key::dsl::secret_nonce.eq(Some(new_encrypted.nonce().to_vec())),
-                    api_key::dsl::secret_format_version.eq(Some(new_encrypted.format_version())),
-                    api_key::dsl::secret_key_fingerprint
-                        .eq(Some(new_encrypted.key_fingerprint().as_str().to_string())),
-                ))
-                .execute(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to rotate downstream api key secret {id}: {error}"
-                    )))
-                })?;
-                if updated != 1 {
-                    return Err(BaseError::DatabaseFatal(Some(format!(
-                        "Downstream api key secret {id} changed during startup rotation"
-                    ))));
-                }
-                downstream.rotated += 1;
+            if fingerprint.eq_ignore_ascii_case(current_fingerprint.as_str()) {
+                downstream.current += 1;
+                continue;
             }
 
-            let manager_totp_row = manager_credential::table
-                .filter(manager_credential::dsl::manager_id.eq(MANAGER_ID))
-                .select((
-                    manager_credential::dsl::credential_epoch,
-                    manager_credential::dsl::totp_secret_ciphertext,
-                    manager_credential::dsl::totp_secret_nonce,
-                    manager_credential::dsl::totp_secret_format_version,
-                    manager_credential::dsl::totp_secret_key_fingerprint,
-                    manager_credential::dsl::totp_last_accepted_step,
-                    manager_credential::dsl::totp_enabled_at,
-                ))
-                .first::<StoredManagerTotpTuple>(conn)
-                .optional()
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to scan manager TOTP secret: {error}"
-                    )))
-                })?;
-            let mut manager_totp = inspect_manager_totp(
-                manager_totp_row,
-                &current_key,
-                &current_fingerprint,
-                previous_key.as_ref(),
-                previous_fingerprint.as_ref(),
-            );
-            if let Some(rotation) = manager_totp.rotation.take() {
-                let updated = diesel::update(
-                    manager_credential::table.filter(
-                        manager_credential::dsl::manager_id
-                            .eq(MANAGER_ID)
-                            .and(
-                                manager_credential::dsl::credential_epoch
-                                    .eq(&rotation.expected_epoch),
-                            )
-                            .and(
-                                manager_credential::dsl::totp_secret_ciphertext
-                                    .eq(Some(&rotation.expected_ciphertext)),
-                            )
-                            .and(
-                                manager_credential::dsl::totp_secret_nonce
-                                    .eq(Some(&rotation.expected_nonce)),
-                            )
-                            .and(
-                                manager_credential::dsl::totp_secret_format_version
-                                    .eq(Some(rotation.expected_format_version)),
-                            )
-                            .and(
-                                manager_credential::dsl::totp_secret_key_fingerprint
-                                    .eq(Some(&rotation.expected_fingerprint)),
-                            )
-                            .and(
-                                manager_credential::dsl::totp_last_accepted_step
-                                    .eq(Some(rotation.expected_last_accepted_step)),
-                            )
-                            .and(
-                                manager_credential::dsl::totp_enabled_at
-                                    .eq(Some(rotation.expected_enabled_at)),
-                            ),
-                    ),
-                )
-                .set((
-                    manager_credential::dsl::totp_secret_ciphertext
-                        .eq(Some(rotation.replacement.ciphertext().to_vec())),
-                    manager_credential::dsl::totp_secret_nonce
-                        .eq(Some(rotation.replacement.nonce().to_vec())),
-                    manager_credential::dsl::totp_secret_format_version
-                        .eq(Some(rotation.replacement.format_version())),
-                    manager_credential::dsl::totp_secret_key_fingerprint.eq(Some(
-                        rotation.replacement.key_fingerprint().as_str().to_string(),
-                    )),
-                ))
-                .execute(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to rotate manager TOTP secret: {error}"
-                    )))
-                })?;
-                if updated != 1 {
-                    manager_totp.summary.state = ManagerTotpPreparationState::UnavailablePreserved;
-                    manager_totp.summary.failure =
-                        Some(ManagerTotpPreparationFailure::ConcurrentChange);
+            let Some(previous_key) = previous_key.as_ref().filter(|_| {
+                previous_fingerprint
+                    .as_ref()
+                    .is_some_and(|previous| fingerprint.eq_ignore_ascii_case(previous.as_str()))
+            }) else {
+                downstream.unavailable_preserved += 1;
+                continue;
+            };
+
+            let old_encrypted = match EncryptedSecret::from_parts(
+                ciphertext.clone(),
+                nonce.clone(),
+                format_version,
+                fingerprint.clone(),
+            ) {
+                Ok(encrypted) => encrypted,
+                Err(_) => {
+                    downstream.unavailable_preserved += 1;
+                    continue;
                 }
+            };
+            let plaintext = match decrypt_with_key(
+                previous_key,
+                SecretDomain::DownstreamApiKey(id),
+                &old_encrypted,
+            ) {
+                Ok(plaintext) => plaintext,
+                Err(_) => {
+                    downstream.unavailable_preserved += 1;
+                    continue;
+                }
+            };
+            let new_encrypted =
+                encrypt_with_key(&current_key, SecretDomain::DownstreamApiKey(id), &plaintext)
+                    .map_err(|_| {
+                        BaseError::InternalServerError(Some(
+                            "Failed to re-encrypt downstream api key secret".to_string(),
+                        ))
+                    })?;
+
+            let updated = transaction.rotate_downstream_secret(DownstreamSecretRotation {
+                id,
+                expected_ciphertext: ciphertext,
+                expected_nonce: nonce,
+                expected_format_version: format_version,
+                expected_fingerprint: fingerprint,
+                replacement_ciphertext: new_encrypted.ciphertext().to_vec(),
+                replacement_nonce: new_encrypted.nonce().to_vec(),
+                replacement_format_version: new_encrypted.format_version(),
+                replacement_fingerprint: new_encrypted.key_fingerprint().as_str().to_string(),
+            })?;
+            if updated != 1 {
+                return Err(BaseError::DatabaseFatal(Some(format!(
+                    "Downstream api key secret {id} changed during startup rotation"
+                ))));
             }
+            downstream.rotated += 1;
+        }
 
-            let provider_rows = provider_api_key::table
-                .filter(provider_api_key::dsl::deleted_at.is_null())
-                .order(provider_api_key::dsl::id.asc())
-                .select((
-                    provider_api_key::dsl::id,
-                    provider_api_key::dsl::provider_id,
-                    provider_api_key::dsl::secret_ciphertext,
-                    provider_api_key::dsl::secret_nonce,
-                    provider_api_key::dsl::secret_format_version,
-                    provider_api_key::dsl::secret_key_fingerprint,
-                    provider_api_key::dsl::secret_hmac,
-                ))
-                .load::<StoredProviderSecretTuple>(conn)
-                .map_err(|_| {
-                    BaseError::DatabaseFatal(Some(
-                        "Failed to scan provider API key secrets".to_string(),
-                    ))
-                })?;
-            let mut provider = SecretRotationSummary::default();
+        let manager_totp_row = transaction.load_manager_totp_secret()?;
+        let mut manager_totp = inspect_manager_totp(
+            manager_totp_row,
+            &current_key,
+            &current_fingerprint,
+            previous_key.as_ref(),
+            previous_fingerprint.as_ref(),
+        );
+        if let Some(rotation) = manager_totp.rotation.take() {
+            let updated = transaction.rotate_manager_totp_secret(ManagerTotpSecretRotation {
+                expected_epoch: rotation.expected_epoch,
+                expected_ciphertext: rotation.expected_ciphertext,
+                expected_nonce: rotation.expected_nonce,
+                expected_format_version: rotation.expected_format_version,
+                expected_fingerprint: rotation.expected_fingerprint,
+                expected_last_accepted_step: rotation.expected_last_accepted_step,
+                expected_enabled_at: rotation.expected_enabled_at,
+                replacement_ciphertext: rotation.replacement.ciphertext().to_vec(),
+                replacement_nonce: rotation.replacement.nonce().to_vec(),
+                replacement_format_version: rotation.replacement.format_version(),
+                replacement_fingerprint: rotation
+                    .replacement
+                    .key_fingerprint()
+                    .as_str()
+                    .to_string(),
+            })?;
+            if updated != 1 {
+                manager_totp.summary.state = ManagerTotpPreparationState::UnavailablePreserved;
+                manager_totp.summary.failure =
+                    Some(ManagerTotpPreparationFailure::ConcurrentChange);
+            }
+        }
 
-            for (id, provider_id, ciphertext, nonce, format_version, fingerprint, stored_hmac) in
-                provider_rows
+        let provider_rows = transaction.load_provider_secrets()?;
+        let mut provider = SecretRotationSummary::default();
+
+        for (id, provider_id, ciphertext, nonce, format_version, fingerprint, stored_hmac) in
+            provider_rows
+        {
+            let (
+                Some(ciphertext),
+                Some(nonce),
+                Some(format_version),
+                Some(fingerprint),
+                Some(stored_hmac),
+            ) = (ciphertext, nonce, format_version, fingerprint, stored_hmac)
+            else {
+                return Err(provider_secret_startup_error(
+                    id,
+                    provider_id,
+                    "incomplete_fields",
+                ));
+            };
+            let encrypted = EncryptedSecret::from_parts(
+                ciphertext.clone(),
+                nonce.clone(),
+                format_version,
+                fingerprint.clone(),
+            )
+            .map_err(|_| provider_secret_startup_error(id, provider_id, "invalid_format"))?;
+
+            let (plaintext, source_key, rotate) = if fingerprint
+                .eq_ignore_ascii_case(current_fingerprint.as_str())
             {
-                let (
-                    Some(ciphertext),
-                    Some(nonce),
-                    Some(format_version),
-                    Some(fingerprint),
-                    Some(stored_hmac),
-                ) = (ciphertext, nonce, format_version, fingerprint, stored_hmac)
-                else {
-                    return Err(provider_secret_startup_error(
-                        id,
-                        provider_id,
-                        "incomplete_fields",
-                    ));
-                };
-                let encrypted = EncryptedSecret::from_parts(
-                    ciphertext.clone(),
-                    nonce.clone(),
-                    format_version,
-                    fingerprint.clone(),
-                )
-                .map_err(|_| provider_secret_startup_error(id, provider_id, "invalid_format"))?;
-
-                let (plaintext, source_key, rotate) =
-                    if fingerprint.eq_ignore_ascii_case(current_fingerprint.as_str()) {
-                        (
-                            decrypt_with_key(
-                                &current_key,
-                                SecretDomain::ProviderApiKey(id),
-                                &encrypted,
-                            )
-                            .map_err(|_| {
-                                provider_secret_startup_error(id, provider_id, "decrypt_failed")
-                            })?,
-                            &current_key,
-                            false,
-                        )
-                    } else if let Some(previous_key) = previous_key.as_ref().filter(|_| {
-                        previous_fingerprint.as_ref().is_some_and(|previous| {
-                            fingerprint.eq_ignore_ascii_case(previous.as_str())
-                        })
-                    }) {
-                        (
-                            decrypt_with_key(
-                                previous_key,
-                                SecretDomain::ProviderApiKey(id),
-                                &encrypted,
-                            )
-                            .map_err(|_| {
-                                provider_secret_startup_error(id, provider_id, "decrypt_failed")
-                            })?,
-                            previous_key,
-                            true,
-                        )
-                    } else {
-                        return Err(provider_secret_startup_error(
-                            id,
-                            provider_id,
-                            "unknown_key",
-                        ));
-                    };
-
-                let expected_hmac =
-                    provider_secret_fingerprint_with_key(source_key, provider_id, &plaintext);
-                if stored_hmac != expected_hmac.as_str() {
-                    return Err(provider_secret_startup_error(
-                        id,
-                        provider_id,
-                        "hmac_mismatch",
-                    ));
-                }
-
-                if !rotate {
-                    provider.current += 1;
-                    continue;
-                }
-
-                let new_encrypted =
-                    encrypt_with_key(&current_key, SecretDomain::ProviderApiKey(id), &plaintext)
+                (
+                    decrypt_with_key(&current_key, SecretDomain::ProviderApiKey(id), &encrypted)
                         .map_err(|_| {
-                            provider_secret_startup_error(id, provider_id, "encrypt_failed")
-                        })?;
-                let new_hmac =
-                    provider_secret_fingerprint_with_key(&current_key, provider_id, &plaintext);
-                let updated = diesel::update(
-                    provider_api_key::table.filter(
-                        provider_api_key::dsl::id
-                            .eq(id)
-                            .and(provider_api_key::dsl::provider_id.eq(provider_id))
-                            .and(provider_api_key::dsl::deleted_at.is_null())
-                            .and(provider_api_key::dsl::secret_ciphertext.eq(Some(ciphertext)))
-                            .and(provider_api_key::dsl::secret_nonce.eq(Some(nonce)))
-                            .and(
-                                provider_api_key::dsl::secret_format_version
-                                    .eq(Some(format_version)),
-                            )
-                            .and(
-                                provider_api_key::dsl::secret_key_fingerprint.eq(Some(fingerprint)),
-                            )
-                            .and(provider_api_key::dsl::secret_hmac.eq(Some(stored_hmac))),
-                    ),
+                            provider_secret_startup_error(id, provider_id, "decrypt_failed")
+                        })?,
+                    &current_key,
+                    false,
                 )
-                .set((
-                    provider_api_key::dsl::secret_ciphertext
-                        .eq(Some(new_encrypted.ciphertext().to_vec())),
-                    provider_api_key::dsl::secret_nonce.eq(Some(new_encrypted.nonce().to_vec())),
-                    provider_api_key::dsl::secret_format_version
-                        .eq(Some(new_encrypted.format_version())),
-                    provider_api_key::dsl::secret_key_fingerprint
-                        .eq(Some(new_encrypted.key_fingerprint().as_str().to_string())),
-                    provider_api_key::dsl::secret_hmac.eq(Some(new_hmac.as_str().to_string())),
-                ))
-                .execute(conn)
-                .map_err(|_| provider_secret_startup_error(id, provider_id, "write_failed"))?;
-                if updated != 1 {
-                    return Err(provider_secret_startup_error(
-                        id,
-                        provider_id,
-                        "concurrent_change",
-                    ));
-                }
-                provider.rotated += 1;
+            } else if let Some(previous_key) = previous_key.as_ref().filter(|_| {
+                previous_fingerprint
+                    .as_ref()
+                    .is_some_and(|previous| fingerprint.eq_ignore_ascii_case(previous.as_str()))
+            }) {
+                (
+                    decrypt_with_key(previous_key, SecretDomain::ProviderApiKey(id), &encrypted)
+                        .map_err(|_| {
+                            provider_secret_startup_error(id, provider_id, "decrypt_failed")
+                        })?,
+                    previous_key,
+                    true,
+                )
+            } else {
+                return Err(provider_secret_startup_error(
+                    id,
+                    provider_id,
+                    "unknown_key",
+                ));
+            };
+
+            let expected_hmac =
+                provider_secret_fingerprint_with_key(source_key, provider_id, &plaintext);
+            if stored_hmac != expected_hmac.as_str() {
+                return Err(provider_secret_startup_error(
+                    id,
+                    provider_id,
+                    "hmac_mismatch",
+                ));
             }
 
-            Ok(SecretPreparationSummary {
-                downstream,
-                provider,
-                manager_totp: manager_totp.summary,
-            })
+            if !rotate {
+                provider.current += 1;
+                continue;
+            }
+
+            let new_encrypted =
+                encrypt_with_key(&current_key, SecretDomain::ProviderApiKey(id), &plaintext)
+                    .map_err(|_| {
+                        provider_secret_startup_error(id, provider_id, "encrypt_failed")
+                    })?;
+            let new_hmac =
+                provider_secret_fingerprint_with_key(&current_key, provider_id, &plaintext);
+            let updated = transaction
+                .rotate_provider_secret(ProviderSecretRotation {
+                    id,
+                    provider_id,
+                    expected_ciphertext: ciphertext,
+                    expected_nonce: nonce,
+                    expected_format_version: format_version,
+                    expected_fingerprint: fingerprint,
+                    expected_hmac: stored_hmac,
+                    replacement_ciphertext: new_encrypted.ciphertext().to_vec(),
+                    replacement_nonce: new_encrypted.nonce().to_vec(),
+                    replacement_format_version: new_encrypted.format_version(),
+                    replacement_fingerprint: new_encrypted.key_fingerprint().as_str().to_string(),
+                    replacement_hmac: new_hmac.as_str().to_string(),
+                })
+                .map_err(|_| provider_secret_startup_error(id, provider_id, "write_failed"))?;
+            if updated != 1 {
+                return Err(provider_secret_startup_error(
+                    id,
+                    provider_id,
+                    "concurrent_change",
+                ));
+            }
+            provider.rotated += 1;
+        }
+
+        Ok(SecretPreparationSummary {
+            downstream,
+            provider,
+            manager_totp: manager_totp.summary,
         })
     });
     if result.is_ok() {

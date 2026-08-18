@@ -8,6 +8,7 @@ use crate::database::{
         ProviderSummaryItem,
     },
     request_patch::RequestPatchVariantAggregate,
+    runtime::DatabaseRuntime,
     upstream_source::UpstreamSource,
 };
 use crate::proxy::runtime::{
@@ -214,11 +215,15 @@ struct ProviderDetailResponse {
     request_patch_variants: Vec<RequestPatchVariantAggregate>,
 }
 
-fn provider_model_details(provider_id: i64) -> DbResult<Vec<ProviderModelDetailResponse>> {
-    let models = Model::list_by_provider_id(provider_id)?
-        .into_iter()
-        .map(|model| Model::get_detail_by_id(model.id))
-        .collect::<Result<Vec<_>, _>>()?;
+async fn provider_model_details(
+    app_state: &AppState,
+    provider_id: i64,
+) -> DbResult<Vec<ProviderModelDetailResponse>> {
+    let listed = Model::list_by_provider_id(&app_state.database, provider_id).await?;
+    let mut models = Vec::with_capacity(listed.len());
+    for model in listed {
+        models.push(Model::get_detail_by_id(&app_state.database, model.id).await?);
+    }
     let owners = models
         .iter()
         .map(|detail| ModelSourceSnapshotOwner {
@@ -228,7 +233,7 @@ fn provider_model_details(provider_id: i64) -> DbResult<Vec<ProviderModelDetailR
             source_selection_mode: detail.model.source_selection_mode.clone(),
         })
         .collect::<Vec<_>>();
-    let summaries = load_model_source_config_summaries(&owners)?;
+    let summaries = load_model_source_config_summaries(&app_state.database, &owners).await?;
     models
         .into_iter()
         .map(|detail| {
@@ -454,8 +459,10 @@ struct BootstrapProviderResponse {
     check_result: Option<BootstrapCheckResult>,
 }
 
-async fn list() -> DbResult<HttpResult<Vec<ProviderAggregateResponse>>> {
-    let result = Provider::list_all()?;
+async fn list(
+    State(app_state): State<Arc<AppState>>,
+) -> DbResult<HttpResult<Vec<ProviderAggregateResponse>>> {
+    let result = Provider::list_all(&app_state.database).await?;
     Ok(HttpResult::new(
         result
             .into_iter()
@@ -464,8 +471,10 @@ async fn list() -> DbResult<HttpResult<Vec<ProviderAggregateResponse>>> {
     ))
 }
 
-async fn list_summary() -> DbResult<HttpResult<Vec<ProviderSummaryItem>>> {
-    let result = Provider::list_summary()?;
+async fn list_summary(
+    State(app_state): State<Arc<AppState>>,
+) -> DbResult<HttpResult<Vec<ProviderSummaryItem>>> {
+    let result = Provider::list_summary(&app_state.database).await?;
     Ok(HttpResult::new(result))
 }
 
@@ -537,9 +546,10 @@ async fn insert(
 }
 
 async fn get_provider(
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ProviderAggregateResponse>, BaseError> {
-    let provider = Provider::get_by_id(id)?;
+    let provider = Provider::get_by_id(&app_state.database, id).await?;
 
     Ok(HttpResult::new(provider.into()))
 }
@@ -640,16 +650,17 @@ async fn preview_source_impact(
         app_state
             .admin
             .provider
-            .preview_source_impact(provider_id, source_id, payload.action)?,
+            .preview_source_impact(provider_id, source_id, payload.action)
+            .await?,
     ))
 }
 
 async fn get_provider_detail(
-    State(_app_state): State<Arc<AppState>>,
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ProviderDetailResponse>, BaseError> {
-    let detail = Provider::get_detail_by_id(id)?;
-    let models = provider_model_details(id)?;
+    let detail = Provider::get_detail_by_id(&app_state.database, id).await?;
+    let models = provider_model_details(&app_state, id).await?;
 
     Ok(HttpResult::new(ProviderDetailResponse {
         provider: detail.provider.into(),
@@ -681,13 +692,14 @@ enum ProviderCheckModel {
 }
 
 impl ProviderCheckModel {
-    fn resolve(
+    async fn resolve(
+        database: &DatabaseRuntime,
         payload: CheckProviderPayload,
         provider_id: i64,
     ) -> Result<(Self, CheckProviderCredentialInput), BaseError> {
         let selected = match (payload.model_id, payload.draft_model) {
             (Some(model_id), None) => {
-                let model = Model::get_by_id(model_id)?;
+                let model = Model::get_by_id(database, model_id).await?;
                 if model.provider_id != provider_id {
                     return Err(BaseError::ParamInvalid(Some(format!(
                         "Model {} does not belong to provider {}",
@@ -772,8 +784,12 @@ struct SourceEvidence {
     provider_api_key_id: Option<i64>,
 }
 
-fn validate_saved_model_source_for_check(model: &Model, source_id: i64) -> Result<(), BaseError> {
-    let source_config = get_model_source_config(model.id)?;
+async fn validate_saved_model_source_for_check(
+    database: &DatabaseRuntime,
+    model: &Model,
+    source_id: i64,
+) -> Result<(), BaseError> {
+    let source_config = get_model_source_config(database, model.id).await?;
     match source_config.source_selection_mode.as_str() {
         "INHERIT_ALL" => Ok(()),
         "EXPLICIT" => {
@@ -820,11 +836,16 @@ async fn resolve_provider_check_request_patches(
     source: &crate::service::cache::types::CacheUpstreamSource,
 ) -> Result<Vec<RuntimeResolvedRequestPatch>, BaseError> {
     let cache_provider = CacheProvider::from(provider.clone());
-    let cache_model = model
-        .cloned()
-        .map(CacheModel::from_db)
-        .transpose()
-        .map_err(|error| BaseError::DatabaseFatal(Some(error)))?;
+    let cache_model = if let Some(model) = model.cloned() {
+        let bindings = crate::database::model_source_binding::list_visible_by_model_id(
+            &app_state.database,
+            model.id,
+        )
+        .await?;
+        Some(CacheModel::from_db_with_bindings(model, bindings))
+    } else {
+        None
+    };
     let variants = app_state
         .catalog
         .get_request_patch_variants()
@@ -1292,15 +1313,16 @@ async fn check_provider(
     Path((id, source_id)): Path<(i64, i64)>,
     Json(payload): Json<CheckProviderPayload>,
 ) -> Result<HttpResult<SourceEvidence>, BaseError> {
-    let (selected_model, credential_input) = ProviderCheckModel::resolve(payload, id)?;
+    let (selected_model, credential_input) =
+        ProviderCheckModel::resolve(&app_state.database, payload, id).await?;
     let model_name = selected_model.upstream_model_name();
 
-    let provider = Provider::get_by_id(id)?;
-    let source = normalize_source_for_outbound(UpstreamSource::get_active_by_id_for_provider(
-        source_id, id,
-    )?)?;
+    let provider = Provider::get_by_id(&app_state.database, id).await?;
+    let source = normalize_source_for_outbound(
+        UpstreamSource::get_active_by_id_for_provider(&app_state.database, source_id, id).await?,
+    )?;
     if let Some(model) = selected_model.saved_model() {
-        validate_saved_model_source_for_check(model, source.id)?;
+        validate_saved_model_source_for_check(&app_state.database, model, source.id).await?;
     }
     let cache_source = crate::service::cache::types::CacheUpstreamSource::from(source.clone());
     validate_source_for_chat_check(&cache_source)?;
@@ -1506,14 +1528,14 @@ async fn bootstrap_provider(
 // Removed full_commit function as Provider::full_commit is no longer available.
 
 async fn list_provider_details(
-    State(_app_state): State<Arc<AppState>>,
+    State(app_state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, HttpResult<Vec<ProviderDetailResponse>>), BaseError> {
-    let providers = Provider::list_all()?;
+    let providers = Provider::list_all(&app_state.database).await?;
     let mut provider_details: Vec<ProviderDetailResponse> = Vec::new();
 
     for provider in providers {
-        let detail = Provider::get_detail_by_id(provider.id)?;
-        let models = provider_model_details(provider.id)?;
+        let detail = Provider::get_detail_by_id(&app_state.database, provider.id).await?;
+        let models = provider_model_details(&app_state, provider.id).await?;
 
         provider_details.push(ProviderDetailResponse {
             provider: detail.provider.into(),
@@ -1560,7 +1582,8 @@ async fn list_provider_api_keys(
     let keys = app_state
         .admin
         .provider
-        .list_provider_api_keys(provider_id)?;
+        .list_provider_api_keys(provider_id)
+        .await?;
 
     Ok(HttpResult::new(keys))
 }
@@ -1572,7 +1595,8 @@ async fn get_provider_api_key(
     let key = app_state
         .admin
         .provider
-        .get_provider_api_key(provider_id, key_id)?;
+        .get_provider_api_key(provider_id, key_id)
+        .await?;
 
     Ok(HttpResult::new(key))
 }
@@ -1724,7 +1748,7 @@ mod tests {
 
     use super::create_provider_router;
     use crate::controller::BaseError;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::model::Model;
     use crate::database::model_source_binding::{ModelSourceBindingInput, ModelSourceConfig};
     use crate::database::provider::ProviderSummaryItem;
@@ -2292,9 +2316,9 @@ mod tests {
     #[tokio::test]
     async fn gemini_source_check_saved_and_draft_share_patch_contract_without_proxy_logs() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-gemini-source-check-native-http.sqlite");
-        test_db_context
-            .run_async(async {
+            TestDatabase::new_sqlite_default("controller-gemini-source-check-native-http.sqlite")
+                .await;
+        (async {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let address = listener.local_addr().unwrap();
                 let (requests_tx, requests_rx) = oneshot::channel();
@@ -2318,7 +2342,7 @@ mod tests {
 
                 let provider_id = 26190;
                 let source_id = 26191;
-                let provider = Provider::create(
+                let provider = Provider::create(&test_db_context,
                     &crate::database::provider::NewProvider {
                         id: provider_id,
                         provider_key: "gemini-check-provider".to_string(),
@@ -2342,16 +2366,16 @@ mod tests {
                             UpstreamProfileType::Gemini,
                         )
                     },
-                )
+                ).await
                 .expect("Gemini provider should seed")
                 .provider;
-                let saved_model = Model::create(
+                let saved_model = Model::create(&test_db_context,
                     provider.id,
                     "saved-gemini-check-model",
                     Some("saved-gemini-upstream-model"),
                     ModelKind::Chat,
                     true,
-                )
+                ).await
                 .expect("saved Gemini model should seed");
                 let patch_input = |model_id, placement, target: &str, value: Value| {
                     RequestPatchVariantInput {
@@ -2369,19 +2393,19 @@ mod tests {
                         }],
                     }
                 };
-                RequestPatchVariantRepository::create(&patch_input(
+                RequestPatchVariantRepository::create(&test_db_context, &patch_input(
                     None,
                     RequestPatchPlacement::Query,
                     "trace",
                     json!("source-check"),
-                ))
+                )).await
                 .expect("source Patch should seed");
-                RequestPatchVariantRepository::create(&patch_input(
+                RequestPatchVariantRepository::create(&test_db_context, &patch_input(
                     Some(saved_model.id),
                     RequestPatchPlacement::Header,
                     "x-model-check-patch",
                     json!("saved-model"),
-                ))
+                )).await
                 .expect("model Patch should seed");
                 let app_state = create_test_app_state(test_db_context.clone()).await;
 
@@ -2454,12 +2478,12 @@ mod tests {
                     .await
                     .expect("Gemini Source Check upstream should finish")
                     .expect("Gemini Source Check task should join");
-                assert!(RequestLog::list_full(RequestLogQueryPayload {
+                assert!(RequestLog::list_full(&test_db_context, RequestLogQueryPayload {
                     provider_id: Some(provider_id),
                     page: Some(1),
                     page_size: Some(10),
                     ..Default::default()
-                })
+                }).await
                 .expect("request logs should query")
                 .list
                 .is_empty());
@@ -2471,57 +2495,65 @@ mod tests {
     async fn gemini_source_check_invalid_model_and_patch_fail_before_saved_key_decryption() {
         const SENTINEL: &str = "gemini-check-private-marker";
         let test_db_context =
-            TestDbContext::new_sqlite("controller-gemini-check-zero-decrypt-http.sqlite");
-        test_db_context
-            .run_async(async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let provider_id = 26192;
-                let source_id = 26193;
-                let provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: provider_id,
-                        provider_key: "gemini-check-zero-decrypt".to_string(),
-                        name: "Gemini Check Zero Decrypt".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: source_id,
-                        provider_id,
-                        profile_type: UpstreamProfileType::Gemini,
-                        base_url: format!("http://{address}/v1beta/models"),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Gemini,
-                        )
-                    },
-                )
-                .expect("Gemini provider should seed")
-                .provider;
-                let invalid_model = Model::create(
-                    provider.id,
-                    "invalid-gemini-model",
-                    Some(&format!("models/{SENTINEL}")),
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("invalid legacy model should seed");
-                let patched_model = Model::create(
-                    provider.id,
-                    "patched-gemini-model",
-                    Some("valid-gemini-model"),
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("patched model should seed");
-                RequestPatchVariantRepository::create(&RequestPatchVariantInput {
+            TestDatabase::new_sqlite_default("controller-gemini-check-zero-decrypt-http.sqlite")
+                .await;
+        (async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let provider_id = 26192;
+            let source_id = 26193;
+            let provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: provider_id,
+                    provider_key: "gemini-check-zero-decrypt".to_string(),
+                    name: "Gemini Check Zero Decrypt".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Gemini,
+                    base_url: format!("http://{address}/v1beta/models"),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Gemini,
+                    )
+                },
+            )
+            .await
+            .expect("Gemini provider should seed")
+            .provider;
+            let invalid_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "invalid-gemini-model",
+                Some(&format!("models/{SENTINEL}")),
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("invalid legacy model should seed");
+            let patched_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "patched-gemini-model",
+                Some("valid-gemini-model"),
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("patched model should seed");
+            RequestPatchVariantRepository::create(
+                &test_db_context,
+                &RequestPatchVariantInput {
                     source_id,
                     model_id: Some(patched_model.id),
                     suffix: None,
@@ -2534,59 +2566,65 @@ mod tests {
                         value_json: Some(Some(json!(SENTINEL))),
                         description: None,
                     }],
-                })
-                .expect("invalid final-shape Patch should seed");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let created = send(
+                },
+            )
+            .await
+            .expect("invalid final-shape Patch should seed");
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let created = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/provider_keys"),
+                    json!({"api_key":"gemini-check-saved-private-key"}),
+                ),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let key_id = response_json(created).await["data"]["id"]
+                .as_i64()
+                .expect("saved key id");
+
+            for model_id in [invalid_model.id, patched_model.id] {
+                app_state.secret_encryption.reset_decrypt_call_count();
+                let response = send(
                     &app_state,
                     json_request(
                         Method::POST,
-                        &format!("/provider/{provider_id}/provider_keys"),
-                        json!({"api_key":"gemini-check-saved-private-key"}),
+                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                        json!({"model_id":model_id,"provider_api_key_id":key_id}),
                     ),
                 )
                 .await;
-                assert_eq!(created.status(), StatusCode::OK);
-                let key_id = response_json(created).await["data"]["id"]
-                    .as_i64()
-                    .expect("saved key id");
-
-                for model_id in [invalid_model.id, patched_model.id] {
-                    app_state.secret_encryption.reset_decrypt_call_count();
-                    let response = send(
-                        &app_state,
-                        json_request(
-                            Method::POST,
-                            &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                            json!({"model_id":model_id,"provider_api_key_id":key_id}),
-                        ),
-                    )
-                    .await;
-                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-                    let body = response_json(response).await.to_string();
-                    assert!(!body.contains(SENTINEL));
-                    assert!(!body.contains("private-key"));
-                    assert_eq!(app_state.secret_encryption.decrypt_call_count(), 0);
-                }
-                assert!(
-                    timeout(Duration::from_millis(100), listener.accept())
-                        .await
-                        .is_err(),
-                    "invalid model and Patch must make zero upstream calls"
-                );
-                assert!(
-                    RequestLog::list_full(RequestLogQueryPayload {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body = response_json(response).await.to_string();
+                assert!(!body.contains(SENTINEL));
+                assert!(!body.contains("private-key"));
+                assert_eq!(app_state.secret_encryption.decrypt_call_count(), 0);
+            }
+            assert!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "invalid model and Patch must make zero upstream calls"
+            );
+            assert!(
+                RequestLog::list_full(
+                    &test_db_context,
+                    RequestLogQueryPayload {
                         provider_id: Some(provider_id),
                         page: Some(1),
                         page_size: Some(10),
                         ..Default::default()
-                    })
-                    .expect("request logs should query")
-                    .list
-                    .is_empty()
-                );
-            })
-            .await;
+                    }
+                )
+                .await
+                .expect("request logs should query")
+                .list
+                .is_empty()
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -2746,405 +2784,431 @@ mod tests {
     #[tokio::test]
     async fn provider_check_source_evidence_distinguishes_saved_and_draft_keys() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-check-key-evidence-http.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let upstream = tokio::spawn(async move {
-                    for _ in 0..3 {
-                        let (mut socket, _) = listener.accept().await.unwrap();
-                        let mut request = vec![0u8; 8192];
-                        let _ = socket.read(&mut request).await.unwrap();
-                        socket
-                            .write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                            )
-                            .await
-                            .unwrap();
-                    }
-                });
-
-                let provider_id = 26006;
-                let source_id = 26007;
-                let provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: provider_id,
-                        provider_key: "check-key-evidence-provider".to_string(),
-                        name: "Check Key Evidence Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: source_id,
-                        provider_id,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: format!("http://{address}/v1"),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Openai,
-                        )
-                    },
-                )
-                .expect("provider seed should succeed")
-                .provider;
-                let saved_model = Model::create(
-                    provider.id,
-                    "saved-check-model",
-                    Some("saved-check-upstream-model"),
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("saved check model should seed");
-                let model_count_before_draft = Model::list_by_provider_id(provider.id)
-                    .expect("provider models should list")
-                    .len();
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let created = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/provider_keys"),
-                        json!({
-                            "api_key": "saved-check-secret",
-                            "description": "saved check key"
-                        }),
-                    ),
-                )
+            TestDatabase::new_sqlite_default("controller-provider-check-key-evidence-http.sqlite")
                 .await;
-                assert_eq!(created.status(), StatusCode::OK);
-                let created_body = response_json(created).await;
-                let key_id = created_body["data"]["id"]
-                    .as_i64()
-                    .expect("created key should expose an id");
-                assert!(key_id > 0);
-                assert!(!created_body.to_string().contains("saved-check-secret"));
 
-                let saved = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "model_id": saved_model.id,
-                            "provider_api_key_id": key_id
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(saved.status(), StatusCode::OK);
-                let saved_body = response_json(saved).await;
-                assert_eq!(saved_body["data"]["source_id"], source_id);
-                assert_eq!(saved_body["data"]["provider_api_key_id"], key_id);
-                assert!(!saved_body.to_string().contains("saved-check-secret"));
-
-                let disabled = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/provider/{provider_id}/provider_keys/{key_id}"),
-                        json!({ "is_enabled": false }),
-                    ),
-                )
-                .await;
-                assert_eq!(disabled.status(), StatusCode::OK);
-
-                let disabled_saved = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "model_id": saved_model.id,
-                            "provider_api_key_id": key_id
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(disabled_saved.status(), StatusCode::OK);
-                let disabled_saved_body = response_json(disabled_saved).await;
-                assert_eq!(
-                    disabled_saved_body["data"]["provider_api_key_id"],
-                    key_id
-                );
-                assert!(!disabled_saved_body.to_string().contains("saved-check-secret"));
-                let detail = Provider::get_detail_by_id(provider.id)
-                    .expect("provider detail should remain readable");
-                assert!(!detail
-                    .api_keys
-                    .iter()
-                    .find(|summary| summary.id == key_id)
-                    .expect("checked key should remain listed")
-                    .is_enabled);
-
-                let draft = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "draft_model": {
-                                "model_kind": "CHAT",
-                                "upstream_model_name": "draft-check-model"
-                            },
-                            "provider_api_key": "draft-check-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(draft.status(), StatusCode::OK);
-                let draft_body = response_json(draft).await;
-                assert_eq!(draft_body["data"]["provider_api_key_id"], Value::Null);
-                assert!(!draft_body.to_string().contains("draft-check-secret"));
-                assert_ne!(draft_body["data"]["provider_api_key_id"], 0);
-                assert_eq!(
-                    Model::list_by_provider_id(provider.id)
-                        .expect("draft check must not affect persisted models")
-                        .len(),
-                    model_count_before_draft
-                );
-
-                timeout(Duration::from_secs(2), upstream)
-                    .await
-                    .expect("all key evidence checks should reach upstream")
-                    .expect("upstream fixture should finish");
-                assert!(Provider::get_by_id(provider.id).is_ok());
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn responses_source_check_saved_and_draft_keys_share_native_contract_without_proxy_logs()
-    {
-        let test_db_context =
-            TestDbContext::new_sqlite("controller-responses-source-check-native-http.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let (requests_tx, requests_rx) = oneshot::channel();
-                let upstream = tokio::spawn(async move {
-                    let mut requests = Vec::new();
-                    for _ in 0..2 {
-                        let (mut socket, _) = listener.accept().await.unwrap();
-                        let mut request = vec![0u8; 8192];
-                        let read = socket.read(&mut request).await.unwrap();
-                        requests.push(String::from_utf8_lossy(&request[..read]).to_string());
-                        socket
-                            .write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                            )
-                            .await
-                            .unwrap();
-                    }
-                    let _ = requests_tx.send(requests);
-                });
-
-                let provider_id = 26040;
-                let source_id = 26041;
-                let provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: provider_id,
-                        provider_key: "responses-check-provider".to_string(),
-                        name: "Responses Check Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: source_id,
-                        provider_id,
-                        profile_type: UpstreamProfileType::Responses,
-                        base_url: format!("http://{address}/proxy/v1/"),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Responses,
-                        )
-                    },
-                )
-                .expect("Responses provider seed should succeed")
-                .provider;
-                let saved_model = Model::create(
-                    provider.id,
-                    "saved-responses-model",
-                    Some("saved-responses-real-model"),
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("saved Responses model should seed");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let created = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/provider_keys"),
-                        json!({
-                            "api_key": "saved-responses-secret",
-                            "description": "saved Responses check key"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(created.status(), StatusCode::OK);
-                let key_id = response_json(created).await["data"]["id"]
-                    .as_i64()
-                    .expect("saved key id");
-
-                let saved = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "model_id": saved_model.id,
-                            "provider_api_key_id": key_id
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(saved.status(), StatusCode::OK);
-                let saved_evidence = response_json(saved).await;
-                assert_eq!(saved_evidence["data"]["profile_type"], "RESPONSES");
-                assert_eq!(saved_evidence["data"]["provider_api_key_id"], key_id);
-
-                let draft = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "draft_model": {
-                                "model_kind": "CHAT",
-                                "upstream_model_name": "draft-responses-model"
-                            },
-                            "provider_api_key": "draft-responses-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(draft.status(), StatusCode::OK);
-                let draft_evidence = response_json(draft).await;
-                assert_eq!(draft_evidence["data"]["profile_type"], "RESPONSES");
-                assert_eq!(draft_evidence["data"]["provider_api_key_id"], Value::Null);
-
-                let requests = timeout(Duration::from_secs(2), requests_rx)
-                    .await
-                    .expect("both Responses checks should reach upstream")
-                    .expect("request evidence should be returned");
-                assert_eq!(requests.len(), 2);
-                for (request, expected_model, expected_secret) in [
-                    (
-                        &requests[0],
-                        "saved-responses-real-model",
-                        "saved-responses-secret",
-                    ),
-                    (
-                        &requests[1],
-                        "draft-responses-model",
-                        "draft-responses-secret",
-                    ),
-                ] {
-                    let (head, body) = request
-                        .split_once("\r\n\r\n")
-                        .expect("HTTP request should contain a body");
-                    let head = head.to_ascii_lowercase();
-                    assert!(head.starts_with("post /proxy/v1/responses http/1.1"));
-                    assert!(head.contains(&format!("authorization: bearer {expected_secret}")));
-                    assert!(head.contains("accept-encoding: gzip, identity"));
-                    let body: Value =
-                        serde_json::from_str(body.trim()).expect("check body should be JSON");
-                    assert_eq!(body["model"], expected_model);
-                    assert_eq!(body["input"], "hi");
-                    assert_eq!(body["store"], false);
-                    assert_eq!(body["stream"], false);
-                    assert_eq!(body["max_output_tokens"], 1);
-                    assert!(body.get("messages").is_none());
-                }
-
-                app_state.flush_proxy_logs().await;
-                let logs = RequestLog::list_full(RequestLogQueryPayload {
-                    page: Some(1),
-                    page_size: Some(10),
-                    ..Default::default()
-                });
-                assert!(logs.expect("Request Logs should query").list.is_empty());
-                timeout(Duration::from_secs(2), upstream)
-                    .await
-                    .expect("upstream fixture should finish")
-                    .expect("upstream fixture should join");
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn saved_model_check_enforces_source_scope_before_any_upstream_call() {
-        let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-check-source-scope-http.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let (request_tx, request_rx) = oneshot::channel();
-                tokio::spawn(async move {
+        (async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let upstream = tokio::spawn(async move {
+                for _ in 0..3 {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     let mut request = vec![0u8; 8192];
-                    let read = socket.read(&mut request).await.unwrap();
-                    let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+                    let _ = socket.read(&mut request).await.unwrap();
                     socket
                         .write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         )
                         .await
                         .unwrap();
-                });
+                }
+            });
 
-                let provider_id = 26001;
-                let checked_source_id = 26002;
-                let unbound_source_id = 26003;
-                let provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: provider_id,
-                        provider_key: "check-scope-provider".to_string(),
-                        name: "Check Scope Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: checked_source_id,
-                        provider_id,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: format!("http://{address}/v1"),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Openai,
+            let provider_id = 26006;
+            let source_id = 26007;
+            let provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: provider_id,
+                    provider_key: "check-key-evidence-provider".to_string(),
+                    name: "Check Key Evidence Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: format!("http://{address}/v1"),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Openai,
+                    )
+                },
+            )
+            .await
+            .expect("provider seed should succeed")
+            .provider;
+            let saved_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "saved-check-model",
+                Some("saved-check-upstream-model"),
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("saved check model should seed");
+            let model_count_before_draft =
+                Model::list_by_provider_id(&test_db_context, provider.id)
+                    .await
+                    .expect("provider models should list")
+                    .len();
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+
+            let created = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/provider_keys"),
+                    json!({
+                        "api_key": "saved-check-secret",
+                        "description": "saved check key"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let created_body = response_json(created).await;
+            let key_id = created_body["data"]["id"]
+                .as_i64()
+                .expect("created key should expose an id");
+            assert!(key_id > 0);
+            assert!(!created_body.to_string().contains("saved-check-secret"));
+
+            let saved = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "model_id": saved_model.id,
+                        "provider_api_key_id": key_id
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(saved.status(), StatusCode::OK);
+            let saved_body = response_json(saved).await;
+            assert_eq!(saved_body["data"]["source_id"], source_id);
+            assert_eq!(saved_body["data"]["provider_api_key_id"], key_id);
+            assert!(!saved_body.to_string().contains("saved-check-secret"));
+
+            let disabled = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/provider/{provider_id}/provider_keys/{key_id}"),
+                    json!({ "is_enabled": false }),
+                ),
+            )
+            .await;
+            assert_eq!(disabled.status(), StatusCode::OK);
+
+            let disabled_saved = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "model_id": saved_model.id,
+                        "provider_api_key_id": key_id
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(disabled_saved.status(), StatusCode::OK);
+            let disabled_saved_body = response_json(disabled_saved).await;
+            assert_eq!(disabled_saved_body["data"]["provider_api_key_id"], key_id);
+            assert!(
+                !disabled_saved_body
+                    .to_string()
+                    .contains("saved-check-secret")
+            );
+            let detail = Provider::get_detail_by_id(&test_db_context, provider.id)
+                .await
+                .expect("provider detail should remain readable");
+            assert!(
+                !detail
+                    .api_keys
+                    .iter()
+                    .find(|summary| summary.id == key_id)
+                    .expect("checked key should remain listed")
+                    .is_enabled
+            );
+
+            let draft = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "draft_model": {
+                            "model_kind": "CHAT",
+                            "upstream_model_name": "draft-check-model"
+                        },
+                        "provider_api_key": "draft-check-secret"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(draft.status(), StatusCode::OK);
+            let draft_body = response_json(draft).await;
+            assert_eq!(draft_body["data"]["provider_api_key_id"], Value::Null);
+            assert!(!draft_body.to_string().contains("draft-check-secret"));
+            assert_ne!(draft_body["data"]["provider_api_key_id"], 0);
+            assert_eq!(
+                Model::list_by_provider_id(&test_db_context, provider.id)
+                    .await
+                    .expect("draft check must not affect persisted models")
+                    .len(),
+                model_count_before_draft
+            );
+
+            timeout(Duration::from_secs(2), upstream)
+                .await
+                .expect("all key evidence checks should reach upstream")
+                .expect("upstream fixture should finish");
+            assert!(
+                Provider::get_by_id(&test_db_context, provider.id)
+                    .await
+                    .is_ok()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn responses_source_check_saved_and_draft_keys_share_native_contract_without_proxy_logs()
+    {
+        let test_db_context = TestDatabase::new_sqlite_default(
+            "controller-responses-source-check-native-http.sqlite",
+        )
+        .await;
+
+        (async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (requests_tx, requests_rx) = oneshot::channel();
+            let upstream = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for _ in 0..2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = vec![0u8; 8192];
+                    let read = socket.read(&mut request).await.unwrap();
+                    requests.push(String::from_utf8_lossy(&request[..read]).to_string());
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         )
-                    },
-                )
-                .expect("provider seed should succeed")
-                .provider;
-                UpstreamSource::create(&crate::database::upstream_source::NewUpstreamSource {
+                        .await
+                        .unwrap();
+                }
+                let _ = requests_tx.send(requests);
+            });
+
+            let provider_id = 26040;
+            let source_id = 26041;
+            let provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: provider_id,
+                    provider_key: "responses-check-provider".to_string(),
+                    name: "Responses Check Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Responses,
+                    base_url: format!("http://{address}/proxy/v1/"),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Responses,
+                    )
+                },
+            )
+            .await
+            .expect("Responses provider seed should succeed")
+            .provider;
+            let saved_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "saved-responses-model",
+                Some("saved-responses-real-model"),
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("saved Responses model should seed");
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+
+            let created = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/provider_keys"),
+                    json!({
+                        "api_key": "saved-responses-secret",
+                        "description": "saved Responses check key"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let key_id = response_json(created).await["data"]["id"]
+                .as_i64()
+                .expect("saved key id");
+
+            let saved = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "model_id": saved_model.id,
+                        "provider_api_key_id": key_id
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(saved.status(), StatusCode::OK);
+            let saved_evidence = response_json(saved).await;
+            assert_eq!(saved_evidence["data"]["profile_type"], "RESPONSES");
+            assert_eq!(saved_evidence["data"]["provider_api_key_id"], key_id);
+
+            let draft = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "draft_model": {
+                            "model_kind": "CHAT",
+                            "upstream_model_name": "draft-responses-model"
+                        },
+                        "provider_api_key": "draft-responses-secret"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(draft.status(), StatusCode::OK);
+            let draft_evidence = response_json(draft).await;
+            assert_eq!(draft_evidence["data"]["profile_type"], "RESPONSES");
+            assert_eq!(draft_evidence["data"]["provider_api_key_id"], Value::Null);
+
+            let requests = timeout(Duration::from_secs(2), requests_rx)
+                .await
+                .expect("both Responses checks should reach upstream")
+                .expect("request evidence should be returned");
+            assert_eq!(requests.len(), 2);
+            for (request, expected_model, expected_secret) in [
+                (
+                    &requests[0],
+                    "saved-responses-real-model",
+                    "saved-responses-secret",
+                ),
+                (
+                    &requests[1],
+                    "draft-responses-model",
+                    "draft-responses-secret",
+                ),
+            ] {
+                let (head, body) = request
+                    .split_once("\r\n\r\n")
+                    .expect("HTTP request should contain a body");
+                let head = head.to_ascii_lowercase();
+                assert!(head.starts_with("post /proxy/v1/responses http/1.1"));
+                assert!(head.contains(&format!("authorization: bearer {expected_secret}")));
+                assert!(head.contains("accept-encoding: gzip, identity"));
+                let body: Value =
+                    serde_json::from_str(body.trim()).expect("check body should be JSON");
+                assert_eq!(body["model"], expected_model);
+                assert_eq!(body["input"], "hi");
+                assert_eq!(body["store"], false);
+                assert_eq!(body["stream"], false);
+                assert_eq!(body["max_output_tokens"], 1);
+                assert!(body.get("messages").is_none());
+            }
+
+            app_state.flush_proxy_logs().await;
+            let logs = RequestLog::list_full(
+                &test_db_context,
+                RequestLogQueryPayload {
+                    page: Some(1),
+                    page_size: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(logs.expect("Request Logs should query").list.is_empty());
+            timeout(Duration::from_secs(2), upstream)
+                .await
+                .expect("upstream fixture should finish")
+                .expect("upstream fixture should join");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn saved_model_check_enforces_source_scope_before_any_upstream_call() {
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-provider-check-source-scope-http.sqlite")
+                .await;
+
+        (async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (request_tx, request_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 8192];
+                let read = socket.read(&mut request).await.unwrap();
+                let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+
+            let provider_id = 26001;
+            let checked_source_id = 26002;
+            let unbound_source_id = 26003;
+            let provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: provider_id,
+                    provider_key: "check-scope-provider".to_string(),
+                    name: "Check Scope Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: checked_source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: format!("http://{address}/v1"),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Openai,
+                    )
+                },
+            )
+            .await
+            .expect("provider seed should succeed")
+            .provider;
+            UpstreamSource::create(
+                &test_db_context,
+                &crate::database::upstream_source::NewUpstreamSource {
                     id: unbound_source_id,
                     provider_id,
                     profile_type: UpstreamProfileType::Responses,
@@ -3157,420 +3221,435 @@ mod tests {
                     ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
                         UpstreamProfileType::Responses,
                     )
-                })
-                .expect("unbound source seed should succeed");
+                },
+            )
+            .await
+            .expect("unbound source seed should succeed");
 
-                let source_config = ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
-                    source_id: checked_source_id,
-                    is_default: true,
-                }]);
-                let model = Model::create_with_source_config(
-                    provider.id,
-                    "checkable-model",
-                    Some("checkable-real-model"),
-                    crate::schema::enum_def::ModelKind::Chat,
-                    true,
-                    Some(&source_config),
-                )
-                .expect("model seed should succeed");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+            let source_config = ModelSourceConfig::explicit(vec![ModelSourceBindingInput {
+                source_id: checked_source_id,
+                is_default: true,
+            }]);
+            let model = Model::create_with_source_config(
+                &test_db_context,
+                provider.id,
+                "checkable-model",
+                Some("checkable-real-model"),
+                crate::schema::enum_def::ModelKind::Chat,
+                true,
+                Some(&source_config),
+            )
+            .await
+            .expect("model seed should succeed");
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let valid = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
-                        json!({
-                            "model_id": model.id,
-                            "provider_api_key": "draft-check-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(valid.status(), StatusCode::OK);
-                let valid_body = response_json(valid).await;
-                assert_eq!(valid_body["data"]["source_id"], checked_source_id);
-                assert_eq!(valid_body["data"]["provider_api_key_id"], Value::Null);
-                assert!(!valid_body.to_string().contains("draft-check-secret"));
-                assert!(
-                    request_rx
-                        .await
-                        .expect("valid check should call upstream")
-                        .contains("POST")
-                );
-
-                let unbound = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{unbound_source_id}/check"),
-                        json!({
-                            "model_id": model.id,
-                            "provider_api_key": "draft-check-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(unbound.status(), StatusCode::BAD_REQUEST);
-                let unbound_body = response_json(unbound).await;
-                assert!(unbound_body.to_string().contains("not declared"));
-
-                let other_provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: 26004,
-                        provider_key: "other-check-provider".to_string(),
-                        name: "Other Check Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: 26005,
-                        provider_id: 26004,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: "http://127.0.0.1:9/v1".to_string(),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Openai,
-                        )
-                    },
-                )
-                .expect("other provider seed should succeed")
-                .provider;
-                let other_model = Model::create(
-                    other_provider.id,
-                    "other-model",
-                    None,
-                    crate::schema::enum_def::ModelKind::Chat,
-                    true,
-                )
-                .expect("other model should seed");
-                let wrong_owner = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
-                        json!({
-                            "model_id": other_model.id,
-                            "provider_api_key": "draft-check-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(wrong_owner.status(), StatusCode::BAD_REQUEST);
-
-                UpstreamSource::delete(checked_source_id, provider_id)
-                    .expect("checked source should soft delete");
-                let deleted = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
-                        json!({
-                            "model_id": model.id,
-                            "provider_api_key": "draft-check-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
-            })
+            let valid = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
+                    json!({
+                        "model_id": model.id,
+                        "provider_api_key": "draft-check-secret"
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(valid.status(), StatusCode::OK);
+            let valid_body = response_json(valid).await;
+            assert_eq!(valid_body["data"]["source_id"], checked_source_id);
+            assert_eq!(valid_body["data"]["provider_api_key_id"], Value::Null);
+            assert!(!valid_body.to_string().contains("draft-check-secret"));
+            assert!(
+                request_rx
+                    .await
+                    .expect("valid check should call upstream")
+                    .contains("POST")
+            );
+
+            let unbound = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{unbound_source_id}/check"),
+                    json!({
+                        "model_id": model.id,
+                        "provider_api_key": "draft-check-secret"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(unbound.status(), StatusCode::BAD_REQUEST);
+            let unbound_body = response_json(unbound).await;
+            assert!(unbound_body.to_string().contains("not declared"));
+
+            let other_provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: 26004,
+                    provider_key: "other-check-provider".to_string(),
+                    name: "Other Check Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: 26005,
+                    provider_id: 26004,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: "http://127.0.0.1:9/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Openai,
+                    )
+                },
+            )
+            .await
+            .expect("other provider seed should succeed")
+            .provider;
+            let other_model = Model::create(
+                &test_db_context,
+                other_provider.id,
+                "other-model",
+                None,
+                crate::schema::enum_def::ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("other model should seed");
+            let wrong_owner = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
+                    json!({
+                        "model_id": other_model.id,
+                        "provider_api_key": "draft-check-secret"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(wrong_owner.status(), StatusCode::BAD_REQUEST);
+
+            UpstreamSource::delete(&test_db_context, checked_source_id, provider_id)
+                .await
+                .expect("checked source should soft delete");
+            let deleted = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{checked_source_id}/check"),
+                    json!({
+                        "model_id": model.id,
+                        "provider_api_key": "draft-check-secret"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn source_check_rejects_non_chat_saved_and_draft_models_without_upstream_call() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-check-chat-only-http.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let provider_id = 26020;
-                let source_id = 26021;
-                let provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: provider_id,
-                        provider_key: "chat-only-check-provider".to_string(),
-                        name: "Chat-only Check Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: source_id,
-                        provider_id,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: format!("http://{address}/v1"),
-                        use_proxy: false,
-                        chat_completions_enabled: Some(false),
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Openai,
-                        )
-                    },
-                )
-                .expect("provider seed should succeed")
-                .provider;
-                let embedding_model = Model::create(
-                    provider.id,
-                    "embedding-check-model",
-                    None,
-                    ModelKind::Embedding,
-                    true,
-                )
-                .expect("embedding model should seed");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let saved = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "model_id": embedding_model.id,
-                            "provider_api_key": "must-not-leak-saved-kind"
-                        }),
-                    ),
-                )
+            TestDatabase::new_sqlite_default("controller-provider-check-chat-only-http.sqlite")
                 .await;
-                assert_eq!(saved.status(), StatusCode::BAD_REQUEST);
-                let saved_body = response_json(saved).await;
-                assert!(saved_body.to_string().contains("CHAT"));
-                assert!(!saved_body.to_string().contains("must-not-leak-saved-kind"));
 
-                let draft = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "draft_model": {
-                                "model_kind": "RERANK",
-                                "upstream_model_name": "rerank-check-model"
-                            },
-                            "provider_api_key": "must-not-leak-draft-kind"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(draft.status(), StatusCode::BAD_REQUEST);
-                let draft_body = response_json(draft).await;
-                assert!(draft_body.to_string().contains("CHAT"));
-                assert!(!draft_body.to_string().contains("must-not-leak-draft-kind"));
+        (async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let provider_id = 26020;
+            let source_id = 26021;
+            let provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: provider_id,
+                    provider_key: "chat-only-check-provider".to_string(),
+                    name: "Chat-only Check Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: format!("http://{address}/v1"),
+                    use_proxy: false,
+                    chat_completions_enabled: Some(false),
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Openai,
+                    )
+                },
+            )
+            .await
+            .expect("provider seed should succeed")
+            .provider;
+            let embedding_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "embedding-check-model",
+                None,
+                ModelKind::Embedding,
+                true,
+            )
+            .await
+            .expect("embedding model should seed");
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                for invalid_payload in [
-                    json!({ "provider_api_key": "must-not-leak-empty-model" }),
+            let saved = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
                     json!({
                         "model_id": embedding_model.id,
-                        "draft_model": {
-                            "model_kind": "CHAT",
-                            "upstream_model_name": "ambiguous-model"
-                        },
-                        "provider_api_key": "must-not-leak-ambiguous-model"
+                        "provider_api_key": "must-not-leak-saved-kind"
                     }),
-                ] {
-                    let invalid = send(
-                        &app_state,
-                        json_request(
-                            Method::POST,
-                            &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                            invalid_payload,
-                        ),
-                    )
-                    .await;
-                    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-                    let invalid_body = response_json(invalid).await;
-                    assert!(invalid_body.to_string().contains("Exactly one"));
-                    assert!(!invalid_body.to_string().contains("must-not-leak"));
-                }
+                ),
+            )
+            .await;
+            assert_eq!(saved.status(), StatusCode::BAD_REQUEST);
+            let saved_body = response_json(saved).await;
+            assert!(saved_body.to_string().contains("CHAT"));
+            assert!(!saved_body.to_string().contains("must-not-leak-saved-kind"));
 
-                let disabled_operation = send(
+            let draft = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "draft_model": {
+                            "model_kind": "RERANK",
+                            "upstream_model_name": "rerank-check-model"
+                        },
+                        "provider_api_key": "must-not-leak-draft-kind"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(draft.status(), StatusCode::BAD_REQUEST);
+            let draft_body = response_json(draft).await;
+            assert!(draft_body.to_string().contains("CHAT"));
+            assert!(!draft_body.to_string().contains("must-not-leak-draft-kind"));
+
+            for invalid_payload in [
+                json!({ "provider_api_key": "must-not-leak-empty-model" }),
+                json!({
+                    "model_id": embedding_model.id,
+                    "draft_model": {
+                        "model_kind": "CHAT",
+                        "upstream_model_name": "ambiguous-model"
+                    },
+                    "provider_api_key": "must-not-leak-ambiguous-model"
+                }),
+            ] {
+                let invalid = send(
                     &app_state,
                     json_request(
                         Method::POST,
                         &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "draft_model": {
-                                "model_kind": "CHAT",
-                                "upstream_model_name": "chat-model"
-                            },
-                            "provider_api_key": "must-not-leak-disabled-operation"
-                        }),
+                        invalid_payload,
                     ),
                 )
                 .await;
-                assert_eq!(disabled_operation.status(), StatusCode::BAD_REQUEST);
-                let disabled_operation_body = response_json(disabled_operation).await;
-                assert!(
-                    disabled_operation_body
-                        .to_string()
-                        .contains("operation is disabled")
-                );
-                assert!(
-                    !disabled_operation_body
-                        .to_string()
-                        .contains("must-not-leak-disabled-operation")
-                );
+                assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+                let invalid_body = response_json(invalid).await;
+                assert!(invalid_body.to_string().contains("Exactly one"));
+                assert!(!invalid_body.to_string().contains("must-not-leak"));
+            }
 
-                assert!(
-                    timeout(Duration::from_millis(100), listener.accept())
-                        .await
-                        .is_err(),
-                    "non-CHAT Source Checks must not contact the upstream"
-                );
-            })
+            let disabled_operation = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "draft_model": {
+                            "model_kind": "CHAT",
+                            "upstream_model_name": "chat-model"
+                        },
+                        "provider_api_key": "must-not-leak-disabled-operation"
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(disabled_operation.status(), StatusCode::BAD_REQUEST);
+            let disabled_operation_body = response_json(disabled_operation).await;
+            assert!(
+                disabled_operation_body
+                    .to_string()
+                    .contains("operation is disabled")
+            );
+            assert!(
+                !disabled_operation_body
+                    .to_string()
+                    .contains("must-not-leak-disabled-operation")
+            );
+
+            assert!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "non-CHAT Source Checks must not contact the upstream"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn saved_check_applies_model_patch_while_draft_check_uses_source_patch_only() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-check-patch-scope-http.sqlite");
+            TestDatabase::new_sqlite_default("controller-provider-check-patch-scope-http.sqlite")
+                .await;
 
-        test_db_context
-            .run_async(async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let (requests_tx, requests_rx) = oneshot::channel();
-                tokio::spawn(async move {
-                    let mut requests = Vec::new();
-                    for _ in 0..2 {
-                        let (mut socket, _) = listener.accept().await.unwrap();
-                        let mut request = vec![0u8; 8192];
-                        let read = socket.read(&mut request).await.unwrap();
-                        requests.push(String::from_utf8_lossy(&request[..read]).to_string());
-                        socket
-                            .write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                            )
-                            .await
-                            .unwrap();
-                    }
-                    let _ = requests_tx.send(requests);
-                });
-
-                let provider_id = 26030;
-                let source_id = 26031;
-                let provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: provider_id,
-                        provider_key: "check-patch-scope-provider".to_string(),
-                        name: "Check Patch Scope Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: source_id,
-                        provider_id,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: format!("http://{address}/v1"),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Openai,
+        (async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (requests_tx, requests_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for _ in 0..2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = vec![0u8; 8192];
+                    let read = socket.read(&mut request).await.unwrap();
+                    requests.push(String::from_utf8_lossy(&request[..read]).to_string());
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         )
-                    },
-                )
-                .expect("provider seed should succeed")
-                .provider;
-                let saved_model = Model::create(
-                    provider.id,
-                    "saved-patch-check-model",
-                    None,
-                    ModelKind::Chat,
-                    true,
-                )
-                .expect("saved model should seed");
+                        .await
+                        .unwrap();
+                }
+                let _ = requests_tx.send(requests);
+            });
 
-                let patch_input = |model_id, target: &str, value: &str| {
-                    RequestPatchVariantInput {
-                        source_id,
-                        model_id,
-                        suffix: None,
-                        enabled: true,
-                        expose_in_models: false,
-                        rules: vec![RequestPatchRuleInput {
-                            placement: RequestPatchPlacement::Header,
-                            target: target.to_string(),
-                            operation: RequestPatchOperation::Set,
-                            value_json: Some(Some(json!(value))),
-                            description: None,
-                        }],
-                    }
-                };
-                RequestPatchVariantRepository::create(&patch_input(
-                    None,
-                    "x-source-check-patch",
-                    "source",
-                ))
-                .expect("source patch should seed");
-                RequestPatchVariantRepository::create(&patch_input(
-                    Some(saved_model.id),
-                    "x-model-check-patch",
-                    "model",
-                ))
-                .expect("model patch should seed");
+            let provider_id = 26030;
+            let source_id = 26031;
+            let provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: provider_id,
+                    provider_key: "check-patch-scope-provider".to_string(),
+                    name: "Check Patch Scope Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: format!("http://{address}/v1"),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Openai,
+                    )
+                },
+            )
+            .await
+            .expect("provider seed should succeed")
+            .provider;
+            let saved_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "saved-patch-check-model",
+                None,
+                ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("saved model should seed");
 
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let saved = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "model_id": saved_model.id,
-                            "provider_api_key": "saved-patch-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(saved.status(), StatusCode::OK);
+            let patch_input = |model_id, target: &str, value: &str| RequestPatchVariantInput {
+                source_id,
+                model_id,
+                suffix: None,
+                enabled: true,
+                expose_in_models: false,
+                rules: vec![RequestPatchRuleInput {
+                    placement: RequestPatchPlacement::Header,
+                    target: target.to_string(),
+                    operation: RequestPatchOperation::Set,
+                    value_json: Some(Some(json!(value))),
+                    description: None,
+                }],
+            };
+            RequestPatchVariantRepository::create(
+                &test_db_context,
+                &patch_input(None, "x-source-check-patch", "source"),
+            )
+            .await
+            .expect("source patch should seed");
+            RequestPatchVariantRepository::create(
+                &test_db_context,
+                &patch_input(Some(saved_model.id), "x-model-check-patch", "model"),
+            )
+            .await
+            .expect("model patch should seed");
 
-                let draft = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources/{source_id}/check"),
-                        json!({
-                            "draft_model": {
-                                "model_kind": "CHAT",
-                                "upstream_model_name": "draft-patch-check-model"
-                            },
-                            "provider_api_key": "draft-patch-secret"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(draft.status(), StatusCode::OK);
-
-                let requests = timeout(Duration::from_secs(2), requests_rx)
-                    .await
-                    .expect("both checks should reach upstream")
-                    .expect("request evidence should be returned");
-                let saved_request = requests[0].to_ascii_lowercase();
-                let draft_request = requests[1].to_ascii_lowercase();
-                assert!(saved_request.contains("x-source-check-patch: source"));
-                assert!(saved_request.contains("x-model-check-patch: model"));
-                assert!(draft_request.contains("x-source-check-patch: source"));
-                assert!(!draft_request.contains("x-model-check-patch"));
-            })
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let saved = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "model_id": saved_model.id,
+                        "provider_api_key": "saved-patch-secret"
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(saved.status(), StatusCode::OK);
+
+            let draft = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources/{source_id}/check"),
+                    json!({
+                        "draft_model": {
+                            "model_kind": "CHAT",
+                            "upstream_model_name": "draft-patch-check-model"
+                        },
+                        "provider_api_key": "draft-patch-secret"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(draft.status(), StatusCode::OK);
+
+            let requests = timeout(Duration::from_secs(2), requests_rx)
+                .await
+                .expect("both checks should reach upstream")
+                .expect("request evidence should be returned");
+            let saved_request = requests[0].to_ascii_lowercase();
+            let draft_request = requests[1].to_ascii_lowercase();
+            assert!(saved_request.contains("x-source-check-patch: source"));
+            assert!(saved_request.contains("x-model-check-patch: model"));
+            assert!(draft_request.contains("x-source-check-patch: source"));
+            assert!(!draft_request.contains("x-model-check-patch"));
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -3712,112 +3791,110 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_save_and_test_checks_chat_and_skips_non_chat_after_persisting() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-bootstrap-chat-only-http.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let upstream = tokio::spawn(async move {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let mut request = vec![0u8; 8192];
-                    let read = socket.read(&mut request).await.unwrap();
-                    let request = String::from_utf8_lossy(&request[..read]).to_string();
-                    socket
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        )
-                        .await
-                        .unwrap();
-                    request
-                });
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let chat_secret = "bootstrap-chat-secret-must-not-return";
-                let chat = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider/bootstrap",
-                        json!({
-                            "initial_source": {
-                                "profile_type": "OPENAI",
-                                "base_url": format!("http://{address}/v1"),
-                                "use_proxy": false,
-                                "is_enabled": true,
-                                "is_default": true
-                            },
-                            "api_key": chat_secret,
-                            "model_name": "bootstrap-chat-model",
-                            "model_kind": "CHAT",
-                            "key": "bootstrap-chat-provider",
-                            "save_and_test": true
-                        }),
-                    ),
-                )
+            TestDatabase::new_sqlite_default("controller-provider-bootstrap-chat-only-http.sqlite")
                 .await;
-                assert_eq!(chat.status(), StatusCode::OK);
-                let chat_body = response_json(chat).await;
-                assert_eq!(chat_body["data"]["check_result"]["status"], "success");
-                assert!(!chat_body.to_string().contains(chat_secret));
-                assert_eq!(chat_body["data"]["created_model"]["model_kind"], "CHAT");
 
-                let upstream_request = timeout(Duration::from_secs(2), upstream)
+        (async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let upstream = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 8192];
+                let read = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]).to_string();
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     .await
-                    .expect("CHAT bootstrap should reach upstream")
-                    .expect("upstream fixture should finish");
-                assert!(upstream_request.contains("bootstrap-chat-model"));
+                    .unwrap();
+                request
+            });
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let embedding_secret = "bootstrap-embedding-secret-must-not-return";
-                let embedding = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider/bootstrap",
-                        json!({
-                            "initial_source": {
-                                "profile_type": "OPENAI",
-                                "base_url": format!("http://{address}/v1"),
-                                "use_proxy": false,
-                                "is_enabled": true,
-                                "is_default": true
-                            },
-                            "api_key": embedding_secret,
-                            "model_name": "bootstrap-embedding-model",
-                            "model_kind": "EMBEDDING",
-                            "key": "bootstrap-embedding-provider",
-                            "save_and_test": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(embedding.status(), StatusCode::OK);
-                let embedding_body = response_json(embedding).await;
-                assert_eq!(
-                    embedding_body["data"]["check_result"]["status"],
-                    "check_skipped"
-                );
-                assert_eq!(
-                    embedding_body["data"]["created_model"]["model_kind"],
-                    "EMBEDDING"
-                );
-                assert!(!embedding_body.to_string().contains(embedding_secret));
-                assert_eq!(
-                    Provider::list_all()
-                        .expect("both bootstrap providers should persist")
-                        .len(),
-                    2
-                );
-            })
+            let chat_secret = "bootstrap-chat-secret-must-not-return";
+            let chat = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/provider/bootstrap",
+                    json!({
+                        "initial_source": {
+                            "profile_type": "OPENAI",
+                            "base_url": format!("http://{address}/v1"),
+                            "use_proxy": false,
+                            "is_enabled": true,
+                            "is_default": true
+                        },
+                        "api_key": chat_secret,
+                        "model_name": "bootstrap-chat-model",
+                        "model_kind": "CHAT",
+                        "key": "bootstrap-chat-provider",
+                        "save_and_test": true
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(chat.status(), StatusCode::OK);
+            let chat_body = response_json(chat).await;
+            assert_eq!(chat_body["data"]["check_result"]["status"], "success");
+            assert!(!chat_body.to_string().contains(chat_secret));
+            assert_eq!(chat_body["data"]["created_model"]["model_kind"], "CHAT");
+
+            let upstream_request = timeout(Duration::from_secs(2), upstream)
+                .await
+                .expect("CHAT bootstrap should reach upstream")
+                .expect("upstream fixture should finish");
+            assert!(upstream_request.contains("bootstrap-chat-model"));
+
+            let embedding_secret = "bootstrap-embedding-secret-must-not-return";
+            let embedding = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/provider/bootstrap",
+                    json!({
+                        "initial_source": {
+                            "profile_type": "OPENAI",
+                            "base_url": format!("http://{address}/v1"),
+                            "use_proxy": false,
+                            "is_enabled": true,
+                            "is_default": true
+                        },
+                        "api_key": embedding_secret,
+                        "model_name": "bootstrap-embedding-model",
+                        "model_kind": "EMBEDDING",
+                        "key": "bootstrap-embedding-provider",
+                        "save_and_test": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(embedding.status(), StatusCode::OK);
+            let embedding_body = response_json(embedding).await;
+            assert_eq!(
+                embedding_body["data"]["check_result"]["status"],
+                "check_skipped"
+            );
+            assert_eq!(
+                embedding_body["data"]["created_model"]["model_kind"],
+                "EMBEDDING"
+            );
+            assert!(!embedding_body.to_string().contains(embedding_secret));
+            assert_eq!(
+                Provider::list_all(&test_db_context,)
+                    .await
+                    .expect("both bootstrap providers should persist")
+                    .len(),
+                2
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn gemini_bootstrap_save_and_test_uses_validated_native_probe_without_proxy_logs() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-gemini-bootstrap-check-http.sqlite");
-        test_db_context
-            .run_async(async {
+            TestDatabase::new_sqlite_default("controller-gemini-bootstrap-check-http.sqlite").await;
+        (async {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let address = listener.local_addr().unwrap();
                 let (request_tx, request_rx) = oneshot::channel();
@@ -3873,12 +3950,12 @@ mod tests {
                     .await
                     .expect("Gemini bootstrap check should finish")
                     .expect("Gemini bootstrap fixture should join");
-                assert!(RequestLog::list_full(RequestLogQueryPayload {
+                assert!(RequestLog::list_full(&test_db_context, RequestLogQueryPayload {
                     provider_id: body["data"]["provider"]["id"].as_i64(),
                     page: Some(1),
                     page_size: Some(10),
                     ..Default::default()
-                })
+                }).await
                 .expect("request logs should query")
                 .list
                 .is_empty());
@@ -3933,606 +4010,624 @@ mod tests {
 
     #[tokio::test]
     async fn provider_http_write_paths_update_response_database_and_cache() {
-        let test_db_context = TestDbContext::new_sqlite("controller-provider-write-http.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-provider-write-http.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let tokens = app_state
-                    .admin
-                    .auth
-                    .bootstrap("controller provider disabled TOTP password")
-                    .await
-                    .expect("manager bootstrap should succeed");
-                let auth_context = decode_access_token(&tokens.access_token)
-                    .expect("bootstrap access should decode");
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let tokens = app_state
+                .admin
+                .auth
+                .bootstrap("controller provider disabled TOTP password")
+                .await
+                .expect("manager bootstrap should succeed");
+            let auth_context =
+                decode_access_token(&tokens.access_token).expect("bootstrap access should decode");
 
-                let legacy_flat_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider",
-                        json!({
-                            "name": "Legacy Flat Provider",
-                            "key": "legacy-flat-provider",
-                            "endpoint": "https://api.example.com/v1",
-                            "use_proxy": false,
-                            "provider_type": "OPENAI",
-                            "provider_api_key_mode": "QUEUE"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    legacy_flat_response.status(),
-                    StatusCode::UNPROCESSABLE_ENTITY
-                );
-                assert!(
-                    Provider::list_all()
-                        .expect("providers should list")
-                        .is_empty()
-                );
-
-                let create_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider",
-                        json!({
-                            "name": "HTTP Provider",
-                            "key": "http-provider",
-                            "initial_source": {
-                                "base_url": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
-                                "use_proxy": false,
-                                "profile_type": "OPENAI"
-                            },
-                            "provider_api_key_mode": "QUEUE"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(create_response.status(), StatusCode::OK);
-                let create_body = response_json(create_response).await;
-                assert_eq!(create_body["code"], 0);
-                assert_eq!(create_body["data"]["provider_key"], "http-provider");
-                assert_eq!(
-                    create_body["data"]["upstream_sources"][0]["base_url"],
-                    "https://api.example.com/v1"
-                );
-                assert!(create_body["data"].get("endpoint").is_none());
-                assert!(create_body["data"].get("profile_type").is_none());
-
-                let provider_id = create_body["data"]["id"]
-                    .as_i64()
-                    .expect("provider id should be returned");
-                let provider = Provider::get_by_id(provider_id).expect("provider should persist");
-                assert_eq!(provider.name, "HTTP Provider");
-                assert_eq!(
-                    provider.upstream_sources[0].base_url,
-                    "https://api.example.com/v1"
-                );
-
-                let provider_cached = app_state
-                    .catalog
-                    .get_provider_by_id(provider_id)
-                    .await
-                    .expect("provider cache should load")
-                    .expect("provider should exist in cache");
-                assert_eq!(provider_cached.provider_key, "http-provider");
-                assert_eq!(
-                    provider_cached.upstream_sources[0].base_url,
-                    "https://api.example.com/v1"
-                );
-
-                let key_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/provider_keys"),
-                        json!({
-                            "api_key": "sk-http-provider",
-                            "description": "primary"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(key_response.status(), StatusCode::OK);
-                let key_body = response_json(key_response).await;
-                assert_eq!(key_body["code"], 0);
-                assert_eq!(key_body["data"]["provider_id"], provider_id);
-                assert_eq!(key_body["data"]["description"], "primary");
-                assert!(key_body["data"].get("api_key").is_none());
-                assert!(key_body["data"].get("secret_ciphertext").is_none());
-
-                let key_id = key_body["data"]["id"]
-                    .as_i64()
-                    .expect("provider key id should be returned");
-                let provider_keys_cached = app_state
-                    .catalog
-                    .get_provider_api_keys(provider_id)
-                    .await
-                    .expect("provider key cache should load");
-                assert_eq!(provider_keys_cached.len(), 1);
-                assert_eq!(provider_keys_cached[0].id, key_id);
-                cache_vertex_token_for_test(key_id, "stale-oauth-token");
-                assert!(vertex_token_is_cached_for_test(key_id));
-
-                let update_key_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/provider_keys/{key_id}/replace"),
-                        json!({
-                            "api_key": "sk-http-provider-updated"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(update_key_response.status(), StatusCode::OK);
-                let update_key_body = response_json(update_key_response).await;
-                assert_eq!(update_key_body["data"]["description"], "primary");
-                assert_eq!(update_key_body["data"]["is_enabled"], true);
-                assert!(update_key_body["data"].get("api_key").is_none());
-                assert!(!vertex_token_is_cached_for_test(key_id));
-                let provider_keys_after_replace = app_state
-                    .catalog
-                    .get_provider_api_keys(provider_id)
-                    .await
-                    .expect("provider key cache should refresh after replace");
-                assert_ne!(
-                    provider_keys_after_replace[0].secret_ciphertext,
-                    provider_keys_cached[0].secret_ciphertext
-                );
-                let replaced_plaintext = app_state
-                    .secret_encryption
-                    .decrypt_current(
-                        SecretDomain::ProviderApiKey(key_id),
-                        &provider_keys_after_replace[0]
-                            .encrypted_secret()
-                            .expect("refreshed encrypted secret should be valid"),
-                    )
-                    .expect("refreshed secret should decrypt");
-                assert_eq!(replaced_plaintext.expose(), "sk-http-provider-updated");
-
-                let mut reveal_request = empty_request(
+            let legacy_flat_response = send(
+                &app_state,
+                json_request(
                     Method::POST,
-                    &format!("/provider/{provider_id}/provider_keys/{key_id}/reveal"),
-                );
-                reveal_request.extensions_mut().insert(auth_context);
-                reveal_request.extensions_mut().insert(ClientIdentity {
-                    client_ip: "127.0.0.1".parse().expect("test IP should parse"),
-                    peer_addr: SocketAddr::from(([127, 0, 0, 1], 31_201)),
-                    source: ClientIdentitySource::TcpPeer,
-                    trusted_proxy_hops: 0,
-                });
-                let reveal_response = send(&app_state, reveal_request).await;
-                assert_eq!(reveal_response.status(), StatusCode::OK);
-                let reveal_body = response_json(reveal_response).await;
-                assert_eq!(reveal_body["data"]["api_key"], "sk-http-provider-updated");
-
-                let get_reveal_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/provider/{provider_id}/provider_keys/{key_id}/reveal"),
-                    ),
-                )
-                .await;
-                assert_eq!(get_reveal_response.status(), StatusCode::METHOD_NOT_ALLOWED);
-
-                let update_key_response = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/provider/{provider_id}/provider_keys/{key_id}"),
-                        json!({
-                            "description": "rotated",
-                            "is_enabled": false
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(update_key_response.status(), StatusCode::OK);
-                let update_key_body = response_json(update_key_response).await;
-                assert_eq!(update_key_body["data"]["description"], "rotated");
-                assert_eq!(update_key_body["data"]["is_enabled"], false);
-
-                let updated_key = ProviderApiKeyRepository::get_summary_by_id(provider_id, key_id)
-                    .expect("updated key should persist");
-                assert!(!updated_key.is_enabled);
-
-                let provider_keys_after_update = app_state
-                    .catalog
-                    .get_provider_api_keys(provider_id)
-                    .await
-                    .expect("provider key cache should reload");
-                assert!(provider_keys_after_update.is_empty());
-
-                let legacy_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/provider/{provider_id}/provider_key/{key_id}"),
-                    ),
-                )
-                .await;
-                assert_eq!(legacy_response.status(), StatusCode::NOT_FOUND);
-
-                let delete_key_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::DELETE,
-                        &format!("/provider/{provider_id}/provider_keys/{key_id}"),
-                    ),
-                )
-                .await;
-                assert_eq!(delete_key_response.status(), StatusCode::OK);
-                assert!(ProviderApiKeyRepository::get_summary_by_id(provider_id, key_id).is_err());
-
-                let delete_response = send(
-                    &app_state,
-                    empty_request(Method::DELETE, &format!("/provider/{provider_id}")),
-                )
-                .await;
-                assert_eq!(delete_response.status(), StatusCode::OK);
-                let delete_body = response_json(delete_response).await;
-                assert_eq!(delete_body["code"], 0);
-                assert!(delete_body["data"].is_null());
-
-                assert!(Provider::get_by_id(provider_id).is_err());
-                assert!(ProviderApiKeyRepository::get_summary_by_id(provider_id, key_id).is_err());
-                let provider_after_delete = app_state
-                    .catalog
-                    .get_provider_by_id(provider_id)
-                    .await
-                    .expect("provider cache should reload");
-                let provider_keys_after_delete = app_state
-                    .catalog
-                    .get_provider_api_keys(provider_id)
-                    .await
-                    .expect("provider key cache should reload after provider delete");
-                assert!(provider_after_delete.is_none());
-                assert!(provider_keys_after_delete.is_empty());
-            })
+                    "/provider",
+                    json!({
+                        "name": "Legacy Flat Provider",
+                        "key": "legacy-flat-provider",
+                        "endpoint": "https://api.example.com/v1",
+                        "use_proxy": false,
+                        "provider_type": "OPENAI",
+                        "provider_api_key_mode": "QUEUE"
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(
+                legacy_flat_response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            assert!(
+                Provider::list_all(&test_db_context,)
+                    .await
+                    .expect("providers should list")
+                    .is_empty()
+            );
+
+            let create_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/provider",
+                    json!({
+                        "name": "HTTP Provider",
+                        "key": "http-provider",
+                        "initial_source": {
+                            "base_url": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
+                            "use_proxy": false,
+                            "profile_type": "OPENAI"
+                        },
+                        "provider_api_key_mode": "QUEUE"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(create_response.status(), StatusCode::OK);
+            let create_body = response_json(create_response).await;
+            assert_eq!(create_body["code"], 0);
+            assert_eq!(create_body["data"]["provider_key"], "http-provider");
+            assert_eq!(
+                create_body["data"]["upstream_sources"][0]["base_url"],
+                "https://api.example.com/v1"
+            );
+            assert!(create_body["data"].get("endpoint").is_none());
+            assert!(create_body["data"].get("profile_type").is_none());
+
+            let provider_id = create_body["data"]["id"]
+                .as_i64()
+                .expect("provider id should be returned");
+            let provider = Provider::get_by_id(&test_db_context, provider_id)
+                .await
+                .expect("provider should persist");
+            assert_eq!(provider.name, "HTTP Provider");
+            assert_eq!(
+                provider.upstream_sources[0].base_url,
+                "https://api.example.com/v1"
+            );
+
+            let provider_cached = app_state
+                .catalog
+                .get_provider_by_id(provider_id)
+                .await
+                .expect("provider cache should load")
+                .expect("provider should exist in cache");
+            assert_eq!(provider_cached.provider_key, "http-provider");
+            assert_eq!(
+                provider_cached.upstream_sources[0].base_url,
+                "https://api.example.com/v1"
+            );
+
+            let key_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/provider_keys"),
+                    json!({
+                        "api_key": "sk-http-provider",
+                        "description": "primary"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(key_response.status(), StatusCode::OK);
+            let key_body = response_json(key_response).await;
+            assert_eq!(key_body["code"], 0);
+            assert_eq!(key_body["data"]["provider_id"], provider_id);
+            assert_eq!(key_body["data"]["description"], "primary");
+            assert!(key_body["data"].get("api_key").is_none());
+            assert!(key_body["data"].get("secret_ciphertext").is_none());
+
+            let key_id = key_body["data"]["id"]
+                .as_i64()
+                .expect("provider key id should be returned");
+            let provider_keys_cached = app_state
+                .catalog
+                .get_provider_api_keys(provider_id)
+                .await
+                .expect("provider key cache should load");
+            assert_eq!(provider_keys_cached.len(), 1);
+            assert_eq!(provider_keys_cached[0].id, key_id);
+            cache_vertex_token_for_test(key_id, "stale-oauth-token");
+            assert!(vertex_token_is_cached_for_test(key_id));
+
+            let update_key_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/provider_keys/{key_id}/replace"),
+                    json!({
+                        "api_key": "sk-http-provider-updated"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(update_key_response.status(), StatusCode::OK);
+            let update_key_body = response_json(update_key_response).await;
+            assert_eq!(update_key_body["data"]["description"], "primary");
+            assert_eq!(update_key_body["data"]["is_enabled"], true);
+            assert!(update_key_body["data"].get("api_key").is_none());
+            assert!(!vertex_token_is_cached_for_test(key_id));
+            let provider_keys_after_replace = app_state
+                .catalog
+                .get_provider_api_keys(provider_id)
+                .await
+                .expect("provider key cache should refresh after replace");
+            assert_ne!(
+                provider_keys_after_replace[0].secret_ciphertext,
+                provider_keys_cached[0].secret_ciphertext
+            );
+            let replaced_plaintext = app_state
+                .secret_encryption
+                .decrypt_current(
+                    SecretDomain::ProviderApiKey(key_id),
+                    &provider_keys_after_replace[0]
+                        .encrypted_secret()
+                        .expect("refreshed encrypted secret should be valid"),
+                )
+                .expect("refreshed secret should decrypt");
+            assert_eq!(replaced_plaintext.expose(), "sk-http-provider-updated");
+
+            let mut reveal_request = empty_request(
+                Method::POST,
+                &format!("/provider/{provider_id}/provider_keys/{key_id}/reveal"),
+            );
+            reveal_request.extensions_mut().insert(auth_context);
+            reveal_request.extensions_mut().insert(ClientIdentity {
+                client_ip: "127.0.0.1".parse().expect("test IP should parse"),
+                peer_addr: SocketAddr::from(([127, 0, 0, 1], 31_201)),
+                source: ClientIdentitySource::TcpPeer,
+                trusted_proxy_hops: 0,
+            });
+            let reveal_response = send(&app_state, reveal_request).await;
+            assert_eq!(reveal_response.status(), StatusCode::OK);
+            let reveal_body = response_json(reveal_response).await;
+            assert_eq!(reveal_body["data"]["api_key"], "sk-http-provider-updated");
+
+            let get_reveal_response = send(
+                &app_state,
+                empty_request(
+                    Method::GET,
+                    &format!("/provider/{provider_id}/provider_keys/{key_id}/reveal"),
+                ),
+            )
+            .await;
+            assert_eq!(get_reveal_response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+            let update_key_response = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/provider/{provider_id}/provider_keys/{key_id}"),
+                    json!({
+                        "description": "rotated",
+                        "is_enabled": false
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(update_key_response.status(), StatusCode::OK);
+            let update_key_body = response_json(update_key_response).await;
+            assert_eq!(update_key_body["data"]["description"], "rotated");
+            assert_eq!(update_key_body["data"]["is_enabled"], false);
+
+            let updated_key =
+                ProviderApiKeyRepository::get_summary_by_id(&test_db_context, provider_id, key_id)
+                    .await
+                    .expect("updated key should persist");
+            assert!(!updated_key.is_enabled);
+
+            let provider_keys_after_update = app_state
+                .catalog
+                .get_provider_api_keys(provider_id)
+                .await
+                .expect("provider key cache should reload");
+            assert!(provider_keys_after_update.is_empty());
+
+            let legacy_response = send(
+                &app_state,
+                empty_request(
+                    Method::GET,
+                    &format!("/provider/{provider_id}/provider_key/{key_id}"),
+                ),
+            )
+            .await;
+            assert_eq!(legacy_response.status(), StatusCode::NOT_FOUND);
+
+            let delete_key_response = send(
+                &app_state,
+                empty_request(
+                    Method::DELETE,
+                    &format!("/provider/{provider_id}/provider_keys/{key_id}"),
+                ),
+            )
+            .await;
+            assert_eq!(delete_key_response.status(), StatusCode::OK);
+            assert!(
+                ProviderApiKeyRepository::get_summary_by_id(&test_db_context, provider_id, key_id)
+                    .await
+                    .is_err()
+            );
+
+            let delete_response = send(
+                &app_state,
+                empty_request(Method::DELETE, &format!("/provider/{provider_id}")),
+            )
+            .await;
+            assert_eq!(delete_response.status(), StatusCode::OK);
+            let delete_body = response_json(delete_response).await;
+            assert_eq!(delete_body["code"], 0);
+            assert!(delete_body["data"].is_null());
+
+            assert!(
+                Provider::get_by_id(&test_db_context, provider_id)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                ProviderApiKeyRepository::get_summary_by_id(&test_db_context, provider_id, key_id)
+                    .await
+                    .is_err()
+            );
+            let provider_after_delete = app_state
+                .catalog
+                .get_provider_by_id(provider_id)
+                .await
+                .expect("provider cache should reload");
+            let provider_keys_after_delete = app_state
+                .catalog
+                .get_provider_api_keys(provider_id)
+                .await
+                .expect("provider key cache should reload after provider delete");
+            assert!(provider_after_delete.is_none());
+            assert!(provider_keys_after_delete.is_empty());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn provider_http_write_rejects_query_endpoint_before_persistence() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-invalid-endpoint-http.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider",
-                        json!({
-                            "name": "Invalid Provider",
-                            "key": "invalid-provider",
-                            "initial_source": {
-                                "base_url": "https://api.example.com/v1?tenant=one",
-                                "use_proxy": false,
-                                "profile_type": "OPENAI"
-                            },
-                            "provider_api_key_mode": "QUEUE"
-                        }),
-                    ),
-                )
+            TestDatabase::new_sqlite_default("controller-provider-invalid-endpoint-http.sqlite")
                 .await;
 
-                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-                let body = response_json(response).await;
-                assert_eq!(body["code"], 1001);
-                assert_eq!(
-                    body["msg"],
-                    "upstream source base URL must not contain a query string"
-                );
-                assert!(
-                    Provider::list_all()
-                        .expect("providers should list")
-                        .is_empty()
-                );
-            })
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/provider",
+                    json!({
+                        "name": "Invalid Provider",
+                        "key": "invalid-provider",
+                        "initial_source": {
+                            "base_url": "https://api.example.com/v1?tenant=one",
+                            "use_proxy": false,
+                            "profile_type": "OPENAI"
+                        },
+                        "provider_api_key_mode": "QUEUE"
+                    }),
+                ),
+            )
             .await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response_json(response).await;
+            assert_eq!(body["code"], 1001);
+            assert_eq!(
+                body["msg"],
+                "upstream source base URL must not contain a query string"
+            );
+            assert!(
+                Provider::list_all(&test_db_context,)
+                    .await
+                    .expect("providers should list")
+                    .is_empty()
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn provider_http_source_routes_are_explicit_and_ownership_scoped() {
-        let test_db_context = TestDbContext::new_sqlite("controller-provider-source-http.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-provider-source-http.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let create_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider",
-                        json!({
-                            "name": "Source HTTP Provider",
-                            "key": "source-http-provider",
-                            "provider_api_key_mode": "QUEUE"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(create_response.status(), StatusCode::OK);
-                let create_body = response_json(create_response).await;
-                assert_eq!(create_body["data"]["upstream_sources"], json!([]));
-                let provider_id = create_body["data"]["id"]
-                    .as_i64()
-                    .expect("provider id should be returned");
-
-                let source_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/sources"),
-                        json!({
-                            "profile_type": "OPENAI",
-                            "use_proxy": false,
-                            "is_enabled": true,
-                            "is_default": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(source_response.status(), StatusCode::OK);
-                let source_body = response_json(source_response).await;
-                assert_eq!(source_body["data"]["profile_type"], "OPENAI");
-                assert_eq!(source_body["data"]["base_url"], "https://api.openai.com/v1");
-                assert_eq!(source_body["data"]["base_url_is_default"], true);
-                assert_eq!(source_body["data"]["chat_completions_enabled"], true);
-                assert_eq!(source_body["data"]["embeddings_enabled"], true);
-                assert!(source_body["data"].get("rerank_enabled").is_none());
-                let source_id = source_body["data"]["id"]
-                    .as_i64()
-                    .expect("source id should be returned");
-
-                let immutable_profile_response = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/provider/{provider_id}/sources/{source_id}"),
-                        json!({"profile_type": "OPENAI_COMPATIBLE"}),
-                    ),
-                )
-                .await;
-                assert_eq!(immutable_profile_response.status(), StatusCode::BAD_REQUEST);
-                let immutable_profile_body = response_json(immutable_profile_response).await;
-                assert_eq!(immutable_profile_body["code"], 1001);
-                assert_eq!(
-                    immutable_profile_body["msg"],
-                    "upstream source profile_type is immutable after creation"
-                );
-
-                let default_only_response = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/provider/{provider_id}/sources/{source_id}"),
-                        json!({
-                            "base_url": "https://api.example.com/v1",
-                            "use_proxy": false,
-                            "is_enabled": true,
-                            "is_default": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(default_only_response.status(), StatusCode::OK);
-
-                let update_response = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/provider/{provider_id}/sources/{source_id}"),
-                        json!({
-                            "base_url": "https://api.example.com/v1/updated",
-                            "use_proxy": true,
-                            "is_enabled": true,
-                            "is_default": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(update_response.status(), StatusCode::OK);
-                let update_body = response_json(update_response).await;
-                assert_eq!(
-                    update_body["data"]["base_url"],
-                    "https://api.example.com/v1/updated"
-                );
-                assert_eq!(update_body["data"]["is_default"], true);
-
-                let disable_response = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/provider/{provider_id}/sources/{source_id}"),
-                        json!({
-                            "use_proxy": true,
-                            "is_enabled": false,
-                            "is_default": false
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(disable_response.status(), StatusCode::OK);
-
-                let enable_response = send(
-                    &app_state,
-                    json_request(
-                        Method::PUT,
-                        &format!("/provider/{provider_id}/sources/{source_id}"),
-                        json!({
-                            "use_proxy": true,
-                            "is_enabled": true,
-                            "is_default": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(enable_response.status(), StatusCode::OK);
-
-                let second_provider_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider",
-                        json!({
-                            "name": "Second Source HTTP Provider",
-                            "key": "second-source-http-provider"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(second_provider_response.status(), StatusCode::OK);
-                let second_provider_id =
-                    response_json(second_provider_response).await["data"]["id"]
-                        .as_i64()
-                        .expect("second provider id should be returned");
-
-                let missing_compatible_base_url = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{second_provider_id}/sources"),
-                        json!({
-                            "profile_type": "OPENAI_COMPATIBLE",
-                            "rerank_enabled": true,
-                            "is_enabled": true,
-                            "is_default": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    missing_compatible_base_url.status(),
-                    StatusCode::UNPROCESSABLE_ENTITY
-                );
-
-                let compatible_source = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{second_provider_id}/sources"),
-                        json!({
-                            "profile_type": "OPENAI_COMPATIBLE",
-                            "base_url": "https://compat.example.test/api/",
-                            "rerank_enabled": true,
-                            "rerank_path_override": "rerank/v2/",
-                            "is_enabled": true,
-                            "is_default": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(compatible_source.status(), StatusCode::OK);
-                let compatible_body = response_json(compatible_source).await;
-                assert_eq!(
-                    compatible_body["data"]["base_url"],
-                    "https://compat.example.test/api"
-                );
-                assert_eq!(compatible_body["data"]["base_url_is_default"], false);
-                assert_eq!(compatible_body["data"]["rerank_enabled"], true);
-                assert_eq!(compatible_body["data"]["rerank_path_override"], "rerank/v2");
-
-                let native_operation_field = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{second_provider_id}/sources"),
-                        json!({
-                            "profile_type": "RESPONSES",
-                            "base_url": "https://responses.example.test/v1",
-                            "embeddings_enabled": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    native_operation_field.status(),
-                    StatusCode::UNPROCESSABLE_ENTITY
-                );
-
-                let wrong_owner_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::DELETE,
-                        &format!("/provider/{second_provider_id}/sources/{source_id}"),
-                    ),
-                )
-                .await;
-                assert_eq!(wrong_owner_response.status(), StatusCode::NOT_FOUND);
-
-                let old_check_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/check"),
-                        json!({}),
-                    ),
-                )
-                .await;
-                assert_eq!(old_check_response.status(), StatusCode::NOT_FOUND);
-                let old_discovery_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/provider/{provider_id}/remote_models"),
-                    ),
-                )
-                .await;
-                assert_eq!(old_discovery_response.status(), StatusCode::NOT_FOUND);
-                let removed_source_discovery_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/provider/{provider_id}/sources/{source_id}/remote_models"),
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    removed_source_discovery_response.status(),
-                    StatusCode::NOT_FOUND
-                );
-
-                let delete_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::DELETE,
-                        &format!("/provider/{provider_id}/sources/{source_id}"),
-                    ),
-                )
-                .await;
-                assert_eq!(delete_response.status(), StatusCode::OK);
-                assert!(response_json(delete_response).await["data"].is_null());
-                let provider_after_delete = Provider::get_by_id(provider_id)
-                    .expect("provider should remain after deleting its final source");
-                assert!(provider_after_delete.upstream_sources.is_empty());
-
-                let bootstrap_without_source = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/provider/bootstrap",
-                        json!({
-                            "api_key": "bootstrap-secret",
-                            "model_name": "bootstrap-model"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(
-                    bootstrap_without_source.status(),
-                    StatusCode::UNPROCESSABLE_ENTITY
-                );
-            })
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let create_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/provider",
+                    json!({
+                        "name": "Source HTTP Provider",
+                        "key": "source-http-provider",
+                        "provider_api_key_mode": "QUEUE"
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(create_response.status(), StatusCode::OK);
+            let create_body = response_json(create_response).await;
+            assert_eq!(create_body["data"]["upstream_sources"], json!([]));
+            let provider_id = create_body["data"]["id"]
+                .as_i64()
+                .expect("provider id should be returned");
+
+            let source_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/sources"),
+                    json!({
+                        "profile_type": "OPENAI",
+                        "use_proxy": false,
+                        "is_enabled": true,
+                        "is_default": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(source_response.status(), StatusCode::OK);
+            let source_body = response_json(source_response).await;
+            assert_eq!(source_body["data"]["profile_type"], "OPENAI");
+            assert_eq!(source_body["data"]["base_url"], "https://api.openai.com/v1");
+            assert_eq!(source_body["data"]["base_url_is_default"], true);
+            assert_eq!(source_body["data"]["chat_completions_enabled"], true);
+            assert_eq!(source_body["data"]["embeddings_enabled"], true);
+            assert!(source_body["data"].get("rerank_enabled").is_none());
+            let source_id = source_body["data"]["id"]
+                .as_i64()
+                .expect("source id should be returned");
+
+            let immutable_profile_response = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/provider/{provider_id}/sources/{source_id}"),
+                    json!({"profile_type": "OPENAI_COMPATIBLE"}),
+                ),
+            )
+            .await;
+            assert_eq!(immutable_profile_response.status(), StatusCode::BAD_REQUEST);
+            let immutable_profile_body = response_json(immutable_profile_response).await;
+            assert_eq!(immutable_profile_body["code"], 1001);
+            assert_eq!(
+                immutable_profile_body["msg"],
+                "upstream source profile_type is immutable after creation"
+            );
+
+            let default_only_response = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/provider/{provider_id}/sources/{source_id}"),
+                    json!({
+                        "base_url": "https://api.example.com/v1",
+                        "use_proxy": false,
+                        "is_enabled": true,
+                        "is_default": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(default_only_response.status(), StatusCode::OK);
+
+            let update_response = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/provider/{provider_id}/sources/{source_id}"),
+                    json!({
+                        "base_url": "https://api.example.com/v1/updated",
+                        "use_proxy": true,
+                        "is_enabled": true,
+                        "is_default": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(update_response.status(), StatusCode::OK);
+            let update_body = response_json(update_response).await;
+            assert_eq!(
+                update_body["data"]["base_url"],
+                "https://api.example.com/v1/updated"
+            );
+            assert_eq!(update_body["data"]["is_default"], true);
+
+            let disable_response = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/provider/{provider_id}/sources/{source_id}"),
+                    json!({
+                        "use_proxy": true,
+                        "is_enabled": false,
+                        "is_default": false
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(disable_response.status(), StatusCode::OK);
+
+            let enable_response = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("/provider/{provider_id}/sources/{source_id}"),
+                    json!({
+                        "use_proxy": true,
+                        "is_enabled": true,
+                        "is_default": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(enable_response.status(), StatusCode::OK);
+
+            let second_provider_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/provider",
+                    json!({
+                        "name": "Second Source HTTP Provider",
+                        "key": "second-source-http-provider"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(second_provider_response.status(), StatusCode::OK);
+            let second_provider_id = response_json(second_provider_response).await["data"]["id"]
+                .as_i64()
+                .expect("second provider id should be returned");
+
+            let missing_compatible_base_url = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{second_provider_id}/sources"),
+                    json!({
+                        "profile_type": "OPENAI_COMPATIBLE",
+                        "rerank_enabled": true,
+                        "is_enabled": true,
+                        "is_default": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                missing_compatible_base_url.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+
+            let compatible_source = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{second_provider_id}/sources"),
+                    json!({
+                        "profile_type": "OPENAI_COMPATIBLE",
+                        "base_url": "https://compat.example.test/api/",
+                        "rerank_enabled": true,
+                        "rerank_path_override": "rerank/v2/",
+                        "is_enabled": true,
+                        "is_default": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(compatible_source.status(), StatusCode::OK);
+            let compatible_body = response_json(compatible_source).await;
+            assert_eq!(
+                compatible_body["data"]["base_url"],
+                "https://compat.example.test/api"
+            );
+            assert_eq!(compatible_body["data"]["base_url_is_default"], false);
+            assert_eq!(compatible_body["data"]["rerank_enabled"], true);
+            assert_eq!(compatible_body["data"]["rerank_path_override"], "rerank/v2");
+
+            let native_operation_field = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{second_provider_id}/sources"),
+                    json!({
+                        "profile_type": "RESPONSES",
+                        "base_url": "https://responses.example.test/v1",
+                        "embeddings_enabled": true
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                native_operation_field.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+
+            let wrong_owner_response = send(
+                &app_state,
+                empty_request(
+                    Method::DELETE,
+                    &format!("/provider/{second_provider_id}/sources/{source_id}"),
+                ),
+            )
+            .await;
+            assert_eq!(wrong_owner_response.status(), StatusCode::NOT_FOUND);
+
+            let old_check_response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/check"),
+                    json!({}),
+                ),
+            )
+            .await;
+            assert_eq!(old_check_response.status(), StatusCode::NOT_FOUND);
+            let old_discovery_response = send(
+                &app_state,
+                empty_request(
+                    Method::GET,
+                    &format!("/provider/{provider_id}/remote_models"),
+                ),
+            )
+            .await;
+            assert_eq!(old_discovery_response.status(), StatusCode::NOT_FOUND);
+            let removed_source_discovery_response = send(
+                &app_state,
+                empty_request(
+                    Method::GET,
+                    &format!("/provider/{provider_id}/sources/{source_id}/remote_models"),
+                ),
+            )
+            .await;
+            assert_eq!(
+                removed_source_discovery_response.status(),
+                StatusCode::NOT_FOUND
+            );
+
+            let delete_response = send(
+                &app_state,
+                empty_request(
+                    Method::DELETE,
+                    &format!("/provider/{provider_id}/sources/{source_id}"),
+                ),
+            )
+            .await;
+            assert_eq!(delete_response.status(), StatusCode::OK);
+            assert!(response_json(delete_response).await["data"].is_null());
+            let provider_after_delete = Provider::get_by_id(&test_db_context, provider_id)
+                .await
+                .expect("provider should remain after deleting its final source");
+            assert!(provider_after_delete.upstream_sources.is_empty());
+
+            let bootstrap_without_source = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/provider/bootstrap",
+                    json!({
+                        "api_key": "bootstrap-secret",
+                        "model_name": "bootstrap-model"
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                bootstrap_without_source.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        })
+        .await;
     }
 
     fn sample_bootstrap_result() -> super::BootstrapProviderResult {
@@ -4980,41 +5075,44 @@ mod tests {
     #[tokio::test]
     async fn source_impact_http_preview_covers_all_actions_without_side_effects() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-provider-source-impact-http.sqlite");
+            TestDatabase::new_sqlite_default("controller-provider-source-impact-http.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let provider_id = 24301;
-                let default_source_id = 24302;
-                let responses_source_id = 24303;
-                let provider = Provider::create(
-                    &crate::database::provider::NewProvider {
-                        id: provider_id,
-                        provider_key: "source-impact-provider".to_string(),
-                        name: "Source Impact Provider".to_string(),
-                        is_enabled: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        provider_api_key_mode: ProviderApiKeyMode::Queue,
-                    },
-                    &crate::database::upstream_source::NewUpstreamSource {
-                        id: default_source_id,
-                        provider_id,
-                        profile_type: UpstreamProfileType::Openai,
-                        base_url: "https://impact-openai.example.com/v1".to_string(),
-                        use_proxy: false,
-                        is_enabled: true,
-                        is_default: true,
-                        created_at: 1,
-                        updated_at: 1,
-                        ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
-                            UpstreamProfileType::Openai,
-                        )
-                    },
-                )
-                .expect("provider seed should succeed")
-                .provider;
-                UpstreamSource::create(&crate::database::upstream_source::NewUpstreamSource {
+        (async {
+            let provider_id = 24301;
+            let default_source_id = 24302;
+            let responses_source_id = 24303;
+            let provider = Provider::create(
+                &test_db_context,
+                &crate::database::provider::NewProvider {
+                    id: provider_id,
+                    provider_key: "source-impact-provider".to_string(),
+                    name: "Source Impact Provider".to_string(),
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                },
+                &crate::database::upstream_source::NewUpstreamSource {
+                    id: default_source_id,
+                    provider_id,
+                    profile_type: UpstreamProfileType::Openai,
+                    base_url: "https://impact-openai.example.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
+                        UpstreamProfileType::Openai,
+                    )
+                },
+            )
+            .await
+            .expect("provider seed should succeed")
+            .provider;
+            UpstreamSource::create(
+                &test_db_context,
+                &crate::database::upstream_source::NewUpstreamSource {
                     id: responses_source_id,
                     provider_id,
                     profile_type: UpstreamProfileType::Responses,
@@ -5027,170 +5125,207 @@ mod tests {
                     ..crate::database::upstream_source::NewUpstreamSource::test_defaults(
                         UpstreamProfileType::Responses,
                     )
-                })
-                .expect("secondary source seed should succeed");
+                },
+            )
+            .await
+            .expect("secondary source seed should succeed");
 
-                let inherit_model = Model::create(
-                    provider.id,
-                    "impact-inherit",
-                    None,
-                    crate::schema::enum_def::ModelKind::Chat,
-                    true,
-                )
-                .expect("inherit model should seed");
-                let disabled_inherit_model = Model::create(
-                    provider.id,
-                    "impact-disabled-inherit",
-                    None,
-                    crate::schema::enum_def::ModelKind::Chat,
-                    false,
-                )
-                .expect("disabled inherit model should seed");
-                let explicit_default_model = Model::create_with_source_config(
-                    provider.id,
-                    "impact-explicit-default",
-                    None,
-                    crate::schema::enum_def::ModelKind::Chat,
-                    true,
-                    Some(&ModelSourceConfig::explicit(vec![
-                        ModelSourceBindingInput {
-                            source_id: default_source_id,
-                            is_default: true,
-                        },
-                    ])),
-                )
-                .expect("explicit default model should seed");
-                let explicit_other_model = Model::create_with_source_config(
-                    provider.id,
-                    "impact-explicit-other",
-                    None,
-                    crate::schema::enum_def::ModelKind::Chat,
-                    true,
-                    Some(&ModelSourceConfig::explicit(vec![
-                        ModelSourceBindingInput {
-                            source_id: responses_source_id,
-                            is_default: true,
-                        },
-                    ])),
-                )
-                .expect("explicit other model should seed");
-                let explicit_empty_model = Model::create_with_source_config(
-                    provider.id,
-                    "impact-explicit-empty",
-                    None,
-                    crate::schema::enum_def::ModelKind::Chat,
-                    true,
-                    Some(&ModelSourceConfig::explicit(Vec::new())),
-                )
-                .expect("explicit empty model should seed");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+            let inherit_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "impact-inherit",
+                None,
+                crate::schema::enum_def::ModelKind::Chat,
+                true,
+            )
+            .await
+            .expect("inherit model should seed");
+            let disabled_inherit_model = Model::create(
+                &test_db_context,
+                provider.id,
+                "impact-disabled-inherit",
+                None,
+                crate::schema::enum_def::ModelKind::Chat,
+                false,
+            )
+            .await
+            .expect("disabled inherit model should seed");
+            let explicit_default_model = Model::create_with_source_config(
+                &test_db_context,
+                provider.id,
+                "impact-explicit-default",
+                None,
+                crate::schema::enum_def::ModelKind::Chat,
+                true,
+                Some(&ModelSourceConfig::explicit(vec![
+                    ModelSourceBindingInput {
+                        source_id: default_source_id,
+                        is_default: true,
+                    },
+                ])),
+            )
+            .await
+            .expect("explicit default model should seed");
+            let explicit_other_model = Model::create_with_source_config(
+                &test_db_context,
+                provider.id,
+                "impact-explicit-other",
+                None,
+                crate::schema::enum_def::ModelKind::Chat,
+                true,
+                Some(&ModelSourceConfig::explicit(vec![
+                    ModelSourceBindingInput {
+                        source_id: responses_source_id,
+                        is_default: true,
+                    },
+                ])),
+            )
+            .await
+            .expect("explicit other model should seed");
+            let explicit_empty_model = Model::create_with_source_config(
+                &test_db_context,
+                provider.id,
+                "impact-explicit-empty",
+                None,
+                crate::schema::enum_def::ModelKind::Chat,
+                true,
+                Some(&ModelSourceConfig::explicit(Vec::new())),
+            )
+            .await
+            .expect("explicit empty model should seed");
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let mut reports = Vec::new();
-                for action in ["DISABLE", "DELETE", "SET_DEFAULT", "UNSET_DEFAULT"] {
-                    let response = send(
-                        &app_state,
-                        json_request(
-                            Method::POST,
-                            &format!(
-                                "/provider/{provider_id}/sources/{default_source_id}/model-impact"
-                            ),
-                            json!({"action": action}),
+            let mut reports = Vec::new();
+            for action in ["DISABLE", "DELETE", "SET_DEFAULT", "UNSET_DEFAULT"] {
+                let response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!(
+                            "/provider/{provider_id}/sources/{default_source_id}/model-impact"
                         ),
-                    )
-                    .await;
-                    assert_eq!(response.status(), StatusCode::OK, "action {action}");
-                    let body = response_json(response).await;
-                    assert_eq!(body["code"], 0, "action {action}");
-                    assert_eq!(body["data"]["action"], action, "action {action}");
-                    assert_eq!(body["data"]["provider_id"], provider_id);
-                    assert_eq!(body["data"]["source_id"], default_source_id);
-                    assert_eq!(body["data"]["inherit_all_model_count"], 2);
-                    assert_eq!(body["data"]["explicit_binding_model_count"], 3);
-                    assert_eq!(body["data"]["explicit_default_model_count"], 2);
-                    assert_eq!(body["data"].get("model_ids"), None);
-                    assert_eq!(body["data"]["protocols"].as_array().unwrap().len(), 4);
-                    reports.push((action, body));
-                }
+                        json!({"action": action}),
+                    ),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK, "action {action}");
+                let body = response_json(response).await;
+                assert_eq!(body["code"], 0, "action {action}");
+                assert_eq!(body["data"]["action"], action, "action {action}");
+                assert_eq!(body["data"]["provider_id"], provider_id);
+                assert_eq!(body["data"]["source_id"], default_source_id);
+                assert_eq!(body["data"]["inherit_all_model_count"], 2);
+                assert_eq!(body["data"]["explicit_binding_model_count"], 3);
+                assert_eq!(body["data"]["explicit_default_model_count"], 2);
+                assert_eq!(body["data"].get("model_ids"), None);
+                assert_eq!(body["data"]["protocols"].as_array().unwrap().len(), 4);
+                reports.push((action, body));
+            }
 
-                let disable_openai = reports
-                    .iter()
-                    .find(|(action, _)| *action == "DISABLE")
-                    .map(|(_, body)| body)
-                    .unwrap();
-                let openai_disable = disable_openai["data"]["protocols"]
+            let disable_openai = reports
+                .iter()
+                .find(|(action, _)| *action == "DISABLE")
+                .map(|(_, body)| body)
+                .unwrap();
+            let openai_disable = disable_openai["data"]["protocols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
+                .unwrap();
+            assert_eq!(openai_disable["selection_changed_count"], 3);
+            assert_eq!(openai_disable["would_become_unselectable_count"], 3);
+
+            let set_default = reports
+                .iter()
+                .find(|(action, _)| *action == "SET_DEFAULT")
+                .map(|(_, body)| body)
+                .unwrap();
+            assert!(
+                set_default["data"]["protocols"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
-                    .unwrap();
-                assert_eq!(openai_disable["selection_changed_count"], 3);
-                assert_eq!(openai_disable["would_become_unselectable_count"], 3);
+                    .all(|protocol| protocol["selection_changed_count"] == 0
+                        && protocol["would_become_unselectable_count"] == 0)
+            );
 
-                let set_default = reports
-                    .iter()
-                    .find(|(action, _)| *action == "SET_DEFAULT")
-                    .map(|(_, body)| body)
-                    .unwrap();
-                assert!(
-                    set_default["data"]["protocols"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .all(|protocol| protocol["selection_changed_count"] == 0
-                            && protocol["would_become_unselectable_count"] == 0)
-                );
+            let unset_default = reports
+                .iter()
+                .find(|(action, _)| *action == "UNSET_DEFAULT")
+                .map(|(_, body)| body)
+                .unwrap();
+            let anthropic_unset = unset_default["data"]["protocols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|protocol| protocol["downstream_protocol"] == "ANTHROPIC")
+                .unwrap();
+            assert_eq!(anthropic_unset["selection_changed_count"], 2);
+            assert_eq!(anthropic_unset["would_become_unselectable_count"], 2);
 
-                let unset_default = reports
-                    .iter()
-                    .find(|(action, _)| *action == "UNSET_DEFAULT")
-                    .map(|(_, body)| body)
-                    .unwrap();
-                let anthropic_unset = unset_default["data"]["protocols"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|protocol| protocol["downstream_protocol"] == "ANTHROPIC")
-                    .unwrap();
-                assert_eq!(anthropic_unset["selection_changed_count"], 2);
-                assert_eq!(anthropic_unset["would_become_unselectable_count"], 2);
+            let delete_openai = reports
+                .iter()
+                .find(|(action, _)| *action == "DELETE")
+                .map(|(_, body)| body)
+                .unwrap();
+            let openai_delete = delete_openai["data"]["protocols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
+                .unwrap();
+            assert_eq!(openai_delete["selection_changed_count"], 3);
+            assert_eq!(openai_delete["would_become_unselectable_count"], 3);
 
-                let delete_openai = reports
-                    .iter()
-                    .find(|(action, _)| *action == "DELETE")
-                    .map(|(_, body)| body)
-                    .unwrap();
-                let openai_delete = delete_openai["data"]["protocols"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|protocol| protocol["downstream_protocol"] == "OPENAI")
-                    .unwrap();
-                assert_eq!(openai_delete["selection_changed_count"], 3);
-                assert_eq!(openai_delete["would_become_unselectable_count"], 3);
-
-                let unchanged_provider = Provider::get_by_id(provider_id)
-                    .expect("provider should remain readable after previews");
-                let unchanged_source = unchanged_provider
-                    .upstream_sources
-                    .iter()
-                    .find(|source| source.id == default_source_id)
-                    .expect("target source should remain visible");
-                assert!(unchanged_source.is_enabled);
-                assert!(unchanged_source.is_default);
-                assert!(Model::get_by_id(inherit_model.id).is_ok());
-                assert!(Model::get_by_id(disabled_inherit_model.id).is_ok());
-                assert!(Model::get_by_id(explicit_default_model.id).is_ok());
-                assert!(Model::get_by_id(explicit_other_model.id).is_ok());
-                assert!(Model::get_by_id(explicit_empty_model.id).is_ok());
-                assert_eq!(
-                    crate::database::model_source_binding::get_config(explicit_default_model.id)
-                        .expect("binding should remain readable")
-                        .bindings
-                        .len(),
-                    1
-                );
-            })
-            .await;
+            let unchanged_provider = Provider::get_by_id(&test_db_context, provider_id)
+                .await
+                .expect("provider should remain readable after previews");
+            let unchanged_source = unchanged_provider
+                .upstream_sources
+                .iter()
+                .find(|source| source.id == default_source_id)
+                .expect("target source should remain visible");
+            assert!(unchanged_source.is_enabled);
+            assert!(unchanged_source.is_default);
+            assert!(
+                Model::get_by_id(&test_db_context, inherit_model.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                Model::get_by_id(&test_db_context, disabled_inherit_model.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                Model::get_by_id(&test_db_context, explicit_default_model.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                Model::get_by_id(&test_db_context, explicit_other_model.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                Model::get_by_id(&test_db_context, explicit_empty_model.id)
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(
+                crate::database::model_source_binding::get_config(
+                    &test_db_context,
+                    explicit_default_model.id,
+                )
+                .await
+                .expect("binding should remain readable")
+                .bindings
+                .len(),
+                1
+            );
+        })
+        .await;
     }
 
     fn sample_provider(profile_type: UpstreamProfileType, endpoint: &str) -> ProviderAggregate {

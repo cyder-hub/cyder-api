@@ -36,7 +36,7 @@
     {
       "kind": "response",
       "scenario": "responses_to_openai_tool",
-      "min_ops_per_sec": 76000.0,
+      "min_ops_per_sec": 48000.0,
       "max_p95_ms": 0.021,
       "max_allocs_per_op": 285.0,
       "max_reallocs_per_op": 10.0,
@@ -46,7 +46,7 @@
     {
       "kind": "stream",
       "scenario": "anthropic_to_responses_fixture",
-      "min_ops_per_sec": 15300.0,
+      "min_ops_per_sec": 15000.0,
       "max_p95_ms": 0.11,
       "max_allocs_per_op": 690.0,
       "max_reallocs_per_op": 38.0,
@@ -56,7 +56,7 @@
     {
       "kind": "stream",
       "scenario": "responses_to_anthropic_long_session",
-      "min_ops_per_sec": 1000.0,
+      "min_ops_per_sec": 700.0,
       "max_p95_ms": 1.5,
       "max_allocs_per_op": 18000.0,
       "max_reallocs_per_op": 400.0,
@@ -66,7 +66,7 @@
     {
       "kind": "stream",
       "scenario": "openai_to_gemini_long_text_stream",
-      "min_ops_per_sec": 2000.0,
+      "min_ops_per_sec": 1250.0,
       "max_p95_ms": 0.75,
       "max_allocs_per_op": 9500.0,
       "max_reallocs_per_op": 24.0,

@@ -42,3 +42,61 @@ fn hot_path_modules_do_not_use_structured_builder_api() {
         );
     }
 }
+
+#[test]
+fn request_log_builder_ignores_transient_url_error_stage_and_visibility() {
+    let source = include_str!("logging.rs");
+    let builder = source
+        .split_once("fn build_request_log")
+        .expect("request log builder should exist")
+        .1
+        .split_once("#[derive(Default)]")
+        .expect("request log builder should end before CostOutcome")
+        .0;
+
+    assert!(
+        !builder.contains("request_url"),
+        "transient raw request URL must not enter the Diesel RequestLog payload"
+    );
+    assert!(
+        !builder.contains("final_error_stage"),
+        "transient error stage must not enter the Diesel RequestLog payload"
+    );
+    assert!(
+        !builder.contains("response_visibility"),
+        "transient response visibility must not enter the Diesel RequestLog payload"
+    );
+}
+
+#[test]
+fn request_log_context_has_no_transient_response_header_map() {
+    let source = include_str!("logging.rs");
+    assert!(
+        !source.contains("response_headers_json"),
+        "raw upstream response headers must not be retained in request context"
+    );
+}
+
+#[test]
+fn proxy_error_events_never_log_client_payload_or_upstream_body() {
+    let logging_source = include_str!("../logging.rs");
+    let helper = logging_source
+        .split_once("fn proxy_error_event_message")
+        .expect("proxy error event helper should exist")
+        .1
+        .split_once("pub(crate) fn log_proxy_error_event")
+        .expect("proxy error event helper should have a bounded body")
+        .0;
+
+    for forbidden in [
+        "client_payload",
+        "response_body",
+        "body_text",
+        "body_base64",
+    ] {
+        assert!(
+            !helper.contains(forbidden),
+            "proxy error event helper must not access {forbidden}"
+        );
+    }
+}

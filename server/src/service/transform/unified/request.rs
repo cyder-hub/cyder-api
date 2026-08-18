@@ -49,6 +49,9 @@ pub enum UnifiedToolResultOutput {
     Json {
         value: Value,
     },
+    Error {
+        error: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -220,6 +223,14 @@ impl UnifiedItem {
                         filename: item.filename.clone(),
                     }]
                 })
+                .or_else(|| {
+                    item.file_id.clone().map(|file_id| {
+                        vec![UnifiedContentPart::FileId {
+                            file_id,
+                            filename: item.filename.clone(),
+                        }]
+                    })
+                })
                 .unwrap_or_default(),
         }
     }
@@ -291,6 +302,17 @@ pub fn unified_tool_result_output_from_value(value: Value) -> UnifiedToolResultO
                 .collect(),
         },
         Value::Object(_) => {
+            if value
+                .as_object()
+                .is_some_and(|object| object.len() == 1 && object.contains_key("error"))
+            {
+                return UnifiedToolResultOutput::Error {
+                    error: value
+                        .get("error")
+                        .expect("single-key error object must contain error")
+                        .clone(),
+                };
+            }
             let type_name = value
                 .get("type")
                 .and_then(Value::as_str)
@@ -350,14 +372,36 @@ pub fn unified_tool_result_output_to_value(output: &UnifiedToolResultOutput) -> 
             serde_json::json!({ "type": "image", "image_url": image_url, "file_url": file_url })
         }
         UnifiedToolResultOutput::Json { value } => value.clone(),
+        UnifiedToolResultOutput::Error { error } => {
+            serde_json::json!({ "error": error })
+        }
     }
 }
 
 pub fn stringify_unified_tool_result_output(output: &UnifiedToolResultOutput) -> String {
     match output {
         UnifiedToolResultOutput::Text { text } => text.clone(),
-        other => serde_json::to_string(&unified_tool_result_output_to_value(other))
-            .unwrap_or_else(|_| unified_tool_result_output_to_value(other).to_string()),
+        other => {
+            let value = canonicalize_json(unified_tool_result_output_to_value(other));
+            serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+        }
+    }
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_json).collect()),
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
     }
 }
 
@@ -443,6 +487,21 @@ pub fn legacy_content_to_unified_items(
                     file_id: None,
                 }));
             }
+            UnifiedContentPart::FileId { file_id, filename } => {
+                if !message_parts.is_empty() {
+                    items.push(UnifiedItem::Message(UnifiedMessageItem {
+                        role: role.clone(),
+                        content: std::mem::take(&mut message_parts),
+                        annotations: Vec::new(),
+                    }));
+                }
+                items.push(UnifiedItem::FileReference(UnifiedFileReferenceItem {
+                    filename,
+                    mime_type: None,
+                    file_url: None,
+                    file_id: Some(file_id),
+                }));
+            }
             other => message_parts.push(other),
         }
     }
@@ -479,6 +538,10 @@ pub enum UnifiedContentPart {
         mime_type: String,
         data: String,
     },
+    AudioData {
+        data: String,
+        format: String,
+    },
     FileUrl {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -489,6 +552,11 @@ pub enum UnifiedContentPart {
     FileData {
         data: String,
         mime_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
+    FileId {
+        file_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
     },
@@ -508,8 +576,10 @@ impl UnifiedContentPart {
             UnifiedContentPart::Reasoning { text } => text.trim().is_empty(),
             UnifiedContentPart::ImageUrl { url, .. } => url.is_empty(),
             UnifiedContentPart::ImageData { data, .. } => data.is_empty(),
+            UnifiedContentPart::AudioData { data, .. } => data.is_empty(),
             UnifiedContentPart::FileUrl { url, .. } => url.is_empty(),
             UnifiedContentPart::FileData { data, .. } => data.is_empty(),
+            UnifiedContentPart::FileId { file_id, .. } => file_id.is_empty(),
             UnifiedContentPart::ExecutableCode { code, .. } => code.is_empty(),
             UnifiedContentPart::ToolCall(_) | UnifiedContentPart::ToolResult(_) => false,
         }
@@ -538,6 +608,8 @@ pub struct UnifiedFunctionDefinition {
     pub name: String,
     pub description: Option<String>,
     pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -545,6 +617,52 @@ pub struct UnifiedTool {
     #[serde(rename = "type")]
     pub type_: String,
     pub function: UnifiedFunctionDefinition,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedAllowedToolMode {
+    Auto,
+    Required,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UnifiedToolChoice {
+    None,
+    Auto,
+    Required,
+    Named {
+        name: String,
+    },
+    Allowed {
+        names: Vec<String>,
+        mode: UnifiedAllowedToolMode,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UnifiedStructuredOutput {
+    JsonObject,
+    JsonSchema {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        schema: Value,
+        strict: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -580,25 +698,13 @@ pub struct UnifiedAnthropicRequestExtension {
     pub metadata: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub structured_output_envelope_present: bool,
 }
 
 impl UnifiedAnthropicRequestExtension {
     pub fn is_empty(&self) -> bool {
-        self.metadata.is_none() && self.top_k.is_none()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UnifiedOllamaRequestExtension {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<String>,
-}
-
-impl UnifiedOllamaRequestExtension {
-    pub fn is_empty(&self) -> bool {
-        self.format.is_none() && self.keep_alive.is_none()
+        self.metadata.is_none() && self.top_k.is_none() && !self.structured_output_envelope_present
     }
 }
 
@@ -614,6 +720,29 @@ pub struct UnifiedResponsesRequestExtension {
     pub reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnifiedGeminiToolAssociation {
+    pub unified_tool_call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnifiedGeminiRequestExtension {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_associations: Vec<UnifiedGeminiToolAssociation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+}
+
+impl UnifiedGeminiRequestExtension {
+    pub fn is_empty(&self) -> bool {
+        self.tool_associations.is_empty() && self.top_k.is_none()
+    }
 }
 
 impl UnifiedResponsesRequestExtension {
@@ -633,9 +762,9 @@ pub struct UnifiedRequestExtensions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic: Option<UnifiedAnthropicRequestExtension>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ollama: Option<UnifiedOllamaRequestExtension>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<UnifiedResponsesRequestExtension>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini: Option<UnifiedGeminiRequestExtension>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -645,6 +774,10 @@ pub struct UnifiedRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<UnifiedItem>,
     pub tools: Option<Vec<UnifiedTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<UnifiedToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
     pub stream: bool,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
@@ -653,6 +786,12 @@ pub struct UnifiedRequest {
     pub seed: Option<i64>,
     pub presence_penalty: Option<f64>,
     pub frequency_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<UnifiedReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<UnifiedStructuredOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<UnifiedRequestExtensions>,
 }
@@ -664,6 +803,10 @@ pub struct UnifiedRequestCore {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<UnifiedItem>,
     pub tools: Option<Vec<UnifiedTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<UnifiedToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
     pub stream: bool,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
@@ -672,6 +815,12 @@ pub struct UnifiedRequestCore {
     pub seed: Option<i64>,
     pub presence_penalty: Option<f64>,
     pub frequency_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<UnifiedReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<UnifiedStructuredOutput>,
 }
 
 impl UnifiedRequest {
@@ -709,14 +858,14 @@ impl UnifiedRequest {
             .and_then(|ext| ext.anthropic.as_ref())
     }
 
-    pub fn ollama_extension(&self) -> Option<&UnifiedOllamaRequestExtension> {
-        self.extensions.as_ref().and_then(|ext| ext.ollama.as_ref())
-    }
-
     pub fn responses_extension(&self) -> Option<&UnifiedResponsesRequestExtension> {
         self.extensions
             .as_ref()
             .and_then(|ext| ext.responses.as_ref())
+    }
+
+    pub fn gemini_extension(&self) -> Option<&UnifiedGeminiRequestExtension> {
+        self.extensions.as_ref().and_then(|ext| ext.gemini.as_ref())
     }
 
     pub fn core(&self) -> UnifiedRequestCore {
@@ -725,6 +874,8 @@ impl UnifiedRequest {
             messages: self.messages.clone(),
             items: self.items.clone(),
             tools: self.tools.clone(),
+            tool_choice: self.tool_choice.clone(),
+            parallel_tool_calls: self.parallel_tool_calls,
             stream: self.stream,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
@@ -733,6 +884,9 @@ impl UnifiedRequest {
             seed: self.seed,
             presence_penalty: self.presence_penalty,
             frequency_penalty: self.frequency_penalty,
+            reasoning_effort: self.reasoning_effort,
+            reasoning_budget_tokens: self.reasoning_budget_tokens,
+            structured_output: self.structured_output.clone(),
         }
     }
 
@@ -745,6 +899,8 @@ impl UnifiedRequest {
                 messages: self.messages,
                 items: self.items,
                 tools: self.tools,
+                tool_choice: self.tool_choice,
+                parallel_tool_calls: self.parallel_tool_calls,
                 stream: self.stream,
                 temperature: self.temperature,
                 max_tokens: self.max_tokens,
@@ -753,6 +909,9 @@ impl UnifiedRequest {
                 seed: self.seed,
                 presence_penalty: self.presence_penalty,
                 frequency_penalty: self.frequency_penalty,
+                reasoning_effort: self.reasoning_effort,
+                reasoning_budget_tokens: self.reasoning_budget_tokens,
+                structured_output: self.structured_output,
             },
             self.extensions,
         )
@@ -767,6 +926,8 @@ impl UnifiedRequest {
             messages: core.messages,
             items: core.items,
             tools: core.tools,
+            tool_choice: core.tool_choice,
+            parallel_tool_calls: core.parallel_tool_calls,
             stream: core.stream,
             temperature: core.temperature,
             max_tokens: core.max_tokens,
@@ -775,11 +936,16 @@ impl UnifiedRequest {
             seed: core.seed,
             presence_penalty: core.presence_penalty,
             frequency_penalty: core.frequency_penalty,
+            reasoning_effort: core.reasoning_effort,
+            reasoning_budget_tokens: core.reasoning_budget_tokens,
+            structured_output: core.structured_output,
             extensions,
         }
     }
 
     pub fn top_k(&self) -> Option<u32> {
-        self.anthropic_extension().and_then(|ext| ext.top_k)
+        self.gemini_extension()
+            .and_then(|ext| ext.top_k)
+            .or_else(|| self.anthropic_extension().and_then(|ext| ext.top_k))
     }
 }

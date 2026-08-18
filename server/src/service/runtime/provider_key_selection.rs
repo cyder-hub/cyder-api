@@ -169,6 +169,8 @@ mod contract_tests;
 #[cfg(test)]
 mod tests {
     use super::GroupItemSelectionStrategy;
+    use crate::config::DatabaseIoConfig;
+    use crate::database::test_support::TestDatabase;
     use crate::schema::enum_def::ProviderApiKeyMode;
     use crate::service::catalog::CatalogService;
     use std::sync::Arc;
@@ -187,7 +189,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalidation_hook_does_not_retain_selector() {
-        let catalog = Arc::new(CatalogService::new(true).await);
+        let database = TestDatabase::new_sqlite(
+            "provider-selector-retention.sqlite",
+            2,
+            DatabaseIoConfig::default(),
+        )
+        .await;
+        let catalog = Arc::new(CatalogService::new(database.runtime(), true).await);
         let selector = super::ProviderKeySelector::new_memory(Arc::clone(&catalog)).await;
         let weak_selector = Arc::downgrade(&selector);
 

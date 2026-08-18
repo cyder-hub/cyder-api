@@ -43,6 +43,7 @@ pub enum ApiKeyGovernanceAdmissionError {
     RateLimited {
         limit: i32,
         current: u32,
+        retry_after: Duration,
     },
     ConcurrencyLimited {
         limit: i32,
@@ -51,25 +52,44 @@ pub enum ApiKeyGovernanceAdmissionError {
     DailyRequestQuotaExceeded {
         limit: i64,
         current: i64,
+        retry_after: Duration,
     },
     DailyTokenQuotaExceeded {
         limit: i64,
         current: i64,
+        retry_after: Duration,
     },
     MonthlyTokenQuotaExceeded {
         limit: i64,
         current: i64,
+        retry_after: Duration,
     },
     DailyBudgetExceeded {
         currency: String,
         limit_nanos: i64,
         current_nanos: i64,
+        retry_after: Duration,
     },
     MonthlyBudgetExceeded {
         currency: String,
         limit_nanos: i64,
         current_nanos: i64,
+        retry_after: Duration,
     },
+}
+
+impl ApiKeyGovernanceAdmissionError {
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. }
+            | Self::DailyRequestQuotaExceeded { retry_after, .. }
+            | Self::DailyTokenQuotaExceeded { retry_after, .. }
+            | Self::MonthlyTokenQuotaExceeded { retry_after, .. }
+            | Self::DailyBudgetExceeded { retry_after, .. }
+            | Self::MonthlyBudgetExceeded { retry_after, .. } => Some(*retry_after),
+            Self::Internal(_) | Self::ConcurrencyLimited { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -178,6 +198,7 @@ impl ApiKeyRuntimeState {
                 return Err(ApiKeyGovernanceAdmissionError::RateLimited {
                     limit: api_key.rate_limit_rpm.unwrap_or_default(),
                     current: self.current_minute_request_count,
+                    retry_after: retry_after_to_next_minute(now_ms),
                 });
             }
         }
@@ -187,6 +208,7 @@ impl ApiKeyRuntimeState {
                 return Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded {
                     limit,
                     current: self.daily_request_count,
+                    retry_after: retry_after_to_next_day(now_ms),
                 });
             }
         }
@@ -196,6 +218,7 @@ impl ApiKeyRuntimeState {
                 return Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded {
                     limit,
                     current: self.daily_token_count,
+                    retry_after: retry_after_to_next_day(now_ms),
                 });
             }
         }
@@ -205,6 +228,7 @@ impl ApiKeyRuntimeState {
                 return Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded {
                     limit,
                     current: self.monthly_token_count,
+                    retry_after: retry_after_to_next_month(now_ms),
                 });
             }
         }
@@ -224,6 +248,7 @@ impl ApiKeyRuntimeState {
                     currency: normalized_currency,
                     limit_nanos,
                     current_nanos,
+                    retry_after: retry_after_to_next_day(now_ms),
                 });
             }
         }
@@ -243,6 +268,7 @@ impl ApiKeyRuntimeState {
                     currency: normalized_currency,
                     limit_nanos,
                     current_nanos,
+                    retry_after: retry_after_to_next_month(now_ms),
                 });
             }
         }
@@ -397,6 +423,77 @@ pub(crate) fn month_bucket_start(timestamp_ms: i64) -> i64 {
         .timestamp_millis()
 }
 
+pub(crate) fn retry_after_to_next_minute(timestamp_ms: i64) -> Duration {
+    duration_until(
+        timestamp_ms,
+        minute_bucket_start(timestamp_ms).saturating_add(60_000),
+    )
+}
+
+pub(crate) fn retry_after_to_next_day(timestamp_ms: i64) -> Duration {
+    duration_until(
+        timestamp_ms,
+        day_bucket_start(timestamp_ms).saturating_add(86_400_000),
+    )
+}
+
+pub(crate) fn retry_after_to_next_month(timestamp_ms: i64) -> Duration {
+    let timestamp = Utc
+        .timestamp_millis_opt(timestamp_ms)
+        .single()
+        .unwrap_or_else(Utc::now);
+    let (year, month) = if timestamp.month() == 12 {
+        (timestamp.year().saturating_add(1), 1)
+    } else {
+        (timestamp.year(), timestamp.month() + 1)
+    };
+    let next_month_ms = Utc
+        .with_ymd_and_hms(year, month, 1, 0, 0, 0)
+        .single()
+        .expect("next month boundary should be valid")
+        .timestamp_millis();
+    duration_until(timestamp_ms, next_month_ms)
+}
+
+fn duration_until(timestamp_ms: i64, boundary_ms: i64) -> Duration {
+    let remaining_ms = boundary_ms.saturating_sub(timestamp_ms).max(1);
+    Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX))
+}
+
 pub(crate) fn normalize_currency_code(currency: &str) -> String {
     currency.trim().to_ascii_uppercase()
+}
+
+#[cfg(test)]
+mod reset_fact_tests {
+    use super::{retry_after_to_next_day, retry_after_to_next_minute, retry_after_to_next_month};
+    use std::time::Duration;
+
+    #[test]
+    fn utc_reset_facts_cover_millisecond_and_calendar_boundaries() {
+        const AUGUST_MINUTE_END_MS: i64 = 1_785_760_499_999;
+        const DECEMBER_YEAR_END_MS: i64 = 1_767_225_599_999;
+        const JANUARY_MONTH_END_MS: i64 = 1_769_903_999_999;
+
+        assert_eq!(
+            retry_after_to_next_minute(AUGUST_MINUTE_END_MS),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            retry_after_to_next_minute(AUGUST_MINUTE_END_MS - 999),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            retry_after_to_next_day(DECEMBER_YEAR_END_MS),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            retry_after_to_next_month(DECEMBER_YEAR_END_MS),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            retry_after_to_next_month(JANUARY_MONTH_END_MS),
+            Duration::from_millis(1)
+        );
+    }
 }

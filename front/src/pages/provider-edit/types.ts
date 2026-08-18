@@ -1,4 +1,8 @@
-import type { RequestPatchRule } from "@/services/types";
+import type {
+  ModelKind,
+  ModelSourceConfigSummary,
+  UpstreamSource,
+} from "@/services/types";
 
 export interface LocalProviderApiKeyItem {
   id: number;
@@ -17,12 +21,8 @@ export interface LocalEditableModelItem {
   id: number | null;
   model_name: string;
   real_model_name: string | null;
-  supports_streaming: boolean;
-  supports_tools: boolean;
-  supports_reasoning: boolean;
-  supports_image_input: boolean;
-  supports_embeddings: boolean;
-  supports_rerank: boolean;
+  model_kind: ModelKind;
+  source_config?: ModelSourceConfigSummary;
   is_enabled: boolean;
   isEditing: boolean;
   checkStatus: "unchecked" | "checking" | "success" | "error";
@@ -33,10 +33,11 @@ export interface EditingProviderData {
   id: number | null;
   name: string;
   provider_key: string;
-  provider_type: string;
-  endpoint: string;
-  use_proxy: boolean;
+  is_enabled: boolean;
+  provider_api_key_mode: string;
+  upstream_sources: EditingProviderSource[];
   models: LocalEditableModelItem[];
   provider_keys: LocalProviderApiKeyItem[];
-  request_patches: RequestPatchRule[];
 }
+
+export type EditingProviderSource = UpstreamSource;

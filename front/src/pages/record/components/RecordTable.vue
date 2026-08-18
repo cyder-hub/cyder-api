@@ -26,8 +26,28 @@
         :title="record.displayRequestedModelName"
         :description="record.request_at_formatted"
       >
+        <div class="min-w-0 rounded-lg bg-gray-50 px-3 py-2">
+          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+            {{ $t("recordPage.table.requestId") }}
+          </p>
+          <p class="mt-1 break-all font-mono text-[11px] leading-4 text-gray-700">
+            {{ record.request_id }}
+          </p>
+        </div>
+
         <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
           <MobileField :label="$t('recordPage.table.provider')" :value="record.providerName" />
+          <MobileField
+            v-if="record.resolved_patch_suffix"
+            :label="$t('recordPage.table.patchSuffix')"
+            :value="record.resolved_patch_suffix"
+            mono
+          />
+          <MobileField
+            :label="$t('recordPage.table.source')"
+            :value="record.sourceDisplay"
+            mono
+          />
           <MobileField :label="$t('recordPage.table.apiKey')" :value="record.apiKeyName" />
           <div class="space-y-1">
             <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
@@ -43,7 +63,15 @@
         <div class="grid grid-cols-1 gap-3 rounded-lg bg-gray-50 p-3 min-[360px]:grid-cols-2">
           <MobileField :label="$t('recordPage.table.tokens')" :value="record.total_tokens ?? '/'" />
           <MobileField :label="$t('recordPage.table.cost')" :value="record.costDisplay" mono />
-          <MobileField :label="$t('recordPage.table.firstByte')" :value="record.firstRespTimeDisplay" />
+          <MobileField
+            :label="$t('recordPage.table.firstResponseBody')"
+            :value="record.firstResponseBodyTimeDisplay"
+          />
+          <MobileField :label="$t('recordPage.table.ttft')" :value="record.ttftDisplay" />
+          <MobileField
+            :label="$t('recordPage.table.totalLatency')"
+            :value="record.totalLatencyDisplay"
+          />
         </div>
 
         <template #actions>
@@ -96,8 +124,23 @@
             :key="record.id"
             class="hover:bg-gray-50"
           >
-            <TableCell class="font-medium">{{ record.displayRequestedModelName }}</TableCell>
-            <TableCell>{{ record.providerName }}</TableCell>
+            <TableCell>
+              <div class="max-w-[18rem]">
+                <div class="font-medium">{{ record.displayRequestedModelName }}</div>
+                <div v-if="record.resolved_patch_suffix" class="mt-1 font-mono text-[11px] text-gray-500">
+                  {{ $t("recordPage.table.patchSuffix") }}: {{ record.resolved_patch_suffix }}
+                </div>
+                <div class="mt-1 truncate font-mono text-[11px] text-gray-500">
+                  {{ record.request_id }}
+                </div>
+              </div>
+            </TableCell>
+            <TableCell>
+              <div>{{ record.providerName }}</div>
+              <div class="mt-1 font-mono text-[11px] text-gray-500">
+                {{ record.sourceDisplay }}
+              </div>
+            </TableCell>
             <TableCell>{{ record.apiKeyName }}</TableCell>
             <TableCell class="w-14 text-center">
               <div
@@ -129,8 +172,9 @@
             <TableCell class="font-mono text-xs text-gray-700">
               {{
                 formatCompactMetrics([
-                  record.firstRespTimeDisplay,
-                  record.totalRespTimeDisplay,
+                  record.firstResponseBodyTimeDisplay,
+                  record.ttftDisplay,
+                  record.totalLatencyDisplay,
                   record.tpsDisplay,
                 ])
               }}

@@ -28,7 +28,15 @@
       "limitModel": "Limit Model",
       "models": "Models",
       "apiKeys": "API Keys",
+      "sources": "Sources",
       "status": "Status"
+    },
+    "sources": {
+      "count": "{count} sources",
+      "enabled": "{count} enabled",
+      "default": "Default",
+      "noDefault": "No default source",
+      "manage": "Manage Sources"
     },
     "confirmDelete": "Are you sure you want to delete the provider '{name}'?",
     "deleteFailed": "Failed to delete provider: {error}"
@@ -67,8 +75,10 @@
       "totalTokens": "Total Tokens",
       "inputTokens": "Input",
       "totalCost": "Total Cost",
-      "avgLatency": "Average Latency",
-      "firstByte": "First Byte",
+      "avgLatency": "Average total latency",
+      "firstResponseBody": "Average first response body",
+      "ttft": "Average time to first token",
+      "latencyTooltip": "Average over observed samples; the sample count is shown below.",
       "runtimeIssues": "Runtime Issues",
       "runtimeWindow": "Window",
       "windowToday": "Window: today",
@@ -83,10 +93,11 @@
       "activeToday": "Active today"
     },
     "runtime": {
+      "providers": "Runtime Providers",
+      "sources": "Runtime Sources",
+      "enabledSources": "Enabled Sources",
       "windowDetail": "Window: {window}",
       "degradedHint": "Observed latency or error-rate degradation",
-      "halfOpenHint": "In half-open recovery probing",
-      "openHint": "Currently circuit-open",
       "noTrafficHint": "No traffic in this window",
       "activeProviders": "Active Providers Today",
       "activeModels": "Active Models"
@@ -116,7 +127,7 @@
       "lastChecked": "Checked {time}"
     },
     "operationsGroups": {
-      "unstable": "Unstable Providers",
+      "degraded": "Degraded Providers",
       "topErrors": "Top Error Providers",
       "costHotspots": "Cost Hotspots",
       "costProviders": "Costliest Providers",
@@ -130,7 +141,7 @@
       "lastError": "Last error"
     },
     "empty": {
-      "noUnstableProviders": "No providers are currently in open or half-open state.",
+      "noDegradedProviders": "No providers are currently showing observed degradation.",
       "noErrors": "No providers are currently surfacing error hotspots.",
       "noCostHotspots": "No clear cost hotspots were found.",
       "noCostProviders": "No provider cost hotspots were found.",
@@ -205,7 +216,9 @@
         "request_count": "Request Count",
         "total_cost": "Total Cost",
         "success_rate": "Success Rate",
-        "avg_latency": "Average Latency",
+        "avg_latency": "Average Total Latency",
+        "avg_time_to_first_response_body": "Average First Response Body",
+        "avg_ttft": "Average Time to First Token",
         "error_count": "Error Count"
       },
       "chartTypes": {
@@ -244,15 +257,15 @@
     "editProvider": "Edit Provider",
     "viewRecords": "View Records",
     "activeOnly": "Enabled providers only",
-    "searchPlaceholder": "Search by provider name or provider key",
+    "searchPlaceholder": "Search Provider or Source Profile, ID, or base URL",
     "empty": "No providers match the current filters.",
     "noData": "No provider runtime data is available yet.",
     "summary": {
       "total": "Total Providers",
+      "totalSources": "Total Sources",
+      "enabledSources": "Enabled Sources",
       "healthy": "Healthy",
       "degraded": "Degraded",
-      "halfOpen": "Half Open",
-      "open": "Open",
       "noTraffic": "No Traffic"
     },
     "filter": {
@@ -273,24 +286,25 @@
     "status": {
       "healthy": "Healthy",
       "degraded": "Degraded",
-      "open": "Open",
-      "half_open": "Half-open",
       "no_traffic": "No traffic"
     },
     "sort": {
       "health": "Health priority",
       "error_rate": "Error rate",
       "latency": "Average latency",
+      "time_to_first_response_body": "Time to first response body",
+      "ttft": "Time to first token",
       "last_error_at": "Last error time",
       "request_count": "Request count"
     },
     "metrics": {
       "requests": "Requests",
       "successRate": "Success rate",
-      "firstByte": "First byte",
+      "firstResponseBody": "First response body",
+      "ttft": "Time to first token",
       "totalLatency": "Total latency",
+      "sampleCoverage": "{count} latency samples",
       "errors": "Errors",
-      "failures": "Consecutive failures",
       "models": "Models",
       "keys": "Keys",
       "cost": "Cost",
@@ -301,7 +315,12 @@
     },
     "table": {
       "provider": "Provider",
-      "health": "Health"
+      "health": "Health",
+      "source": "Source",
+      "runtime": "Runtime"
+    },
+    "source": {
+      "title": "Source"
     },
     "detail": {
       "statusCode": "Status code",
@@ -346,13 +365,14 @@
       "title": "Filters",
       "apiKeyLabel": "API Key",
       "providerLabel": "Provider",
+      "sourceLabel": "Source",
       "modelLabel": "Model",
       "statusLabel": "Status",
       "searchLabel": "Search",
-      "searchPlaceholder": "Model, provider, error...",
+      "searchPlaceholder": "Request ID, model, provider, error...",
       "clearSearch": "Clear search",
       "advancedFilters": "Advanced filters",
-      "userApiLabel": "User API",
+      "downstreamProtocolLabel": "Downstream Protocol",
       "errorCodeLabel": "Error Code",
       "latencyMinLabel": "Latency Min",
       "latencyMaxLabel": "Latency Max",
@@ -373,9 +393,11 @@
       "collapse": "Collapse",
       "allApiKeys": "All API Keys",
       "allProviders": "All Providers",
+      "allSources": "All Sources",
+      "retiredSource": "Retired or unavailable Source #{id}",
       "allModels": "All Models",
       "allStatuses": "All Statuses",
-      "allApis": "All APIs",
+      "allDownstreamProtocols": "All Downstream Protocols",
       "summaryActive": "{count} filters active.",
       "summaryAll": "All request records, no filters applied.",
       "status": {
@@ -391,11 +413,16 @@
     },
     "table": {
       "model": "Model",
+      "patchSuffix": "Patch suffix",
+      "requestId": "Gateway Request ID",
       "provider": "Provider",
+      "source": "Source",
       "apiKey": "API Key",
       "status": "Status",
       "tokens": "Tokens",
-      "firstByte": "First Byte",
+      "firstResponseBody": "First response body",
+      "ttft": "Time to first token",
+      "totalLatency": "Total latency",
       "performance": "Performance",
       "cost": "Cost",
       "time": "Time",
@@ -404,19 +431,78 @@
       "view": "View",
       "viewDetails": "View Details"
     },
+    "source": {
+      "unselected": "Source not selected"
+    },
     "detailModal": {
       "fetchFailed": "Failed to fetch record detail"
     },
     "detailDialog": {
       "title": "Request Details",
+      "recordId": "Record ID",
+      "gatewayRequestId": "Gateway Request ID",
+      "copy": "Copy",
+      "copyRequestId": "Copy gateway request ID",
+      "copySuccess": "Gateway request ID copied.",
+      "copyFailed": "Failed to copy gateway request ID.",
       "loading": "Loading request detail...",
       "noRecord": "No record is selected.",
       "tabs": {
         "overview": "Overview"
       },
       "summary": {
+        "apiKey": "API Key",
         "provider": "Provider",
-        "model": "Model"
+        "providerKeyId": "Provider Key ID",
+        "providerKeyIdUnknown": "Unknown / not selected",
+        "source": "Executed Source",
+        "sourceId": "Source ID",
+        "sourceEndpoint": "Source Endpoint",
+        "selectionReason": "Source Selection Reason",
+        "selectionReasonUnknown": "Unknown (legacy record or no selected Source)",
+        "model": "Model",
+        "patchSuffix": "Patch suffix",
+        "realModel": "Real Model",
+        "downstreamProtocol": "Downstream Protocol",
+        "upstreamProtocol": "Upstream Protocol",
+        "transform": "Transform",
+        "transformDirect": "Direct wire family",
+        "transformRequired": "Gateway transform required",
+        "transformUnknown": "Unknown",
+        "clientIp": "Client IP",
+        "clientRequestId": "Client Request ID (caller-provided)",
+        "stream": "Stream",
+        "timeToFirstResponseBody": "Time to first response body",
+        "ttft": "Time to first token",
+        "totalLatency": "Total Latency",
+        "maxResponseIdle": "Max upstream response idle",
+        "tokens": "Tokens",
+        "cost": "Cost",
+        "received": "Received",
+        "completed": "Completed",
+        "error": "Error"
+      },
+      "timing": {
+        "title": "Timing summary",
+        "timeToFirstResponseBody": "Time to first response body",
+        "ttft": "Time to first token",
+        "totalLatency": "Total latency",
+        "maxResponseIdle": "Max upstream response idle"
+      },
+      "timeline": {
+        "title": "Transport timeline",
+        "hint": "Absolute timestamps are retained for troubleshooting; durations reject reversed stages.",
+        "absolute": "At",
+        "duration": "Elapsed",
+        "received": "Request received",
+        "upstreamRequestSent": "Upstream request sent",
+        "upstreamResponseHeaders": "Upstream response headers",
+        "upstreamFirstBodyChunk": "Upstream first raw body chunk",
+        "firstResponseBody": "First response body",
+        "firstToken": "First meaningful token",
+        "completed": "Completed",
+        "notObserved": "Not observed",
+        "notApplicable": "Not applicable"
       }
     }
   },
@@ -446,6 +532,9 @@
     "select": "Select",
     "selected": "Selected",
     "notAvailable": "N/A",
+    "noSamples": "No observed samples",
+    "oneSample": "1 sample",
+    "samples": "{count} samples",
     "noData": "No data",
     "refresh": "Refresh",
     "retry": "Retry",
@@ -674,141 +763,236 @@
     "table": {
       "provider": "Provider",
       "model": "Model",
+      "kind": "Kind",
       "realModel": "Real Model",
-      "capabilities": "Capabilities",
+      "sourceConfig": "Source Config",
       "enabled": "Enabled"
+    },
+    "sourceWarnings": "{count} warning(s)"
+  },
+  "modelKinds": {
+    "CHAT": "Chat",
+    "EMBEDDING": "Embedding",
+    "RERANK": "Rerank"
+  },
+  "modelSourceConfig": {
+    "title": "Source Config",
+    "helpLabel": "Source Config help",
+    "description": "Choose whether this model follows every visible Source or an explicit, closed Source set. Source selection is deterministic and does not retry another Source after execution starts.",
+    "modeLabel": "Selection mode",
+    "modePlaceholder": "Select a Source selection mode",
+    "modes": {
+      "inheritAll": { "label": "Inherit all Sources" },
+      "explicit": { "label": "Explicit Source set" }
+    },
+    "modeHint": {
+      "inheritAll": "New visible Sources become available automatically. The Provider default is the only fallback after an exact protocol match is unavailable.",
+      "explicit": "Only the checked Sources are available. The model default is the only fallback; an empty set is a valid fail-closed state."
+    },
+    "inheritAllFutureSources": "INHERIT_ALL keeps future non-deleted Sources in scope. Disabled Sources remain visible for governance but are ignored by runtime selection until enabled.",
+    "explicitSourcesTitle": "Declared Sources",
+    "explicitSourcesDescription": "Select Sources and optionally mark one selected Source as the model default. Disabled Sources may remain declared and will be ignored until re-enabled.",
+    "sourceCount": "{count} declared",
+    "selectSource": "Select Source {id}",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "selected": "Declared for this model",
+    "notSelected": "Not declared",
+    "default": "Model default",
+    "makeDefault": "Make default",
+    "clearDefault": "Clear default",
+    "noSources": "No visible Sources are available for this Provider.",
+    "actions": {
+      "explain": "Explain selection"
+    },
+    "warnings": {
+      "invalid_mode_binding_state": "Invalid config",
+      "invalid_mode_binding_stateDescription": "The saved mode and binding state disagree. Review and save a complete Source Config.",
+      "explicit_empty": "Explicit empty",
+      "explicit_emptyDescription": "No Source is declared. Requests for this model fail closed before credentials or network access.",
+      "no_visible_source": "No visible Source",
+      "no_visible_sourceDescription": "The Provider currently has no non-deleted Source visible to this model.",
+      "no_enabled_source": "No enabled Source",
+      "no_enabled_sourceDescription": "Declared Sources exist, but none are enabled for runtime selection.",
+      "model_default_unavailable": "Default unavailable",
+      "model_default_unavailableDescription": "The model default is declared but currently disabled. It will become usable if the Source is enabled again."
+    },
+    "explain": {
+      "title": "Selection explain",
+      "selected": "Selected before runtime validation",
+      "unselectable": "No Source can be selected",
+      "transformRequired": "Transform required",
+      "executionStatus": "Execution diagnostic",
+      "executionReason": "Execution diagnostic reason",
+      "yes": "yes",
+      "no": "no"
+    },
+    "modeConfirm": {
+      "title": "Change Source selection mode?",
+      "toExplicit": "The current visible Sources will be copied into the explicit draft. Future Sources will not be included automatically.",
+      "toInheritAll": "The explicit bindings will be cleared from the draft. All future visible Sources will be included after saving.",
+      "confirm": "Apply mode change"
+    },
+    "alert": {
+      "saveSuccess": "Source Config saved successfully.",
+      "saveFailed": "Failed to save Source Config: {error}",
+      "explainFailed": "Failed to explain Source selection: {error}"
     }
   },
-  "modelCapabilities": {
-    "streaming": "Streaming",
-    "tools": "Tools",
-    "reasoning": "Reasoning",
-    "imageInput": "Image Input",
-    "embeddings": "Embeddings",
-    "rerank": "Rerank"
-  },
-  "reasoningConfigPanel": {
-    "titles": {
-      "provider": "Provider reasoning config",
-      "model": "Model reasoning config"
-    },
+  "requestPatchVariant": {
+    "title": "Request Patches",
+    "description": "Review Source-bound base and suffix Variants, four-layer evaluation, and model overrides.",
     "actions": {
-      "save": "Save reasoning config",
-      "clearProvider": "Clear provider config",
-      "clearModel": "Clear model override"
+      "addRule": "Add Rule",
+      "addVariant": "Add Variant",
+      "addModelRule": "Add Model Rule",
+      "addModelSuffix": "Add Model Suffix",
+      "allowModel": "Allow this model",
+      "deleteRule": "Delete Rule",
+      "deleteVariant": "Delete Variant",
+      "details": "Details",
+      "editRule": "Edit Rule",
+      "editVariant": "Edit Variant",
+      "preview": "Preview",
+      "refresh": "Refresh",
+      "restore": "Restore"
     },
-    "summary": {
-      "ownerConfig": "Owner config",
-      "providerDefault": "Provider default",
-      "effectiveConfig": "Effective config"
+    "alert": {
+      "created": "Request Patch Variant created.",
+      "updated": "Request Patch Variant updated.",
+      "deleted": "Request Patch Variant deleted.",
+      "restored": "Request Patch suffix inheritance restored.",
+      "saveFailed": "Failed to save Request Patch Variant: {error}",
+      "deleteFailed": "Failed to delete Request Patch Variant: {error}"
+    },
+    "delete": {
+      "title": "Delete Request Patch Variant?",
+      "description": "Delete Variant {variant}? Its rules and exposure metadata will no longer be active."
+    },
+    "restore": {
+      "title": "Restore Request Patch inheritance?",
+      "description": "Remove the disabled zero-rule override for Variant {variant} and allow the Source suffix to inherit again.",
+      "confirm": "Restore inheritance"
+    },
+    "editor": {
+      "addTitle": "Add Request Patch Variant",
+      "editTitle": "Edit Request Patch Variant",
+      "description": "Save the Variant and all of its Rules together. Preview checks conflicts and sensitive targets before persistence.",
+      "readOnlyDescription": "Source Rules are shown as read-only evidence. Model Rules remain independently editable.",
+      "suffixPlaceholder": "for example: reasoning",
+      "suffixHelp": "Leave empty for the base Variant. Suffixes use lowercase letters, digits, and single hyphens.",
+      "enabledHelp": "Disabled suffix Variants can act as model tombstones.",
+      "exposeHelp": "Expose an enabled suffix Variant in downstream model discovery.",
+      "rulesHelp": "Rules are edited locally and submitted with the complete Variant.",
+      "addRuleTitle": "Add Request Patch Rule",
+      "editRuleTitle": "Edit Request Patch Rule",
+      "ruleDescription": "Choose a placement and target, then provide a JSON value when using SET.",
+      "selectPlacement": "Select placement",
+      "selectOperation": "Select operation",
+      "targetPlaceholderHeader": "authorization",
+      "targetPlaceholderQuery": "api-version",
+      "targetPlaceholderBody": "/generationConfig/temperature",
+      "targetHelpHEADER": "Use a header name. Reserved transport headers are rejected by the backend.",
+      "targetHelpQUERY": "Use a query key without ?, &, =, or whitespace.",
+      "targetHelpBODY": "Use a JSON Pointer such as /model or /generationConfig/temperature.",
+      "valueHelp": "HEADER and QUERY accept JSON scalar values. BODY accepts any JSON value.",
+      "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
+      "removeValuePlaceholder": "REMOVE does not accept a value.",
+      "descriptionPlaceholder": "Optional note for operators and future debugging."
+    },
+    "emptyRules": "No Rules in this Variant.",
+    "errors": {
+      "target": "Target is required.",
+      "required": "SET Rules require a JSON value.",
+      "suffixRequired": "A suffix is required for this Model Variant.",
+      "invalid": "Value must be valid JSON.",
+      "previewInvalid": "Preview did not produce a valid executable Variant."
     },
     "fields": {
-      "patchFamily": "Patch family",
-      "preset": "Preset",
-      "suffix": "Suffix",
-      "runtime": "Runtime",
+      "description": "Description",
       "enabled": "Enabled",
-      "models": "/models",
-      "patch": "Patch",
-      "reasoning": "Reasoning"
+      "expose": "Expose in models",
+      "operation": "Operation",
+      "placement": "Placement",
+      "rules": "Rules",
+      "status": "Status",
+      "suffix": "Suffix",
+      "target": "Target",
+      "value": "Value",
+      "variant": "Variant"
     },
-    "modes": {
-      "inherit": "Inherit provider",
-      "disabled": "Disabled",
-      "custom": "Custom"
+    "manager": {
+      "eyebrow": "Source-bound Request Patches",
+      "description": "Manage base and suffix Variants for this Source. Rules, exposure, and runtime evidence stay in the same scope.",
+      "loading": "Loading Request Patch Variants...",
+      "empty": "No Variants configured.",
+      "emptyDescription": "Add a base or suffix Variant to start documenting this Source's request transformation.",
+      "totalVariants": "Variants",
+      "totalRules": "Rules",
+      "suffixVariants": "Suffix Variants",
+      "ruleCount": "{count} Rules"
+    },
+    "model": {
+      "noSources": "No Provider Sources are available for this model.",
+      "sourceSummary": "{variants} Variant(s) in this Source scope",
+      "baseDescription": "Base layers resolve Source Base and Model Base configuration.",
+      "suffixDescription": "Suffix layers resolve Source Suffix and Model Suffix configuration.",
+      "sourceRulesReadOnly": "Source Rules (read-only)"
+    },
+    "origins": {
+      "SourceBase": "Source Base",
+      "ModelBase": "Model Base",
+      "SourceSuffix": "Source Suffix",
+      "ModelSuffix": "Model Suffix"
+    },
+    "operations": {
+      "SET": "Set",
+      "REMOVE": "Remove"
+    },
+    "placements": {
+      "HEADER": "Header",
+      "QUERY": "Query Parameter",
+      "BODY": "Body JSON"
+    },
+    "preview": {
+      "title": "Variant Preview",
+      "valid": "Valid",
+      "invalid": "Needs attention",
+      "layers": "Four-layer result",
+      "ruleCount": "Rules",
+      "effectiveRules": "Effective Rules",
+      "affectedModels": "Affected models",
+      "conflicts": "Conflicts",
+      "executable": "Executable",
+      "exposed": "Exposed in models",
+      "yes": "Yes",
+      "no": "No"
+    },
+    "explain": {
+      "layers": "Four-layer evaluation",
+      "effective": "Effective Rules",
+      "conflictTitle": "Request Patch conflicts detected",
+      "conflictDescription": "{count} conflict(s) are present in the Source/model evaluation. Runtime execution fails closed until they are resolved."
     },
     "states": {
-      "unsaved": "unsaved",
-      "review": "review",
-      "supported": "supported",
-      "blocked": "blocked"
-    },
-    "sources": {
-      "providerDefault": "provider default",
-      "modelCustom": "model custom",
-      "modelDisabled": "model disabled",
-      "missing": "missing config",
-      "unknown": "unknown"
-    },
-    "messages": {
-      "saveOwnerFirst": "Save the owner before configuring reasoning suffixes.",
-      "loading": "Loading reasoning config",
-      "modelReasoningUnsupported": "This model is marked as not supporting reasoning. Reasoning-required presets can still be saved, but runtime preview will mark them unsupported.",
-      "selectPatchFamily": "Select a patch family",
-      "previewRefreshing": "Refreshing patch preview.",
-      "familyTargets": "Targets: {targets}.",
-      "familyIncompatible": "Targets: {targets}; current provider resolves to {current}.",
-      "familyTargetsShort": "targets {targets}",
-      "familyCompatibleShort": "compatible with {current}",
-      "presetUnsupported": "Preset is not supported by the selected family.",
-      "reviewOnly": "Enable this preset before saving to apply it at runtime.",
-      "presetDisabled": "Preset is not enabled.",
-      "runtimeUnsupported": "Runtime preview marks this preset unsupported.",
-      "runtimeSupported": "Runtime preview is supported.",
-      "disabledMode": "Model reasoning suffixes are disabled.",
-      "none": "none"
-    },
-    "alert": {
-      "selectPatchFamily": "Select a reasoning patch family first.",
-      "previewFailed": "Failed to preview reasoning config draft.",
-      "loadFailed": "Failed to load reasoning config.",
-      "saveFailed": "Failed to save reasoning config.",
-      "clearFailed": "Failed to clear reasoning config.",
-      "saved": "Reasoning config saved.",
-      "draftCleared": "Reasoning config draft cleared.",
-      "cleared": "Reasoning config cleared."
-    }
-  },
-  "runtimeFeatureConfigPanel": {
-    "titles": {
-      "provider": "Provider runtime features",
-      "model": "Model runtime features"
-    },
-    "features": {
-      "openaiReasoningContentRepair": {
-        "label": "Reasoning callback",
-        "description": "Restore cached reasoning_content for compatible OpenAI tool continuations."
-      }
-    },
-    "actions": {
-      "saveProvider": "Save provider default",
-      "saveModel": "Save model override",
-      "clearProvider": "Clear provider default",
-      "clearModel": "Inherit provider"
-    },
-    "summary": {
-      "ownerConfig": "Current config",
-      "providerDefault": "Provider default",
-      "effective": "Effective value"
-    },
-    "fields": {
-      "providerDefault": "Provider default",
-      "modelOverride": "Model override"
-    },
-    "sources": {
-      "defaultFalse": "default false",
-      "providerDefault": "provider default",
-      "modelOverride": "model override",
-      "unknown": "unknown"
-    },
-    "values": {
+      "base": "Base",
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "missing": "missing"
+      "sourceVariant": "Source",
+      "modelOverride": "Model override",
+      "metadataOverride": "Metadata override",
+      "metadataOverrideDescription": "Enabled with no Model Rules. The inherited effective set currently contains {count} Rule(s).",
+      "tombstone": "Disabled tombstone",
+      "tombstoneDescription": "This disabled zero-rule Variant masks the inherited suffix. Restore deletes the tombstone.",
+      "sourceDisabled": "Source disabled",
+      "unboundDormant": "Unbound / dormant"
     },
-    "messages": {
-      "reasoningIndependent": "Reasoning suffix config and runtime repair are independent. Enabling reasoning_config does not automatically enable reasoning_content repair.",
-      "saveOwnerFirst": "Save the owner before configuring runtime features.",
-      "loading": "Loading runtime feature config",
-      "providerDefaultHelp": "This default applies to models that do not define their own override.",
-      "modelOverrideHelp": "Saving here creates a model override. Clear it to inherit the provider default again."
-    },
-    "alert": {
-      "loadFailed": "Failed to load runtime feature config.",
-      "saveFailed": "Failed to save runtime feature config.",
-      "clearFailed": "Failed to clear runtime feature config.",
-      "saved": "Runtime feature config saved.",
-      "cleared": "Runtime feature config cleared."
+    "status": {
+      "Effective": "Effective",
+      "Overridden": "Overridden",
+      "Conflicted": "Conflicted",
+      "Masked": "Masked",
+      "Dormant": "Dormant"
     }
   },
   "apiKeyPage": {
@@ -1053,6 +1237,7 @@
   "providerEditPage": {
     "tabs": {
       "base": "Basic",
+      "sources": "Sources",
       "models": "Models",
       "credentials": "Credentials",
       "advanced": "Advanced"
@@ -1067,9 +1252,10 @@
       "fetchDetailFailed": "Failed to fetch provider detail for ID {providerId}",
       "loadDataFailed": "Failed to load provider data for ID: {providerId}.",
       "providerTypeRequired": "Provider Type cannot be empty.",
+      "profileTypeRequired": "Initial Source Profile cannot be empty.",
       "nameRequired": "Name cannot be empty.",
       "providerKeyRequired": "Provider Key cannot be empty.",
-      "endpointRequired": "Endpoint cannot be empty.",
+      "baseUrlRequired": "Base URL cannot be empty for this profile.",
       "apiKeyRequired": "API Key cannot be empty.",
       "modelNameRequired": "Model Name cannot be empty.",
       "baseInfoUpdateSuccess": "Provider base information updated successfully.",
@@ -1078,11 +1264,10 @@
       "bootstrapSaveSuccess": "Provider saved successfully.",
       "bootstrapSaveAndTestSuccess": "Provider saved and tested successfully.",
       "bootstrapSaveAndTestFailed": "Provider saved, but the bootstrap test failed: {error}",
+      "bootstrapSaveAndTestSkipped": "Provider saved without a connection test: {reason}",
       "bootstrapFailed": "Failed to bootstrap provider: {error}",
       "providerNotSavedForApiKey": "Provider must be saved before API Keys can be added.",
       "apiKeyRequiredWithIndex": "API Key #{index} cannot be empty.",
-      "vertexApiKeyMissingFields": "Vertex API Key #{index} (JSON) is missing or has empty fields: {fields}.",
-      "vertexApiKeyInvalidJson": "Vertex API Key #{index} must be a valid JSON format.",
       "saveApiKeyFailed": "Failed to save API Key: {error}",
       "providerNotSavedForModel": "Provider must be saved before models can be added or edited.",
       "modelIdRequiredWithIndex": "Model ID for model #{index} cannot be empty.",
@@ -1091,34 +1276,20 @@
       "providerNotSavedForModelDelete": "Provider not saved, cannot delete model from backend.",
       "deleteModelFailed": "Failed to delete model: {error}",
       "deleteApiKeyFailed": "Failed to delete API Key: {error}",
-      "fetchRemoteModelsFailed": "Failed to fetch remote models: {error}",
-      "noRemoteModels": "Could not get models from remote, or the list is empty.",
-      "newModelsAdded": "{count} new models added.",
-      "noNewModels": "No new models to add. All remote models may already exist.",
-      "uncommittedCleared": "Uncommitted models have been cleared.",
-      "noUncommittedToClear": "No uncommitted models to clear.",
       "noModels": "No models available.",
       "noApiKeys": "No API Keys available.",
       "apiKeySaveSuccess": "API Key saved successfully.",
-      "modelSaveSuccess": "Model saved successfully.",
       "modelDeleteSuccess": "Model deleted successfully.",
       "providerIdNotFound": "Provider ID not found.",
       "apiKeyDeleteSuccess": "API Key deleted successfully.",
       "providerNotSavedForCheck": "Provider must be saved before a check can be performed.",
       "noApiKeyForCheck": "At least one API Key must be saved to perform a model check.",
-      "noModelForCheck": "At least one model must be saved to perform an API key check.",
-      "checking": "Performing check...",
+      "noModelForCheck": "At least one enabled CHAT model or draft is required for this check.",
+      "noSourceForCheck": "At least one Source must be saved before a check can be performed.",
+      "sourceCheckChatOnly": "Source Check currently supports CHAT models only.",
       "checkSuccess": "Check successful. The connection is valid.",
       "checkFailed": "Check failed: {error}",
-      "buttonCheckAll": "Check All",
-      "noModelsToCheck": "No saved models to check.",
-      "noApiKeysToCheck": "No saved API keys to check.",
-      "batchChecking": "Performing batch check for {type}...",
-      "checkSuccessShort": "Check successful.",
-      "batchCheckComplete": "Batch check complete: {success}/{total} successful for {type}.",
-      "apiKeyNameFallback": "Key ending in ...{lastKeyChars}",
-      "checkTypeModels": "Models",
-      "checkTypeApiKeys": "API Keys"
+      "apiKeyNameFallback": "Key ending in ...{lastKeyChars}"
     },
     "sections": {
       "quickStart": {
@@ -1129,18 +1300,23 @@
         "identityTitle": "Provider Identity",
         "identityDescription": "The provider name and key can still be adjusted after bootstrap."
       },
+      "logicalProvider": {
+        "title": "Logical Provider",
+      "description": "Owns identity, models, credentials, and Source-bound configuration."
+      },
+      "initialSource": {
+        "title": "Initial Source",
+        "description": "The first Source is created with the provider. Add and manage additional Sources from the Sources tab."
+      },
       "advanced": {
         "title": "Advanced",
-        "description": "Manage extra API keys, more models, request patches, and remote model sync here."
+        "description": "Manage extra API keys, more models, and runtime checks here."
       },
-      "advancedConfig": {
-        "title": "Reasoning",
-        "description": "Manage reasoning suffixes and callback repair for this provider."
-      },
-      "modelsDescription": "Edit model name, mapped model name, capabilities, and enabled state inline. Full configuration still lives in ModelEdit."
+      "modelsDescription": "Edit model name, mapped model name, Source Config summary, and enabled state inline. Full configuration still lives in ModelEdit."
     },
-    "modelCapabilities": {
-      "title": "Capabilities"
+    "modelSourceConfig": {
+      "title": "Source Config",
+      "warningCount": "{count} warning(s)"
     },
     "preview": {
       "title": "Identity Preview",
@@ -1160,6 +1336,7 @@
     },
     "credentials": {
       "items": "credentials",
+      "keyId": "Key #{id}",
       "enabled": "Enabled",
       "disabled": "Disabled",
       "enable": "Enable",
@@ -1173,110 +1350,28 @@
       "reveal": "Reveal",
       "revealTitle": "Revealed Provider Credential",
       "revealConfirm": "Confirm this plaintext reveal. When authenticator verification is enabled, submit a fresh code before decryption.",
-      "checkDraft": "Check Draft",
       "secretLocalOnly": "The plaintext is kept only in this dialog and is cleared when it closes.",
-      "vertexPlaceholder": "Paste the complete Google service account JSON",
-      "vertexHelp": "Required fields: client_email, private_key, private_key_id, and token_uri. The private key is sent only to the manager API.",
-      "vertexInvalid": "Enter a valid service account JSON with all required fields.",
+      "providerOwnership": "Credentials belong to the Logical Provider. Every Source for this Provider uses this shared credential pool; Source-level credentials are not supported before 1.0.",
       "mutationSuccess": "Provider credential updated.",
       "mutationFailed": "The credential operation failed: {error}. The saved state was refreshed because runtime activation may have failed after persistence.",
       "revealFailed": "Failed to reveal provider credential: {error}"
     },
-    "modalSelectModel": {
-      "title": "Select Model for Check",
-      "description": "Please select a model to perform the check with the selected API key.",
-      "target": "Selected API key: {target}",
-      "selectPlaceholder": "Select a model"
-    },
-    "modalSelectApiKey": {
-      "title": "Select API Key for Check",
-      "description": "Please select an API key to perform the check with the selected model.",
-      "target": "Selected model: {target}",
-      "selectPlaceholder": "Select an API key"
-    },
-    "requestPatch": {
-      "title": "Request Patches",
-      "description": "Manage direct provider rules inherited by downstream models. Model explain and conflict views remain on the model page.",
-      "directTitle": "Direct Provider Rules",
-      "directDescription": "Provider rules are inherited by downstream models, and exact-target model rules can override them.",
-      "addRule": "Add Rule",
-      "emptyDirect": "No direct request patches configured for this provider yet.",
-      "noDescription": "No description",
-      "placements": {
-        "HEADER": "Header",
-        "QUERY": "Query Parameter",
-        "BODY": "Body JSON"
-      },
-      "operations": {
-        "SET": "Set",
-        "REMOVE": "Remove"
-      },
-      "fields": {
-        "value": "Value",
-        "description": "Description",
-        "trace": "Trace",
-        "enabled": "Enabled",
-        "ruleId": "Rule ID"
-      },
-      "states": {
-        "disabled": "Disabled",
-        "enabled": "Enabled"
-      },
-      "messages": {
-        "providerDirect": "Direct provider rule. Inherited/effective diagnostics are shown on each model."
-      },
-      "editor": {
-        "addTitle": "Add Provider Request Patch",
-        "editTitle": "Edit Provider Request Patch",
-        "description": "Create direct provider rules for headers, query parameters, or body JSON Pointer targets.",
-        "placement": "Placement",
-        "operation": "Operation",
-        "selectPlacement": "Select placement",
-        "selectOperation": "Select operation",
-        "target": "Target",
-        "targetPlaceholderHeader": "authorization",
-        "targetPlaceholderQuery": "api-version",
-        "targetPlaceholderBody": "/generationConfig/temperature",
-        "valueJson": "Value JSON",
-        "valueHelp": "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
-        "descriptionLabel": "Description",
-        "descriptionPlaceholder": "Optional note for operators and future debugging.",
-        "enabledTitle": "Enabled",
-        "enabledDescription": "Disabled rules stay on the provider but are skipped at runtime.",
-        "targetHelpHeader": "Use a header name. Reserved transport headers are rejected by the backend.",
-        "targetHelpQuery": "Use a query parameter key without ?, &, =, or whitespace.",
-        "targetHelpBody": "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
-        "removeValuePlaceholder": "REMOVE does not accept value_json.",
-        "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
-        "create": "Create Rule",
-        "save": "Save Changes",
-        "dangerousTitle": "Confirm Dangerous Target",
-        "dangerousDescription": "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
-        "saveAnyway": "Save Anyway"
-      },
-      "alert": {
-        "saveBeforeEdit": "Save the provider before editing request patch rules.",
-        "saveFailed": "Failed to save request patch rule.",
-        "createSuccess": "Provider request patch created.",
-        "updateSuccess": "Provider request patch updated.",
-        "deleteSuccess": "Provider request patch deleted.",
-        "deleteFailed": "Failed to delete provider request patch.",
-        "toggleFailed": "Failed to update request patch status.",
-        "enableSuccess": "Request patch enabled.",
-        "disableSuccess": "Request patch disabled.",
-        "dangerousConfirmFailed": "Failed to confirm dangerous request patch target.",
-        "targetRequired": "Target is required.",
-        "valueRequired": "Value JSON is required for SET rules."
-      }
-    },
     "labelName": "Name",
     "labelProviderKey": "Provider Key",
     "labelProviderType": "Provider Type",
-    "labelEndpoint": "Endpoint",
+    "labelProfileType": "Upstream Profile",
+    "labelBaseUrl": "Base URL",
     "labelUseProxy": "Use Proxy",
     "labelEnabled": "Enabled",
+    "labelApiKeyMode": "API Key Mode",
     "labelLimitModel": "Limit Model",
     "placeholderProviderType": "Select Provider Type",
+    "placeholderProfileType": "Select Upstream Profile",
+    "placeholderApiKeyMode": "Select API Key Mode",
+    "apiKeyModes": {
+      "QUEUE": "Queue",
+      "RANDOM": "Random"
+    },
     "buttonUpdateBaseInfo": "Update Provider Base Info",
     "buttonCreateBaseInfo": "Create Provider & Save Base Info",
     "sectionModels": "Models",
@@ -1284,10 +1379,7 @@
     "tableHeaderMappedModelId": "Mapped Model ID",
     "placeholderModelId": "e.g., gpt-3.5-turbo",
     "placeholderMappedModelId": "e.g., azure-gpt-35 (optional)",
-    "buttonSaveModel": "Save Model",
     "buttonAddModel": "Add Model",
-    "buttonFetchRemote": "Fetch Remote Models",
-    "buttonClearUncommitted": "Clear Uncommitted",
     "sectionApiKeys": "API Keys",
     "tableHeaderApiKey": "API Key",
     "tableHeaderDescription": "Description",
@@ -1296,10 +1388,88 @@
     "placeholderDescription": "Optional description",
     "buttonSaveThisKey": "Save This Key",
     "buttonAddApiKey": "Add API Key",
-    "buttonBackToList": "Back to List"
+    "buttonBackToList": "Back to List",
+    "sources": {
+      "title": "Provider Sources",
+      "description": "Manage the base URL, operation availability, and persistent enabled/default state for every upstream Source owned by this Provider.",
+      "add": "Add Source",
+      "addTitle": "Add Source",
+      "editTitle": "Edit Source",
+      "drawerDescription": "Source profile is fixed after creation. Update its base URL, supported operations, proxy, and runtime flags.",
+      "createHint": "Save the Provider from the Basic tab first. The initial Source is submitted with the bootstrap form.",
+      "zeroWarning": "This Provider has no Sources.",
+      "zeroDescription": "Requests cannot execute until an enabled Source is available. You can add one now; deleting the last Source is allowed.",
+      "profile": "Upstream Profile",
+      "profilePlaceholder": "Select Upstream Profile",
+      "baseUrl": "Base URL",
+      "officialDefault": "Official default",
+      "officialDefaultPlaceholder": "Leave blank to use the official base URL",
+      "officialDefaultHelp": "An empty value uses and persists the profile's official base URL. Enter a custom URL for a proxy or transparent relay.",
+      "operationPathOverride": "Path override",
+      "operationPathPlaceholder": "Optional, for example /v1/embeddings",
+      "operations": {
+        "chatCompletions": {
+          "label": "Chat completions",
+          "help": "Allow this Source to serve the OpenAI-compatible chat completions operation."
+        },
+        "embeddings": {
+          "label": "Embeddings",
+          "help": "Allow this Source to serve embedding models."
+        },
+        "rerank": {
+          "label": "Rerank",
+          "help": "Allow this Source to serve rerank models through its configured path."
+        }
+      },
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "default": "Default",
+      "defaultHint": "Only one enabled Source can be the Provider default.",
+      "table": {
+        "profile": "Profile",
+        "baseUrl": "Base URL",
+        "state": "State"
+      },
+      "editAction": "Edit Source",
+      "requestPatchAction": "Request Patch",
+      "checkAction": "Check Source",
+      "enableAction": "Enable Source",
+      "disableAction": "Disable Source",
+      "setDefaultAction": "Set Default Source",
+      "unsetDefaultAction": "Unset Default Source",
+      "deleteAction": "Delete Source",
+      "confirmDelete": "Delete Source {target}? The last Source may also be deleted.",
+      "baseUrlRequired": "Base URL cannot be empty for this profile.",
+      "createSuccess": "Source created successfully.",
+      "updateSuccess": "Source updated successfully.",
+      "deleteSuccess": "Source deleted successfully.",
+      "saveFailed": "Failed to save Source: {error}",
+      "deleteFailed": "Failed to delete Source: {error}",
+      "impactUnavailable": "Source impact preview failed: {error}. You may still continue after reviewing the normal confirmation.",
+      "impactDescription": "{changed} protocol selection(s) change; {unselectable} become unselectable. INHERIT_ALL models: {inheritAll}; explicit binding models: {explicit}; explicit defaults: {defaults}. Per protocol changed/unselectable: {protocols}",
+      "confirmDisable": "Disable Source {target}?",
+      "confirmDisableFallback": "Disabling this Source may make some models unavailable.",
+      "confirmSetDefault": "Set Source {target} as the Provider default?",
+      "confirmSetDefaultFallback": "This changes the Provider default used by INHERIT_ALL models.",
+      "confirmUnsetDefault": "Unset the Provider default for Source {target}?",
+      "confirmUnsetDefaultFallback": "INHERIT_ALL models may become unavailable when no default can satisfy a request.",
+      "confirmDeleteFallback": "Deleting this Source hides it from runtime selection and may affect model availability."
+    },
+    "checkDialog": {
+      "title": "Choose check targets",
+      "description": "Only enabled Sources, models, and credentials are selected automatically. The row you opened remains the fixed target, even when disabled.",
+      "sourceLabel": "Source",
+      "sourcePlaceholder": "Select an enabled Source",
+      "modelLabel": "Model",
+      "modelPlaceholder": "Select an enabled saved model",
+      "apiKeyLabel": "Provider Key",
+      "apiKeyPlaceholder": "Select an enabled Provider Key"
+    }
   },
   "modelEditPage": {
     "title": "Edit Model",
+    "createTitle": "Create Model",
+    "createDescription": "Create the model and its Source Config together. You can refine either part independently later.",
     "loading": "Loading model data...",
     "buttonBackToModels": "Back to Model Library",
     "buttonBackToProviders": "View Providers",
@@ -1308,25 +1478,22 @@
       "unknown": "Unknown Provider",
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "description": "This model belongs to the provider above. Basic model fields stay editable here; cost, reasoning, and request patches are managed separately."
+      "description": "This model belongs to the provider above. Basic fields, Source Config, cost, and Source-bound Request Patches are managed here."
     },
     "labelModelName": "Model Name",
     "labelRealModelName": "Real Model Name",
+    "labelModelKind": "Model Kind",
+    "modelKindCreateHelp": "Choose the model's operation family. Model kind cannot be changed after creation.",
+    "modelKindImmutableHelp": "Model kind is fixed after creation.",
     "labelEnabled": "Enabled",
-    "capabilities": {
-      "title": "Model Capabilities",
-      "description": "Explicit runtime capabilities used to validate and materialize requests. Keep them aligned with actual provider behavior."
-    },
-    "advancedConfig": {
-      "title": "Reasoning",
-      "description": "Manage reasoning suffixes and callback repair for this model."
-    },
     "alert": {
       "missingId": "Model ID is missing. Cannot edit.",
       "loadDataFailed": "Failed to load model data for ID: {modelId}.",
       "nameRequired": "Model Name cannot be empty.",
       "updateSuccess": "Model updated successfully.",
-      "saveFailed": "Failed to save model: {error}"
+      "saveFailed": "Failed to save model: {error}",
+      "createSuccess": "Model created successfully.",
+      "createFailed": "Failed to create model: {error}"
     },
     "priceSection": {
       "title": "Cost Catalog",
@@ -1339,119 +1506,6 @@
       "enabled": "Enabled",
       "effectiveFrom": "Effective from",
       "effectiveUntil": "Effective until"
-    },
-    "requestPatch": {
-      "title": "Request Patches",
-      "description": "Edit direct model rules and review inherited provider rules, effective runtime output, and explain diagnostics from one place.",
-      "refresh": "Refresh",
-      "loading": "Loading request patch state...",
-      "providerFallback": "Provider",
-      "directTitle": "Direct Model Rules",
-      "directDescription": "Model rules can override inherited provider rules only on the exact same target.",
-      "addRule": "Add Rule",
-      "emptyDirect": "No direct request patches configured for this model yet.",
-      "inheritedTitle": "Inherited Provider Rules",
-      "inheritedDescription": "Active provider direct rules inherited by this model from {provider}. Overridden rules stay visible.",
-      "emptyInherited": "This model is not inheriting any active provider request patches.",
-      "effectiveTitle": "Effective Runtime Result",
-      "effectiveDescription": "This is the resolved rule set the runtime will try to apply for this model.",
-      "emptyEffective": "No effective request patches are active for this model.",
-      "explainTitle": "Explain and Conflict",
-      "explainDescription": "Review how each active rule resolves, which rules are overridden, and whether any unsafe cross-scope conflicts remain.",
-      "emptyExplain": "No active request patch diagnostics are available for this model.",
-      "details": "Details",
-      "noDescription": "No description",
-      "conflictBannerTitle": "Unsafe request patch configuration",
-      "conflictBannerDescription": "This model currently has provider/model cross-scope conflicts. Resolve them before treating the model as safe to use.",
-      "conflictFields": {
-        "providerTarget": "Provider Target",
-        "modelTarget": "Model Target"
-      },
-      "placements": {
-        "HEADER": "Header",
-        "QUERY": "Query Parameter",
-        "BODY": "Body JSON"
-      },
-      "operations": {
-        "SET": "Set",
-        "REMOVE": "Remove"
-      },
-      "fields": {
-        "value": "Value",
-        "description": "Description",
-        "source": "Source",
-        "trace": "Trace",
-        "enabled": "Enabled",
-        "ruleId": "Rule ID",
-        "sourceRule": "Source Rule",
-        "effectiveRule": "Effective Rule",
-        "conflictsWith": "Conflicts With"
-      },
-      "states": {
-        "effective": "Effective",
-        "overridden": "Overridden",
-        "conflicted": "Conflicted",
-        "disabled": "Disabled",
-        "enabled": "Enabled"
-      },
-      "origin": {
-        "ProviderDirect": "Provider Direct",
-        "ModelDirect": "Model Direct"
-      },
-      "messages": {
-        "directEffective": "This direct model rule is part of the effective runtime set.",
-        "disabledSkipped": "Disabled rules stay stored on the model but are skipped at runtime.",
-        "inheritedEffective": "Inherited from the provider and currently effective for this model.",
-        "overriddenByRule": "Overridden by model rule {id}.",
-        "conflictsWithRules": "Conflicts with rule(s) {ids}.",
-        "overridesProviderRules": "Overrides provider rule(s) {ids}.",
-        "effectiveFromOrigin": "Applied from {origin} rule {id}.",
-        "noRuntimeTrace": "No additional diagnostic message."
-      },
-      "editor": {
-        "addTitle": "Add Model Request Patch",
-        "editTitle": "Edit Model Request Patch",
-        "description": "Create direct model rules for headers, query parameters, or body JSON Pointer targets.",
-        "placement": "Placement",
-        "operation": "Operation",
-        "selectPlacement": "Select placement",
-        "selectOperation": "Select operation",
-        "target": "Target",
-        "targetPlaceholderHeader": "authorization",
-        "targetPlaceholderQuery": "api-version",
-        "targetPlaceholderBody": "/generationConfig/temperature",
-        "valueJson": "Value JSON",
-        "valueHelp": "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
-        "descriptionLabel": "Description",
-        "descriptionPlaceholder": "Optional note for operators and future debugging.",
-        "enabledTitle": "Enabled",
-        "enabledDescription": "Disabled rules stay on the model but are skipped at runtime.",
-        "targetHelpHeader": "Use a header name. Reserved transport headers are rejected by the backend.",
-        "targetHelpQuery": "Use a query parameter key without ?, &, =, or whitespace.",
-        "targetHelpBody": "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
-        "removeValuePlaceholder": "REMOVE does not accept value_json.",
-        "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
-        "create": "Create Rule",
-        "save": "Save Changes",
-        "dangerousTitle": "Confirm Dangerous Target",
-        "dangerousDescription": "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
-        "saveAnyway": "Save Anyway"
-      },
-      "alert": {
-        "loadFailed": "Failed to load request patch state.",
-        "saveBeforeEdit": "Save the model before editing request patch rules.",
-        "saveFailed": "Failed to save request patch rule.",
-        "createSuccess": "Model request patch created.",
-        "updateSuccess": "Model request patch updated.",
-        "deleteSuccess": "Model request patch deleted.",
-        "deleteFailed": "Failed to delete request patch rule.",
-        "toggleFailed": "Failed to update request patch status.",
-        "enableSuccess": "Request patch enabled.",
-        "disableSuccess": "Request patch disabled.",
-        "dangerousConfirmFailed": "Failed to confirm dangerous request patch target.",
-        "targetRequired": "Target is required.",
-        "valueRequired": "Value JSON is required for SET rules."
-      }
     }
   },
   "costPage": {

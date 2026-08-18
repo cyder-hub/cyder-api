@@ -34,6 +34,27 @@
             {{ provider.provider_key }}
           </span>
         </div>
+        <div class="rounded-lg border border-gray-100 px-3 py-2.5">
+          <div class="flex items-center justify-between gap-3">
+            <span>{{ t("providerPage.table.sources") }}</span>
+            <div class="flex min-w-0 items-center gap-2">
+              <Badge variant="outline" class="font-mono text-[10px]">
+                {{ t("providerPage.sources.count", { count: provider.source_count }) }}
+              </Badge>
+              <span class="font-mono text-gray-700">
+                {{ t("providerPage.sources.enabled", { count: provider.enabled_source_count }) }}
+              </span>
+            </div>
+          </div>
+          <div v-if="provider.default_source_id" class="mt-2 text-right">
+            <span class="font-mono text-[11px] text-gray-500">
+              {{ provider.default_source_profile_type }} · #{{ provider.default_source_id }}
+            </span>
+          </div>
+          <Badge v-else class="mt-2 border-amber-200 bg-amber-50 font-mono text-[10px] text-amber-700 hover:bg-amber-50">
+            {{ t("providerPage.sources.noDefault") }}
+          </Badge>
+        </div>
       </div>
 
       <template #actions>
@@ -45,6 +66,15 @@
         >
           <Server class="mr-1.5 h-3.5 w-3.5" />
           {{ t("common.edit") }}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="w-full justify-center text-gray-600"
+          @click="$emit('sources', provider)"
+        >
+          <Network class="mr-1.5 h-3.5 w-3.5" />
+          {{ t("providerPage.sources.manage") }}
         </Button>
         <Button
           variant="ghost"
@@ -71,7 +101,7 @@
 
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
-import { Activity, Server, Trash2 } from "lucide-vue-next";
+import { Activity, Network, Server, Trash2 } from "lucide-vue-next";
 
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { Badge } from "@/components/ui/badge";
@@ -96,6 +126,7 @@ defineProps<{
 
 defineEmits<{
   edit: [provider: ProviderSummaryItem];
+  sources: [provider: ProviderSummaryItem];
   runtime: [provider: ProviderSummaryItem];
   delete: [provider: ProviderSummaryItem];
 }>();

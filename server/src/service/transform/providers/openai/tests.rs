@@ -1,5 +1,5 @@
 use super::*;
-use crate::schema::enum_def::{LlmApiType, ProviderType};
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::{StreamTransformer, unified::*};
 use serde_json::{Value, json};
 
@@ -13,6 +13,7 @@ fn test_openai_request_to_unified() {
                 content: Some(OpenAiContent::Text(
                     "You are a helpful assistant.".to_string(),
                 )),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,
@@ -21,6 +22,7 @@ fn test_openai_request_to_unified() {
             OpenAiMessage {
                 role: "user".to_string(),
                 content: Some(OpenAiContent::Text("Hello".to_string())),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,
@@ -32,6 +34,7 @@ fn test_openai_request_to_unified() {
         stream: Some(false),
         temperature: Some(0.8),
         max_tokens: Some(100),
+        max_completion_tokens: None,
         top_p: Some(0.9),
         stop: Some(OpenAiStop::String("stop".to_string())),
         n: None,
@@ -126,17 +129,17 @@ fn test_unified_request_to_openai() {
 }
 
 #[test]
-fn test_unified_request_to_openai_preserves_reasoning_as_text() {
+fn openai_request_reasoning_history_uses_the_dedicated_reasoning_channel() {
     let unified_req = UnifiedRequest {
-        model: Some("gpt-4".to_string()),
+        model: Some("reasoning-model".to_string()),
         messages: vec![UnifiedMessage {
-            role: UnifiedRole::User,
+            role: UnifiedRole::Assistant,
             content: vec![
-                UnifiedContentPart::Text {
-                    text: "Question".to_string(),
-                },
                 UnifiedContentPart::Reasoning {
-                    text: "hidden reasoning".to_string(),
+                    text: "private reasoning".to_string(),
+                },
+                UnifiedContentPart::Text {
+                    text: "visible answer".to_string(),
                 },
             ],
         }],
@@ -144,16 +147,28 @@ fn test_unified_request_to_openai_preserves_reasoning_as_text() {
     };
 
     let openai_req: OpenAiRequestPayload = unified_req.into();
-    match openai_req.messages[0].content.as_ref().unwrap() {
-        OpenAiContent::Parts(parts) => {
-            assert_eq!(parts.len(), 2);
-            assert!(matches!(
-                &parts[1],
-                OpenAiContentPart::Text { text } if text == "hidden reasoning"
-            ));
-        }
-        other => panic!("Expected multipart OpenAI content, got {:?}", other),
-    }
+    assert_eq!(openai_req.messages.len(), 1);
+    assert_eq!(
+        openai_req.messages[0].reasoning_content.as_deref(),
+        Some("private reasoning")
+    );
+    assert!(matches!(
+        openai_req.messages[0].content.as_ref(),
+        Some(OpenAiContent::Text(text)) if text == "visible answer"
+    ));
+
+    let round_trip: UnifiedRequest = openai_req.into();
+    assert_eq!(
+        round_trip.messages[0].content,
+        vec![
+            UnifiedContentPart::Reasoning {
+                text: "private reasoning".to_string(),
+            },
+            UnifiedContentPart::Text {
+                text: "visible answer".to_string(),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -217,6 +232,7 @@ fn test_openai_response_to_unified() {
             message: OpenAiMessage {
                 role: "assistant".to_string(),
                 content: Some(OpenAiContent::Text("Hi there!".to_string())),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,
@@ -314,6 +330,7 @@ fn test_openai_response_to_unified_promotes_refusal() {
             message: OpenAiMessage {
                 role: "assistant".to_string(),
                 content: Some(OpenAiContent::Text("safe answer".to_string())),
+                reasoning_content: None,
                 tool_calls: None,
                 name: None,
                 tool_call_id: None,
@@ -418,7 +435,8 @@ fn test_openai_chunk_to_unified() {
 
 #[test]
 fn test_openai_chunk_to_unified_stream_events_with_reasoning_and_text() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     let reasoning_events = openai_chunk_to_unified_stream_events_with_state(
         OpenAiChunkResponse {
@@ -547,7 +565,8 @@ fn test_openai_chunk_to_unified_stream_events_with_reasoning_and_text() {
 
 #[test]
 fn test_openai_chunk_to_unified_stream_events_drops_late_reasoning_after_text_started() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
     transformer.session.set_current_content_block_index(Some(0));
 
     let events = openai_chunk_to_unified_stream_events_with_state(
@@ -580,7 +599,8 @@ fn test_openai_chunk_to_unified_stream_events_drops_late_reasoning_after_text_st
 
 #[test]
 fn test_openai_chunk_to_unified_stream_events_emits_tool_call_stop_on_tool_calls_finish() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
 
     let start_events = openai_chunk_to_unified_stream_events_with_state(
         OpenAiChunkResponse {
@@ -712,7 +732,7 @@ fn test_unified_chunk_to_openai() {
 }
 
 #[test]
-fn test_transform_unified_chunk_to_openai_events_emits_diagnostic_for_image_delta() {
+fn test_transform_unified_chunk_to_openai_events_keeps_diagnostic_internal_for_image_delta() {
     let unified_chunk = UnifiedChunkResponse {
         id: "cmpl-123".to_string(),
         model: Some("gpt-4.1".to_string()),
@@ -737,162 +757,21 @@ fn test_transform_unified_chunk_to_openai_events_emits_diagnostic_for_image_delt
         ..Default::default()
     };
 
-    let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::Openai);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
     let events =
         transform_unified_chunk_to_openai_events(unified_chunk, &mut transformer.stream_context())
             .expect("openai chunk events");
 
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].event.as_deref(), Some("transform_diagnostic"));
-    let diagnostic: Value = serde_json::from_str(&events[0].data).unwrap();
-    assert_eq!(diagnostic["semantic_unit"], json!("ImageDelta"));
-
-    let chunk: Value = serde_json::from_str(&events[1].data).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_ne!(events[0].event.as_deref(), Some("transform_diagnostic"));
+    let chunk: Value = serde_json::from_str(&events[0].data).unwrap();
     assert_eq!(chunk["choices"][0]["delta"]["content"], json!("caption"));
-}
-
-#[test]
-fn test_determine_openai_variant_for_vertex_openai_chat_completions() {
+    let summary = transformer.diagnostics_snapshot();
+    assert_eq!(summary.total_fact_count, 1);
     assert_eq!(
-        determine_openai_variant(&ProviderType::VertexOpenai, "chat/completions"),
-        OpenAiVariant::GeminiCompat
-    );
-    assert_eq!(
-        determine_openai_variant(&ProviderType::Openai, "chat/completions"),
-        OpenAiVariant::Standard
-    );
-    assert_eq!(
-        determine_openai_variant(&ProviderType::VertexOpenai, "embeddings"),
-        OpenAiVariant::Standard
-    );
-}
-
-#[test]
-fn test_sanitize_openai_request_payload_for_gemini_variant() {
-    let mut payload = json!({
-        "model": "gemini-2.5-pro",
-        "messages": [{"role": "user", "content": "hello"}],
-        "temperature": 0.2,
-        "tools": [],
-        "stream": true,
-        "stream_options": {"include_usage": true},
-        "parallel_tool_calls": true,
-        "logprobs": true,
-        "user": "user-123"
-    });
-
-    let report = sanitize_openai_request_payload(&mut payload, OpenAiVariant::GeminiCompat);
-
-    assert_eq!(
-        payload,
-        json!({
-            "model": "gemini-2.5-pro",
-            "messages": [{"role": "user", "content": "hello"}],
-            "temperature": 0.2,
-            "tools": [],
-            "stream": true,
-            "stream_options": {"include_usage": true}
-        })
-    );
-    assert_eq!(
-        report.removed_fields,
-        vec![
-            "logprobs".to_string(),
-            "parallel_tool_calls".to_string(),
-            "user".to_string()
-        ]
-    );
-    assert!(report.injected_defaults.is_empty());
-}
-
-#[test]
-fn test_sanitize_openai_request_payload_for_standard_variant_is_noop() {
-    let mut payload = json!({
-        "model": "gpt-4.1",
-        "messages": [{"role": "user", "content": "hello"}],
-        "stream_options": {"include_usage": true},
-        "parallel_tool_calls": true
-    });
-
-    let original = payload.clone();
-    let report = sanitize_openai_request_payload(&mut payload, OpenAiVariant::Standard);
-
-    assert_eq!(payload, original);
-    assert!(report.removed_fields.is_empty());
-    assert!(report.injected_defaults.is_empty());
-}
-
-#[test]
-fn test_resolve_openai_variant_policy_keeps_standard_and_compat_separate() {
-    let standard = resolve_openai_variant_policy(&ProviderType::Openai, "chat/completions");
-    let compat = resolve_openai_variant_policy(&ProviderType::VertexOpenai, "chat/completions");
-
-    assert_eq!(standard.variant(), OpenAiVariant::Standard);
-    assert_eq!(compat.variant(), OpenAiVariant::GeminiCompat);
-
-    let mut standard_payload = json!({
-        "model": "gpt-4.1",
-        "messages": [{"role": "user", "content": "hello"}],
-        "stream_options": {"include_usage": true},
-        "parallel_tool_calls": true
-    });
-    let standard_report = standard.sanitize_request_payload(&mut standard_payload);
-    assert!(standard_report.removed_fields.is_empty());
-    assert_eq!(
-        standard_payload,
-        json!({
-            "model": "gpt-4.1",
-            "messages": [{"role": "user", "content": "hello"}],
-            "stream_options": {"include_usage": true},
-            "parallel_tool_calls": true
-        })
-    );
-
-    let mut compat_payload = json!({
-        "model": "gemini-2.5-pro",
-        "messages": [{"role": "user", "content": "hello"}],
-        "stream_options": {"include_usage": true},
-        "parallel_tool_calls": true
-    });
-    let compat_report = compat.sanitize_request_payload(&mut compat_payload);
-    assert_eq!(
-        compat_report.removed_fields,
-        vec!["parallel_tool_calls".to_string()]
-    );
-    assert_eq!(
-        compat_payload,
-        json!({
-            "model": "gemini-2.5-pro",
-            "messages": [{"role": "user", "content": "hello"}],
-            "stream_options": {"include_usage": true}
-        })
-    );
-}
-
-#[test]
-fn test_finalize_openai_compatible_request_payload_uses_variant_layer_only() {
-    let mut payload = json!({
-        "model": "gemini-2.5-pro",
-        "messages": [{"role": "user", "content": "hello"}],
-        "stream_options": {"include_usage": true},
-        "user": "user-123"
-    });
-
-    let (variant, report) = finalize_openai_compatible_request_payload(
-        &mut payload,
-        &ProviderType::VertexOpenai,
-        "chat/completions",
-    );
-
-    assert_eq!(variant, OpenAiVariant::GeminiCompat);
-    assert_eq!(report.removed_fields, vec!["user".to_string()]);
-    assert_eq!(
-        payload,
-        json!({
-            "model": "gemini-2.5-pro",
-            "messages": [{"role": "user", "content": "hello"}],
-            "stream_options": {"include_usage": true}
-        })
+        summary.facts[0].semantic_unit,
+        crate::service::transform::TransformSemanticUnit::ImageDelta
     );
 }
 

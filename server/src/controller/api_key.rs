@@ -94,7 +94,9 @@ async fn create_api_key(
 async fn list_api_keys(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<Vec<ApiKeySummary>>, BaseError> {
-    Ok(HttpResult::new(app_state.admin.api_key.list_api_keys()?))
+    Ok(HttpResult::new(
+        app_state.admin.api_key.list_api_keys().await?,
+    ))
 }
 
 async fn get_api_key_detail(
@@ -102,7 +104,7 @@ async fn get_api_key_detail(
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ApiKeyDetail>, BaseError> {
     Ok(HttpResult::new(
-        app_state.admin.api_key.get_api_key_detail(id)?,
+        app_state.admin.api_key.get_api_key_detail(id).await?,
     ))
 }
 
@@ -143,6 +145,7 @@ async fn reveal_api_key(
             .admin
             .api_key
             .reveal_api_key(id)
+            .await
             .map_err(IntoResponse::into_response)?,
     ))
 }
@@ -166,7 +169,7 @@ async fn get_api_key_runtime_snapshot(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ApiKeyRuntimeSnapshotResponse>, BaseError> {
-    app_state.admin.api_key.ensure_api_key_exists(id)?;
+    app_state.admin.api_key.ensure_api_key_exists(id).await?;
     let snapshot = app_state
         .api_key_governance
         .get_api_key_governance_snapshot(id)
@@ -219,7 +222,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::config::SecretEncryptionConfig;
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::api_key::CreateApiKeyPayload;
     use crate::ingress::client_identity::{ClientIdentity, ClientIdentitySource};
     use crate::schema::enum_def::Action;
@@ -261,76 +264,74 @@ mod tests {
 
     #[tokio::test]
     async fn api_key_reveal_contract_is_post_only_and_returns_recoverable_secret() {
-        let database = TestDbContext::new_sqlite("controller-api-key-reveal.sqlite");
-        database
-            .run_async(async {
-                let base = create_test_app_state(database.clone()).await;
-                let config: SecretEncryptionConfig = serde_yaml::from_str(&format!(
-                    "downstream_mode: recoverable\nencryption_key: '{CURRENT_KEY}'\n"
-                ))
-                .expect("recoverable config should parse");
-                let encryption = Arc::new(SecretEncryptionService::from_config(&config));
-                let admin = Arc::new(AdminServices::new(
-                    Arc::clone(&base.catalog),
-                    Arc::clone(&encryption),
-                ));
-                let mut configured = (*base).clone();
-                configured.admin = admin;
-                configured.secret_encryption = encryption;
-                let app_state = Arc::new(configured);
-                let tokens = app_state
-                    .admin
-                    .auth
-                    .bootstrap("controller api key disabled TOTP password")
-                    .await
-                    .expect("manager bootstrap should succeed");
-                let auth_context = decode_access_token(&tokens.access_token)
-                    .expect("bootstrap access should decode");
+        let database = TestDatabase::new_sqlite_default("controller-api-key-reveal.sqlite").await;
+        (async {
+            let base = create_test_app_state(database.clone()).await;
+            let config: SecretEncryptionConfig = serde_yaml::from_str(&format!(
+                "downstream_mode: recoverable\nencryption_key: '{CURRENT_KEY}'\n"
+            ))
+            .expect("recoverable config should parse");
+            let encryption = Arc::new(SecretEncryptionService::from_config(&config));
+            let admin = Arc::new(
+                AdminServices::new(Arc::clone(&base.catalog), Arc::clone(&encryption)).await,
+            );
+            let mut configured = (*base).clone();
+            configured.admin = admin;
+            configured.secret_encryption = encryption;
+            let app_state = Arc::new(configured);
+            let tokens = app_state
+                .admin
+                .auth
+                .bootstrap("controller api key disabled TOTP password")
+                .await
+                .expect("manager bootstrap should succeed");
+            let auth_context =
+                decode_access_token(&tokens.access_token).expect("bootstrap access should decode");
 
-                let created = app_state
-                    .admin
-                    .api_key
-                    .create_api_key(payload())
-                    .await
-                    .expect("recoverable API key should create");
-                let route = format!("/api_key/{}/reveal", created.detail.id);
+            let created = app_state
+                .admin
+                .api_key
+                .create_api_key(payload())
+                .await
+                .expect("recoverable API key should create");
+            let route = format!("/api_key/{}/reveal", created.detail.id);
 
-                let mut request = Request::builder()
-                    .method(Method::POST)
-                    .uri(&route)
-                    .body(Body::empty())
-                    .expect("POST request should build");
-                request.extensions_mut().insert(auth_context);
-                request.extensions_mut().insert(ClientIdentity {
-                    client_ip: "127.0.0.1".parse().expect("test IP should parse"),
-                    peer_addr: SocketAddr::from(([127, 0, 0, 1], 31_200)),
-                    source: ClientIdentitySource::TcpPeer,
-                    trusted_proxy_hops: 0,
-                });
-                let response = create_api_key_management_router()
-                    .with_state(Arc::clone(&app_state))
-                    .oneshot(request)
-                    .await
-                    .expect("POST reveal should respond");
-                assert_eq!(response.status(), StatusCode::OK);
-                let body = response_json(response).await;
-                assert_eq!(body["data"]["api_key"], created.reveal.api_key);
-                assert_eq!(body["data"]["can_reveal"], true);
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(&route)
+                .body(Body::empty())
+                .expect("POST request should build");
+            request.extensions_mut().insert(auth_context);
+            request.extensions_mut().insert(ClientIdentity {
+                client_ip: "127.0.0.1".parse().expect("test IP should parse"),
+                peer_addr: SocketAddr::from(([127, 0, 0, 1], 31_200)),
+                source: ClientIdentitySource::TcpPeer,
+                trusted_proxy_hops: 0,
+            });
+            let response = create_api_key_management_router()
+                .with_state(Arc::clone(&app_state))
+                .oneshot(request)
+                .await
+                .expect("POST reveal should respond");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["data"]["api_key"], created.reveal.api_key);
+            assert_eq!(body["data"]["can_reveal"], true);
 
-                let response = create_api_key_management_router()
-                    .with_state(app_state)
-                    .oneshot(
-                        Request::builder()
-                            .method(Method::GET)
-                            .uri(&route)
-                            .body(Body::empty())
-                            .expect("GET request should build"),
-                    )
-                    .await
-                    .expect("GET reveal should respond");
-                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-            })
-            .await;
+            let response = create_api_key_management_router()
+                .with_state(app_state)
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(&route)
+                        .body(Body::empty())
+                        .expect("GET request should build"),
+                )
+                .await
+                .expect("GET reveal should respond");
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -2,18 +2,25 @@ import type {
   ProviderApiKeySummary,
   ProviderBootstrapPayload,
   ProviderBootstrapResponse,
-  ModelItem,
-  ProviderPayload,
+  ModelSourceConfigSummary,
+  UpstreamSource,
+  ProviderUpdatePayload,
+  ModelKind,
+  UpstreamProfileType,
 } from "@/services/types";
 import type {
   EditingProviderData,
   LocalEditableModelItem,
   LocalProviderApiKeyItem,
 } from "../types";
+import {
+  buildSourceCreatePayload,
+  createProviderSourceDraft,
+  type ProviderSourceDraft,
+} from "./sourceProfileContract.ts";
 
 export interface ProviderBootstrapPreviewState {
-  provider_type: string;
-  endpoint: string;
+  profile_type: UpstreamProfileType;
   provider_name?: string;
   provider_key?: string;
   name?: string;
@@ -21,7 +28,9 @@ export interface ProviderBootstrapPreviewState {
   model_name?: string;
 }
 
-export interface ProviderBootstrapFormState extends ProviderBootstrapPreviewState {
+export interface ProviderBootstrapFormState
+  extends ProviderBootstrapPreviewState,
+    ProviderSourceDraft {
   api_key: string;
   model_name: string;
   api_key_description: string;
@@ -29,20 +38,30 @@ export interface ProviderBootstrapFormState extends ProviderBootstrapPreviewStat
   provider_name: string;
   provider_key: string;
   real_model_name?: string | null;
+  model_kind: ModelKind;
+}
+
+function getPreferredSource(editingData?: Partial<EditingProviderData> | null) {
+  return (
+    editingData?.upstream_sources?.find((source) => source.is_default) ??
+    editingData?.upstream_sources?.find((source) => source.is_enabled) ??
+    editingData?.upstream_sources?.[0]
+  );
 }
 
 export function createProviderBootstrapFormState(
   editingData?: Partial<EditingProviderData> | null,
 ): ProviderBootstrapFormState {
+  const source = getPreferredSource(editingData);
   return {
-    provider_type: trimText(editingData?.provider_type) || "OPENAI",
-    endpoint: trimText(editingData?.endpoint),
+    ...createProviderSourceDraft(source),
     api_key: "",
     model_name: "",
     api_key_description: "",
-    use_proxy: editingData?.use_proxy ?? false,
+    use_proxy: source?.use_proxy ?? false,
     provider_name: trimText(editingData?.name),
     provider_key: trimText(editingData?.provider_key),
+    model_kind: "CHAT",
   };
 }
 
@@ -54,9 +73,8 @@ export function syncProviderBootstrapFormState(
     return form;
   }
 
-  form.provider_type = trimText(editingData.provider_type) || "OPENAI";
-  form.endpoint = trimText(editingData.endpoint);
-  form.use_proxy = editingData.use_proxy ?? false;
+  const source = getPreferredSource(editingData);
+  Object.assign(form, createProviderSourceDraft(source));
   form.provider_name = trimText(editingData.name);
   form.provider_key = trimText(editingData.provider_key);
 
@@ -80,37 +98,64 @@ function titleize(value: unknown): string {
 
 function mapCreatedModel(
   model:
-    | Partial<
-        Pick<
-          ModelItem,
-          | "id"
-          | "model_name"
-          | "real_model_name"
-          | "supports_streaming"
-          | "supports_tools"
-          | "supports_reasoning"
-          | "supports_image_input"
-          | "supports_embeddings"
-          | "supports_rerank"
-          | "is_enabled"
-        >
-      >
+    | {
+        id?: number;
+        model_name?: string;
+        real_model_name?: string | null;
+        model_kind?: ModelKind;
+        source_selection_mode?: string;
+        source_config?: ModelSourceConfigSummary;
+        is_enabled?: boolean;
+      }
     | null
     | undefined,
+  sources: UpstreamSource[] = [],
 ): LocalEditableModelItem {
   return {
     id: model?.id ?? null,
     model_name: model?.model_name ?? "",
     real_model_name: model?.real_model_name ?? null,
-    supports_streaming: model?.supports_streaming ?? true,
-    supports_tools: model?.supports_tools ?? true,
-    supports_reasoning: model?.supports_reasoning ?? true,
-    supports_image_input: model?.supports_image_input ?? true,
-    supports_embeddings: model?.supports_embeddings ?? true,
-    supports_rerank: model?.supports_rerank ?? true,
+    model_kind: model?.model_kind ?? "CHAT",
+    source_config:
+      model?.source_config ?? buildBootstrapSourceConfigSummary(model, sources),
     is_enabled: model?.is_enabled ?? true,
     isEditing: false,
     checkStatus: "unchecked",
+  };
+}
+
+export function buildBootstrapSourceConfigSummary(
+  model:
+    | Pick<
+        {
+          source_selection_mode?: string;
+        },
+        "source_selection_mode"
+      >
+    | null
+    | undefined,
+  sources: UpstreamSource[] = [],
+): ModelSourceConfigSummary {
+  const sourceSelectionMode =
+    model?.source_selection_mode === "EXPLICIT" ? "EXPLICIT" : "INHERIT_ALL";
+  const visibleSources = sources.filter((source) => source.deleted_at === null);
+
+  return {
+    source_selection_mode: sourceSelectionMode,
+    bindings: [],
+    declared_source_count:
+      sourceSelectionMode === "INHERIT_ALL" ? visibleSources.length : 0,
+    enabled_source_count:
+      sourceSelectionMode === "INHERIT_ALL"
+        ? visibleSources.filter((source) => source.is_enabled).length
+        : 0,
+    model_default_source_id: null,
+    warnings:
+      sourceSelectionMode === "INHERIT_ALL" && visibleSources.length === 0
+        ? ["no_visible_source"]
+        : sourceSelectionMode === "EXPLICIT"
+          ? ["explicit_empty"]
+          : [],
   };
 }
 
@@ -136,12 +181,11 @@ export function createEmptyEditingProviderData(): EditingProviderData {
     id: null,
     name: "",
     provider_key: "",
-    provider_type: "OPENAI",
-    endpoint: "",
-    use_proxy: false,
+    is_enabled: true,
+    provider_api_key_mode: "QUEUE",
+    upstream_sources: [],
     models: [],
     provider_keys: [],
-    request_patches: [],
   };
 }
 
@@ -150,18 +194,17 @@ export function buildProviderBootstrapPayload(
   saveAndTest = false,
 ): ProviderBootstrapPayload {
   const payload: ProviderBootstrapPayload = {
-    endpoint: trimText(form.endpoint),
+    initial_source: {
+      ...buildSourceCreatePayload(form),
+      is_enabled: true,
+      is_default: true,
+    },
     api_key: trimText(form.api_key),
     model_name: trimText(form.model_name),
+    model_kind: form.model_kind,
     key: trimText(form.key ?? form.provider_key),
     save_and_test: !!saveAndTest,
-    use_proxy: !!form.use_proxy,
   };
-
-  const providerType = trimText(form.provider_type);
-  if (providerType) {
-    payload.provider_type = providerType;
-  }
 
   const providerName = trimText(form.name ?? form.provider_name);
   if (providerName) {
@@ -184,13 +227,11 @@ export function buildProviderBootstrapPayload(
 export function buildProviderUpdatePayload(
   editingData: EditingProviderData,
   form: ProviderBootstrapFormState,
-): ProviderPayload {
+): ProviderUpdatePayload {
   return {
-    key: trimText(editingData.provider_key),
     name: trimText(form.provider_name) || trimText(editingData.name),
-    endpoint: trimText(form.endpoint),
-    use_proxy: !!form.use_proxy,
-    provider_type: trimText(form.provider_type) || trimText(editingData.provider_type),
+    is_enabled: editingData.is_enabled,
+    provider_api_key_mode: editingData.provider_api_key_mode,
   };
 }
 
@@ -205,7 +246,7 @@ export function buildProviderBootstrapPreview(
     trimText(response?.provider_name) ||
     trimText(response?.provider?.name) ||
     trimText(form.provider_name ?? form.name) ||
-    titleize(form.provider_type) ||
+    titleize(form.profile_type) ||
     "Provider";
 
   const providerKey =
@@ -228,7 +269,15 @@ export function hydrateEditingProviderDataFromBootstrap(
   }
 
   const provider = response.provider;
-  const preview = buildProviderBootstrapPreview(editingData, response);
+  const source = getPreferredSource(editingData);
+  const preview = buildProviderBootstrapPreview(
+    {
+      profile_type: source?.profile_type ?? "OPENAI",
+      provider_name: editingData.name,
+      provider_key: editingData.provider_key,
+    },
+    response,
+  );
 
   if (provider?.id !== undefined && provider.id !== null) {
     editingData.id = provider.id;
@@ -240,12 +289,13 @@ export function hydrateEditingProviderDataFromBootstrap(
     trimText(provider?.provider_key) ||
     preview.provider_key ||
     editingData.provider_key;
-  editingData.provider_type =
-    trimText(provider?.provider_type) || editingData.provider_type;
-  editingData.endpoint = trimText(provider?.endpoint) || editingData.endpoint;
-
-  if (typeof provider?.use_proxy === "boolean") {
-    editingData.use_proxy = provider.use_proxy;
+  if (provider) {
+    editingData.is_enabled = provider.is_enabled;
+    editingData.provider_api_key_mode = provider.provider_api_key_mode;
+    editingData.upstream_sources = provider.upstream_sources.map((source) => ({
+      ...source,
+      base_url: trimText(source.base_url),
+    }));
   }
 
   if (response.created_key) {
@@ -263,7 +313,10 @@ export function hydrateEditingProviderDataFromBootstrap(
   }
 
   if (response.created_model) {
-    const normalizedModel = mapCreatedModel(response.created_model);
+    const normalizedModel = mapCreatedModel(
+      response.created_model,
+      editingData.upstream_sources,
+    );
     const existingIndex =
       normalizedModel.id === null
         ? -1
@@ -310,6 +363,16 @@ export function normalizeBootstrapCheckResult(checkResult: unknown): {
 
   if (typeof checkResult === "object") {
     const record = checkResult as Record<string, unknown>;
+    if (
+      record.status === "success" ||
+      record.status === "failed" ||
+      record.status === "check_skipped"
+    ) {
+      return {
+        ok: record.status !== "failed",
+        message: trimText(record.message ?? ""),
+      };
+    }
     if ("ok" in record) {
       return {
         ok: !!record.ok,

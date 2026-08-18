@@ -6,6 +6,5 @@ export * from "./providers";
 export * from "./models";
 export * from "./providerRuntime";
 export * from "./requestPatch";
-export * from "./runtimeFeatureConfig";
 export * from "./cost";
 export * from "./records";

@@ -2,4 +2,5 @@
 pub(in crate::service::transform) enum UsageMergeStrategy {
     Replace,
     FinalOnly,
+    AnthropicFields,
 }

@@ -1,8 +1,8 @@
 use super::*;
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::{AnthropicSessionState, StreamTransformer, unified::*};
 use crate::utils::sse::SseEvent;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[test]
 fn test_anthropic_request_to_unified() {
@@ -21,8 +21,11 @@ fn test_anthropic_request_to_unified() {
         stop_sequences: None,
         stream: Some(true),
         tools: None,
+        tool_choice: None,
         metadata: None,
         top_k: None,
+        thinking: None,
+        output_config: None,
     };
 
     let unified_request: UnifiedRequest = anthropic_request.into();
@@ -121,11 +124,14 @@ fn test_anthropic_request_round_trip_preserves_metadata_and_top_k() {
         stop_sequences: Some(vec!["done".to_string()]),
         stream: Some(true),
         tools: None,
+        tool_choice: None,
         metadata: Some(json!({
             "trace_id": "trace_123",
             "user_tier": "pro"
         })),
         top_k: Some(32),
+        thinking: None,
+        output_config: None,
     };
 
     let unified_request: UnifiedRequest = anthropic_request.into();
@@ -187,7 +193,7 @@ fn test_unified_request_to_anthropic_preserves_reasoning_as_text() {
 }
 
 #[test]
-fn test_unified_request_to_anthropic_preserves_image_file_and_code() {
+fn test_unified_request_to_anthropic_encodes_portable_media_natively() {
     let unified_request = UnifiedRequest {
         model: Some("claude-3-opus-20240229".to_string()),
         messages: vec![UnifiedMessage {
@@ -229,18 +235,49 @@ fn test_unified_request_to_anthropic_preserves_image_file_and_code() {
                 }
             },
             {
-                "type": "text",
-                "text": "image_url: https://example.com/chart.png\ndetail: high"
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/chart.png"
+                }
             },
             {
-                "type": "text",
-                "text": "file_url: https://files.example.com/report.pdf\nmime_type: application/pdf"
-            },
-            {
-                "type": "text",
-                "text": "```python\nprint(1)\n```"
+                "type": "document",
+                "source": {
+                    "type": "url",
+                    "url": "https://files.example.com/report.pdf"
+                }
             }
         ])
+    );
+}
+
+#[test]
+fn test_unified_request_to_anthropic_serializes_json_tool_results_as_text() {
+    let unified_request = UnifiedRequest {
+        model: Some("claude-3-opus-20240229".to_string()),
+        messages: vec![UnifiedMessage {
+            role: UnifiedRole::Tool,
+            content: vec![UnifiedContentPart::ToolResult(UnifiedToolResult {
+                tool_call_id: "toolu_weather".to_string(),
+                name: Some("weather".to_string()),
+                output: UnifiedToolResultOutput::Json {
+                    value: json!({"temp": 21}),
+                },
+            })],
+        }],
+        max_tokens: Some(100),
+        ..Default::default()
+    };
+
+    let anthropic_request: AnthropicRequestPayload = unified_request.into();
+    assert_eq!(
+        anthropic_request.messages[0].content,
+        json!([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_weather",
+            "content": "{\"temp\":21}"
+        }])
     );
 }
 
@@ -259,6 +296,7 @@ fn test_anthropic_response_to_unified() {
         usage: AnthropicUsage {
             input_tokens: 10,
             output_tokens: 20,
+            ..Default::default()
         },
     };
 
@@ -381,9 +419,10 @@ fn test_anthropic_event_to_unified_chunk() {
             stop_sequence: None,
             usage: None,
         },
-        usage: Some(AnthropicUsage {
-            input_tokens: 0,
-            output_tokens: 10,
+        usage: Some(AnthropicStreamUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(10),
+            ..Default::default()
         }),
     };
     let unified_chunk_stop: UnifiedChunkResponse = event_stop.into();
@@ -392,6 +431,67 @@ fn test_anthropic_event_to_unified_chunk() {
         Some("stop".to_string())
     );
     assert!(unified_chunk_stop.choices[0].delta.content.is_empty());
+}
+
+#[test]
+fn test_anthropic_source_usage_is_emitted_once_with_merged_terminal_totals() {
+    let mut session = AnthropicSessionState::default();
+    let start = anthropic_event_to_unified_stream_events_with_state(
+        AnthropicEvent::MessageStart {
+            message: AnthropicStreamMessage {
+                id: "msg_usage".to_string(),
+                type_: "message".to_string(),
+                role: "assistant".to_string(),
+                model: "claude-test".to_string(),
+                content: None,
+                stop_reason: None,
+                stop_sequence: None,
+                usage: Some(AnthropicUsage {
+                    input_tokens: 11,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 3,
+                    cache_creation_input_tokens: 2,
+                }),
+            },
+        },
+        &mut session,
+    );
+    assert_eq!(start.len(), 1);
+    assert!(matches!(start[0], UnifiedStreamEvent::MessageStart { .. }));
+
+    let terminal = anthropic_event_to_unified_stream_events_with_state(
+        AnthropicEvent::MessageDelta {
+            delta: MessageDelta {
+                stop_reason: Some("end_turn".to_string()),
+                stop_sequence: None,
+                usage: Some(AnthropicStreamUsage {
+                    output_tokens: Some(7),
+                    ..Default::default()
+                }),
+            },
+            usage: None,
+        },
+        &mut session,
+    );
+    let usage = terminal
+        .iter()
+        .filter_map(|event| match event {
+            UnifiedStreamEvent::Usage { usage } => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(
+        usage[0],
+        &UnifiedUsage {
+            input_tokens: 16,
+            output_tokens: 7,
+            total_tokens: 23,
+            cached_tokens: Some(3),
+            cache_write_tokens: Some(2),
+            ..Default::default()
+        }
+    );
 }
 
 #[test]
@@ -425,14 +525,6 @@ fn test_anthropic_event_to_unified_stream_events_preserves_tool_use_lifecycle() 
                 index: 2,
                 id: "toolu_123".to_string(),
                 name: "lookup_weather".to_string(),
-            },
-            UnifiedStreamEvent::ToolCallArgumentsDelta {
-                index: 2,
-                item_index: None,
-                item_id: None,
-                id: Some("toolu_123".to_string()),
-                name: Some("lookup_weather".to_string()),
-                arguments: "{\"city\":\"Boston\"}".to_string(),
             },
         ]
     );
@@ -531,7 +623,7 @@ fn test_anthropic_event_to_unified_stream_events_preserves_thinking_lifecycle() 
 
 #[test]
 fn test_transform_unified_chunk_to_anthropic_events() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     // Role chunk
     let unified_chunk_role = UnifiedChunkResponse {
@@ -554,11 +646,7 @@ fn test_transform_unified_chunk_to_anthropic_events() {
     .unwrap();
     assert_eq!(events_role.len(), 1);
     assert_eq!(events_role[0].event.as_deref(), Some("message_start"));
-    assert!(
-        events_role[0]
-            .data
-            .contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}")
-    );
+    assert!(!events_role[0].data.contains("\"usage\""));
     assert!(state.session.anthropic_message_started());
     assert!(state.session.anthropic_active_blocks_is_empty());
 
@@ -630,11 +718,7 @@ fn test_transform_unified_chunk_to_anthropic_events() {
             .data
             .contains("\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}")
     );
-    assert!(
-        events_finish[1]
-            .data
-            .contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}")
-    );
+    assert!(!events_finish[1].data.contains("\"usage\""));
     assert_eq!(events_finish[2].event.as_deref(), Some("message_stop"));
 
     // Thinking content chunk - NOTE: This behavior is no longer supported directly
@@ -676,7 +760,8 @@ fn test_transform_unified_chunk_to_anthropic_events() {
 #[test]
 fn test_transform_unified_stream_events_to_anthropic_events_preserves_tool_and_thinking_native_lifecycle()
  {
-    let mut state = StreamTransformer::new(LlmApiType::Responses, LlmApiType::Anthropic);
+    let mut state =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Anthropic);
     state.session.set_stream_id("msg_native".to_string());
     state
         .session
@@ -746,7 +831,7 @@ fn test_transform_unified_stream_events_to_anthropic_events_preserves_tool_and_t
 #[test]
 fn test_transform_unified_stream_events_to_anthropic_events_delays_usage_until_terminal_message_delta()
  {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
     let events = transform_unified_stream_events_to_anthropic_events(
         vec![
             UnifiedStreamEvent::MessageStart {
@@ -811,7 +896,8 @@ fn test_transform_unified_stream_events_to_anthropic_events_delays_usage_until_t
 
 #[test]
 fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_blocks() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     let frames = vec![
         SseEvent {
@@ -929,13 +1015,18 @@ fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_block
 
     let events: Vec<SseEvent> = frames
         .into_iter()
-        .flat_map(|event| transformer.transform_event(event).unwrap_or_default())
+        .flat_map(|event| {
+            transformer
+                .transform_event(event)
+                .expect("Anthropic replay event must transform")
+                .value
+        })
         .collect();
 
     assert_eq!(events[0].event.as_deref(), Some("message_start"));
     assert_eq!(events[1].event.as_deref(), Some("content_block_start"));
     assert!(events[1].data.contains("\"type\":\"thinking\""));
-    assert!(events[1].data.contains("\"signature\":\"\""));
+    assert!(!events[1].data.contains("\"signature\""));
     assert_eq!(events[2].event.as_deref(), Some("content_block_delta"));
     assert!(events[2].data.contains("\"type\":\"thinking_delta\""));
     assert!(events[2].data.contains("\"thinking\":\"嗯\""));
@@ -958,8 +1049,8 @@ fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_block
 }
 
 #[test]
-fn test_transform_unified_chunk_to_anthropic_events_emits_diagnostic_for_image_delta() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+fn test_transform_unified_chunk_to_anthropic_events_keeps_diagnostic_internal_for_image_delta() {
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
     let unified_chunk = UnifiedChunkResponse {
         id: "cmpl-123".to_string(),
         model: Some("claude-3-7-sonnet".to_string()),
@@ -982,17 +1073,23 @@ fn test_transform_unified_chunk_to_anthropic_events_emits_diagnostic_for_image_d
         transform_unified_chunk_to_anthropic_events(unified_chunk, &mut state.stream_context())
             .unwrap();
 
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert_eq!(events[0].event.as_deref(), Some("message_start"));
-    assert_eq!(events[1].event.as_deref(), Some("transform_diagnostic"));
-    let diagnostic: Value = serde_json::from_str(&events[1].data).unwrap();
-    assert_eq!(diagnostic["semantic_unit"], json!("ImageDelta"));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event.as_deref() != Some("transform_diagnostic"))
+    );
     assert_eq!(state.session.diagnostics_len(), 1);
+    assert_eq!(
+        state.session.latest_diagnostic().unwrap().semantic_unit,
+        crate::service::transform::TransformSemanticUnit::ImageDelta
+    );
 }
 
 #[test]
 fn test_transform_unified_chunk_to_anthropic_events_preserves_usage_in_start_and_finish() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     let start_chunk = UnifiedChunkResponse {
         id: "cmpl-usage".to_string(),
@@ -1082,6 +1179,7 @@ fn test_anthropic_response_with_tool_use_and_text_to_unified() {
         usage: AnthropicUsage {
             input_tokens: 10,
             output_tokens: 20,
+            ..Default::default()
         },
     };
 
@@ -1178,6 +1276,7 @@ fn test_anthropic_response_to_unified_preserves_items() {
         usage: AnthropicUsage {
             input_tokens: 10,
             output_tokens: 20,
+            ..Default::default()
         },
     };
 

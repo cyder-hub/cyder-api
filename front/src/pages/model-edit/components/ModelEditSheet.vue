@@ -37,9 +37,8 @@ import CostEditorSheet from "@/pages/cost/CostEditorSheet.vue";
 import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
 import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./ModelBaseInfoForm.vue";
+import ModelSourceConfigEditor from "@/components/model-source-config/ModelSourceConfigEditor.vue";
 import ModelRequestPatchPanel from "./ModelRequestPatchPanel.vue";
-import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
-import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 import { useModelEdit } from "../composables/useModelEdit";
 import type { EditingModelData } from "../types";
 
@@ -66,16 +65,21 @@ const {
   isSaving,
   modelDetail,
   editingData,
+  providerSources,
+  sourceConfigSummary,
+  sourceConfigDraft,
+  isSourceConfigDirty,
+  isSourceConfigSaving,
+  sourceConfigError,
+  sourceConfigExplain,
   costManager,
-  capabilityItems,
   currentProvider,
   selectedCatalog,
   selectedCatalogVersions,
-  reasoningActions,
   fetchData,
   handleSaveModel,
-  handleReasoningConfigSaved,
-  handleRuntimeFeatureConfigSaved,
+  handleSaveSourceConfig,
+  handleExplainSourceConfig,
   handleOpenSelectedCostCatalog,
   handleCreateCostCatalog,
   handleDuplicateSelectedCostCatalog,
@@ -96,8 +100,27 @@ const onSaveAndClose = async () => {
   const saved = await handleSaveModel();
   if (!saved || !editingData.value) return;
 
-  emit("saved", { ...editingData.value });
+  // The footer is the aggregate Save action for this drawer. Persist the
+  // independently editable Source Config before closing so its draft cannot
+  // be replaced by fetchData() on the next open.
+  const sourceConfigSaved = await handleSaveSourceConfig();
+  if (!sourceConfigSaved || !editingData.value) return;
+
+  emit("saved", {
+    ...editingData.value,
+    source_config: sourceConfigSummary.value ?? undefined,
+  });
   isOpen.value = false;
+};
+
+const onSaveSourceConfig = async () => {
+  const saved = await handleSaveSourceConfig();
+  if (!saved || !editingData.value) return;
+
+  emit("saved", {
+    ...editingData.value,
+    source_config: sourceConfigSummary.value ?? undefined,
+  });
 };
 </script>
 
@@ -148,27 +171,19 @@ const onSaveAndClose = async () => {
             </div>
           </section>
 
-          <ModelBaseInfoForm v-model:editingData="editingData" :capability-items="capabilityItems" />
+          <ModelBaseInfoForm v-model:editingData="editingData" />
 
-          <div class="border-t border-gray-200 pt-5">
-            <ReasoningConfigPanel
-              owner-kind="model"
-              :owner-id="editingData.id"
-              :actions="reasoningActions"
-              :title="t('modelEditPage.advancedConfig.title')"
-              :model-supports-reasoning="editingData.supports_reasoning"
-              @saved="handleReasoningConfigSaved"
-            >
-              <template #runtime-feature>
-                <RuntimeFeatureConfigPanel
-                  owner-kind="model"
-                  :owner-id="editingData.id"
-                  embedded
-                  @saved="handleRuntimeFeatureConfigSaved"
-                />
-              </template>
-            </ReasoningConfigPanel>
-          </div>
+          <ModelSourceConfigEditor
+            v-model="sourceConfigDraft"
+            :sources="providerSources"
+            :summary="sourceConfigSummary"
+            :explain="sourceConfigExplain"
+            :dirty="isSourceConfigDirty"
+            :saving="isSourceConfigSaving"
+            :error="sourceConfigError"
+            @save="onSaveSourceConfig"
+            @explain="handleExplainSourceConfig"
+          />
 
           <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
             <SectionHeader :title="t('modelEditPage.priceSection.title')" />
@@ -287,8 +302,11 @@ const onSaveAndClose = async () => {
 
           <ModelRequestPatchPanel
             :model-id="editingData.id"
+            :provider-id="editingData.provider_id"
             :provider-name="currentProvider?.name"
             :provider-key="currentProvider?.provider_key"
+            :sources="providerSources"
+            :source-config="sourceConfigSummary"
           />
         </div>
       </div>

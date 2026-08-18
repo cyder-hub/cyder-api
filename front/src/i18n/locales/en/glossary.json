@@ -31,7 +31,6 @@
   "model_id": "Model ID",
   "model_name": "Model Name",
   "multimodal": "Multimodal",
-  "ollama": "Ollama",
   "openai": "OpenAI",
   "provider": "Provider",
   "provider_api_key": "Provider API Key",

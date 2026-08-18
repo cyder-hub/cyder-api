@@ -13,20 +13,21 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ProviderRuntimeItem, ProviderRuntimeLevel } from "@/services/types";
+import { formatSafeSourceBaseUrl } from "@/utils/sourceEvidence";
 
 const props = defineProps<{
   items: ProviderRuntimeItem[];
   formatCount: (value: number | null | undefined) => string;
   formatCost: (nanos: number, currency: string) => string;
   formatDateTime: (value: number | null | undefined) => string;
-  formatLatency: (value: number | null) => string;
+  formatLatencyCoverage: (value: number | null, sampleCount: number) => string;
   formatPercentage: (value: number | null) => string;
   runtimeBadgeClass: (level: ProviderRuntimeLevel) => string;
   runtimeLevelLabel: (level: ProviderRuntimeLevel) => string;
 }>();
 
 const emit = defineEmits<{
-  editProvider: [providerId: number];
+  editProvider: [providerId: number, sourceId: number];
   viewRecords: [item: ProviderRuntimeItem];
 }>();
 
@@ -39,8 +40,11 @@ const { t: $t } = useAppI18n();
       <TableHeader>
         <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
           <TableHead>{{ $t("providerRuntimePage.table.provider") }}</TableHead>
-          <TableHead>{{ $t("providerRuntimePage.table.health") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.table.source") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.table.runtime") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.requests") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.metrics.firstResponseBody") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.metrics.ttft") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.totalLatency") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.lastError") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.cost") }}</TableHead>
@@ -48,18 +52,11 @@ const { t: $t } = useAppI18n();
         </TableRow>
       </TableHeader>
       <TableBody>
-        <TableRow v-for="item in props.items" :key="item.provider_id">
+        <TableRow v-for="item in props.items" :key="item.source_id">
           <TableCell class="align-top">
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-medium text-gray-900">{{ item.provider_name }}</span>
-                <Badge variant="outline" class="text-[11px]">
-                  {{ item.provider_type }}
-                </Badge>
-                <Badge variant="outline" class="bg-gray-50 text-[11px] text-gray-500">
-                  {{ $t("providerRuntimePage.metrics.proxy") }}:
-                  {{ item.use_proxy ? $t("common.yes") : $t("common.no") }}
-                </Badge>
               </div>
               <p class="mt-1 font-mono text-xs text-gray-400">
                 {{ item.provider_key }}
@@ -82,14 +79,27 @@ const { t: $t } = useAppI18n();
               </p>
             </div>
           </TableCell>
+          <TableCell class="max-w-xs align-top">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-mono text-xs text-gray-700">
+                {{ item.source_profile_type }}
+              </span>
+            </div>
+            <p
+              class="mt-1 truncate font-mono text-[11px] text-gray-500"
+              :title="formatSafeSourceBaseUrl(item.source_base_url, '-')"
+            >
+              {{ formatSafeSourceBaseUrl(item.source_base_url, "-") }}
+            </p>
+            <p class="mt-1 font-mono text-[11px] text-gray-400">
+              #{{ item.source_id }} · {{ $t("providerRuntimePage.metrics.proxy") }}:
+              {{ item.source_use_proxy ? $t("common.yes") : $t("common.no") }}
+            </p>
+          </TableCell>
           <TableCell class="align-top">
             <Badge :class="props.runtimeBadgeClass(item.runtime_level)">
               {{ props.runtimeLevelLabel(item.runtime_level) }}
             </Badge>
-            <p class="mt-2 text-xs text-gray-500">
-              {{ $t("providerRuntimePage.metrics.failures") }}:
-              {{ item.consecutive_failures }}
-            </p>
           </TableCell>
           <TableCell class="align-top">
             <p class="font-mono text-sm text-gray-900">
@@ -105,13 +115,18 @@ const { t: $t } = useAppI18n();
             </p>
           </TableCell>
           <TableCell class="align-top">
-            <p class="text-sm text-gray-900">
-              {{ props.formatLatency(item.avg_total_latency_ms) }}
-            </p>
-            <p class="mt-1 text-xs text-gray-500">
-              {{ $t("providerRuntimePage.metrics.firstByte") }}
-              {{ props.formatLatency(item.avg_first_byte_ms) }}
-            </p>
+            {{
+              props.formatLatencyCoverage(
+                item.avg_time_to_first_response_body_ms,
+                item.time_to_first_response_body_sample_count,
+              )
+            }}
+          </TableCell>
+          <TableCell class="align-top">
+            {{ props.formatLatencyCoverage(item.avg_ttft_ms, item.ttft_sample_count) }}
+          </TableCell>
+          <TableCell class="align-top">
+            {{ props.formatLatencyCoverage(item.avg_total_latency_ms, item.total_latency_sample_count) }}
           </TableCell>
           <TableCell class="max-w-xs align-top">
             <p class="text-sm text-gray-900">
@@ -119,9 +134,7 @@ const { t: $t } = useAppI18n();
             </p>
             <p class="mt-1 break-words text-xs text-gray-500">
               {{
-                item.last_error_summary ||
-                item.last_error ||
-                $t("providerRuntimePage.detail.noError")
+                item.last_error_summary || $t("providerRuntimePage.detail.noError")
               }}
             </p>
             <p class="mt-1 text-xs text-gray-400">
@@ -145,7 +158,7 @@ const { t: $t } = useAppI18n();
                 variant="ghost"
                 size="sm"
                 class="text-gray-500"
-                @click="emit('editProvider', item.provider_id)"
+                @click="emit('editProvider', item.provider_id, item.source_id)"
               >
                 <Pencil class="mr-1 h-3.5 w-3.5" />
                 {{ $t("providerRuntimePage.editProvider") }}

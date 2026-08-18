@@ -1,7 +1,10 @@
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
+#[cfg(test)]
+use tokio::sync::Notify;
 
+use crate::database::runtime::DatabaseRuntime;
 use crate::logging::event_message_with_fields;
 use crate::service::app_state::AppStoreError;
 use crate::service::catalog::CatalogService;
@@ -38,20 +41,8 @@ pub enum AdminCatalogInvalidation {
     ProviderApiKeys {
         provider_id: i64,
     },
-    ProviderRequestPatchRules {
-        provider_id: i64,
-    },
-    ReasoningProviderConfig {
-        provider_id: i64,
-    },
-    ReasoningModelConfig {
-        model_id: i64,
-    },
-    RuntimeFeatureProviderConfig {
-        provider_id: i64,
-    },
-    RuntimeFeatureModelConfig {
-        model_id: i64,
+    RequestPatchSource {
+        source_id: i64,
     },
     Model {
         id: i64,
@@ -64,7 +55,7 @@ pub enum AdminCatalogInvalidation {
     ApiKeyHash {
         api_key_hash: String,
     },
-    ModelRequestPatchRules {
+    RequestPatchModel {
         model_id: i64,
     },
     CostCatalogVersions {
@@ -78,15 +69,11 @@ impl AdminCatalogInvalidation {
             Self::ModelsCatalog => "models_catalog",
             Self::Provider { .. } => "provider",
             Self::ProviderApiKeys { .. } => "provider_api_keys",
-            Self::ProviderRequestPatchRules { .. } => "provider_request_patch_rules",
-            Self::ReasoningProviderConfig { .. } => "reasoning_provider_config",
-            Self::ReasoningModelConfig { .. } => "reasoning_model_config",
-            Self::RuntimeFeatureProviderConfig { .. } => "runtime_feature_provider_config",
-            Self::RuntimeFeatureModelConfig { .. } => "runtime_feature_model_config",
+            Self::RequestPatchSource { .. } => "request_patch_source",
             Self::Model { .. } => "model",
             Self::ApiKeyId { .. } => "api_key_id",
             Self::ApiKeyHash { .. } => "api_key_hash",
-            Self::ModelRequestPatchRules { .. } => "model_request_patch_rules",
+            Self::RequestPatchModel { .. } => "request_patch_model",
             Self::CostCatalogVersions { .. } => "cost_catalog_versions",
         }
     }
@@ -130,6 +117,31 @@ pub(crate) struct AdminMutationRunner {
     audit_logger: AdminAuditLogger,
     #[cfg(test)]
     emitted_audit_events: Mutex<Vec<AdminAuditEvent>>,
+    #[cfg(test)]
+    before_effects_gate: Mutex<Option<AdminMutationTestGate>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct AdminMutationTestGate {
+    reached: Arc<Notify>,
+    resume: Arc<Notify>,
+    completed: Arc<Notify>,
+}
+
+#[cfg(test)]
+impl AdminMutationTestGate {
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.resume.notify_one();
+    }
+
+    pub(crate) async fn wait_until_completed(&self) {
+        self.completed.notified().await;
+    }
 }
 
 impl AdminMutationRunner {
@@ -139,20 +151,31 @@ impl AdminMutationRunner {
             audit_logger: AdminAuditLogger,
             #[cfg(test)]
             emitted_audit_events: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            before_effects_gate: Mutex::new(None),
         }
     }
 
+    pub(crate) fn database(&self) -> Arc<DatabaseRuntime> {
+        self.catalog.database()
+    }
+
     pub(crate) async fn execute(&self, effects: &[AdminMutationEffect]) -> AdminMutationReport {
+        #[cfg(test)]
+        let test_gate = self.wait_before_effects_for_test().await;
         let mut report = AdminMutationReport::default();
 
         // Post-commit effects always run in the same order:
         // 1. cache invalidation
         // 2. management audit events
         for effect in effects {
-            if let AdminMutationEffect::CatalogInvalidation(invalidation) = effect
-                && let Err(err) = self.apply_catalog_invalidation(invalidation).await
-            {
-                self.record_invalidation_failure(&mut report, invalidation, err);
+            match effect {
+                AdminMutationEffect::CatalogInvalidation(invalidation) => {
+                    if let Err(err) = self.apply_catalog_invalidation(invalidation).await {
+                        self.record_invalidation_failure(&mut report, invalidation, err);
+                    }
+                }
+                AdminMutationEffect::Audit(_) => {}
             }
         }
 
@@ -164,7 +187,40 @@ impl AdminMutationRunner {
             }
         }
 
+        #[cfg(test)]
+        if let Some(gate) = test_gate {
+            gate.completed.notify_one();
+        }
+
         report
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_before_effects_for_test(&self) -> AdminMutationTestGate {
+        let gate = AdminMutationTestGate {
+            reached: Arc::new(Notify::new()),
+            resume: Arc::new(Notify::new()),
+            completed: Arc::new(Notify::new()),
+        };
+        *self
+            .before_effects_gate
+            .lock()
+            .expect("admin mutation test gate should lock") = Some(gate.clone());
+        gate
+    }
+
+    #[cfg(test)]
+    async fn wait_before_effects_for_test(&self) -> Option<AdminMutationTestGate> {
+        let gate = self
+            .before_effects_gate
+            .lock()
+            .expect("admin mutation test gate should lock")
+            .take();
+        if let Some(gate) = &gate {
+            gate.reached.notify_one();
+            gate.resume.notified().await;
+        }
+        gate
     }
 
     #[cfg(test)]
@@ -200,29 +256,9 @@ impl AdminMutationRunner {
                     .invalidate_provider_api_keys(*provider_id)
                     .await
             }
-            AdminCatalogInvalidation::ProviderRequestPatchRules { provider_id } => {
+            AdminCatalogInvalidation::RequestPatchSource { source_id } => {
                 self.catalog
-                    .invalidate_provider_request_patch_rules(*provider_id)
-                    .await
-            }
-            AdminCatalogInvalidation::ReasoningProviderConfig { provider_id } => {
-                self.catalog
-                    .invalidate_reasoning_provider_config(*provider_id)
-                    .await
-            }
-            AdminCatalogInvalidation::ReasoningModelConfig { model_id } => {
-                self.catalog
-                    .invalidate_reasoning_model_config(*model_id)
-                    .await
-            }
-            AdminCatalogInvalidation::RuntimeFeatureProviderConfig { provider_id } => {
-                self.catalog
-                    .invalidate_runtime_feature_provider_config(*provider_id)
-                    .await
-            }
-            AdminCatalogInvalidation::RuntimeFeatureModelConfig { model_id } => {
-                self.catalog
-                    .invalidate_runtime_feature_model_config(*model_id)
+                    .invalidate_request_patch_source(*source_id)
                     .await
             }
             AdminCatalogInvalidation::Model {
@@ -249,10 +285,8 @@ impl AdminMutationRunner {
             AdminCatalogInvalidation::ApiKeyHash { api_key_hash } => {
                 self.catalog.invalidate_api_key_hash(api_key_hash).await
             }
-            AdminCatalogInvalidation::ModelRequestPatchRules { model_id } => {
-                self.catalog
-                    .invalidate_model_request_patch_rules(*model_id)
-                    .await
+            AdminCatalogInvalidation::RequestPatchModel { model_id } => {
+                self.catalog.invalidate_request_patch_model(*model_id).await
             }
             AdminCatalogInvalidation::CostCatalogVersions { ids } => {
                 for id in ids {
@@ -289,3 +323,6 @@ impl AdminMutationRunner {
             });
     }
 }
+
+#[cfg(test)]
+mod tests {}

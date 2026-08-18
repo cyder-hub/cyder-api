@@ -17,7 +17,6 @@ const {
   modelStore,
   modelPageState,
   summaryCards,
-  capabilityItems,
   loadData,
 } = useModelList();
 
@@ -88,13 +87,11 @@ const openModel = (id: number) => {
       <ModelCards
         class="md:hidden"
         :models="modelPageState.filteredItems"
-        :capability-items="capabilityItems"
         @open="openModel"
       />
       <ModelTable
         class="hidden md:block"
         :models="modelPageState.filteredItems"
-        :capability-items="capabilityItems"
         @open="openModel"
       />
     </template>

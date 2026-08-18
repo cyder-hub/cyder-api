@@ -30,6 +30,10 @@ const openProviderEdit = (provider: ProviderSummaryItem) => {
   void router.push(`/provider/edit/${provider.id}`);
 };
 
+const openProviderSources = (provider: ProviderSummaryItem) => {
+  void router.push({ path: `/provider/edit/${provider.id}`, query: { tab: "sources" } });
+};
+
 const openProviderRuntime = (provider: ProviderSummaryItem) => {
   void router.push({
     path: "/provider/runtime",
@@ -96,6 +100,7 @@ const openProviderRuntime = (provider: ProviderSummaryItem) => {
       :runtime-level-label="runtimeLevelLabel"
       :runtime-badge-class="runtimeBadgeClass"
       @edit="openProviderEdit"
+      @sources="openProviderSources"
       @runtime="openProviderRuntime"
       @delete="deleteProvider"
     />
@@ -109,6 +114,7 @@ const openProviderRuntime = (provider: ProviderSummaryItem) => {
       :runtime-level-label="runtimeLevelLabel"
       :runtime-badge-class="runtimeBadgeClass"
       @edit="openProviderEdit"
+      @sources="openProviderSources"
       @runtime="openProviderRuntime"
       @delete="deleteProvider"
     />

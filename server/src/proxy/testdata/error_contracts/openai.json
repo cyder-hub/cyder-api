@@ -1,0 +1,58 @@
+{
+  "protocol": "OPENAI",
+  "authentication": {
+    "status": 401,
+    "body": {"error":{"message":"Missing API key. Provide it in 'Authorization' header or 'key' query parameter.","type":"authentication_error","param":null,"code":"authentication_error"}},
+    "cors": true,
+    "www_authenticate": "Bearer"
+  },
+  "rate_limit": {
+    "status": 429,
+    "body": {"error":{"message":"API key '$API_KEY_NAME' exceeded rate_limit_rpm=1 (current_window_requests=1)","type":"rate_limit_error","param":null,"code":"rate_limit_error"}},
+    "cors": true,
+    "retry_after": "1"
+  },
+  "capability": {
+    "status": 400,
+    "body": {"error":{"message":"Enabled provider 'missing-provider' was not found.","type":"invalid_request_error","param":null,"code":"unsupported_capability_error"}},
+    "cors": true
+  },
+  "provider": {
+    "status": 429,
+    "body": {"error":{"message":"Upstream provider rate limited the request.","type":"rate_limit_error","param":null,"code":"upstream_rate_limit_error"},"upstream_error":{"status":429,"content_type":"application/json","body":{"error":{"message":"baseline throttled"}},"truncated":false,"captured_bytes":42,"limit_bytes":65536}},
+    "cors": true
+  },
+  "internal": {
+    "status": 500,
+    "body": {"error":{"message":"The gateway encountered an internal error.","type":"server_error","param":null,"code":"server_error"}},
+    "cors": false
+  },
+  "query_rejection": {
+    "status": 400,
+    "body": {"error":{"message":"The request query parameters are invalid.","type":"invalid_request_error","param":null,"code":"invalid_request_error"}},
+    "cors": true
+  },
+  "route_not_found": {
+    "status": 404,
+    "body": {"error":{"message":"The requested gateway route was not found.","type":"invalid_request_error","param":null,"code":"route_not_found_error"}},
+    "cors": true
+  },
+  "method_not_allowed": {
+    "status": 405,
+    "body": {"error":{"message":"The requested HTTP method is not allowed for this gateway route.","type":"invalid_request_error","param":null,"code":"method_not_allowed_error"}},
+    "cors": true,
+    "allow": "POST"
+  },
+  "utility_rejections": {
+    "embeddings": {
+      "status": 400,
+      "body": {"error":{"message":"Model kind Chat cannot execute an operation that requires Embedding.","type":"invalid_request_error","param":null,"code":"unsupported_capability_error"}},
+      "cors": true
+    },
+    "rerank": {
+      "status": 400,
+      "body": {"error":{"message":"Model kind Chat cannot execute an operation that requires Rerank.","type":"invalid_request_error","param":null,"code":"unsupported_capability_error"}},
+      "cors": true
+    }
+  }
+}

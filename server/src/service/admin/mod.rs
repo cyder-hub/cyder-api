@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use crate::service::catalog::CatalogService;
 use crate::service::secret_encryption::SecretEncryptionService;
@@ -9,9 +9,7 @@ use self::cost::CostAdminService;
 use self::model::ModelAdminService;
 use self::mutation::AdminMutationRunner;
 use self::provider::ProviderAdminService;
-use self::reasoning_config::ReasoningConfigAdminService;
 use self::request_patch::RequestPatchAdminService;
-use self::runtime_feature_config::RuntimeFeatureConfigAdminService;
 
 pub mod api_key;
 pub mod audit;
@@ -20,9 +18,15 @@ pub mod cost;
 pub mod model;
 pub mod mutation;
 pub mod provider;
-pub mod reasoning_config;
 pub mod request_patch;
-pub mod runtime_feature_config;
+
+async fn await_cancellation_safe<T, F>(future: F) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    tokio::spawn(future).await
+}
 
 // Management write paths must be owned here. Controllers may parse HTTP payloads and
 // shape responses, but cache invalidation, audit emission, and write orchestration
@@ -34,20 +38,19 @@ pub struct AdminServices {
     pub model: Arc<ModelAdminService>,
     pub request_patch: Arc<RequestPatchAdminService>,
     pub cost: Arc<CostAdminService>,
-    pub reasoning_config: Arc<ReasoningConfigAdminService>,
-    pub runtime_feature_config: Arc<RuntimeFeatureConfigAdminService>,
     pub secret_encryption: Arc<SecretEncryptionService>,
 }
 
 impl AdminServices {
-    pub fn new(
+    pub async fn new(
         catalog: Arc<CatalogService>,
         secret_encryption: Arc<SecretEncryptionService>,
     ) -> Self {
+        let database = catalog.database();
         let mutation_runner = Arc::new(AdminMutationRunner::new(catalog));
 
         Self {
-            auth: Arc::new(ManagerAuthService::new(Arc::clone(&secret_encryption))),
+            auth: Arc::new(ManagerAuthService::new(database, Arc::clone(&secret_encryption)).await),
             provider: Arc::new(ProviderAdminService::new(
                 Arc::clone(&mutation_runner),
                 Arc::clone(&secret_encryption),
@@ -59,12 +62,6 @@ impl AdminServices {
             model: Arc::new(ModelAdminService::new(Arc::clone(&mutation_runner))),
             request_patch: Arc::new(RequestPatchAdminService::new(Arc::clone(&mutation_runner))),
             cost: Arc::new(CostAdminService::new(Arc::clone(&mutation_runner))),
-            reasoning_config: Arc::new(ReasoningConfigAdminService::new(Arc::clone(
-                &mutation_runner,
-            ))),
-            runtime_feature_config: Arc::new(RuntimeFeatureConfigAdminService::new(Arc::clone(
-                &mutation_runner,
-            ))),
             secret_encryption,
         }
     }
@@ -74,7 +71,8 @@ impl AdminServices {
 mod tests {
     use std::sync::Arc;
 
-    use crate::config::SecretEncryptionConfig;
+    use crate::config::{DatabaseIoConfig, SecretEncryptionConfig};
+    use crate::database::test_support::TestDatabase;
     use crate::service::catalog::CatalogService;
     use crate::service::secret_encryption::SecretEncryptionService;
 
@@ -82,11 +80,14 @@ mod tests {
 
     #[tokio::test]
     async fn admin_services_share_one_mutation_runner() {
-        let catalog = Arc::new(CatalogService::new(true).await);
+        let database =
+            TestDatabase::new_sqlite("admin-services.sqlite", 2, DatabaseIoConfig::default()).await;
+        let catalog = Arc::new(CatalogService::new(database.runtime(), true).await);
         let secret_encryption = Arc::new(SecretEncryptionService::from_config(
             &SecretEncryptionConfig::default(),
         ));
-        let services = AdminServices::new(Arc::clone(&catalog), Arc::clone(&secret_encryption));
+        let services =
+            AdminServices::new(Arc::clone(&catalog), Arc::clone(&secret_encryption)).await;
 
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
@@ -103,14 +104,6 @@ mod tests {
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
             services.cost.mutation_runner(),
-        ));
-        assert!(Arc::ptr_eq(
-            services.provider.mutation_runner(),
-            services.reasoning_config.mutation_runner(),
-        ));
-        assert!(Arc::ptr_eq(
-            services.provider.mutation_runner(),
-            services.runtime_feature_config.mutation_runner(),
         ));
         assert!(Arc::ptr_eq(&services.secret_encryption, &secret_encryption,));
         assert!(Arc::ptr_eq(

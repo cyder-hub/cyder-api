@@ -600,8 +600,6 @@ pub struct RuntimeStateRedisConfig {
     pub key_prefix: String,
     #[serde(default = "default_api_key_concurrency_lease_ttl_seconds")]
     pub api_key_concurrency_lease_ttl_seconds: u64,
-    #[serde(default = "default_provider_circuit_probe_lease_ttl_seconds")]
-    pub provider_circuit_probe_lease_ttl_seconds: u64,
     #[serde(default = "default_runtime_state_ttl_seconds")]
     pub state_ttl_seconds: u64,
 }
@@ -611,8 +609,6 @@ impl Default for RuntimeStateRedisConfig {
         Self {
             key_prefix: default_runtime_state_redis_key_prefix(),
             api_key_concurrency_lease_ttl_seconds: default_api_key_concurrency_lease_ttl_seconds(),
-            provider_circuit_probe_lease_ttl_seconds:
-                default_provider_circuit_probe_lease_ttl_seconds(),
             state_ttl_seconds: default_runtime_state_ttl_seconds(),
         }
     }
@@ -626,10 +622,6 @@ pub struct RuntimeStateConfig {
     pub redis: RuntimeStateRedisConfig,
     #[serde(default)]
     pub fallback_to_memory: bool,
-    #[serde(default = "default_reasoning_continuation_ttl_seconds")]
-    pub reasoning_continuation_ttl_seconds: u64,
-    #[serde(default = "default_reasoning_continuation_memory_capacity")]
-    pub reasoning_continuation_memory_capacity: usize,
 }
 
 impl Default for RuntimeStateConfig {
@@ -638,9 +630,6 @@ impl Default for RuntimeStateConfig {
             backend: RuntimeStateBackendType::default(),
             redis: RuntimeStateRedisConfig::default(),
             fallback_to_memory: false,
-            reasoning_continuation_ttl_seconds: default_reasoning_continuation_ttl_seconds(),
-            reasoning_continuation_memory_capacity: default_reasoning_continuation_memory_capacity(
-            ),
         }
     }
 }
@@ -650,83 +639,292 @@ impl RuntimeStateConfig {
         Duration::from_secs(self.redis.api_key_concurrency_lease_ttl_seconds)
     }
 
-    pub fn provider_circuit_probe_lease_ttl(&self) -> Duration {
-        Duration::from_secs(self.redis.provider_circuit_probe_lease_ttl_seconds)
-    }
-
     pub fn state_ttl(&self) -> Duration {
         Duration::from_secs(self.redis.state_ttl_seconds)
-    }
-
-    pub fn reasoning_continuation_ttl(&self) -> Duration {
-        Duration::from_secs(self.reasoning_continuation_ttl_seconds)
     }
 }
 
 // --- START PROXY REQUEST CONFIG ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProxyRequestConfig {
-    #[serde(default = "default_proxy_connect_timeout_seconds")]
+pub struct NonStreamResponseConfig {
+    #[serde(default = "default_non_stream_raw_body_limit_bytes")]
+    pub raw_body_limit_bytes: usize,
+    #[serde(default = "default_non_stream_decoded_body_limit_bytes")]
+    pub decoded_body_limit_bytes: usize,
+}
+
+impl Default for NonStreamResponseConfig {
+    fn default() -> Self {
+        Self {
+            raw_body_limit_bytes: default_non_stream_raw_body_limit_bytes(),
+            decoded_body_limit_bytes: default_non_stream_decoded_body_limit_bytes(),
+        }
+    }
+}
+
+impl NonStreamResponseConfig {
+    pub const MIN_BODY_LIMIT_BYTES: usize = 1_048_576;
+    pub const MAX_BODY_LIMIT_BYTES: usize = 536_870_912;
+
+    fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("raw_body_limit_bytes", self.raw_body_limit_bytes),
+            ("decoded_body_limit_bytes", self.decoded_body_limit_bytes),
+        ] {
+            if !(Self::MIN_BODY_LIMIT_BYTES..=Self::MAX_BODY_LIMIT_BYTES).contains(&value) {
+                return Err(format!(
+                    "proxy_request.non_stream_response.{field} must be in {}..={}",
+                    Self::MIN_BODY_LIMIT_BYTES,
+                    Self::MAX_BODY_LIMIT_BYTES
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SseResponseConfig {
+    #[serde(default = "default_sse_line_limit_bytes")]
+    pub line_limit_bytes: usize,
+    #[serde(default = "default_sse_event_limit_bytes")]
+    pub event_limit_bytes: usize,
+    #[serde(default = "default_sse_buffer_limit_bytes")]
+    pub buffer_limit_bytes: usize,
+    #[serde(default = "default_sse_frame_count_limit")]
+    pub frame_count_limit: u64,
+}
+
+impl Default for SseResponseConfig {
+    fn default() -> Self {
+        Self {
+            line_limit_bytes: default_sse_line_limit_bytes(),
+            event_limit_bytes: default_sse_event_limit_bytes(),
+            buffer_limit_bytes: default_sse_buffer_limit_bytes(),
+            frame_count_limit: default_sse_frame_count_limit(),
+        }
+    }
+}
+
+impl SseResponseConfig {
+    pub const MIN_BYTE_LIMIT: usize = 1_024;
+    pub const MAX_BYTE_LIMIT: usize = 536_870_912;
+    pub const MIN_FRAME_COUNT_LIMIT: u64 = 1;
+    pub const MAX_FRAME_COUNT_LIMIT: u64 = 10_000_000;
+
+    fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("line_limit_bytes", self.line_limit_bytes),
+            ("event_limit_bytes", self.event_limit_bytes),
+            ("buffer_limit_bytes", self.buffer_limit_bytes),
+        ] {
+            if !(Self::MIN_BYTE_LIMIT..=Self::MAX_BYTE_LIMIT).contains(&value) {
+                return Err(format!(
+                    "proxy_request.sse_response.{field} must be in {}..={}",
+                    Self::MIN_BYTE_LIMIT,
+                    Self::MAX_BYTE_LIMIT
+                ));
+            }
+        }
+        if !(Self::MIN_FRAME_COUNT_LIMIT..=Self::MAX_FRAME_COUNT_LIMIT)
+            .contains(&self.frame_count_limit)
+        {
+            return Err(format!(
+                "proxy_request.sse_response.frame_count_limit must be in {}..={}",
+                Self::MIN_FRAME_COUNT_LIMIT,
+                Self::MAX_FRAME_COUNT_LIMIT
+            ));
+        }
+        if self.line_limit_bytes > self.event_limit_bytes
+            || self.event_limit_bytes > self.buffer_limit_bytes
+        {
+            return Err(
+                "proxy_request.sse_response must satisfy line_limit_bytes <= event_limit_bytes <= buffer_limit_bytes"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboundHttpConfig {
+    #[serde(default = "default_outbound_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
+    #[serde(default = "default_auxiliary_total_timeout_seconds")]
+    pub auxiliary_total_timeout_seconds: u64,
+}
+
+impl Default for OutboundHttpConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_seconds: default_outbound_connect_timeout_seconds(),
+            auxiliary_total_timeout_seconds: default_auxiliary_total_timeout_seconds(),
+        }
+    }
+}
+
+impl OutboundHttpConfig {
+    pub const MIN_CONNECT_TIMEOUT_SECONDS: u64 = 1;
+    pub const MAX_CONNECT_TIMEOUT_SECONDS: u64 = 120;
+    pub const MIN_AUXILIARY_TOTAL_TIMEOUT_SECONDS: u64 = 10;
+    pub const MAX_AUXILIARY_TOTAL_TIMEOUT_SECONDS: u64 = 300;
+
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_secs(self.connect_timeout_seconds)
+    }
+
+    pub fn auxiliary_total_timeout(&self) -> Duration {
+        Duration::from_secs(self.auxiliary_total_timeout_seconds)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !(Self::MIN_CONNECT_TIMEOUT_SECONDS..=Self::MAX_CONNECT_TIMEOUT_SECONDS)
+            .contains(&self.connect_timeout_seconds)
+        {
+            return Err(format!(
+                "outbound_http.connect_timeout_seconds must be in {}..={}",
+                Self::MIN_CONNECT_TIMEOUT_SECONDS,
+                Self::MAX_CONNECT_TIMEOUT_SECONDS
+            ));
+        }
+        if !(Self::MIN_AUXILIARY_TOTAL_TIMEOUT_SECONDS..=Self::MAX_AUXILIARY_TOTAL_TIMEOUT_SECONDS)
+            .contains(&self.auxiliary_total_timeout_seconds)
+        {
+            return Err(format!(
+                "outbound_http.auxiliary_total_timeout_seconds must be in {}..={}",
+                Self::MIN_AUXILIARY_TOTAL_TIMEOUT_SECONDS,
+                Self::MAX_AUXILIARY_TOTAL_TIMEOUT_SECONDS
+            ));
+        }
+        if self.connect_timeout_seconds > self.auxiliary_total_timeout_seconds {
+            return Err(
+                "outbound_http.connect_timeout_seconds must be <= outbound_http.auxiliary_total_timeout_seconds"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyTimeoutConfig {
+    #[serde(default = "default_proxy_request_send_timeout_seconds")]
+    pub request_send_seconds: u64,
+    #[serde(default = "default_proxy_first_byte_timeout_seconds")]
+    pub first_byte_seconds: u64,
+    #[serde(default = "default_proxy_response_idle_timeout_seconds")]
+    pub response_idle_seconds: u64,
+    #[serde(default = "default_proxy_total_timeout_seconds")]
+    pub total_seconds: u64,
+}
+
+impl Default for ProxyTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            request_send_seconds: default_proxy_request_send_timeout_seconds(),
+            first_byte_seconds: default_proxy_first_byte_timeout_seconds(),
+            response_idle_seconds: default_proxy_response_idle_timeout_seconds(),
+            total_seconds: default_proxy_total_timeout_seconds(),
+        }
+    }
+}
+
+impl ProxyTimeoutConfig {
+    pub const MIN_PHASE_SECONDS: u64 = 60;
+    pub const MAX_PHASE_SECONDS: u64 = 86_400;
+    pub const MIN_TOTAL_SECONDS: u64 = 300;
+
+    pub fn request_send(&self) -> Duration {
+        Duration::from_secs(self.request_send_seconds)
+    }
+
+    pub fn first_byte(&self) -> Duration {
+        Duration::from_secs(self.first_byte_seconds)
+    }
+
+    pub fn response_idle(&self) -> Duration {
+        Duration::from_secs(self.response_idle_seconds)
+    }
+
+    pub fn total(&self) -> Duration {
+        Duration::from_secs(self.total_seconds)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("request_send_seconds", self.request_send_seconds),
+            ("first_byte_seconds", self.first_byte_seconds),
+            ("response_idle_seconds", self.response_idle_seconds),
+        ] {
+            if !(Self::MIN_PHASE_SECONDS..=Self::MAX_PHASE_SECONDS).contains(&value) {
+                return Err(format!(
+                    "proxy_request.timeouts.{field} must be in {}..={}",
+                    Self::MIN_PHASE_SECONDS,
+                    Self::MAX_PHASE_SECONDS
+                ));
+            }
+        }
+        if !(Self::MIN_TOTAL_SECONDS..=Self::MAX_PHASE_SECONDS).contains(&self.total_seconds) {
+            return Err(format!(
+                "proxy_request.timeouts.total_seconds must be in {}..={}",
+                Self::MIN_TOTAL_SECONDS,
+                Self::MAX_PHASE_SECONDS
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyRequestConfig {
     #[serde(default)]
-    pub first_byte_timeout_seconds: Option<u64>,
+    pub timeouts: ProxyTimeoutConfig,
+    #[serde(default = "default_upstream_error_body_limit_bytes")]
+    pub upstream_error_body_limit_bytes: usize,
     #[serde(default)]
-    pub total_timeout_seconds: Option<u64>,
+    pub non_stream_response: NonStreamResponseConfig,
+    #[serde(default)]
+    pub sse_response: SseResponseConfig,
 }
 
 impl Default for ProxyRequestConfig {
     fn default() -> Self {
         Self {
-            connect_timeout_seconds: default_proxy_connect_timeout_seconds(),
-            first_byte_timeout_seconds: default_proxy_first_byte_timeout_seconds(),
-            total_timeout_seconds: None,
+            timeouts: ProxyTimeoutConfig::default(),
+            upstream_error_body_limit_bytes: default_upstream_error_body_limit_bytes(),
+            non_stream_response: NonStreamResponseConfig::default(),
+            sse_response: SseResponseConfig::default(),
         }
     }
 }
 
 impl ProxyRequestConfig {
-    pub fn connect_timeout(&self) -> Duration {
-        Duration::from_secs(self.connect_timeout_seconds)
-    }
+    pub const MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES: usize = 1_024;
+    pub const MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES: usize = 1_048_576;
 
-    pub fn first_byte_timeout(&self) -> Option<Duration> {
-        self.first_byte_timeout_seconds.map(Duration::from_secs)
-    }
-
-    pub fn total_timeout(&self) -> Option<Duration> {
-        self.total_timeout_seconds.map(Duration::from_secs)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProviderGovernanceConfig {
-    #[serde(default = "default_provider_governance_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_provider_governance_consecutive_failure_threshold")]
-    pub consecutive_failure_threshold: u32,
-    #[serde(default = "default_provider_governance_open_cooldown_seconds")]
-    pub open_cooldown_seconds: u64,
-}
-
-impl Default for ProviderGovernanceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_provider_governance_enabled(),
-            consecutive_failure_threshold:
-                default_provider_governance_consecutive_failure_threshold(),
-            open_cooldown_seconds: default_provider_governance_open_cooldown_seconds(),
+    pub fn validate(&self) -> Result<(), String> {
+        self.timeouts.validate()?;
+        self.non_stream_response.validate()?;
+        self.sse_response.validate()?;
+        if !(Self::MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES..=Self::MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES)
+            .contains(&self.upstream_error_body_limit_bytes)
+        {
+            return Err(format!(
+                "proxy_request.upstream_error_body_limit_bytes must be in {}..={}",
+                Self::MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES,
+                Self::MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES
+            ));
         }
-    }
-}
-
-impl ProviderGovernanceConfig {
-    pub fn open_cooldown(&self) -> Duration {
-        Duration::from_secs(self.open_cooldown_seconds)
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled && self.consecutive_failure_threshold > 0
+        if self.upstream_error_body_limit_bytes > self.non_stream_response.decoded_body_limit_bytes
+        {
+            return Err(format!(
+                "proxy_request.upstream_error_body_limit_bytes must be <= proxy_request.non_stream_response.decoded_body_limit_bytes ({})",
+                self.non_stream_response.decoded_body_limit_bytes
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -739,24 +937,56 @@ fn default_negative_ttl_seconds() -> u64 {
     60 // 1 minute
 }
 
-fn default_proxy_connect_timeout_seconds() -> u64 {
+fn default_outbound_connect_timeout_seconds() -> u64 {
     10
 }
 
-fn default_proxy_first_byte_timeout_seconds() -> Option<u64> {
-    Some(60)
+fn default_auxiliary_total_timeout_seconds() -> u64 {
+    60
 }
 
-fn default_provider_governance_enabled() -> bool {
-    true
+fn default_proxy_request_send_timeout_seconds() -> u64 {
+    7_200
 }
 
-fn default_provider_governance_consecutive_failure_threshold() -> u32 {
-    5
+fn default_proxy_first_byte_timeout_seconds() -> u64 {
+    7_200
 }
 
-fn default_provider_governance_open_cooldown_seconds() -> u64 {
-    30
+fn default_proxy_response_idle_timeout_seconds() -> u64 {
+    7_200
+}
+
+fn default_proxy_total_timeout_seconds() -> u64 {
+    7_200
+}
+
+fn default_upstream_error_body_limit_bytes() -> usize {
+    65_536
+}
+
+fn default_non_stream_raw_body_limit_bytes() -> usize {
+    33_554_432
+}
+
+fn default_non_stream_decoded_body_limit_bytes() -> usize {
+    67_108_864
+}
+
+fn default_sse_line_limit_bytes() -> usize {
+    4_194_304
+}
+
+fn default_sse_event_limit_bytes() -> usize {
+    8_388_608
+}
+
+fn default_sse_buffer_limit_bytes() -> usize {
+    16_777_216
+}
+
+fn default_sse_frame_count_limit() -> u64 {
+    1_000_000
 }
 
 fn default_pool_size() -> usize {
@@ -779,20 +1009,8 @@ fn default_api_key_concurrency_lease_ttl_seconds() -> u64 {
     900
 }
 
-fn default_provider_circuit_probe_lease_ttl_seconds() -> u64 {
-    600
-}
-
 fn default_runtime_state_ttl_seconds() -> u64 {
     30 * 24 * 60 * 60
-}
-
-fn default_reasoning_continuation_ttl_seconds() -> u64 {
-    30 * 60
-}
-
-fn default_reasoning_continuation_memory_capacity() -> usize {
-    4096
 }
 
 fn default_redis_url() -> String {
@@ -939,6 +1157,8 @@ pub struct FinalConfig {
     #[serde(default)]
     pub metrics: MetricsConfig,
     pub db_pool_size: u32,
+    #[serde(default)]
+    pub database_io: DatabaseIoConfig,
     pub redis: Option<RedisConfig>,
     #[serde(default)]
     pub deployment: DeploymentConfig,
@@ -949,9 +1169,9 @@ pub struct FinalConfig {
     #[serde(default)]
     pub id: IdConfig,
     #[serde(default)]
-    pub proxy_request: ProxyRequestConfig,
+    pub outbound_http: OutboundHttpConfig,
     #[serde(default)]
-    pub provider_governance: ProviderGovernanceConfig,
+    pub proxy_request: ProxyRequestConfig,
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
@@ -961,6 +1181,13 @@ pub struct FinalConfig {
 }
 
 impl FinalConfig {
+    pub fn validate_database(&self) -> Result<(), String> {
+        if !(1..=128).contains(&self.db_pool_size) {
+            return Err("db_pool_size must be in 1..=128".to_string());
+        }
+        self.database_io.validate()
+    }
+
     pub fn validate_manager_auth(&self) -> Result<(), String> {
         if self.jwt_secret.len() < 32 {
             return Err("jwt_secret must contain at least 32 bytes".to_string());
@@ -984,6 +1211,102 @@ impl FinalConfig {
             Err(errors.join("; "))
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseIoConfig {
+    #[serde(default = "default_database_max_waiters")]
+    pub max_waiters: u32,
+    #[serde(default = "default_database_queue_wait_timeout_seconds")]
+    pub queue_wait_timeout_seconds: u64,
+    #[serde(default = "default_database_operation_deadline_seconds")]
+    pub operation_deadline_seconds: u64,
+    #[serde(default = "default_sqlite_busy_timeout_seconds")]
+    pub sqlite_busy_timeout_seconds: u64,
+}
+
+impl Default for DatabaseIoConfig {
+    fn default() -> Self {
+        Self {
+            max_waiters: default_database_max_waiters(),
+            queue_wait_timeout_seconds: default_database_queue_wait_timeout_seconds(),
+            operation_deadline_seconds: default_database_operation_deadline_seconds(),
+            sqlite_busy_timeout_seconds: default_sqlite_busy_timeout_seconds(),
+        }
+    }
+}
+
+impl DatabaseIoConfig {
+    pub const MAX_WAITERS: u32 = 4_096;
+    pub const MIN_QUEUE_WAIT_TIMEOUT_SECONDS: u64 = 1;
+    pub const MAX_QUEUE_WAIT_TIMEOUT_SECONDS: u64 = 60;
+    pub const MIN_OPERATION_DEADLINE_SECONDS: u64 = 1;
+    pub const MAX_OPERATION_DEADLINE_SECONDS: u64 = 300;
+    pub const MIN_SQLITE_BUSY_TIMEOUT_SECONDS: u64 = 1;
+    pub const MAX_SQLITE_BUSY_TIMEOUT_SECONDS: u64 = 60;
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_waiters > Self::MAX_WAITERS {
+            return Err(format!(
+                "database_io.max_waiters must be in 0..={}",
+                Self::MAX_WAITERS
+            ));
+        }
+        if !(Self::MIN_QUEUE_WAIT_TIMEOUT_SECONDS..=Self::MAX_QUEUE_WAIT_TIMEOUT_SECONDS)
+            .contains(&self.queue_wait_timeout_seconds)
+        {
+            return Err(format!(
+                "database_io.queue_wait_timeout_seconds must be in {}..={}",
+                Self::MIN_QUEUE_WAIT_TIMEOUT_SECONDS,
+                Self::MAX_QUEUE_WAIT_TIMEOUT_SECONDS
+            ));
+        }
+        if !(Self::MIN_OPERATION_DEADLINE_SECONDS..=Self::MAX_OPERATION_DEADLINE_SECONDS)
+            .contains(&self.operation_deadline_seconds)
+        {
+            return Err(format!(
+                "database_io.operation_deadline_seconds must be in {}..={}",
+                Self::MIN_OPERATION_DEADLINE_SECONDS,
+                Self::MAX_OPERATION_DEADLINE_SECONDS
+            ));
+        }
+        if !(Self::MIN_SQLITE_BUSY_TIMEOUT_SECONDS..=Self::MAX_SQLITE_BUSY_TIMEOUT_SECONDS)
+            .contains(&self.sqlite_busy_timeout_seconds)
+        {
+            return Err(format!(
+                "database_io.sqlite_busy_timeout_seconds must be in {}..={}",
+                Self::MIN_SQLITE_BUSY_TIMEOUT_SECONDS,
+                Self::MAX_SQLITE_BUSY_TIMEOUT_SECONDS
+            ));
+        }
+        if self.sqlite_busy_timeout_seconds > self.operation_deadline_seconds {
+            return Err(
+                "database_io.sqlite_busy_timeout_seconds must be <= database_io.operation_deadline_seconds"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn sqlite_busy_timeout(&self) -> Duration {
+        Duration::from_secs(self.sqlite_busy_timeout_seconds)
+    }
+}
+
+const fn default_database_max_waiters() -> u32 {
+    64
+}
+
+const fn default_database_queue_wait_timeout_seconds() -> u64 {
+    1
+}
+
+const fn default_database_operation_deadline_seconds() -> u64 {
+    30
+}
+
+const fn default_sqlite_busy_timeout_seconds() -> u64 {
+    5
 }
 
 fn generate_random_string(len: usize) -> String {
@@ -1036,13 +1359,14 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         max_body_size: 100 * 1024 * 1024, // 100MB
         metrics: MetricsConfig::default(),
         db_pool_size: 5,
+        database_io: DatabaseIoConfig::default(),
         redis: None,
         deployment: DeploymentConfig::default(),
         manager_auth: ManagerAuthConfig::default(),
         client_identity: ClientIdentityConfig::default(),
         id: IdConfig::default(),
+        outbound_http: OutboundHttpConfig::default(),
         proxy_request: ProxyRequestConfig::default(),
-        provider_governance: ProviderGovernanceConfig::default(),
         cache: CacheConfig::default(),
         runtime_state: RuntimeStateConfig::default(),
         secret_encryption: SecretEncryptionConfig::default(),

@@ -11,8 +11,8 @@ import type { DashboardTranslator } from "../types";
 
 const identityTranslate: DashboardTranslator = (key) => key;
 
-export function getUnstableProviders(signals: DashboardOperationalSignals) {
-  return [...signals.open_providers, ...signals.half_open_providers].sort(
+export function getDegradedProviders(signals: DashboardOperationalSignals) {
+  return [...signals.degraded_providers].sort(
     (left, right) =>
       right.error_count - left.error_count || left.provider_id - right.provider_id,
   );
@@ -32,8 +32,8 @@ export function useDashboardOperations(
 ) {
   const t = options.t ?? identityTranslate;
 
-  const unstableProviders = computed(() =>
-    getUnstableProviders(operationsSection.value.operational_signals),
+  const degradedProviders = computed(() =>
+    getDegradedProviders(operationsSection.value.operational_signals),
   );
   const showCostHotspots = computed(() =>
     hasCostHotspots(operationsSection.value.operational_signals),
@@ -49,6 +49,18 @@ export function useDashboardOperations(
     value == null
       ? t("dashboard.empty.noLatency")
       : `${formatNumberValue(Math.round(value))} ms`;
+
+  const formatLatencyCoverage = (
+    value: number | null | undefined,
+    sampleCount: number | null | undefined,
+  ) => {
+    const coverage = sampleCount == null || sampleCount === 0
+      ? t("common.noSamples")
+      : sampleCount === 1
+        ? t("common.oneSample")
+        : t("common.samples", { count: formatNumberValue(sampleCount) });
+    return `${formatLatency(value)} · ${coverage}`;
+  };
 
   const formatDateTime = (value: number | null | undefined) =>
     formatTimestamp(value) || "-";
@@ -70,10 +82,6 @@ export function useDashboardOperations(
 
   const runtimeLevelBadgeClass = (level: ProviderRuntimeLevel) => {
     switch (level) {
-      case "open":
-        return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-      case "half_open":
-        return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
       case "degraded":
         return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
       case "healthy":
@@ -88,10 +96,11 @@ export function useDashboardOperations(
     formatCount,
     formatDateTime,
     formatLatency,
+    formatLatencyCoverage,
     formatPercentage,
     runtimeLevelBadgeClass,
     runtimeLevelLabel,
     showCostHotspots,
-    unstableProviders,
+    degradedProviders,
   };
 }

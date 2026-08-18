@@ -8,6 +8,7 @@ import * as providerService from "@/services/providers";
 import { useProviderStore } from "@/store/providerStore";
 import type { ProviderRuntimeLevel, ProviderSummaryItem } from "@/services/types";
 import type { ProviderRuntimeLevelMap, ProviderSummaryCard } from "../types";
+import { aggregateProviderRuntimeLevels } from "./providerRuntimeAggregation";
 
 export function useProviderList() {
   const { t } = useI18n();
@@ -24,7 +25,7 @@ export function useProviderList() {
     const enabled = store.providers.filter((item) => item.is_enabled).length;
     const disabled = total - enabled;
     const runtimeIssues = Object.values(providerRuntimeLevelMap.value).filter(
-      (level) => level === "open" || level === "half_open" || level === "degraded",
+      (level) => level === "degraded",
     ).length;
 
     return [
@@ -40,10 +41,6 @@ export function useProviderList() {
 
   const runtimeBadgeClass = (level: ProviderRuntimeLevel) => {
     switch (level) {
-      case "open":
-        return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-      case "half_open":
-        return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
       case "degraded":
         return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
       case "healthy":
@@ -67,9 +64,7 @@ export function useProviderList() {
         window: "1h",
         only_enabled: false,
       });
-      providerRuntimeLevelMap.value = Object.fromEntries(
-        runtimeItems.map((item) => [item.provider_id, item.runtime_level]),
-      );
+      providerRuntimeLevelMap.value = aggregateProviderRuntimeLevels(runtimeItems);
     } catch (err) {
       console.error("Failed to fetch provider runtime levels:", err);
       providerRuntimeLevelMap.value = {};

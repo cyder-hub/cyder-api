@@ -46,6 +46,8 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
       "success_rate",
       "error_count",
       "avg_latency",
+      "avg_time_to_first_response_body",
+      "avg_ttft",
       "total_input_tokens",
       "total_output_tokens",
       "total_reasoning_tokens",
@@ -58,6 +60,8 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
         "success_rate",
         "error_count",
         "avg_latency",
+        "avg_time_to_first_response_body",
+        "avg_ttft",
         "total_input_tokens",
         "total_output_tokens",
         "total_reasoning_tokens",
@@ -68,25 +72,16 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
   {
     id: "request-patch-prefix",
     keyTemplates: [
-      "{textPrefix}.placements.{placement}",
-      "{textPrefix}.operations.{operation}",
+      "requestPatchVariant.placements.{placement}",
+      "requestPatchVariant.operations.{operation}",
     ],
-    values: [
-      "providerEditPage.requestPatch",
-      "modelEditPage.requestPatch",
-      "HEADER",
-      "QUERY",
-      "BODY",
-      "SET",
-      "REMOVE",
-    ],
+    values: ["requestPatchVariant", "HEADER", "QUERY", "BODY", "SET", "REMOVE"],
     placeholders: {
-      textPrefix: ["providerEditPage.requestPatch", "modelEditPage.requestPatch"],
       placement: ["HEADER", "QUERY", "BODY"],
       operation: ["SET", "REMOVE"],
     },
     valueSource:
-      "front/src/components/request-patch/RequestPatchRulesPanel.vue props.textPrefix",
+      "front/src/components/request-patch/RequestPatchVariantEditor.vue dynamic placement/operation labels",
   },
   {
     id: "api-key-governance",
@@ -141,11 +136,50 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
     valueSource: "front/src/pages/api-key/components/ApiKeyEditDialog.vue",
   },
   {
-    id: "model-capabilities",
-    keyTemplates: ["{capability.labelKey}"],
-    values: [],
+    id: "model-source-config-warnings",
+    keyTemplates: [
+      "modelSourceConfig.warnings.{warning}",
+      "modelSourceConfig.warnings.{warning}Description",
+    ],
+    values: [
+      "invalid_mode_binding_state",
+      "explicit_empty",
+      "no_visible_source",
+      "no_enabled_source",
+      "model_default_unavailable",
+    ],
+    placeholders: {
+      warning: [
+        "invalid_mode_binding_state",
+        "explicit_empty",
+        "no_visible_source",
+        "no_enabled_source",
+        "model_default_unavailable",
+      ],
+    },
     valueSource:
-      "MODEL_CAPABILITY_ITEMS and provider edit capability item labelKey values",
+      "front/src/components/model-source-config/ModelSourceConfigEditor.vue warning summary",
+  },
+  {
+    id: "model-kind",
+    keyTemplates: ["modelKinds.{kind}"],
+    values: ["CHAT", "EMBEDDING", "RERANK"],
+    placeholders: {
+      kind: ["CHAT", "EMBEDDING", "RERANK"],
+    },
+    valueSource: "front/src/pages/model*/** model kind selectors and summaries",
+  },
+  {
+    id: "provider-source-operation",
+    keyTemplates: [
+      "providerEditPage.sources.operations.{operation}.label",
+      "providerEditPage.sources.operations.{operation}.help",
+    ],
+    values: ["chatCompletions", "embeddings", "rerank"],
+    placeholders: {
+      operation: ["chatCompletions", "embeddings", "rerank"],
+    },
+    valueSource: "front/src/pages/provider-edit/** operationRows",
   },
   {
     id: "cost-options",

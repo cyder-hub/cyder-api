@@ -9,6 +9,7 @@ export interface StatsStripItem {
   label: string;
   value: string | number;
   secondary?: string | null;
+  title?: string | null;
   tone?: "default" | "success" | "warning" | "danger" | "muted";
   mono?: boolean;
 }
@@ -104,6 +105,7 @@ function valueClass(item: StatsStripItem) {
     <div
       v-for="item in props.items"
       :key="item.key"
+      :title="item.title || undefined"
       class="min-w-0 bg-white px-4 py-3"
     >
       <dt class="truncate text-[11px] font-medium uppercase tracking-wide text-gray-500">

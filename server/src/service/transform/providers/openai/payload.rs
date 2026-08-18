@@ -20,6 +20,8 @@ pub(crate) struct OpenAiRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stop: Option<OpenAiStop>,
@@ -76,6 +78,8 @@ pub(crate) struct OpenAiMessage {
     pub(crate) role: String,
     pub(crate) content: Option<OpenAiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
@@ -97,6 +101,8 @@ pub(crate) enum OpenAiContent {
 pub(crate) enum OpenAiContentPart {
     Text { text: String },
     ImageUrl { image_url: OpenAiImageUrl },
+    InputAudio { input_audio: OpenAiInputAudio },
+    File { file: OpenAiFile },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -104,6 +110,22 @@ pub(crate) struct OpenAiImageUrl {
     pub(crate) url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct OpenAiInputAudio {
+    pub(crate) data: String,
+    pub(crate) format: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct OpenAiFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) filename: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -261,7 +283,7 @@ pub(crate) struct OpenAiChunkChoice {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) struct OpenAiChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) role: Option<String>,

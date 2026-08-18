@@ -50,11 +50,18 @@
             <ProviderBaseInfoForm v-model:editingData="editingData" />
           </template>
 
+          <template v-else-if="activeTab === 'sources'">
+            <ProviderSourceList
+              v-model:editingData="editingData"
+              @check-source="handleSourceCheck"
+              @request-patch="openRequestPatch"
+            />
+          </template>
+
           <template v-else-if="activeTab === 'models'">
             <ProviderModelList
               v-model:editingData="editingData"
               @check-single="(index) => handleCheck('model', index)"
-              @check-batch="() => handleBatchCheck('models')"
             />
           </template>
 
@@ -62,39 +69,15 @@
             <ProviderApiKeyList
               v-model:editingData="editingData"
               @check-single="(index) => handleCheck('apiKey', index)"
-              @check-batch="() => handleBatchCheck('api_keys')"
             />
           </template>
 
           <template v-else-if="activeTab === 'advanced'">
-            <div v-if="editingData.id">
-              <ReasoningConfigPanel
-                owner-kind="provider"
-                :owner-id="editingData.id"
-                :actions="reasoningActions"
-                :title="$t('providerEditPage.sections.advancedConfig.title')"
-                :provider-type="editingData.provider_type"
-                @saved="handleReasoningConfigSaved"
-              >
-                <template #runtime-feature>
-                  <RuntimeFeatureConfigPanel
-                    owner-kind="provider"
-                    :owner-id="editingData.id"
-                    embedded
-                    @saved="handleRuntimeFeatureConfigSaved"
-                  />
-                </template>
-              </ReasoningConfigPanel>
+            <div class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+              <p class="text-sm leading-6 text-gray-600">
+                {{ $t("providerEditPage.sections.advanced.description") }}
+              </p>
             </div>
-
-            <SectionHeader
-              :title="$t('providerEditPage.sections.advanced.title')"
-              :help="$t('providerEditPage.sections.advanced.description')"
-              :help-label="$t('providerEditPage.sections.advanced.title')"
-              class="border-t border-gray-200 pt-5 mt-5"
-            />
-
-            <ProviderRequestPatchPanel v-model:editingData="editingData" />
           </template>
 
           <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row sm:justify-end">
@@ -104,187 +87,105 @@
           </div>
         </div>
 
-        <Dialog
-          :open="isModelSelectModalOpen"
-          @update:open="(v: boolean) => (isModelSelectModalOpen = v)"
-        >
-          <DialogContent class="flex max-h-[92dvh] flex-col border border-gray-200 bg-white p-0 sm:max-w-md">
-            <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
-              <DialogTitle class="text-lg font-semibold text-gray-900">{{
-                $t("providerEditPage.modalSelectModel.title")
-              }}</DialogTitle>
-            </DialogHeader>
-            <div class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
-              <p class="text-sm text-gray-500">
-                {{ $t("providerEditPage.modalSelectModel.description") }}
-              </p>
-              <p class="font-mono text-xs text-gray-600">
-                {{ $t("providerEditPage.modalSelectModel.target", { target: selectedApiKeyCheckTargetLabel }) }}
-              </p>
-              <Select v-model="modelIndexToUseStr">
-                <SelectTrigger class="w-full">
-                  <SelectValue
-                    :placeholder="
-                      $t('providerEditPage.modalSelectModel.selectPlaceholder')
-                    "
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="opt in modelOptionsForSelect"
-                    :key="opt.value"
-                    :value="String(opt.value)"
-                  >
-                    {{ opt.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
-              <Button
-                variant="ghost"
-                class="w-full text-gray-600 sm:w-auto"
-                @click="isModelSelectModalOpen = false"
-                >{{ $t("common.cancel") }}</Button
-              >
-              <Button
-                variant="default"
-                class="w-full sm:w-auto"
-                @click="handleConfirmModelSelection"
-                :disabled="modelIndexToUseStr === null"
-                >{{ $t("common.check") }}</Button
-              >
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        <ProviderCheckDialog
+          v-model:open="isCheckDialogOpen"
+          :kind="checkDialogKind"
+          :target-label="checkDialogTargetLabel"
+          :source-options="checkDialogSourceOptions"
+          :model-options="checkDialogModelOptions"
+          :api-key-options="checkDialogApiKeyOptions"
+          :source-value="checkDialogSourceValue"
+          :model-value="checkDialogModelValue"
+          :api-key-value="checkDialogApiKeyValue"
+          @update:source-value="checkDialogSourceValue = $event"
+          @update:model-value="checkDialogModelValue = $event"
+          @update:api-key-value="checkDialogApiKeyValue = $event"
+          @confirm="handleConfirmCheck"
+        />
 
-        <Dialog
-          :open="isApiKeySelectModalOpen"
-          @update:open="(v: boolean) => (isApiKeySelectModalOpen = v)"
-        >
-          <DialogContent class="flex max-h-[92dvh] flex-col border border-gray-200 bg-white p-0 sm:max-w-md">
-            <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
-              <DialogTitle class="text-lg font-semibold text-gray-900">{{
-                $t("providerEditPage.modalSelectApiKey.title")
-              }}</DialogTitle>
-            </DialogHeader>
-            <div class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
-              <p class="text-sm text-gray-500">
-                {{ $t("providerEditPage.modalSelectApiKey.description") }}
-              </p>
-              <p class="font-mono text-xs text-gray-600">
-                {{ $t("providerEditPage.modalSelectApiKey.target", { target: selectedModelCheckTargetLabel }) }}
-              </p>
-              <Select v-model="apiKeyIndexToUseStr">
-                <SelectTrigger class="w-full">
-                  <SelectValue
-                    :placeholder="
-                      $t('providerEditPage.modalSelectApiKey.selectPlaceholder')
-                    "
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="opt in apiKeyOptionsForSelect"
-                    :key="opt.value"
-                    :value="String(opt.value)"
-                  >
-                    {{ opt.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
-              <Button
-                variant="ghost"
-                class="w-full text-gray-600 sm:w-auto"
-                @click="isApiKeySelectModalOpen = false"
-                >{{ $t("common.cancel") }}</Button
-              >
-              <Button
-                variant="default"
-                class="w-full sm:w-auto"
-                @click="handleConfirmApiKeySelection"
-                :disabled="apiKeyIndexToUseStr === null"
-                >{{ $t("common.check") }}</Button
-              >
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        <ProviderRequestPatchPanel
+          v-if="editingData.id && selectedSource"
+          v-model:open="isRequestPatchOpen"
+          :provider-id="editingData.id"
+          :source-id="selectedSource.id"
+          :source-title="`${selectedSource.profile_type} · #${selectedSource.id}`"
+        />
       </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, type Ref } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import PageHeader from "@/components/PageHeader.vue";
-import SectionHeader from "@/components/SectionHeader.vue";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   ArrowLeft,
   Loader2,
   AlertCircle,
 } from "lucide-vue-next";
 
-import type { EditingProviderData } from "./types";
 import { useProviderEdit } from "./composables/useProviderEdit";
 import { useProviderCheck } from "./composables/useProviderCheck";
 import ProviderBaseInfoForm from "./components/ProviderBaseInfoForm.vue";
+import ProviderSourceList from "./components/ProviderSourceList.vue";
 import ProviderModelList from "./components/ProviderModelList.vue";
 import ProviderApiKeyList from "./components/ProviderApiKeyList.vue";
+import ProviderCheckDialog from "./components/ProviderCheckDialog.vue";
 import ProviderRequestPatchPanel from "./components/ProviderRequestPatchPanel.vue";
-import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
-import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 
 const { t: $t } = useI18n();
 const router = useRouter();
+const route = useRoute();
 const {
   isLoading,
   errorMsg,
   editingData,
   pageTitle,
-  reasoningActions,
-  handleReasoningConfigSaved,
-  handleRuntimeFeatureConfigSaved,
 } = useProviderEdit();
 
-const activeTab = ref<"base" | "models" | "credentials" | "advanced">("base");
+const selectedSourceId = ref<number | null>(null);
+const isRequestPatchOpen = ref(false);
+const selectedSource = computed(() =>
+  editingData.value?.upstream_sources.find((source) => source.id === selectedSourceId.value) ?? null,
+);
+const openRequestPatch = (sourceId: number) => {
+  selectedSourceId.value = sourceId;
+  isRequestPatchOpen.value = true;
+};
+
+type ProviderEditTab = "base" | "sources" | "models" | "credentials" | "advanced";
+const routeTab = route.query.tab;
+const activeTab = ref<ProviderEditTab>(
+  routeTab === "sources" ||
+    routeTab === "models" ||
+    routeTab === "credentials" ||
+    routeTab === "advanced"
+    ? routeTab
+    : "base",
+);
 const providerEditTabs = [
   { id: "base", labelKey: "providerEditPage.tabs.base" },
+  { id: "sources", labelKey: "providerEditPage.tabs.sources" },
   { id: "models", labelKey: "providerEditPage.tabs.models" },
   { id: "credentials", labelKey: "providerEditPage.tabs.credentials" },
   { id: "advanced", labelKey: "providerEditPage.tabs.advanced" },
 ] as const;
 
 const {
-  isModelSelectModalOpen,
-  isApiKeySelectModalOpen,
-  modelIndexToUseStr,
-  apiKeyIndexToUseStr,
-  modelOptionsForSelect,
-  apiKeyOptionsForSelect,
-  selectedModelCheckTargetLabel,
-  selectedApiKeyCheckTargetLabel,
+  isCheckDialogOpen,
+  checkDialogKind,
+  checkDialogTargetLabel,
+  checkDialogSourceOptions,
+  checkDialogModelOptions,
+  checkDialogApiKeyOptions,
+  checkDialogSourceValue,
+  checkDialogModelValue,
+  checkDialogApiKeyValue,
   handleCheck,
-  handleBatchCheck,
-  handleConfirmModelSelection,
-  handleConfirmApiKeySelection,
-} = useProviderCheck(editingData as Ref<EditingProviderData | null>);
+  handleSourceCheck,
+  handleConfirmCheck,
+} = useProviderCheck(editingData);
 </script>

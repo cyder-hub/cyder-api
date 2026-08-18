@@ -8,9 +8,6 @@ pub(super) enum CacheKey<'a> {
     ModelById(i64),
     ModelByName(&'a str, &'a str),
     ProviderApiKeys(i64),
-    ProviderRequestPatchRules(i64),
-    ModelRequestPatchRules(i64),
-    ModelEffectiveRequestPatches(i64),
     CostCatalogVersion(i64),
 }
 
@@ -27,15 +24,6 @@ impl<'a> CacheKey<'a> {
             }
             CacheKey::ProviderApiKeys(provider_id) => {
                 format_compact!("provider_keys:{}", provider_id)
-            }
-            CacheKey::ProviderRequestPatchRules(provider_id) => {
-                format_compact!("request_patch:provider:{}", provider_id)
-            }
-            CacheKey::ModelRequestPatchRules(model_id) => {
-                format_compact!("request_patch:model:{}", model_id)
-            }
-            CacheKey::ModelEffectiveRequestPatches(model_id) => {
-                format_compact!("request_patch:model_effective:{}", model_id)
             }
             CacheKey::CostCatalogVersion(id) => format_compact!("cost_catalog_version:id:{}", id),
         }

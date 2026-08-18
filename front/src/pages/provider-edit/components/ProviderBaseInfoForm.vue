@@ -3,118 +3,202 @@
     <SectionHeader
       :title="
         editingData.id
-          ? $t('providerEditPage.sections.quickStart.editTitle')
+          ? $t('providerEditPage.sections.logicalProvider.title')
           : $t('providerEditPage.sections.quickStart.title')
       "
       :help="
         editingData.id
-          ? $t('providerEditPage.sections.quickStart.editDescription')
+          ? $t('providerEditPage.sections.logicalProvider.description')
           : $t('providerEditPage.sections.quickStart.description')
       "
       :help-label="
         editingData.id
-          ? $t('providerEditPage.sections.quickStart.editTitle')
+          ? $t('providerEditPage.sections.logicalProvider.title')
           : $t('providerEditPage.sections.quickStart.title')
       "
     />
 
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <div class="space-y-1.5">
-        <Label class="text-gray-700">
-          {{ $t("providerEditPage.labelName") }}
-        </Label>
-        <Input
-          v-model="quickStart.provider_name"
-          class="font-mono text-sm"
-          :placeholder="$t('providerEditPage.quickStart.placeholderProviderName')"
-        />
-      </div>
-
-      <div class="space-y-1.5">
-        <Label class="text-gray-700">
-          {{ $t("providerEditPage.labelProviderKey") }}
-          <span v-if="!editingData.id" class="ml-0.5 text-red-500">*</span>
-        </Label>
-        <Input
-          v-model="quickStart.provider_key"
-          class="font-mono text-sm"
-          :disabled="!!editingData.id"
-          :placeholder="$t('providerEditPage.quickStart.placeholderProviderKey')"
-        />
-      </div>
-
-      <div class="space-y-1.5">
-        <Label class="text-gray-700">
-          {{ $t("providerEditPage.labelProviderType") }}
-          <span class="ml-0.5 text-red-500">*</span>
-        </Label>
-        <Select v-model="quickStart.provider_type">
-          <SelectTrigger class="w-full">
-            <SelectValue
-              :placeholder="$t('providerEditPage.placeholderProviderType')"
-            />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="pt in providerTypes" :key="pt" :value="pt">
-              {{ pt }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div class="space-y-1.5">
-        <Label class="text-gray-700">
-          {{ $t("providerEditPage.labelEndpoint") }}
-          <span class="ml-0.5 text-red-500">*</span>
-        </Label>
-        <Input v-model="quickStart.endpoint" class="font-mono text-sm" />
-      </div>
-
-      <div v-if="!editingData.id" class="space-y-1.5">
-        <Label class="text-gray-700">
-          {{ $t("providerEditPage.quickStart.labelApiKey") }}
-          <span class="ml-0.5 text-red-500">*</span>
-        </Label>
-        <textarea
-          v-if="['VERTEX', 'VERTEX_OPENAI'].includes(quickStart.provider_type)"
-          v-model="quickStart.api_key"
-          rows="8"
-          class="flex w-full resize-y rounded-md border border-gray-200 bg-white px-3 py-2 font-mono text-sm text-gray-900 outline-none focus:border-gray-400"
-          :placeholder="$t('providerEditPage.credentials.vertexPlaceholder')"
-        />
-        <Input v-else v-model="quickStart.api_key" type="password" class="font-mono text-sm" />
-        <p
-          v-if="['VERTEX', 'VERTEX_OPENAI'].includes(quickStart.provider_type)"
-          class="text-xs leading-5 text-gray-500"
-        >
-          {{ $t("providerEditPage.credentials.vertexHelp") }}
+    <div class="space-y-4 rounded-lg border border-gray-200 bg-gray-50/40 p-3.5 sm:p-4">
+      <div>
+        <h3 class="text-sm font-semibold text-gray-900">
+          {{ $t("providerEditPage.sections.logicalProvider.title") }}
+        </h3>
+        <p class="mt-1 text-xs leading-5 text-gray-500">
+          {{ $t("providerEditPage.sections.logicalProvider.description") }}
         </p>
       </div>
 
-      <div v-if="!editingData.id" class="space-y-1.5">
-        <Label class="text-gray-700">
-          {{ $t("providerEditPage.quickStart.labelModelName") }}
-          <span class="ml-0.5 text-red-500">*</span>
-        </Label>
-        <Input v-model="quickStart.model_name" class="font-mono text-sm" />
-      </div>
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="space-y-1.5">
+          <Label class="text-gray-700">{{ $t("providerEditPage.labelName") }}</Label>
+          <Input
+            v-model="quickStart.provider_name"
+            class="font-mono text-sm"
+            :placeholder="$t('providerEditPage.quickStart.placeholderProviderName')"
+          />
+        </div>
 
-      <div v-if="!editingData.id" class="space-y-1.5 sm:col-span-2">
-        <Label class="text-gray-700">
-          {{ $t("providerEditPage.quickStart.labelApiKeyDescription") }}
-        </Label>
-        <Input
-          v-model="quickStart.api_key_description"
-          :placeholder="$t('providerEditPage.quickStart.placeholderApiKeyDescription')"
-        />
+        <div class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.labelProviderKey") }}
+            <span v-if="!editingData.id" class="ml-0.5 text-red-500">*</span>
+          </Label>
+          <Input
+            v-model="quickStart.provider_key"
+            class="font-mono text-sm"
+            :disabled="!!editingData.id"
+            :placeholder="$t('providerEditPage.quickStart.placeholderProviderKey')"
+          />
+        </div>
+
+        <div
+          v-if="editingData.id"
+          class="flex items-center justify-between rounded-lg border border-gray-200 bg-white p-3.5"
+        >
+          <Label for="provider_enabled" class="cursor-pointer text-gray-700">
+            {{ $t("providerEditPage.labelEnabled") }}
+          </Label>
+          <Checkbox id="provider_enabled" v-model="editingData.is_enabled" />
+        </div>
+
+        <div v-if="editingData.id" class="space-y-1.5">
+          <Label class="text-gray-700">{{ $t("providerEditPage.labelApiKeyMode") }}</Label>
+          <Select v-model="editingData.provider_api_key_mode">
+            <SelectTrigger class="w-full">
+              <SelectValue :placeholder="$t('providerEditPage.placeholderApiKeyMode')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="mode in providerApiKeyModes" :key="mode" :value="mode">
+                {{ $t(`providerEditPage.apiKeyModes.${mode}`) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div v-if="!editingData.id" class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.quickStart.labelApiKey") }}
+            <span class="ml-0.5 text-red-500">*</span>
+          </Label>
+          <Input
+            v-model="quickStart.api_key"
+            type="password"
+            class="font-mono text-sm"
+            :placeholder="$t('providerEditPage.placeholderApiKey')"
+          />
+        </div>
+
+        <div v-if="!editingData.id" class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.quickStart.labelModelName") }}
+            <span class="ml-0.5 text-red-500">*</span>
+          </Label>
+          <Input v-model="quickStart.model_name" class="font-mono text-sm" />
+        </div>
+
+        <div v-if="!editingData.id" class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("modelEditPage.labelModelKind") }}
+            <span class="ml-0.5 text-red-500">*</span>
+          </Label>
+          <Select v-model="quickStart.model_kind">
+            <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="kind in ['CHAT', 'EMBEDDING', 'RERANK']" :key="kind" :value="kind">
+                {{ $t(`modelKinds.${kind}`) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div v-if="!editingData.id" class="space-y-1.5 sm:col-span-2">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.quickStart.labelApiKeyDescription") }}
+          </Label>
+          <Input
+            v-model="quickStart.api_key_description"
+            :placeholder="$t('providerEditPage.quickStart.placeholderApiKeyDescription')"
+          />
+          <p class="text-xs leading-5 text-gray-500">
+            {{ $t("providerEditPage.credentials.providerOwnership") }}
+          </p>
+        </div>
       </div>
     </div>
 
-    <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5">
-      <Label for="provider_quick_start_proxy" class="cursor-pointer text-gray-700">
-        {{ $t("providerEditPage.labelUseProxy") }}
-      </Label>
-      <Checkbox id="provider_quick_start_proxy" v-model="quickStart.use_proxy" />
+    <div v-if="!editingData.id" class="space-y-4 rounded-lg border border-gray-200 p-3.5 sm:p-4">
+      <div>
+        <h3 class="text-sm font-semibold text-gray-900">
+          {{ $t("providerEditPage.sections.initialSource.title") }}
+        </h3>
+        <p class="mt-1 text-xs leading-5 text-gray-500">
+          {{ $t("providerEditPage.sections.initialSource.description") }}
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.labelProfileType") }}
+            <span class="ml-0.5 text-red-500">*</span>
+          </Label>
+          <Select v-model="quickStart.profile_type">
+            <SelectTrigger class="w-full">
+              <SelectValue :placeholder="$t('providerEditPage.placeholderProfileType')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="profile in providerProfileTypes" :key="profile" :value="profile">
+                {{ profile }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div class="space-y-1.5 sm:col-span-2">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.labelBaseUrl") }}
+            <span v-if="!sourceBaseUrlMayBeEmpty(quickStart.profile_type)" class="ml-0.5 text-red-500">*</span>
+          </Label>
+          <Input
+            v-model="quickStart.base_url"
+            class="font-mono text-sm"
+            :placeholder="sourceBaseUrlMayBeEmpty(quickStart.profile_type) ? $t('providerEditPage.sources.officialDefaultPlaceholder') : ''"
+          />
+          <p v-if="sourceBaseUrlMayBeEmpty(quickStart.profile_type)" class="text-xs leading-5 text-gray-500">
+            {{ $t("providerEditPage.sources.officialDefaultHelp") }}
+          </p>
+        </div>
+
+        <div
+          v-for="operation in operationRows"
+          :key="operation.key"
+          class="space-y-3 rounded-lg border border-gray-200 bg-gray-50/40 p-3.5 sm:col-span-2"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <Label :for="`quick-source-${operation.key}`" class="cursor-pointer text-gray-700">
+                {{ $t(`providerEditPage.sources.operations.${operation.key}.label`) }}
+              </Label>
+              <p class="mt-1 text-xs leading-5 text-gray-500">
+                {{ $t(`providerEditPage.sources.operations.${operation.key}.help`) }}
+              </p>
+            </div>
+            <Checkbox :id="`quick-source-${operation.key}`" v-model="quickStart[operation.enabledKey]" />
+          </div>
+          <Input
+            v-model="quickStart[operation.pathKey]"
+            class="font-mono text-sm"
+            :placeholder="$t('providerEditPage.sources.operationPathPlaceholder')"
+          />
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between rounded-lg border border-gray-200 bg-white p-3.5">
+        <Label for="provider_quick_start_proxy" class="cursor-pointer text-gray-700">
+          {{ $t("providerEditPage.labelUseProxy") }}
+        </Label>
+        <Checkbox id="provider_quick_start_proxy" v-model="quickStart.use_proxy" />
+      </div>
     </div>
 
     <div class="border-t border-gray-100 pt-4">
@@ -220,17 +304,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Loader2 } from "lucide-vue-next";
+import {
+  applySourceProfileDefaults,
+  providerProfileTypes,
+  sourceBaseUrlMayBeEmpty,
+  sourceSupportsOperation,
+} from "../composables/sourceProfileContract";
 
-const providerTypes = [
-  "OPENAI",
-  "GEMINI",
-  "GEMINI_OPENAI",
-  "VERTEX",
-  "VERTEX_OPENAI",
-  "ANTHROPIC",
-  "RESPONSES",
-  "OLLAMA",
-];
+const providerApiKeyModes = ["QUEUE", "RANDOM"];
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();
@@ -245,6 +326,29 @@ const quickStart = reactive<ProviderBootstrapFormState>(
 
 const isSubmitting = ref(false);
 const pendingAction = ref<"save" | "test" | null>(null);
+const operationRows = computed(() =>
+  [
+    { key: "chatCompletions", operation: "chat_completions", enabledKey: "chat_completions_enabled", pathKey: "chat_completions_path_override" },
+    { key: "embeddings", operation: "embeddings", enabledKey: "embeddings_enabled", pathKey: "embeddings_path_override" },
+    { key: "rerank", operation: "rerank", enabledKey: "rerank_enabled", pathKey: "rerank_path_override" },
+  ].filter((item) => sourceSupportsOperation(
+    quickStart.profile_type,
+    item.operation as "chat_completions" | "embeddings" | "rerank",
+  )) as Array<{
+    key: string;
+    enabledKey: "chat_completions_enabled" | "embeddings_enabled" | "rerank_enabled";
+    pathKey: "chat_completions_path_override" | "embeddings_path_override" | "rerank_path_override";
+  }>,
+);
+
+watch(
+  () => quickStart.profile_type,
+  (profile, previous) => {
+    if (!editingData.value.id && profile !== previous) {
+      applySourceProfileDefaults(quickStart, profile);
+    }
+  },
+);
 
 watch(
   editingData,
@@ -276,12 +380,12 @@ const handleBootstrap = async (saveAndTest: boolean) => {
   const data = editingData.value;
   if (!data) return;
 
-  if (!quickStart.provider_type.trim()) {
-    toastController.warn($t("providerEditPage.alert.providerTypeRequired"));
+  if (!quickStart.profile_type.trim()) {
+    toastController.warn($t("providerEditPage.alert.profileTypeRequired"));
     return;
   }
-  if (!quickStart.endpoint.trim()) {
-    toastController.warn($t("providerEditPage.alert.endpointRequired"));
+  if (!sourceBaseUrlMayBeEmpty(quickStart.profile_type) && !quickStart.base_url.trim()) {
+    toastController.warn($t("providerEditPage.alert.baseUrlRequired"));
     return;
   }
   if (!quickStart.provider_key.trim()) {
@@ -309,6 +413,15 @@ const handleBootstrap = async (saveAndTest: boolean) => {
 
     const checkResult = normalizeBootstrapCheckResult(response.check_result);
     void providerStore.fetchProviders().catch(() => undefined);
+
+    if (saveAndTest && response.check_result?.status === "check_skipped") {
+      toastController.warn(
+        $t("providerEditPage.alert.bootstrapSaveAndTestSkipped", {
+          reason: response.check_result.message,
+        }),
+      );
+      return;
+    }
 
     if (saveAndTest && checkResult && !checkResult.ok) {
       toastController.error(
@@ -343,14 +456,6 @@ const handleUpdateProvider = async () => {
   if (!data?.id || isSubmitting.value) return;
   const providerName = quickStart.provider_name?.trim() ?? "";
 
-  if (!quickStart.provider_type.trim()) {
-    toastController.warn($t("providerEditPage.alert.providerTypeRequired"));
-    return;
-  }
-  if (!quickStart.endpoint.trim()) {
-    toastController.warn($t("providerEditPage.alert.endpointRequired"));
-    return;
-  }
   if (!providerName) {
     toastController.warn($t("providerEditPage.alert.nameRequired"));
     return;
@@ -360,11 +465,15 @@ const handleUpdateProvider = async () => {
   pendingAction.value = "save";
 
   try {
-    await providerService.updateProvider(data.id, buildProviderUpdatePayload(data, quickStart));
-    data.name = providerName;
-    data.provider_type = quickStart.provider_type.trim();
-    data.endpoint = quickStart.endpoint.trim();
-    data.use_proxy = !!quickStart.use_proxy;
+    const updated = await providerService.updateProvider(
+      data.id,
+      buildProviderUpdatePayload(data, quickStart),
+    );
+    data.name = updated.name;
+    data.provider_key = updated.provider_key;
+    data.is_enabled = updated.is_enabled;
+    data.provider_api_key_mode = updated.provider_api_key_mode;
+    data.upstream_sources = updated.upstream_sources.map((source) => ({ ...source }));
     syncProviderBootstrapFormState(quickStart, data);
 
     void providerStore.fetchProviders().catch(() => undefined);

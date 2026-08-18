@@ -5,7 +5,7 @@ use crate::{
         },
         request_log::RequestLog,
     },
-    schema::enum_def::RequestStatus,
+    schema::enum_def::{RequestStatus, UpstreamProfileType},
 };
 
 use super::types::{MetricsScope, MetricsScopeType};
@@ -93,6 +93,15 @@ fn request_scopes(request_log: &RequestLog) -> Vec<MetricsScope> {
             request_log.provider_name_snapshot.clone(),
         ));
     }
+    if let Some(source_id) = request_log.source_id {
+        scopes.push(id_scope(
+            MetricsScopeType::Source,
+            source_id,
+            request_log
+                .source_profile_type_snapshot
+                .map(upstream_profile_wire_name),
+        ));
+    }
     if let Some(model_id) = request_log.model_id {
         scopes.push(id_scope(
             MetricsScopeType::Model,
@@ -128,16 +137,87 @@ fn request_scopes(request_log: &RequestLog) -> Vec<MetricsScope> {
     scopes
 }
 
+fn upstream_profile_wire_name(profile: UpstreamProfileType) -> String {
+    serde_json::to_value(profile)
+        .expect("upstream profile type serialization is infallible")
+        .as_str()
+        .expect("upstream profile type serializes as a string")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_scopes;
+    use crate::{
+        database::request_log::RequestLog, schema::enum_def::UpstreamProfileType,
+        service::metrics::types::MetricsScopeType,
+    };
+
+    #[test]
+    fn request_scopes_preserve_provider_and_add_selected_source() {
+        let request_log = RequestLog {
+            api_key_id: 1,
+            provider_id: Some(2),
+            provider_name_snapshot: Some("Logical Provider".to_string()),
+            source_id: Some(3),
+            source_profile_type_snapshot: Some(
+                crate::schema::enum_def::UpstreamProfileType::Openai,
+            ),
+            ..RequestLog::default()
+        };
+
+        let scopes = request_scopes(&request_log);
+        assert!(scopes.iter().any(|scope| {
+            scope.scope_type == MetricsScopeType::Provider
+                && scope.scope_id == "2"
+                && scope.scope_label.as_deref() == Some("Logical Provider")
+        }));
+        assert!(scopes.iter().any(|scope| {
+            scope.scope_type == MetricsScopeType::Source
+                && scope.scope_id == "3"
+                && scope.scope_label.as_deref() == Some("OPENAI")
+        }));
+    }
+
+    #[test]
+    fn request_scopes_use_wire_names_for_compound_profiles() {
+        for (profile, expected) in [
+            (UpstreamProfileType::OpenaiCompatible, "OPENAI_COMPATIBLE"),
+            (UpstreamProfileType::GeminiOpenai, "GEMINI_OPENAI"),
+        ] {
+            let request_log = RequestLog {
+                api_key_id: 1,
+                source_id: Some(3),
+                source_profile_type_snapshot: Some(profile),
+                ..RequestLog::default()
+            };
+
+            let source_scope = request_scopes(&request_log)
+                .into_iter()
+                .find(|scope| scope.scope_type == MetricsScopeType::Source)
+                .expect("source scope should be present");
+            assert_eq!(source_scope.scope_label.as_deref(), Some(expected));
+        }
+    }
+}
+
 fn request_rollup_delta(
     request_log: &RequestLog,
     scope: &MetricsScope,
     bucket_start_ms: i64,
     now_ms: i64,
 ) -> MetricRequestRollupMinute {
-    let first_byte_latency = positive_duration_ms(
+    let time_to_first_response_body = positive_duration_ms(
         request_log.upstream_request_sent_at,
-        request_log.response_started_to_client_at,
+        request_log.first_response_body_at,
     );
+    let ttft = request_log.is_stream.then(|| {
+        positive_duration_ms(
+            request_log.upstream_request_sent_at,
+            request_log.first_token_at,
+        )
+    });
+    let ttft = ttft.flatten();
     let total_latency = positive_duration_ms(
         request_log.upstream_request_sent_at,
         request_log.completed_at,
@@ -154,8 +234,10 @@ fn request_rollup_delta(
             request_log.overall_status,
             RequestStatus::Cancelled
         )),
-        first_byte_latency_sum_ms: first_byte_latency.unwrap_or_default(),
-        first_byte_latency_count: i64::from(first_byte_latency.is_some()),
+        time_to_first_response_body_sum_ms: time_to_first_response_body.unwrap_or_default(),
+        time_to_first_response_body_count: i64::from(time_to_first_response_body.is_some()),
+        ttft_sum_ms: ttft.unwrap_or_default(),
+        ttft_count: i64::from(ttft.is_some()),
         total_latency_sum_ms: total_latency.unwrap_or_default(),
         total_latency_count: i64::from(total_latency.is_some()),
         input_tokens: i64::from(request_log.total_input_tokens.unwrap_or_default().max(0)),

@@ -2,23 +2,21 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
-    routing::{get, put},
+    extract::{Path, Query, State},
+    routing::{get, post, put},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    database::{
-        model::Model,
-        request_patch::{
-            CreateRequestPatchPayload, RequestPatchMutationOutcome, RequestPatchRule,
-            RequestPatchRuleResponse, UpdateRequestPatchPayload,
-        },
+    database::request_patch::{
+        RequestPatchRuleInput, RequestPatchVariantAggregate, RequestPatchVariantInput,
+        RequestPatchVariantPreview,
     },
     service::{
         app_state::{AppState, StateRouter, create_state_router},
-        cache::types::{
-            CacheRequestPatchConflict, CacheRequestPatchExplainEntry, CacheResolvedRequestPatch,
+        request_patch::{
+            RequestPatchEvaluation, cache_variant_from_preview_input,
+            evaluate_request_patch_variants,
         },
     },
     utils::HttpResult,
@@ -27,196 +25,397 @@ use crate::{
 use super::BaseError;
 
 #[derive(Debug, Serialize)]
-struct ModelRequestPatchEffectiveResponse {
-    provider_id: i64,
-    model_id: i64,
-    effective_rules: Vec<CacheResolvedRequestPatch>,
-    conflicts: Vec<CacheRequestPatchConflict>,
-    has_conflicts: bool,
+struct RequestPatchVariantListResponse {
+    source_id: i64,
+    model_id: Option<i64>,
+    variants: Vec<RequestPatchVariantAggregate>,
+    variant_count: usize,
+    rule_count: usize,
+}
+
+impl RequestPatchVariantListResponse {
+    fn new(
+        source_id: i64,
+        model_id: Option<i64>,
+        variants: Vec<RequestPatchVariantAggregate>,
+    ) -> Self {
+        let rule_count = variants.iter().map(|item| item.rules.len()).sum();
+        Self {
+            source_id,
+            model_id,
+            variant_count: variants.len(),
+            rule_count,
+            variants,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
-struct ModelRequestPatchExplainResponse {
-    provider_id: i64,
+struct ModelRequestPatchOverviewResponse {
     model_id: i64,
-    direct_rules: Vec<crate::service::cache::types::CacheRequestPatchRule>,
-    inherited_rules: Vec<crate::service::cache::types::CacheInheritedRequestPatch>,
-    effective_rules: Vec<CacheResolvedRequestPatch>,
-    explain: Vec<CacheRequestPatchExplainEntry>,
-    conflicts: Vec<CacheRequestPatchConflict>,
-    has_conflicts: bool,
+    variants: Vec<RequestPatchVariantAggregate>,
+    variant_count: usize,
+    rule_count: usize,
 }
 
-async fn list_provider_request_patches(
-    Path(provider_id): Path<i64>,
-) -> Result<HttpResult<Vec<RequestPatchRuleResponse>>, BaseError> {
-    Ok(HttpResult::new(RequestPatchRule::list_by_provider_id(
-        provider_id,
-    )?))
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestPatchPreviewPayload {
+    variant_id: Option<i64>,
+    source_id: i64,
+    model_id: Option<i64>,
+    suffix: Option<String>,
+    enabled: bool,
+    expose_in_models: bool,
+    rules: Vec<RequestPatchRuleInput>,
 }
 
-async fn create_provider_request_patch(
+impl From<RequestPatchPreviewPayload> for RequestPatchVariantInput {
+    fn from(value: RequestPatchPreviewPayload) -> Self {
+        Self {
+            source_id: value.source_id,
+            model_id: value.model_id,
+            suffix: value.suffix,
+            enabled: value.enabled,
+            expose_in_models: value.expose_in_models,
+            rules: value.rules,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RequestPatchPreviewResponse {
+    historical_snapshot: bool,
+    preview: RequestPatchVariantPreview,
+    evaluation: Option<RequestPatchEvaluation>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RequestPatchExplainQuery {
+    suffix: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestPatchExplainResponse {
+    historical_snapshot: bool,
+    source_id: i64,
+    model_id: Option<i64>,
+    suffix: Option<String>,
+    evaluation: RequestPatchEvaluation,
+}
+
+fn list_response(
+    source_id: i64,
+    model_id: Option<i64>,
+    variants: Vec<RequestPatchVariantAggregate>,
+) -> HttpResult<RequestPatchVariantListResponse> {
+    HttpResult::new(RequestPatchVariantListResponse::new(
+        source_id, model_id, variants,
+    ))
+}
+
+async fn list_source_request_patch_variants(
     State(app_state): State<Arc<AppState>>,
-    Path(provider_id): Path<i64>,
-    Json(payload): Json<CreateRequestPatchPayload>,
-) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = app_state
-        .admin
-        .request_patch
-        .create_provider_request_patch(provider_id, payload)
-        .await?;
-    Ok(HttpResult::new(outcome))
-}
-
-async fn update_provider_request_patch(
-    State(app_state): State<Arc<AppState>>,
-    Path((provider_id, rule_id)): Path<(i64, i64)>,
-    Json(payload): Json<UpdateRequestPatchPayload>,
-) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = app_state
-        .admin
-        .request_patch
-        .update_provider_request_patch(provider_id, rule_id, payload)
-        .await?;
-    Ok(HttpResult::new(outcome))
-}
-
-async fn delete_provider_request_patch(
-    State(app_state): State<Arc<AppState>>,
-    Path((provider_id, rule_id)): Path<(i64, i64)>,
-) -> Result<HttpResult<()>, BaseError> {
+    Path((provider_id, source_id)): Path<(i64, i64)>,
+) -> Result<HttpResult<RequestPatchVariantListResponse>, BaseError> {
     app_state
         .admin
         .request_patch
-        .delete_provider_request_patch(provider_id, rule_id)
+        .validate_source_route(provider_id, source_id)
         .await?;
-    Ok(HttpResult::new(()))
-}
-
-async fn list_model_request_patches(
-    Path(model_id): Path<i64>,
-) -> Result<HttpResult<Vec<RequestPatchRuleResponse>>, BaseError> {
-    Ok(HttpResult::new(RequestPatchRule::list_by_model_id(
-        model_id,
-    )?))
-}
-
-async fn create_model_request_patch(
-    State(app_state): State<Arc<AppState>>,
-    Path(model_id): Path<i64>,
-    Json(payload): Json<CreateRequestPatchPayload>,
-) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = app_state
+    let variants = app_state
         .admin
         .request_patch
-        .create_model_request_patch(model_id, payload)
+        .list_source_variants(source_id)
         .await?;
-    Ok(HttpResult::new(outcome))
+    Ok(list_response(source_id, None, variants))
 }
 
-async fn update_model_request_patch(
+async fn create_source_request_patch_variant(
     State(app_state): State<Arc<AppState>>,
-    Path((model_id, rule_id)): Path<(i64, i64)>,
-    Json(payload): Json<UpdateRequestPatchPayload>,
-) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = app_state
-        .admin
-        .request_patch
-        .update_model_request_patch(model_id, rule_id, payload)
-        .await?;
-    Ok(HttpResult::new(outcome))
-}
-
-async fn delete_model_request_patch(
-    State(app_state): State<Arc<AppState>>,
-    Path((model_id, rule_id)): Path<(i64, i64)>,
-) -> Result<HttpResult<()>, BaseError> {
+    Path((provider_id, source_id)): Path<(i64, i64)>,
+    Json(input): Json<RequestPatchVariantInput>,
+) -> Result<HttpResult<RequestPatchVariantAggregate>, BaseError> {
     app_state
         .admin
         .request_patch
-        .delete_model_request_patch(model_id, rule_id)
+        .validate_source_route(provider_id, source_id)
         .await?;
-    Ok(HttpResult::new(()))
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .request_patch
+            .create_source_variant(source_id, input)
+            .await?,
+    ))
 }
 
-async fn get_model_request_patch_effective(
+async fn update_source_request_patch_variant(
     State(app_state): State<Arc<AppState>>,
-    Path(model_id): Path<i64>,
-) -> Result<HttpResult<ModelRequestPatchEffectiveResponse>, BaseError> {
-    let model = Model::get_by_id(model_id)?;
-    let Some(resolved) = app_state
-        .catalog
-        .get_model_effective_request_patches(model_id)
-        .await?
-    else {
-        return Err(BaseError::NotFound(Some(format!(
-            "Model request patch effective result for {} not found",
-            model_id
-        ))));
-    };
+    Path((provider_id, source_id, variant_id)): Path<(i64, i64, i64)>,
+    Json(input): Json<RequestPatchVariantInput>,
+) -> Result<HttpResult<RequestPatchVariantAggregate>, BaseError> {
+    app_state
+        .admin
+        .request_patch
+        .validate_source_route(provider_id, source_id)
+        .await?;
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .request_patch
+            .update_source_variant(source_id, variant_id, input)
+            .await?,
+    ))
+}
 
-    Ok(HttpResult::new(ModelRequestPatchEffectiveResponse {
-        provider_id: model.provider_id,
-        model_id,
-        effective_rules: resolved.effective_rules.clone(),
-        conflicts: resolved.conflicts.clone(),
-        has_conflicts: resolved.has_conflicts,
+async fn delete_source_request_patch_variant(
+    State(app_state): State<Arc<AppState>>,
+    Path((provider_id, source_id, variant_id)): Path<(i64, i64, i64)>,
+) -> Result<HttpResult<RequestPatchVariantAggregate>, BaseError> {
+    app_state
+        .admin
+        .request_patch
+        .validate_source_route(provider_id, source_id)
+        .await?;
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .request_patch
+            .delete_source_variant(source_id, variant_id)
+            .await?,
+    ))
+}
+
+async fn preview_source_request_patch_variant(
+    State(app_state): State<Arc<AppState>>,
+    Path((provider_id, source_id)): Path<(i64, i64)>,
+    Json(payload): Json<RequestPatchPreviewPayload>,
+) -> Result<HttpResult<RequestPatchPreviewResponse>, BaseError> {
+    app_state
+        .admin
+        .request_patch
+        .validate_source_route(provider_id, source_id)
+        .await?;
+    let variant_id = payload.variant_id;
+    let input: RequestPatchVariantInput = payload.into();
+    let preview = app_state
+        .admin
+        .request_patch
+        .preview_source_variant(source_id, input, variant_id)
+        .await?;
+    Ok(HttpResult::new(RequestPatchPreviewResponse {
+        historical_snapshot: false,
+        preview,
+        evaluation: None,
     }))
 }
 
-async fn get_model_request_patch_explain(
+async fn explain_source_request_patch_variants(
+    State(app_state): State<Arc<AppState>>,
+    Path((provider_id, source_id)): Path<(i64, i64)>,
+    Query(query): Query<RequestPatchExplainQuery>,
+) -> Result<HttpResult<RequestPatchExplainResponse>, BaseError> {
+    app_state
+        .admin
+        .request_patch
+        .validate_source_route(provider_id, source_id)
+        .await?;
+    Ok(HttpResult::new(
+        build_explain_response(&app_state, source_id, None, query.suffix).await?,
+    ))
+}
+
+async fn list_model_request_patch_variants(
     State(app_state): State<Arc<AppState>>,
     Path(model_id): Path<i64>,
-) -> Result<HttpResult<ModelRequestPatchExplainResponse>, BaseError> {
-    let model = Model::get_by_id(model_id)?;
-    let Some(resolved) = app_state
-        .catalog
-        .get_model_effective_request_patches(model_id)
-        .await?
-    else {
-        return Err(BaseError::NotFound(Some(format!(
-            "Model request patch explain result for {} not found",
-            model_id
-        ))));
-    };
-
-    Ok(HttpResult::new(ModelRequestPatchExplainResponse {
-        provider_id: model.provider_id,
+) -> Result<HttpResult<ModelRequestPatchOverviewResponse>, BaseError> {
+    let variants = app_state
+        .admin
+        .request_patch
+        .list_model_variants(model_id)
+        .await?;
+    let rule_count = variants.iter().map(|item| item.rules.len()).sum();
+    Ok(HttpResult::new(ModelRequestPatchOverviewResponse {
         model_id,
-        direct_rules: resolved.direct_rules.clone(),
-        inherited_rules: resolved.inherited_rules.clone(),
-        effective_rules: resolved.effective_rules.clone(),
-        explain: resolved.explain.clone(),
-        conflicts: resolved.conflicts.clone(),
-        has_conflicts: resolved.has_conflicts,
+        variant_count: variants.len(),
+        rule_count,
+        variants,
     }))
+}
+
+async fn list_model_source_request_patch_variants(
+    State(app_state): State<Arc<AppState>>,
+    Path((model_id, source_id)): Path<(i64, i64)>,
+) -> Result<HttpResult<RequestPatchVariantListResponse>, BaseError> {
+    let variants = app_state
+        .admin
+        .request_patch
+        .list_model_source_variants(model_id, source_id)
+        .await?;
+    Ok(list_response(source_id, Some(model_id), variants))
+}
+
+async fn create_model_source_request_patch_variant(
+    State(app_state): State<Arc<AppState>>,
+    Path((model_id, source_id)): Path<(i64, i64)>,
+    Json(input): Json<RequestPatchVariantInput>,
+) -> Result<HttpResult<RequestPatchVariantAggregate>, BaseError> {
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .request_patch
+            .create_model_source_variant(model_id, source_id, input)
+            .await?,
+    ))
+}
+
+async fn update_model_source_request_patch_variant(
+    State(app_state): State<Arc<AppState>>,
+    Path((model_id, source_id, variant_id)): Path<(i64, i64, i64)>,
+    Json(input): Json<RequestPatchVariantInput>,
+) -> Result<HttpResult<RequestPatchVariantAggregate>, BaseError> {
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .request_patch
+            .update_model_source_variant(model_id, source_id, variant_id, input)
+            .await?,
+    ))
+}
+
+async fn delete_model_source_request_patch_variant(
+    State(app_state): State<Arc<AppState>>,
+    Path((model_id, source_id, variant_id)): Path<(i64, i64, i64)>,
+) -> Result<HttpResult<RequestPatchVariantAggregate>, BaseError> {
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .request_patch
+            .delete_model_source_variant(model_id, source_id, variant_id)
+            .await?,
+    ))
+}
+
+async fn preview_model_source_request_patch_variant(
+    State(app_state): State<Arc<AppState>>,
+    Path((model_id, source_id)): Path<(i64, i64)>,
+    Json(payload): Json<RequestPatchPreviewPayload>,
+) -> Result<HttpResult<RequestPatchPreviewResponse>, BaseError> {
+    let variant_id = payload.variant_id;
+    let input: RequestPatchVariantInput = payload.into();
+    let preview = app_state
+        .admin
+        .request_patch
+        .preview_model_source_variant(model_id, source_id, input.clone(), variant_id)
+        .await?;
+    let candidate = cache_variant_from_preview_input(&input, variant_id)?;
+    let mut variants = app_state
+        .catalog
+        .get_request_patch_variants()
+        .await?
+        .as_ref()
+        .clone();
+    variants.retain(|variant| {
+        variant.id != candidate.id
+            && !(variant.source_id == candidate.source_id
+                && variant.model_id == candidate.model_id
+                && variant.suffix == candidate.suffix)
+    });
+    let suffix = candidate.suffix.clone();
+    variants.push(candidate);
+    let evaluation = evaluate_request_patch_variants(
+        variants.as_slice(),
+        source_id,
+        Some(model_id),
+        suffix.as_deref(),
+    );
+    Ok(HttpResult::new(RequestPatchPreviewResponse {
+        historical_snapshot: false,
+        preview,
+        evaluation: Some(evaluation),
+    }))
+}
+
+async fn explain_model_source_request_patch_variants(
+    State(app_state): State<Arc<AppState>>,
+    Path((model_id, source_id)): Path<(i64, i64)>,
+    Query(query): Query<RequestPatchExplainQuery>,
+) -> Result<HttpResult<RequestPatchExplainResponse>, BaseError> {
+    Ok(HttpResult::new(
+        build_explain_response(&app_state, source_id, Some(model_id), query.suffix).await?,
+    ))
+}
+
+async fn build_explain_response(
+    app_state: &AppState,
+    source_id: i64,
+    model_id: Option<i64>,
+    suffix: Option<String>,
+) -> Result<RequestPatchExplainResponse, BaseError> {
+    let variants = app_state.catalog.get_request_patch_variants().await?;
+    let evaluation = evaluate_request_patch_variants(
+        variants.as_slice(),
+        source_id,
+        model_id,
+        suffix.as_deref(),
+    );
+    Ok(RequestPatchExplainResponse {
+        historical_snapshot: false,
+        source_id,
+        model_id,
+        suffix,
+        evaluation,
+    })
 }
 
 pub fn create_request_patch_router() -> StateRouter {
     create_state_router()
         .route(
-            "/provider/{id}/request_patch",
-            get(list_provider_request_patches).post(create_provider_request_patch),
+            "/provider/{provider_id}/sources/{source_id}/request_patch",
+            get(list_source_request_patch_variants),
         )
         .route(
-            "/provider/{id}/request_patch/{rule_id}",
-            put(update_provider_request_patch).delete(delete_provider_request_patch),
+            "/provider/{provider_id}/sources/{source_id}/request_patch/variants",
+            post(create_source_request_patch_variant),
         )
         .route(
-            "/model/{id}/request_patch",
-            get(list_model_request_patches).post(create_model_request_patch),
+            "/provider/{provider_id}/sources/{source_id}/request_patch/preview",
+            post(preview_source_request_patch_variant),
         )
         .route(
-            "/model/{id}/request_patch/effective",
-            get(get_model_request_patch_effective),
+            "/provider/{provider_id}/sources/{source_id}/request_patch/explain",
+            get(explain_source_request_patch_variants),
         )
         .route(
-            "/model/{id}/request_patch/explain",
-            get(get_model_request_patch_explain),
+            "/provider/{provider_id}/sources/{source_id}/request_patch/variants/{variant_id}",
+            put(update_source_request_patch_variant).delete(delete_source_request_patch_variant),
         )
         .route(
-            "/model/{id}/request_patch/{rule_id}",
-            put(update_model_request_patch).delete(delete_model_request_patch),
+            "/model/{model_id}/request_patch",
+            get(list_model_request_patch_variants),
+        )
+        .route(
+            "/model/{model_id}/sources/{source_id}/request_patch",
+            get(list_model_source_request_patch_variants),
+        )
+        .route(
+            "/model/{model_id}/sources/{source_id}/request_patch/variants",
+            post(create_model_source_request_patch_variant),
+        )
+        .route(
+            "/model/{model_id}/sources/{source_id}/request_patch/preview",
+            post(preview_model_source_request_patch_variant),
+        )
+        .route(
+            "/model/{model_id}/sources/{source_id}/request_patch/explain",
+            get(explain_model_source_request_patch_variants),
+        )
+        .route(
+            "/model/{model_id}/sources/{source_id}/request_patch/variants/{variant_id}",
+            put(update_model_source_request_patch_variant)
+                .delete(delete_model_source_request_patch_variant),
         )
 }
 
@@ -231,47 +430,268 @@ mod tests {
     use serde_json::{Value, json};
     use tower::util::ServiceExt;
 
-    use crate::database::TestDbContext;
-    use crate::database::model::{Model, ModelCapabilityFlags};
+    use super::create_request_patch_router;
+    use crate::database::TestDatabase;
+    use crate::database::model::Model;
     use crate::database::provider::{NewProvider, Provider};
-    use crate::database::request_patch::RequestPatchRule;
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::database::upstream_source::NewUpstreamSource;
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
+    };
     use crate::service::app_state::{AppState, create_test_app_state};
 
-    use super::create_request_patch_router;
-
-    fn seed_provider(id: i64, provider_key: &str) -> Provider {
-        Provider::create(&NewProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://api.example.com/v1".to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            provider_type: ProviderType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-        })
-        .expect("provider seed should succeed")
+    #[test]
+    fn request_patch_router_registers_only_aggregate_routes() {
+        let _router = create_request_patch_router();
     }
 
-    fn seed_model_for_provider(provider_id: i64, model_name: &str) -> Model {
-        Model::create(
-            provider_id,
-            model_name,
-            None,
-            true,
-            ModelCapabilityFlags {
-                supports_streaming: true,
-                supports_tools: true,
-                supports_reasoning: true,
-                supports_image_input: true,
-                supports_embeddings: true,
-                supports_rerank: true,
+    #[test]
+    fn request_patch_openapi_matches_aggregate_routes_and_current_detail_shapes() {
+        let document: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../docs/openapi/manager-provider.openapi.yaml"
+        ))
+        .expect("manager Provider OpenAPI should parse");
+        assert_eq!(
+            document["x-cyder-default-cache-control"].as_str(),
+            Some("no-store")
+        );
+
+        let expected_operations = [
+            (
+                "/ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch",
+                "get",
+                "RequestPatchVariantList",
+            ),
+            (
+                "/ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/variants",
+                "post",
+                "RequestPatchVariantAggregate",
+            ),
+            (
+                "/ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/variants/{variant_id}",
+                "put",
+                "RequestPatchVariantAggregate",
+            ),
+            (
+                "/ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/variants/{variant_id}",
+                "delete",
+                "RequestPatchVariantAggregate",
+            ),
+            (
+                "/ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/preview",
+                "post",
+                "RequestPatchPreview",
+            ),
+            (
+                "/ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/explain",
+                "get",
+                "RequestPatchExplain",
+            ),
+            (
+                "/ai/manager/api/model/{model_id}/request_patch",
+                "get",
+                "RequestPatchModelOverview",
+            ),
+            (
+                "/ai/manager/api/model/{model_id}/sources/{source_id}/request_patch",
+                "get",
+                "RequestPatchVariantList",
+            ),
+            (
+                "/ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/variants",
+                "post",
+                "RequestPatchVariantAggregate",
+            ),
+            (
+                "/ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/variants/{variant_id}",
+                "put",
+                "RequestPatchVariantAggregate",
+            ),
+            (
+                "/ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/variants/{variant_id}",
+                "delete",
+                "RequestPatchVariantAggregate",
+            ),
+            (
+                "/ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/preview",
+                "post",
+                "RequestPatchPreview",
+            ),
+            (
+                "/ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/explain",
+                "get",
+                "RequestPatchExplain",
+            ),
+        ];
+        for (path, method, response_name) in expected_operations {
+            let operation = &document["paths"][path][method];
+            assert!(operation.is_mapping(), "missing {method} {path}");
+            let success_ref = operation["responses"]["200"]["$ref"]
+                .as_str()
+                .expect("success response must reference an explicit DTO");
+            assert_eq!(
+                success_ref,
+                format!("#/components/responses/{response_name}")
+            );
+            assert_eq!(
+                document["components"]["responses"][response_name]["headers"]["Cache-Control"]
+                    ["$ref"]
+                    .as_str(),
+                Some("#/components/headers/NoStore")
+            );
+        }
+
+        for schema in [
+            "RequestPatchRuleInput",
+            "RequestPatchVariantInput",
+            "RequestPatchPreviewInput",
+            "RequestPatchVariant",
+            "RequestPatchRule",
+            "RequestPatchVariantAggregate",
+            "RequestPatchVariantListData",
+            "ModelRequestPatchOverviewData",
+            "RequestPatchVariantPreview",
+            "RequestPatchEvaluation",
+        ] {
+            assert_eq!(
+                document["components"]["schemas"][schema]["additionalProperties"].as_bool(),
+                Some(false),
+                "{schema} must reject unknown fields"
+            );
+        }
+        assert!(
+            document["components"]["schemas"]["RequestPatchVariantInput"]["required"]
+                .as_sequence()
+                .expect("Variant input required fields should exist")
+                .contains(&serde_yaml::Value::from("source_id"))
+        );
+        let retired_confirmation_field = ["confirm", "dangerous", "target"].join("_");
+        let rule_input_properties =
+            document["components"]["schemas"]["RequestPatchRuleInput"]["properties"]
+                .as_mapping()
+                .expect("Rule input properties should exist");
+        assert!(
+            !rule_input_properties
+                .contains_key(serde_yaml::Value::from(retired_confirmation_field))
+        );
+        let retired_preview_field = ["dangerous", "targets"].join("_");
+        let preview_properties =
+            document["components"]["schemas"]["RequestPatchPreviewData"]["properties"]
+                .as_mapping()
+                .expect("Preview response properties should exist");
+        assert!(!preview_properties.contains_key(serde_yaml::Value::from(retired_preview_field)));
+
+        let model_detail = &document["components"]["schemas"]["ModelDetail"];
+        let model_detail_properties = model_detail["properties"]
+            .as_mapping()
+            .expect("Model detail properties should exist");
+        assert!(
+            model_detail_properties
+                .contains_key(serde_yaml::Value::from("request_patch_variants",))
+        );
+        assert!(
+            document["components"]["schemas"]["RequestPatchPreviewData"]["required"]
+                .as_sequence()
+                .expect("Preview response required fields should exist")
+                .contains(&serde_yaml::Value::from("evaluation"))
+        );
+        for forbidden in [
+            "request_patches",
+            "inherited_request_patches",
+            "effective_request_patches",
+            "request_patch_explain",
+            "request_patch_conflicts",
+            "has_request_patch_conflicts",
+        ] {
+            assert!(
+                !model_detail_properties.contains_key(serde_yaml::Value::from(forbidden)),
+                "Model detail must not expose retired {forbidden}"
+            );
+        }
+        let provider_detail_properties =
+            document["components"]["schemas"]["ProviderDetail"]["properties"]
+                .as_mapping()
+                .expect("Provider detail properties should exist");
+        assert!(
+            provider_detail_properties
+                .contains_key(serde_yaml::Value::from("request_patch_variants",))
+        );
+        assert!(
+            !provider_detail_properties.contains_key(serde_yaml::Value::from("request_patches"))
+        );
+
+        for legacy_path in [
+            "/ai/manager/api/provider/{provider_id}/request_patch",
+            "/ai/manager/api/model/{model_id}/request_patches",
+        ] {
+            assert!(
+                document["paths"][legacy_path].is_null(),
+                "legacy path {legacy_path}"
+            );
+        }
+        for path in document["paths"]
+            .as_mapping()
+            .expect("OpenAPI paths should be a mapping")
+            .keys()
+            .filter_map(serde_yaml::Value::as_str)
+        {
+            assert!(!path.contains("reasoning"), "retired reasoning path {path}");
+            assert!(
+                !path.contains("runtime_feature"),
+                "retired runtime feature path {path}"
+            );
+        }
+    }
+
+    async fn seed_provider(
+        database: &crate::database::runtime::DatabaseRuntime,
+        provider_id: i64,
+        source_id: i64,
+    ) -> (Provider, Model) {
+        let provider = Provider::create(
+            database,
+            &NewProvider {
+                id: provider_id,
+                provider_key: format!("provider-{provider_id}"),
+                name: format!("Provider {provider_id}"),
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            &NewUpstreamSource {
+                id: source_id,
+                provider_id,
+                profile_type: UpstreamProfileType::Openai,
+                base_url: format!("https://source-{source_id}.example/v1"),
+                use_proxy: false,
+                chat_completions_enabled: Some(true),
+                chat_completions_path_override: None,
+                embeddings_enabled: Some(true),
+                embeddings_path_override: None,
+                rerank_enabled: Some(false),
+                rerank_path_override: None,
+                is_enabled: true,
+                is_default: true,
+                created_at: 1,
+                updated_at: 1,
+                ..NewUpstreamSource::test_defaults(UpstreamProfileType::Openai)
             },
         )
-        .expect("model seed should succeed")
+        .await
+        .expect("provider seed should succeed")
+        .provider;
+        let model = Model::create(
+            database,
+            provider.id,
+            "model-a",
+            None,
+            crate::schema::enum_def::ModelKind::Chat,
+            true,
+        )
+        .await
+        .expect("model seed should succeed");
+        (provider, model)
     }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
@@ -293,213 +713,549 @@ mod tests {
             .expect("request should build")
     }
 
-    fn empty_request(method: Method, uri: &str) -> Request<Body> {
-        Request::builder()
-            .method(method)
-            .uri(uri)
-            .body(Body::empty())
-            .expect("request should build")
-    }
-
     async fn response_json(response: axum::response::Response) -> Value {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body should read");
-        serde_json::from_slice(&body).expect("response should be json")
+        serde_json::from_slice(&body).expect("response should be JSON")
     }
 
-    #[test]
-    fn create_request_patch_router_registers_routes() {
-        let _router = create_request_patch_router();
-    }
-
-    #[tokio::test]
-    async fn provider_scope_request_patch_http_lifecycle_updates_effective_endpoint() {
-        let test_db_context =
-            TestDbContext::new_sqlite("controller-request-patch-provider-http.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let provider = seed_provider(22101, "openai");
-                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let create_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/provider/{}/request_patch", provider.id),
-                        json!({
-                            "placement": "BODY",
-                            "target": "/temperature",
-                            "operation": "SET",
-                            "value_json": 0.2,
-                            "description": "provider patch",
-                            "is_enabled": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(create_response.status(), StatusCode::OK);
-                let create_body = response_json(create_response).await;
-                let rule_id = create_body["data"]["rule"]["id"]
-                    .as_i64()
-                    .expect("saved provider rule id should exist");
-                assert_eq!(create_body["code"], 0);
-                assert_eq!(create_body["data"]["result"], "saved");
-
-                let effective_after_create = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/model/{}/request_patch/effective", model.id),
-                    ),
-                )
-                .await;
-                assert_eq!(effective_after_create.status(), StatusCode::OK);
-                let effective_after_create_body = response_json(effective_after_create).await;
-                assert_eq!(
-                    effective_after_create_body["data"]["effective_rules"]
-                        .as_array()
-                        .expect("effective rules should be an array")
-                        .len(),
-                    1
-                );
-                assert_eq!(
-                    effective_after_create_body["data"]["effective_rules"][0]["target"],
-                    "/temperature"
-                );
-
-                let delete_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::DELETE,
-                        &format!("/provider/{}/request_patch/{}", provider.id, rule_id),
-                    ),
-                )
-                .await;
-                assert_eq!(delete_response.status(), StatusCode::OK);
-                let delete_body = response_json(delete_response).await;
-                assert_eq!(delete_body["code"], 0);
-                assert!(delete_body["data"].is_null());
-
-                let effective_after_delete = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/model/{}/request_patch/effective", model.id),
-                    ),
-                )
-                .await;
-                assert_eq!(effective_after_delete.status(), StatusCode::OK);
-                let effective_after_delete_body = response_json(effective_after_delete).await;
-                assert!(
-                    effective_after_delete_body["data"]["effective_rules"]
-                        .as_array()
-                        .expect("effective rules should be an array")
-                        .is_empty()
-                );
-                assert!(
-                    RequestPatchRule::list_by_provider_id(provider.id)
-                        .expect("provider rules should load")
-                        .is_empty()
-                );
-            })
-            .await;
+    fn source_variant_payload(source_id: i64, suffix: &str, target: &str) -> Value {
+        json!({
+            "source_id": source_id,
+            "model_id": null,
+            "suffix": suffix,
+            "enabled": true,
+            "expose_in_models": true,
+            "rules": [{
+                "placement": RequestPatchPlacement::Body,
+                "target": target,
+                "operation": RequestPatchOperation::Set,
+                "value_json": 0.2,
+                "description": "controller test"
+            }]
+        })
     }
 
     #[tokio::test]
-    async fn model_scope_request_patch_http_lifecycle_updates_effective_endpoint() {
-        let test_db_context =
-            TestDbContext::new_sqlite("controller-request-patch-model-http.sqlite");
+    async fn responses_stateless_targets_are_rejected_by_preview_and_save_routes() {
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-stateless.sqlite").await;
+        (async {
+            let (provider, _) = seed_provider(&database, 8451, 8461).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let source_id = 8461;
+            let base = format!(
+                "/provider/{}/sources/{source_id}/request_patch",
+                provider.id
+            );
 
-        test_db_context
-            .run_async(async {
-                let provider = seed_provider(22201, "openai");
-                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+            for (index, (operation, target)) in [
+                (RequestPatchOperation::Set, "/store"),
+                (RequestPatchOperation::Remove, "/store/enabled"),
+                (RequestPatchOperation::Set, "/previous_response_id"),
+                (RequestPatchOperation::Remove, "/conversation/id"),
+                (RequestPatchOperation::Set, "/background"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let payload = json!({
+                    "source_id": source_id,
+                    "model_id": null,
+                    "suffix": format!("stateless-{index}"),
+                    "enabled": true,
+                    "expose_in_models": true,
+                    "rules": [{
+                        "placement": RequestPatchPlacement::Body,
+                        "target": target,
+                        "operation": operation,
+                        "value_json": (operation == RequestPatchOperation::Set)
+                            .then_some("patch-private-marker"),
+                        "description": null
+                    }]
+                });
+                for uri in [format!("{base}/preview"), format!("{base}/variants")] {
+                    let response = send(
+                        &app_state,
+                        json_request(Method::POST, &uri, payload.clone()),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri} {target}");
+                    let body = response_json(response).await.to_string();
+                    assert!(body.contains("reserved"), "{uri} {target}");
+                    assert!(!body.contains("patch-private-marker"), "{uri} {target}");
+                }
+            }
+        })
+        .await;
+    }
 
-                let create_response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        &format!("/model/{}/request_patch", model.id),
-                        json!({
-                            "placement": "BODY",
-                            "target": "/top_p",
-                            "operation": "SET",
-                            "value_json": 0.7,
-                            "description": "model patch",
-                            "is_enabled": true
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(create_response.status(), StatusCode::OK);
-                let create_body = response_json(create_response).await;
-                let rule_id = create_body["data"]["rule"]["id"]
-                    .as_i64()
-                    .expect("saved model rule id should exist");
-                assert_eq!(create_body["code"], 0);
-                assert_eq!(create_body["data"]["result"], "saved");
+    #[tokio::test]
+    async fn aggregate_source_routes_support_crud_preview_explain_and_negative_legacy_route() {
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-aggregate.sqlite").await;
+        (async {
+            let (provider, model) = seed_provider(&database, 8501, 8511).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let source_id = 8511;
+            let base = format!(
+                "/provider/{}/sources/{source_id}/request_patch",
+                provider.id
+            );
+            let variants = format!("{base}/variants");
+            assert!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .is_empty()
+            );
 
-                let effective_after_create = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/model/{}/request_patch/effective", model.id),
-                    ),
-                )
-                .await;
-                assert_eq!(effective_after_create.status(), StatusCode::OK);
-                let effective_after_create_body = response_json(effective_after_create).await;
-                assert_eq!(
-                    effective_after_create_body["data"]["effective_rules"]
-                        .as_array()
-                        .expect("effective rules should be an array")
-                        .len(),
-                    1
-                );
-                assert_eq!(
-                    effective_after_create_body["data"]["effective_rules"][0]["target"],
-                    "/top_p"
-                );
-
-                let delete_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::DELETE,
-                        &format!("/model/{}/request_patch/{}", model.id, rule_id),
-                    ),
-                )
-                .await;
-                assert_eq!(delete_response.status(), StatusCode::OK);
-                let delete_body = response_json(delete_response).await;
-                assert_eq!(delete_body["code"], 0);
-                assert!(delete_body["data"].is_null());
-
-                let effective_after_delete = send(
-                    &app_state,
-                    empty_request(
-                        Method::GET,
-                        &format!("/model/{}/request_patch/effective", model.id),
-                    ),
-                )
-                .await;
-                assert_eq!(effective_after_delete.status(), StatusCode::OK);
-                let effective_after_delete_body = response_json(effective_after_delete).await;
-                assert!(
-                    effective_after_delete_body["data"]["effective_rules"]
-                        .as_array()
-                        .expect("effective rules should be an array")
-                        .is_empty()
-                );
-                assert!(
-                    RequestPatchRule::list_by_model_id(model.id)
-                        .expect("model rules should load")
-                        .is_empty()
-                );
-            })
+            let created = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &variants,
+                    source_variant_payload(source_id, "fast", "/options/temperature"),
+                ),
+            )
             .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let created_body = response_json(created).await;
+            let variant_id = created_body["data"]["variant"]["id"]
+                .as_i64()
+                .expect("created Variant id should exist");
+            assert_eq!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .len(),
+                1
+            );
+
+            let listed = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("list request should build"),
+            )
+            .await;
+            assert_eq!(listed.status(), StatusCode::OK);
+            let listed_body = response_json(listed).await;
+            assert_eq!(listed_body["data"]["variant_count"], 1);
+            assert_eq!(listed_body["data"]["rule_count"], 1);
+
+            let preview = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{base}/preview"),
+                    json!({
+                        "source_id": source_id,
+                        "model_id": null,
+                        "suffix": "secret",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": [{
+                            "placement": "HEADER",
+                            "target": "Authorization",
+                            "operation": "SET",
+                            "value_json": "would-not-be-saved",
+                            "description": null
+                        }]
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
+            let preview_body = response_json(preview).await;
+            assert!(preview_body.to_string().contains("reserved"));
+            assert!(!preview_body.to_string().contains("would-not-be-saved"));
+            assert!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .is_empty(),
+                "Preview must not emit an audit event"
+            );
+
+            let mut legacy_rule = json!({
+                "placement": "HEADER",
+                "target": "Authorization",
+                "operation": "SET",
+                "value_json": "would-not-be-saved",
+                "description": null
+            });
+            legacy_rule
+                .as_object_mut()
+                .expect("legacy rule should be an object")
+                .insert(
+                    ["confirm", "dangerous", "target"].join("_"),
+                    Value::Bool(true),
+                );
+            let legacy_confirmation = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{base}/preview"),
+                    json!({
+                        "source_id": source_id,
+                        "model_id": null,
+                        "suffix": "secret",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": [legacy_rule]
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                legacy_confirmation.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            let legacy_body = to_bytes(legacy_confirmation.into_body(), usize::MAX)
+                .await
+                .expect("legacy rejection body should read");
+            assert!(!String::from_utf8_lossy(&legacy_body).contains("would-not-be-saved"));
+            assert!(
+                app_state
+                    .admin
+                    .request_patch
+                    .mutation_runner()
+                    .drain_audit_events()
+                    .is_empty(),
+                "rejected legacy confirmation must not emit an audit event"
+            );
+
+            let listed_after_preview = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("post-preview list request should build"),
+            )
+            .await;
+            assert_eq!(listed_after_preview.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(listed_after_preview).await["data"]["variant_count"],
+                1,
+                "Preview must not persist a candidate Variant"
+            );
+
+            let explained = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("{base}/explain?suffix=fast"))
+                    .body(Body::empty())
+                    .expect("explain request should build"),
+            )
+            .await;
+            assert_eq!(explained.status(), StatusCode::OK);
+            let explained_body = response_json(explained).await;
+            assert_eq!(explained_body["data"]["evaluation"]["executable"], true);
+            assert_eq!(
+                explained_body["data"]["evaluation"]["effective_rules"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            let updated = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("{variants}/{variant_id}"),
+                    source_variant_payload(source_id, "fast", "/options/top_p"),
+                ),
+            )
+            .await;
+            assert_eq!(updated.status(), StatusCode::OK);
+            let updated_body = response_json(updated).await;
+            assert_eq!(updated_body["data"]["variant"]["id"], variant_id);
+            assert_eq!(updated_body["data"]["rules"][0]["target"], "/options/top_p");
+
+            let deleted = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("{variants}/{variant_id}"))
+                    .body(Body::empty())
+                    .expect("delete request should build"),
+            )
+            .await;
+            assert_eq!(deleted.status(), StatusCode::OK);
+            assert!(response_json(deleted).await["data"]["variant"]["deleted_at"].is_number());
+
+            let old_route = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/provider/{}/request_patch", provider.id))
+                    .body(Body::empty())
+                    .expect("legacy request should build"),
+            )
+            .await;
+            assert_eq!(old_route.status(), StatusCode::NOT_FOUND);
+
+            let _ = model;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn aggregate_model_source_route_rejects_cross_owner_payload() {
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-owner.sqlite").await;
+        (async {
+            let (provider, model) = seed_provider(&database, 8601, 8611).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!(
+                        "/model/{}/sources/{}/request_patch/variants",
+                        model.id, 8611
+                    ),
+                    json!({
+                        "source_id": 8611,
+                        "model_id": provider.id,
+                        "suffix": "fast",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": []
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn aggregate_model_source_routes_cover_crud_overview_tombstone_preview_explain_and_rollback()
+     {
+        let database =
+            TestDatabase::new_sqlite_default("controller-request-patch-model-source.sqlite").await;
+        (async {
+            let (provider, model) = seed_provider(&database, 8701, 8711).await;
+            let app_state = create_test_app_state(database.clone()).await;
+            let source_base = format!("/provider/{}/sources/{}/request_patch", provider.id, 8711);
+            let source_variant = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{source_base}/variants"),
+                    source_variant_payload(8711, "fast", "/options/temperature"),
+                ),
+            )
+            .await;
+            assert_eq!(source_variant.status(), StatusCode::OK);
+
+            let base = format!("/model/{}/sources/{}/request_patch", model.id, 8711);
+            let variants = format!("{base}/variants");
+            let tombstone_payload = json!({
+                "source_id": 8711,
+                "model_id": model.id,
+                "suffix": "fast",
+                "enabled": true,
+                "expose_in_models": true,
+                "rules": []
+            });
+            let created = send(
+                &app_state,
+                json_request(Method::POST, &variants, tombstone_payload.clone()),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let created_body = response_json(created).await;
+            let variant_id = created_body["data"]["variant"]["id"]
+                .as_i64()
+                .expect("Model+Source Variant id should exist");
+            assert_eq!(
+                created_body["data"]["rules"].as_array().map(Vec::len),
+                Some(0)
+            );
+
+            let listed = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("Model+Source list request should build"),
+            )
+            .await;
+            assert_eq!(listed.status(), StatusCode::OK);
+            let listed_body = response_json(listed).await;
+            assert_eq!(listed_body["data"]["variant_count"], 1);
+            assert_eq!(listed_body["data"]["rule_count"], 0);
+
+            let overview = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/model/{}/request_patch", model.id))
+                    .body(Body::empty())
+                    .expect("Model overview request should build"),
+            )
+            .await;
+            assert_eq!(overview.status(), StatusCode::OK);
+            let overview_body = response_json(overview).await;
+            assert_eq!(overview_body["data"]["model_id"], model.id);
+            assert_eq!(overview_body["data"]["variant_count"], 1);
+            assert_eq!(overview_body["data"]["rule_count"], 0);
+
+            let preview = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    &format!("{base}/preview"),
+                    json!({
+                        "variant_id": variant_id,
+                        "source_id": 8711,
+                        "model_id": model.id,
+                        "suffix": "fast",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": []
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(preview.status(), StatusCode::OK);
+            let preview_body = response_json(preview).await;
+            assert_eq!(preview_body["data"]["preview"]["valid"], true);
+            assert_eq!(preview_body["data"]["preview"]["rule_count"], 0);
+            assert_eq!(
+                preview_body["data"]["evaluation"]["layers"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(4)
+            );
+            assert_eq!(
+                preview_body["data"]["evaluation"]["effective_rules"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            let explained = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("{base}/explain?suffix=fast"))
+                    .body(Body::empty())
+                    .expect("Model+Source explain request should build"),
+            )
+            .await;
+            assert_eq!(explained.status(), StatusCode::OK);
+            let explained_body = response_json(explained).await;
+            assert_eq!(explained_body["data"]["model_id"], model.id);
+            assert_eq!(explained_body["data"]["evaluation"]["executable"], true);
+            assert_eq!(
+                explained_body["data"]["evaluation"]["effective_rules"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1),
+                "empty Model suffix tombstone should inherit the Source rule"
+            );
+
+            let invalid_update = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("{variants}/{variant_id}"),
+                    json!({
+                        "source_id": 8711,
+                        "model_id": model.id,
+                        "suffix": "fast",
+                        "enabled": true,
+                        "expose_in_models": true,
+                        "rules": [{
+                            "placement": "BODY",
+                            "target": "not-a-json-pointer",
+                            "operation": "SET",
+                            "value_json": true,
+                            "description": null
+                        }]
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(invalid_update.status(), StatusCode::BAD_REQUEST);
+
+            let updated = send(
+                &app_state,
+                json_request(
+                    Method::PUT,
+                    &format!("{variants}/{variant_id}"),
+                    json!({
+                        "source_id": 8711,
+                        "model_id": model.id,
+                        "suffix": "fast",
+                        "enabled": false,
+                        "expose_in_models": false,
+                        "rules": []
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(updated.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(updated).await["data"]["variant"]["enabled"],
+                false
+            );
+
+            let deleted = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("{variants}/{variant_id}"))
+                    .body(Body::empty())
+                    .expect("Model+Source delete request should build"),
+            )
+            .await;
+            assert_eq!(deleted.status(), StatusCode::OK);
+            assert!(response_json(deleted).await["data"]["variant"]["deleted_at"].is_number());
+
+            let listed_after_delete = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&base)
+                    .body(Body::empty())
+                    .expect("post-delete Model+Source list request should build"),
+            )
+            .await;
+            assert_eq!(listed_after_delete.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(listed_after_delete).await["data"]["variant_count"],
+                0
+            );
+
+            let old_route = send(
+                &app_state,
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/model/{}/request_patches", model.id))
+                    .body(Body::empty())
+                    .expect("legacy Model request should build"),
+            )
+            .await;
+            assert_eq!(old_route.status(), StatusCode::NOT_FOUND);
+        })
+        .await;
     }
 }

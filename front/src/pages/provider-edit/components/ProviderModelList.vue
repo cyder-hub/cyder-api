@@ -4,32 +4,7 @@
       :title="$t('providerEditPage.sectionModels')"
       :help="$t('providerEditPage.sections.modelsDescription')"
       :help-label="$t('providerEditPage.sectionModels')"
-    >
-      <template #actions>
-      <div class="flex flex-col gap-2 sm:w-auto sm:flex-row">
-        <Button
-          variant="outline"
-          size="sm"
-          class="w-full sm:w-auto"
-          @click="emit('checkBatch')"
-          :disabled="!editingData.id || editingData.models.length === 0"
-        >
-          <Check class="mr-1.5 h-4 w-4" />
-          {{ $t("providerEditPage.alert.buttonCheckAll") }}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          class="w-full sm:w-auto"
-          @click="handleFetchRemoteModels"
-          :disabled="!editingData.id"
-        >
-          <CloudDownload class="mr-1.5 h-4 w-4" />
-          {{ $t("providerEditPage.buttonFetchRemote") }}
-        </Button>
-      </div>
-      </template>
-    </SectionHeader>
+    />
 
     <div
       v-if="editingData.models.length === 0"
@@ -81,27 +56,24 @@
             <Checkbox v-model="model.is_enabled" />
           </div>
 
-          <div class="space-y-2">
-            <Label class="text-gray-700">
-              {{ $t("providerEditPage.modelCapabilities.title") }}
-            </Label>
-            <div class="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2">
-              <div
-                v-for="capability in capabilityItems"
-                :key="capability.key"
-                class="flex items-center justify-between rounded-lg border border-gray-200 p-3"
+          <div class="rounded-lg border border-gray-200 px-3.5 py-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-xs font-medium text-gray-600">
+                {{ $t("providerEditPage.modelSourceConfig.title") }}
+              </span>
+              <Badge variant="secondary" class="font-mono text-[11px]">
+                {{ model.source_config?.source_selection_mode || "INHERIT_ALL" }}
+              </Badge>
+              <span class="font-mono text-xs text-gray-500">
+                {{ model.source_config?.declared_source_count ?? 0 }}
+              </span>
+              <Badge
+                v-if="model.source_config?.warnings.length"
+                variant="outline"
+                class="font-mono text-[11px] text-gray-600"
               >
-                <Label class="cursor-pointer text-xs text-gray-700">
-                  {{ $t(capability.labelKey) }}
-                </Label>
-                <Checkbox
-                  :model-value="model[capability.key]"
-                  @update:model-value="
-                    (value: boolean | 'indeterminate') =>
-                      (model[capability.key] = value === true)
-                  "
-                />
-              </div>
+                {{ $t("providerEditPage.modelSourceConfig.warningCount", { count: model.source_config.warnings.length }) }}
+              </Badge>
             </div>
           </div>
         </div>
@@ -121,9 +93,7 @@
               @click="handleSaveSingleModel(index)"
             >
               {{
-                model.id
-                  ? $t("common.save")
-                  : $t("providerEditPage.buttonSaveModel")
+                $t("common.save")
               }}
             </Button>
             <Button
@@ -182,7 +152,7 @@
           {{ $t("providerEditPage.tableHeaderMappedModelId") }}
         </span>
         <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
-          {{ $t("providerEditPage.modelCapabilities.title") }}
+          {{ $t("providerEditPage.modelSourceConfig.title") }}
         </span>
         <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
           {{ $t("providerEditPage.labelEnabled") }}
@@ -210,23 +180,20 @@
             (v: string | number) => (model.real_model_name = String(v).trim() || null)
           "
         />
-        <div class="grid grid-cols-2 gap-2 xl:grid-cols-3">
-          <div
-            v-for="capability in capabilityItems"
-            :key="`desktop-${index}-${capability.key}`"
-            class="flex items-center justify-between gap-2 rounded-md border border-gray-200 px-2.5 py-2"
+        <div class="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary" class="font-mono text-[11px]">
+            {{ model.source_config?.source_selection_mode || "INHERIT_ALL" }}
+          </Badge>
+          <span class="font-mono text-xs text-gray-500">
+            {{ model.source_config?.declared_source_count ?? 0 }}
+          </span>
+          <Badge
+            v-if="model.source_config?.warnings.length"
+            variant="outline"
+            class="font-mono text-[11px] text-gray-600"
           >
-            <Label class="cursor-pointer text-[11px] text-gray-600">
-              {{ $t(capability.labelKey) }}
-            </Label>
-            <Checkbox
-              :model-value="model[capability.key]"
-              @update:model-value="
-                (value: boolean | 'indeterminate') =>
-                  (model[capability.key] = value === true)
-              "
-            />
-          </div>
+            {{ $t("providerEditPage.modelSourceConfig.warningCount", { count: model.source_config.warnings.length }) }}
+          </Badge>
         </div>
         <div class="flex items-center justify-start">
           <Checkbox v-model="model.is_enabled" />
@@ -234,9 +201,7 @@
         <div class="flex items-center justify-end space-x-1">
           <Button variant="default" size="sm" class="h-8" @click="handleSaveSingleModel(index)">
             {{
-              model.id
-                ? $t("common.save")
-                : $t("providerEditPage.buttonSaveModel")
+              $t("common.save")
             }}
           </Button>
           <Button
@@ -286,16 +251,6 @@
         <Plus class="mr-1.5 h-4 w-4" />
         {{ $t("providerEditPage.buttonAddModel") }}
       </Button>
-      <Button
-        v-if="hasUncommittedModels"
-        variant="outline"
-        size="sm"
-        class="w-full border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 sm:w-auto"
-        @click="handleClearUncommittedModels"
-      >
-        <Trash2 class="mr-1.5 h-4 w-4" />
-        {{ $t("providerEditPage.buttonClearUncommitted") }}
-      </Button>
     </div>
   </section>
 
@@ -304,21 +259,23 @@
     :model-id="sheetModelId"
     @saved="handleModelSheetSaved"
   />
+  <ModelCreateSheet
+    v-model:open="isCreateSheetOpen"
+    :provider-id="editingData.id"
+    :sources="editingData.upstream_sources"
+    @saved="handleCreateModelSaved"
+  />
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { ref } from "vue";
 import { useI18n } from "vue-i18n";
-import * as providerService from "@/services/providers";
 import * as modelService from "@/services/models";
 import { toastController } from "@/services/uiFeedback";
-import type { EditingProviderData, LocalEditableModelItem } from "../types";
+import type { EditingProviderData } from "../types";
 import type { EditingModelData } from "@/pages/model-edit/types";
-import type {
-  ProviderRemoteModelItem,
-  ProviderRemoteModelsResponse,
-} from "@/services/types";
 import ModelEditSheet from "@/pages/model-edit/components/ModelEditSheet.vue";
+import ModelCreateSheet from "@/pages/model-edit/components/ModelCreateSheet.vue";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
@@ -328,7 +285,6 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Check,
-  CloudDownload,
   Box,
   Loader2,
   AlertCircle,
@@ -339,9 +295,9 @@ import {
 
 const { t: $t } = useI18n();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
-
 const isSheetOpen = ref(false);
 const sheetModelId = ref<number | null>(null);
+const isCreateSheetOpen = ref(false);
 
 const handleOpenModelEditSheet = (modelId: number) => {
   sheetModelId.value = modelId;
@@ -355,50 +311,35 @@ const handleModelSheetSaved = (savedModel: EditingModelData) => {
   Object.assign(model, {
     model_name: savedModel.model_name,
     real_model_name: savedModel.real_model_name,
-    supports_streaming: savedModel.supports_streaming,
-    supports_tools: savedModel.supports_tools,
-    supports_reasoning: savedModel.supports_reasoning,
-    supports_image_input: savedModel.supports_image_input,
-    supports_embeddings: savedModel.supports_embeddings,
-    supports_rerank: savedModel.supports_rerank,
+    model_kind: savedModel.model_kind,
+    source_config: savedModel.source_config,
     is_enabled: savedModel.is_enabled,
   });
 };
 
-const capabilityItems = [
-  { key: "supports_streaming", labelKey: "modelCapabilities.streaming" },
-  { key: "supports_tools", labelKey: "modelCapabilities.tools" },
-  { key: "supports_reasoning", labelKey: "modelCapabilities.reasoning" },
-  { key: "supports_image_input", labelKey: "modelCapabilities.imageInput" },
-  { key: "supports_embeddings", labelKey: "modelCapabilities.embeddings" },
-  { key: "supports_rerank", labelKey: "modelCapabilities.rerank" },
-] as const;
-
-const emit = defineEmits<{
-  (e: "checkSingle", index: number): void;
-  (e: "checkBatch"): void;
-}>();
-
-const hasUncommittedModels = computed(() => {
-  if (!editingData.value) return false;
-  return editingData.value.models.some((m) => m.id === null);
-});
-
-const addModel = () => {
+const handleCreateModelSaved = (savedModel: EditingModelData) => {
   editingData.value.models.push({
-    id: null,
-    model_name: "",
-    real_model_name: null,
-    supports_streaming: true,
-    supports_tools: true,
-    supports_reasoning: true,
-    supports_image_input: true,
-    supports_embeddings: true,
-    supports_rerank: true,
-    is_enabled: true,
+    id: savedModel.id,
+    model_name: savedModel.model_name,
+    real_model_name: savedModel.real_model_name || null,
+    model_kind: savedModel.model_kind,
+    source_config: savedModel.source_config,
+    is_enabled: savedModel.is_enabled,
     isEditing: false,
     checkStatus: "unchecked",
   });
+};
+
+const emit = defineEmits<{
+  (e: "checkSingle", index: number): void;
+}>();
+
+const addModel = () => {
+  if (!editingData.value.id) {
+    toastController.warn($t("providerEditPage.alert.providerNotSavedForModel"));
+    return;
+  }
+  isCreateSheetOpen.value = true;
 };
 
 const handleSaveSingleModel = async (index: number) => {
@@ -421,36 +362,16 @@ const handleSaveSingleModel = async (index: number) => {
   const payload = {
     model_name: modelItem.model_name.trim(),
     real_model_name: modelItem.real_model_name?.trim() || null,
-    supports_streaming: modelItem.supports_streaming,
-    supports_tools: modelItem.supports_tools,
-    supports_reasoning: modelItem.supports_reasoning,
-    supports_image_input: modelItem.supports_image_input,
-    supports_embeddings: modelItem.supports_embeddings,
-    supports_rerank: modelItem.supports_rerank,
     is_enabled: modelItem.is_enabled,
   };
 
   try {
-    if (modelItem.id) {
-      await modelService.updateModel(modelItem.id, payload);
-      toastController.success($t("providerEditPage.alert.modelUpdateSuccess"));
-    } else {
-      const savedModel = await modelService.createModel({
-        provider_id: data.id,
-        ...payload,
-      });
-      modelItem.id = savedModel.id;
-      modelItem.model_name = savedModel.model_name;
-      modelItem.real_model_name = savedModel.real_model_name ?? null;
-      modelItem.supports_streaming = savedModel.supports_streaming;
-      modelItem.supports_tools = savedModel.supports_tools;
-      modelItem.supports_reasoning = savedModel.supports_reasoning;
-      modelItem.supports_image_input = savedModel.supports_image_input;
-      modelItem.supports_embeddings = savedModel.supports_embeddings;
-      modelItem.supports_rerank = savedModel.supports_rerank;
-      modelItem.is_enabled = savedModel.is_enabled;
-      toastController.success($t("providerEditPage.alert.modelSaveSuccess"));
+    if (!modelItem.id) {
+      toastController.warn($t("providerEditPage.alert.providerNotSavedForModel"));
+      return;
     }
+    await modelService.updateModel(modelItem.id, payload);
+    toastController.success($t("providerEditPage.alert.modelUpdateSuccess"));
     modelItem.isEditing = false;
   } catch (error) {
     console.error("Failed to save model:", error);
@@ -491,108 +412,4 @@ const handleDeleteModel = async (index: number) => {
   }
 };
 
-const handleFetchRemoteModels = async () => {
-  const data = editingData.value;
-  if (!data.id) {
-    toastController.warn($t("providerEditPage.alert.providerNotSavedForModel"));
-    return;
-  }
-
-  try {
-    const response = await providerService.getProviderRemoteModels(data.id);
-
-    let remoteModels: ProviderRemoteModelItem[] = [];
-    let isGeminiLike = false;
-    if (response) {
-      const wrappedResponse = response as Exclude<
-        ProviderRemoteModelsResponse,
-        ProviderRemoteModelItem[]
-      >;
-      if (Array.isArray(wrappedResponse.data)) {
-        remoteModels = wrappedResponse.data;
-      } else if (Array.isArray(wrappedResponse.models)) {
-        remoteModels = wrappedResponse.models;
-        isGeminiLike = true;
-      } else if (Array.isArray(response)) {
-        remoteModels = response;
-      }
-    }
-
-    if (!remoteModels || remoteModels.length === 0) {
-      toastController.warn($t("providerEditPage.alert.noRemoteModels"));
-      return;
-    }
-
-    const existingModelNames = new Set<string>();
-    data.models.forEach((m) => {
-      existingModelNames.add(m.model_name);
-      if (m.real_model_name) existingModelNames.add(m.real_model_name);
-    });
-
-    const newModels: LocalEditableModelItem[] = [];
-    remoteModels.forEach((item) => {
-      let model_name = (item.id as string) || (item.name as string);
-      const providerType = data.provider_type;
-      const isGoogleOwned = item.owned_by === "google";
-      const isGeminiProvider =
-        providerType === "GEMINI" || providerType === "VERTEX";
-
-      if (
-        (isGeminiProvider || isGeminiLike || isGoogleOwned) &&
-        model_name &&
-        model_name.startsWith("models/")
-      ) {
-        model_name = model_name.substring("models/".length);
-      }
-
-      if (model_name && !existingModelNames.has(model_name)) {
-        newModels.push({
-          id: null,
-          model_name,
-          real_model_name: null,
-          supports_streaming: true,
-          supports_tools: true,
-          supports_reasoning: true,
-          supports_image_input: true,
-          supports_embeddings: true,
-          supports_rerank: true,
-          is_enabled: true,
-          isEditing: false,
-          checkStatus: "unchecked",
-        });
-        existingModelNames.add(model_name);
-      }
-    });
-
-    if (newModels.length > 0) {
-      data.models.push(...newModels);
-      toastController.success(
-        $t("providerEditPage.alert.newModelsAdded", {
-          count: newModels.length,
-        }),
-      );
-    } else {
-      toastController.info($t("providerEditPage.alert.noNewModels"));
-    }
-  } catch (error) {
-    console.error("Failed to fetch remote models:", error);
-    toastController.error(
-      $t("providerEditPage.alert.fetchRemoteModelsFailed", {
-        error: (error as Error).message || $t("common.unknownError"),
-      }),
-    );
-  }
-};
-
-const handleClearUncommittedModels = () => {
-  const originalCount = editingData.value.models.length;
-  editingData.value.models = editingData.value.models.filter(
-    (m) => m.id !== null,
-  );
-  if (editingData.value.models.length < originalCount) {
-    toastController.info($t("providerEditPage.alert.uncommittedCleared"));
-  } else {
-    toastController.info($t("providerEditPage.alert.noUncommittedToClear"));
-  }
-};
 </script>

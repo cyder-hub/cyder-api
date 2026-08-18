@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::unified::*;
@@ -59,12 +59,13 @@ fn responses_message_blob_events(
     parts
         .iter()
         .filter_map(|part| match part {
-            ItemContentPart::InputImage { .. } | ItemContentPart::InputFile { .. } => {
-                Some(UnifiedStreamEvent::BlobDelta {
-                    index: Some(output_index),
-                    data: serde_json::to_value(part).unwrap_or(Value::Null),
-                })
-            }
+            ItemContentPart::InputImage { .. }
+            | ItemContentPart::InputAudio { .. }
+            | ItemContentPart::InputFile { .. } => Some(UnifiedStreamEvent::BlobDelta {
+                index: Some(output_index),
+                data: serde_json::to_value(part)
+                    .expect("Responses content serialization is structurally infallible"),
+            }),
             _ => None,
         })
         .collect()
@@ -73,7 +74,12 @@ fn responses_message_blob_events(
 pub(crate) fn responses_chunk_to_unified_stream_events(
     chunk: ResponsesChunkResponse,
 ) -> Vec<UnifiedStreamEvent> {
-    let ResponsesChunkResponse { id, model, event } = chunk;
+    let ResponsesChunkResponse {
+        id,
+        model,
+        sequence_number: _,
+        event,
+    } = chunk;
 
     let mut events = Vec::new();
 
@@ -85,9 +91,17 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 role: UnifiedRole::Assistant,
             }];
         }
+        ResponsesStreamEvent::ResponseQueued { .. }
+        | ResponsesStreamEvent::ResponseInProgress { .. } => return Vec::new(),
         ResponsesStreamEvent::ResponseCompleted { response }
         | ResponsesStreamEvent::ResponseIncomplete { response } => {
             return response_terminal_stream_events(response);
+        }
+        ResponsesStreamEvent::ResponseFailed { response } => {
+            return vec![UnifiedStreamEvent::Error {
+                error: serde_json::to_value(response.error)
+                    .expect("Responses application error serialization is structurally infallible"),
+            }];
         }
         ResponsesStreamEvent::OutputItemAdded { output_index, item } => match item {
             ItemField::Message(message) => {
@@ -159,15 +173,13 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 }
                 events.push(UnifiedStreamEvent::BlobDelta {
                     index: Some(output_index),
-                    data: serde_json::to_value(output).unwrap_or(Value::Null),
+                    data: serde_json::to_value(output)
+                        .expect("Responses output serialization is structurally infallible"),
                 });
                 return events;
             }
             ItemField::Unknown(value) => {
-                return vec![UnifiedStreamEvent::BlobDelta {
-                    index: Some(output_index),
-                    data: value,
-                }];
+                return vec![UnifiedStreamEvent::Error { error: value }];
             }
         },
         ResponsesStreamEvent::OutputItemDone { output_index, item } => match item {
@@ -226,7 +238,9 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 }
                 return Vec::new();
             }
-            ItemField::Unknown(_) => return Vec::new(),
+            ItemField::Unknown(value) => {
+                return vec![UnifiedStreamEvent::Error { error: value }];
+            }
         },
         ResponsesStreamEvent::ContentPartAdded {
             item_id,
@@ -247,6 +261,24 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 item_index: None,
                 item_id: Some(item_id),
                 part_index: content_index,
+            }];
+        }
+        ResponsesStreamEvent::OutputTextDone { .. }
+        | ResponsesStreamEvent::RefusalDone { .. }
+        | ResponsesStreamEvent::ReasoningDone { .. }
+        | ResponsesStreamEvent::AnnotationAdded { .. } => return Vec::new(),
+        ResponsesStreamEvent::RefusalDelta {
+            item_id,
+            output_index,
+            content_index,
+            delta,
+        } => {
+            return vec![UnifiedStreamEvent::RefusalDelta {
+                index: content_index,
+                item_index: Some(output_index),
+                item_id: Some(item_id),
+                part_index: Some(content_index),
+                text: delta,
             }];
         }
         ResponsesStreamEvent::ReasoningSummaryPartAdded {
@@ -272,8 +304,10 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
         }
         ResponsesStreamEvent::MessageStart { id: event_id, role } => {
             return vec![UnifiedStreamEvent::MessageStart {
-                id: event_id.or(Some(id)),
-                model: Some(model),
+                id: event_id
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| (!id.is_empty()).then_some(id)),
+                model: (!model.is_empty()).then_some(model),
                 role,
             }];
         }
@@ -429,7 +463,9 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                         other => {
                             events.push(UnifiedStreamEvent::BlobDelta {
                                 index: Some(index),
-                                data: serde_json::to_value(other).unwrap_or(Value::Null),
+                                data: serde_json::to_value(other).expect(
+                                    "Responses content serialization is structurally infallible",
+                                ),
                             });
                         }
                     }
@@ -508,7 +544,8 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 }
                 events.push(UnifiedStreamEvent::BlobDelta {
                     index: Some(0),
-                    data: serde_json::to_value(output).unwrap_or(Value::Null),
+                    data: serde_json::to_value(output)
+                        .expect("Responses output serialization is structurally infallible"),
                 });
                 return events;
             }
@@ -598,84 +635,19 @@ pub(crate) fn responses_chunk_to_unified_stream_events(
                 return events;
             }
             ItemField::Unknown(value) => {
-                return vec![UnifiedStreamEvent::BlobDelta {
-                    index: None,
-                    data: value,
-                }];
+                return vec![UnifiedStreamEvent::Error { error: value }];
             }
         },
         ResponsesStreamEvent::Unknown(value) => {
-            if let Some(type_name) = value.get("type").and_then(Value::as_str) {
-                match type_name {
-                    "response.content_part.added" => {
-                        return vec![UnifiedStreamEvent::ContentPartAdded {
-                            item_index: None,
-                            item_id: value
-                                .get("item_id")
-                                .and_then(Value::as_str)
-                                .map(ToString::to_string),
-                            part_index: value
-                                .get("content_index")
-                                .and_then(Value::as_u64)
-                                .unwrap_or_default() as u32,
-                            part: None,
-                        }];
-                    }
-                    "response.content_part.done" => {
-                        return vec![UnifiedStreamEvent::ContentPartDone {
-                            item_index: None,
-                            item_id: value
-                                .get("item_id")
-                                .and_then(Value::as_str)
-                                .map(ToString::to_string),
-                            part_index: value
-                                .get("content_index")
-                                .and_then(Value::as_u64)
-                                .unwrap_or_default() as u32,
-                        }];
-                    }
-                    "response.reasoning_summary_part.added" => {
-                        return vec![UnifiedStreamEvent::ReasoningSummaryPartAdded {
-                            item_index: None,
-                            item_id: value
-                                .get("item_id")
-                                .and_then(Value::as_str)
-                                .map(ToString::to_string),
-                            part_index: value
-                                .get("summary_index")
-                                .and_then(Value::as_u64)
-                                .unwrap_or_default() as u32,
-                            part: None,
-                        }];
-                    }
-                    "response.reasoning_summary_part.done" => {
-                        return vec![UnifiedStreamEvent::ReasoningSummaryPartDone {
-                            item_index: None,
-                            item_id: value
-                                .get("item_id")
-                                .and_then(Value::as_str)
-                                .map(ToString::to_string),
-                            part_index: value
-                                .get("summary_index")
-                                .and_then(Value::as_u64)
-                                .unwrap_or_default() as u32,
-                        }];
-                    }
-                    _ => {}
-                }
-            }
-            return vec![UnifiedStreamEvent::BlobDelta {
-                index: None,
-                data: value,
-            }];
+            return vec![UnifiedStreamEvent::Error { error: value }];
         }
     }
 }
 
-pub(crate) fn transform_unified_stream_events_to_responses_events(
+pub(crate) fn try_transform_unified_stream_events_to_responses_events(
     stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut events = Vec::new();
 
     for event in stream_events {
@@ -683,23 +655,23 @@ pub(crate) fn transform_unified_stream_events_to_responses_events(
         for frame in encode_formal_responses_stream_event(event, context) {
             let frame = finalize_public_responses_stream_frame(frame, context);
             events.push(SseEvent {
-                data: serde_json::to_string(&frame).unwrap_or_default(),
+                data: serde_json::to_string(&frame)?,
                 ..Default::default()
             });
         }
     }
 
     if events.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(events)
+        Ok(Some(events))
     }
 }
 
-pub(crate) fn transform_unified_chunk_to_responses_events(
+pub(crate) fn try_transform_unified_chunk_to_responses_events(
     unified_chunk: UnifiedChunkResponse,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut stream_events = Vec::new();
 
     for choice in unified_chunk.choices {
@@ -715,6 +687,15 @@ pub(crate) fn transform_unified_chunk_to_responses_events(
             match part {
                 UnifiedContentPartDelta::TextDelta { index, text } => {
                     stream_events.push(UnifiedStreamEvent::ContentBlockDelta {
+                        index,
+                        item_index: None,
+                        item_id: None,
+                        part_index: None,
+                        text,
+                    });
+                }
+                UnifiedContentPartDelta::ReasoningDelta { index, text } => {
+                    stream_events.push(UnifiedStreamEvent::ReasoningDelta {
                         index,
                         item_index: None,
                         item_id: None,
@@ -765,5 +746,23 @@ pub(crate) fn transform_unified_chunk_to_responses_events(
         stream_events.push(UnifiedStreamEvent::Usage { usage });
     }
 
-    transform_unified_stream_events_to_responses_events(stream_events, context)
+    try_transform_unified_stream_events_to_responses_events(stream_events, context)
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_stream_events_to_responses_events(
+    stream_events: Vec<UnifiedStreamEvent>,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_stream_events_to_responses_events(stream_events, context)
+        .expect("Responses test stream payloads must serialize")
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_chunk_to_responses_events(
+    unified_chunk: UnifiedChunkResponse,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_chunk_to_responses_events(unified_chunk, context)
+        .expect("Responses test stream payloads must serialize")
 }

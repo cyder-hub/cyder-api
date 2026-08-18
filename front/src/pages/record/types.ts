@@ -1,13 +1,14 @@
 import type { Component } from "vue";
-import type { RecordListItem } from "../../services/types";
+import type { DownstreamProtocol, RecordListItem } from "../../services/types";
 import type { RecordDetailTab } from "./composables/useRecordDetail";
 
 export type RecordFilters = {
   api_key_id: number;
   provider_id: number;
+  source_id: number;
   model_id: number;
   status: string;
-  user_api_type: string;
+  downstream_protocol: "ALL" | DownstreamProtocol;
   final_error_code: string;
   latency_ms_min: string;
   latency_ms_max: string;
@@ -27,11 +28,13 @@ export type FilterOption = {
 
 export type EnrichedRecordListItem = RecordListItem & {
   providerName: string;
+  sourceDisplay: string;
   apiKeyName: string;
   displayRequestedModelName: string;
   httpStatusDisplay: string;
-  firstRespTimeDisplay: string;
-  totalRespTimeDisplay: string;
+  firstResponseBodyTimeDisplay: string;
+  ttftDisplay: string;
+  totalLatencyDisplay: string;
   tpsDisplay: string;
   costDisplay: string;
   request_at_formatted: string;

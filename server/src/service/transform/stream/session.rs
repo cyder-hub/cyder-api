@@ -1,23 +1,46 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use super::usage::UsageMergeStrategy;
 use crate::cost::UsageNormalization;
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::providers::{gemini, responses};
 use crate::service::transform::unified::{
-    UnifiedBlockKind, UnifiedRole, UnifiedStreamEvent, UnifiedTransformDiagnostic, UnifiedUsage,
+    UnifiedBlockKind, UnifiedRole, UnifiedStreamEvent, UnifiedUsage,
+};
+use crate::service::transform::{
+    TransformAction, TransformDiagnosticCollector, TransformDiagnosticFact, TransformOutcomeKind,
+    TransformOutcomeSummary, TransformPhase, TransformReasonCode, TransformSemanticUnit,
 };
 use crate::utils::sse::SseEvent;
 use crate::utils::usage::UsageInfo;
 
 const STREAM_DIAGNOSTIC_WINDOW: usize = 32;
+pub(in crate::service::transform) const MAX_STREAM_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
+
+pub(in crate::service::transform) fn try_append_tool_arguments(
+    buffer: &mut String,
+    delta: &str,
+) -> bool {
+    if buffer.len().saturating_add(delta.len()) > MAX_STREAM_TOOL_ARGUMENT_BYTES {
+        return false;
+    }
+    buffer.push_str(delta);
+    true
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct AnthropicSessionState {
     pub(in crate::service::transform) message_started: bool,
+    pub(in crate::service::transform) source_message_started: bool,
+    pub(in crate::service::transform) source_message_stopped: bool,
+    pub(in crate::service::transform) source_message_delta_seen: bool,
+    pub(in crate::service::transform) source_error_seen: bool,
+    pub(in crate::service::transform) source_next_block_index: u32,
     pub(in crate::service::transform) active_blocks: HashMap<u32, AnthropicActiveBlockState>,
+    pub(in crate::service::transform) source_usage: Option<UnifiedUsage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +56,7 @@ pub struct AnthropicActiveBlockState {
     pub(in crate::service::transform) text: String,
     pub(in crate::service::transform) tool_call_id: Option<String>,
     pub(in crate::service::transform) tool_name: Option<String>,
+    pub(in crate::service::transform) signature_seen: bool,
 }
 
 impl AnthropicActiveBlockState {
@@ -42,6 +66,7 @@ impl AnthropicActiveBlockState {
             text: String::new(),
             tool_call_id: None,
             tool_name: None,
+            signature_seen: false,
         }
     }
 }
@@ -49,7 +74,26 @@ impl AnthropicActiveBlockState {
 #[derive(Debug, Default, Clone)]
 pub struct GeminiSessionState {
     pub(in crate::service::transform) tool_call_id_map: HashMap<String, String>,
-    pub(in crate::service::transform) next_message_index_by_choice: HashMap<u32, u32>,
+    pub(in crate::service::transform) target_tool_calls: HashMap<u32, StreamToolCallState>,
+    pub(in crate::service::transform) source_usage: Option<UnifiedUsage>,
+    pub(in crate::service::transform) usage_observation_degraded: bool,
+    pub(in crate::service::transform) source_response_id: Option<String>,
+    pub(in crate::service::transform) source_candidate_indices: HashSet<u32>,
+    pub(in crate::service::transform) source_tool_call_candidate_indices: HashSet<u32>,
+    pub(in crate::service::transform) source_terminal_candidate_indices: HashSet<u32>,
+    pub(in crate::service::transform) source_prompt_block_seen: bool,
+    pub(in crate::service::transform) source_terminal_failed: bool,
+    pub(in crate::service::transform) source_observation_degraded: bool,
+    pub(in crate::service::transform) source_observation_semantic_unit:
+        Option<TransformSemanticUnit>,
+    pub(in crate::service::transform) source_observation_reason_code: Option<TransformReasonCode>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct StreamToolCallState {
+    pub(in crate::service::transform) id: Option<String>,
+    pub(in crate::service::transform) name: Option<String>,
+    pub(in crate::service::transform) arguments: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -67,14 +111,30 @@ pub struct ResponsesSessionState {
     pub(in crate::service::transform) reasoning_summaries: HashMap<u32, String>,
     pub(in crate::service::transform) active_tool_calls: HashMap<u32, responses::FunctionCall>,
     pub(in crate::service::transform) completed_output: BTreeMap<u32, responses::ItemField>,
+    pub(in crate::service::transform) source_created_seen: bool,
+    pub(in crate::service::transform) source_response_id: Option<String>,
+    pub(in crate::service::transform) source_response_model: Option<String>,
+    pub(in crate::service::transform) source_queued_seen: bool,
+    pub(in crate::service::transform) source_in_progress_seen: bool,
+    pub(in crate::service::transform) source_terminal_seen: bool,
+    pub(in crate::service::transform) source_last_sequence_number: Option<u64>,
+    pub(in crate::service::transform) source_output_item_ids: HashMap<u32, String>,
+    pub(in crate::service::transform) source_output_items_done: HashSet<u32>,
+    pub(in crate::service::transform) source_content_parts: HashSet<(String, u32)>,
+    pub(in crate::service::transform) source_reasoning_parts: HashSet<(String, u32)>,
+    pub(in crate::service::transform) source_output_text: HashMap<String, String>,
+    pub(in crate::service::transform) source_refusal_text: HashMap<String, String>,
+    pub(in crate::service::transform) source_reasoning_text: HashMap<(String, u32), String>,
+    pub(in crate::service::transform) source_tool_arguments: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct SessionContext {
-    stream_id: Option<String>,
-    stream_model: Option<String>,
+    stream_id: Option<Arc<str>>,
+    stream_model: Option<Arc<str>>,
     openai_reasoning_seen: bool,
     openai_active_tool_calls: HashMap<u32, String>,
+    openai_source_tool_calls: HashMap<u32, StreamToolCallState>,
     tool_call_id_map: HashMap<String, String>,
     current_item_index: Option<u32>,
     current_content_block_index: Option<u32>,
@@ -83,9 +143,10 @@ pub struct SessionContext {
     current_reasoning_part_index: Option<u32>,
     usage_cache: Option<UsageInfo>,
     usage_normalization_cache: Option<UsageNormalization>,
+    unified_usage_cache: Option<UnifiedUsage>,
     finish_reason_cache: Option<String>,
     last_error: Option<Value>,
-    diagnostics: VecDeque<UnifiedTransformDiagnostic>,
+    diagnostics: TransformDiagnosticCollector,
     original_events: VecDeque<SseEvent>,
     transformed_events: VecDeque<SseEvent>,
     anthropic: AnthropicSessionState,
@@ -94,20 +155,38 @@ pub struct SessionContext {
 }
 
 impl SessionContext {
+    pub(in crate::service::transform) fn semantic_snapshot(&mut self) -> Self {
+        let diagnostics = std::mem::take(&mut self.diagnostics);
+        let original_events = std::mem::take(&mut self.original_events);
+        let transformed_events = std::mem::take(&mut self.transformed_events);
+        let snapshot = self.clone();
+        self.diagnostics = diagnostics;
+        self.original_events = original_events;
+        self.transformed_events = transformed_events;
+        snapshot
+    }
+
+    pub(in crate::service::transform) fn restore_semantic_snapshot(&mut self, mut snapshot: Self) {
+        snapshot.diagnostics = std::mem::take(&mut self.diagnostics);
+        snapshot.original_events = std::mem::take(&mut self.original_events);
+        snapshot.transformed_events = std::mem::take(&mut self.transformed_events);
+        *self = snapshot;
+    }
+
     pub(in crate::service::transform) fn stream_id_clone(&self) -> Option<String> {
-        self.stream_id.clone()
+        self.stream_id.as_deref().map(str::to_owned)
     }
 
     pub(in crate::service::transform) fn stream_model_clone(&self) -> Option<String> {
-        self.stream_model.clone()
+        self.stream_model.as_deref().map(str::to_owned)
     }
 
     pub(in crate::service::transform) fn set_stream_id(&mut self, id: String) {
-        self.stream_id = Some(id);
+        self.stream_id = Some(id.into());
     }
 
     pub(in crate::service::transform) fn set_stream_model(&mut self, model: String) {
-        self.stream_model = Some(model);
+        self.stream_model = Some(model.into());
     }
 
     pub(in crate::service::transform) fn set_stream_model_if_present(
@@ -115,39 +194,42 @@ impl SessionContext {
         model: Option<String>,
     ) {
         if let Some(model) = model.filter(|value| !value.is_empty()) {
-            self.stream_model = Some(model);
+            self.stream_model = Some(model.into());
         }
     }
 
     pub(in crate::service::transform) fn get_or_generate_stream_id(
         &mut self,
-        source_api: LlmApiType,
+        upstream_protocol: UpstreamProtocol,
     ) -> String {
         if let Some(id) = &self.stream_id {
-            return id.clone();
+            return id.to_string();
         }
 
         use crate::utils::ID_GENERATOR;
-        let new_id = if source_api == LlmApiType::Gemini {
+        let new_id = if upstream_protocol == UpstreamProtocol::Gemini {
             format!("gemini-stream-{}", ID_GENERATOR.generate_id())
         } else {
             format!("chatcmpl-{}", ID_GENERATOR.generate_id())
         };
-        self.stream_id = Some(new_id.clone());
+        self.stream_id = Some(Arc::from(new_id.as_str()));
         new_id
     }
 
     pub(in crate::service::transform) fn get_or_default_stream_model(
         &self,
-        source_api: LlmApiType,
+        upstream_protocol: UpstreamProtocol,
     ) -> String {
-        self.stream_model.clone().unwrap_or_else(|| {
-            if source_api == LlmApiType::Gemini {
-                "".to_string()
-            } else {
-                "unified-stream-model".to_string()
-            }
-        })
+        self.stream_model
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                if upstream_protocol == UpstreamProtocol::Gemini {
+                    "gemini".to_string()
+                } else {
+                    "unified-stream-model".to_string()
+                }
+            })
     }
 
     pub(in crate::service::transform) fn usage_cache(&self) -> Option<&UsageInfo> {
@@ -162,6 +244,65 @@ impl SessionContext {
         &self,
     ) -> Option<UsageNormalization> {
         self.usage_normalization_cache.clone()
+    }
+
+    pub(in crate::service::transform) fn unified_usage_cache_clone(&self) -> Option<UnifiedUsage> {
+        self.unified_usage_cache.clone()
+    }
+
+    pub(in crate::service::transform) fn gemini_usage_observation_degraded(&self) -> bool {
+        self.gemini.usage_observation_degraded
+    }
+
+    pub(in crate::service::transform) fn gemini_source_terminal_seen(&self) -> bool {
+        !self.gemini.source_observation_degraded
+            && (self.gemini.source_terminal_failed
+                || (self.gemini.source_prompt_block_seen
+                    && self.gemini.source_candidate_indices.is_empty())
+                || (!self.gemini.source_candidate_indices.is_empty()
+                    && self.gemini.source_candidate_indices
+                        == self.gemini.source_terminal_candidate_indices))
+    }
+
+    pub(in crate::service::transform) fn gemini_source_failed(&self) -> bool {
+        self.gemini_source_terminal_seen() && self.gemini.source_terminal_failed
+    }
+
+    pub(in crate::service::transform) fn mark_gemini_source_tool_call_candidate(
+        &mut self,
+        candidate_index: u32,
+    ) {
+        self.gemini
+            .source_tool_call_candidate_indices
+            .insert(candidate_index);
+    }
+
+    pub(in crate::service::transform) fn gemini_source_candidate_has_tool_call(
+        &self,
+        candidate_index: u32,
+    ) -> bool {
+        self.gemini
+            .source_tool_call_candidate_indices
+            .contains(&candidate_index)
+    }
+
+    pub(in crate::service::transform) fn gemini_source_observation_degraded(&self) -> bool {
+        self.gemini.source_observation_degraded
+    }
+
+    pub(in crate::service::transform) fn gemini_source_observation_error(
+        &self,
+    ) -> Option<(TransformSemanticUnit, TransformReasonCode)> {
+        self.gemini
+            .source_observation_reason_code
+            .map(|reason_code| {
+                (
+                    self.gemini
+                        .source_observation_semantic_unit
+                        .unwrap_or(TransformSemanticUnit::Lifecycle),
+                    reason_code,
+                )
+            })
     }
 
     pub(in crate::service::transform) fn finish_reason_cache(&self) -> Option<&str> {
@@ -183,27 +324,60 @@ impl SessionContext {
         self.last_error = Some(error);
     }
 
-    pub(in crate::service::transform) fn diagnostics_snapshot(
+    pub(in crate::service::transform) fn diagnostics_snapshot(&self) -> TransformOutcomeSummary {
+        self.diagnostics.snapshot()
+    }
+
+    pub(in crate::service::transform) fn responses_source_terminal_seen(&self) -> bool {
+        self.responses.source_terminal_seen
+    }
+
+    pub(in crate::service::transform) fn responses_source_failed(&self) -> bool {
+        self.responses.source_terminal_seen && self.last_error.is_some()
+    }
+
+    pub(in crate::service::transform) fn anthropic_source_terminal_seen(&self) -> bool {
+        self.anthropic.source_message_stopped || self.anthropic.source_error_seen
+    }
+
+    pub(in crate::service::transform) fn anthropic_source_failed(&self) -> bool {
+        self.anthropic.source_error_seen
+    }
+
+    pub(in crate::service::transform) fn anthropic_target_message_started(&self) -> bool {
+        self.anthropic.message_started
+    }
+
+    pub(in crate::service::transform) fn responses_source_identity_matches(
         &self,
-    ) -> Vec<UnifiedTransformDiagnostic> {
-        self.diagnostics.iter().cloned().collect()
+        response_id: &str,
+        response_model: &str,
+    ) -> bool {
+        self.responses.source_created_seen
+            && self.responses.source_response_id.as_deref() == Some(response_id)
+            && self.responses.source_response_model.as_deref() == Some(response_model)
+    }
+
+    pub(in crate::service::transform) fn mark_responses_source_terminal(
+        &mut self,
+        error: Option<Value>,
+    ) {
+        self.responses.source_terminal_seen = true;
+        if let Some(error) = error {
+            self.last_error = Some(error);
+        }
     }
 
     #[cfg(test)]
     pub(in crate::service::transform) fn diagnostics_len(&self) -> usize {
-        self.diagnostics.len()
+        self.diagnostics.snapshot().facts.len()
     }
 
     #[cfg(test)]
     pub(in crate::service::transform) fn latest_diagnostic(
         &self,
-    ) -> Option<&UnifiedTransformDiagnostic> {
-        self.diagnostics.back()
-    }
-
-    #[cfg(test)]
-    pub(in crate::service::transform) fn last_error_is_some(&self) -> bool {
-        self.last_error.is_some()
+    ) -> Option<TransformDiagnosticFact> {
+        self.diagnostics.snapshot().facts.last().cloned()
     }
 
     pub(in crate::service::transform) fn original_events(&self) -> &VecDeque<SseEvent> {
@@ -284,12 +458,9 @@ impl SessionContext {
 
     pub(in crate::service::transform) fn record_diagnostic(
         &mut self,
-        diagnostic: UnifiedTransformDiagnostic,
+        diagnostic: TransformDiagnosticFact,
     ) {
-        if self.diagnostics.len() >= STREAM_DIAGNOSTIC_WINDOW {
-            self.diagnostics.pop_front();
-        }
-        self.diagnostics.push_back(diagnostic);
+        self.diagnostics.record(diagnostic);
     }
 
     fn push_bounded(queue: &mut VecDeque<SseEvent>, event: SseEvent) {
@@ -301,12 +472,47 @@ impl SessionContext {
 
     pub(in crate::service::transform) fn merge_usage(
         &mut self,
-        usage: UnifiedUsage,
+        mut usage: UnifiedUsage,
         strategy: UsageMergeStrategy,
     ) {
-        let _ = strategy;
-        self.usage_normalization_cache = Some(UsageNormalization::from(&usage));
-        self.usage_cache = Some(usage.into());
+        if strategy == UsageMergeStrategy::AnthropicFields
+            && let Some(previous) = self.unified_usage_cache.as_ref()
+        {
+            if usage.input_tokens == 0 {
+                usage.input_tokens = previous.input_tokens;
+            }
+            if usage.cached_tokens.is_none() {
+                usage.cached_tokens = previous.cached_tokens;
+            }
+            if usage.cache_write_tokens.is_none() {
+                usage.cache_write_tokens = previous.cache_write_tokens;
+            }
+            usage.total_tokens = usage
+                .input_tokens
+                .checked_add(usage.output_tokens)
+                .expect("source-validated Anthropic stream usage must remain in range");
+        }
+        match UsageInfo::try_from(&usage) {
+            Ok(usage_info) => {
+                self.usage_normalization_cache = Some(UsageNormalization::from(&usage));
+                self.usage_cache = Some(usage_info);
+                self.unified_usage_cache = Some(usage);
+            }
+            Err(_) => {
+                self.usage_normalization_cache = None;
+                self.usage_cache = None;
+                self.unified_usage_cache = None;
+                self.record_diagnostic(TransformDiagnosticFact {
+                    sequence: 0,
+                    phase: TransformPhase::ResponseObserve,
+                    semantic_unit: TransformSemanticUnit::Usage,
+                    outcome: TransformOutcomeKind::ObservationDegraded,
+                    action: TransformAction::PassThrough,
+                    reason_code: TransformReasonCode::UsageOverflow,
+                    safe_summary: None,
+                });
+            }
+        }
     }
 
     pub(in crate::service::transform) fn remember_tool_call_id(&mut self, id: String) {
@@ -332,12 +538,16 @@ impl SessionContext {
         self.openai_active_tool_calls.clone()
     }
 
-    fn gemini_message_index(&self, provider_order: u32) -> u32 {
-        self.gemini
-            .next_message_index_by_choice
-            .get(&provider_order)
-            .copied()
-            .unwrap_or(0)
+    pub(in crate::service::transform) fn openai_source_tool_calls(
+        &self,
+    ) -> &HashMap<u32, StreamToolCallState> {
+        &self.openai_source_tool_calls
+    }
+
+    pub(in crate::service::transform) fn openai_source_tool_calls_mut(
+        &mut self,
+    ) -> &mut HashMap<u32, StreamToolCallState> {
+        &mut self.openai_source_tool_calls
     }
 
     pub(in crate::service::transform) fn get_or_create_gemini_tool_call_id(
@@ -346,10 +556,10 @@ impl SessionContext {
         part_index: u32,
         function_name: &str,
     ) -> String {
-        let message_index = self.gemini_message_index(provider_order);
+        let response_id = self.stream_id_clone().unwrap_or_default();
         let key = gemini::build_gemini_tool_call_key(
+            &response_id,
             provider_order,
-            message_index,
             part_index,
             function_name,
         );
@@ -358,24 +568,13 @@ impl SessionContext {
             .entry(key)
             .or_insert_with(|| {
                 gemini::build_gemini_synthetic_tool_call_id(
+                    &response_id,
                     provider_order,
-                    message_index,
                     part_index,
                     function_name,
                 )
             })
             .clone()
-    }
-
-    pub(in crate::service::transform) fn advance_gemini_message_index(
-        &mut self,
-        provider_order: u32,
-    ) {
-        self.gemini
-            .next_message_index_by_choice
-            .entry(provider_order)
-            .and_modify(|index| *index += 1)
-            .or_insert(1);
     }
 
     pub(in crate::service::transform) fn update_from_stream_event(
@@ -403,10 +602,10 @@ impl SessionContext {
             }
             UnifiedStreamEvent::MessageStart { id, model, .. } => {
                 if let Some(id) = id {
-                    self.stream_id = Some(id.clone());
+                    self.stream_id = Some(Arc::from(id.as_str()));
                 }
                 if let Some(model) = model {
-                    self.stream_model = Some(model.clone());
+                    self.stream_model = Some(Arc::from(model.as_str()));
                 }
             }
             UnifiedStreamEvent::ContentBlockStart { index, kind } => match kind {
@@ -488,46 +687,67 @@ impl SessionContext {
             UnifiedStreamEvent::ToolCallArgumentsDelta { id: None, .. } => {}
             UnifiedStreamEvent::Error { error } => {
                 self.last_error = Some(error.clone());
-                if let Ok(diagnostic) =
-                    serde_json::from_value::<UnifiedTransformDiagnostic>(error.clone())
-                {
-                    self.record_diagnostic(diagnostic);
-                }
             }
             UnifiedStreamEvent::MessageStop
             | UnifiedStreamEvent::ContentBlockDelta { .. }
+            | UnifiedStreamEvent::RefusalDelta { .. }
             | UnifiedStreamEvent::BlobDelta { .. } => {}
         }
     }
 }
 
 pub(crate) struct StreamTransformContext<'a> {
-    source_api: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: crate::schema::enum_def::DownstreamProtocol,
     session: &'a mut SessionContext,
 }
 
 impl<'a> StreamTransformContext<'a> {
     pub(in crate::service::transform) fn new(
-        source_api: LlmApiType,
-        _target_api: LlmApiType,
+        upstream_protocol: UpstreamProtocol,
+        downstream_protocol: crate::schema::enum_def::DownstreamProtocol,
         session: &'a mut SessionContext,
     ) -> Self {
         Self {
-            source_api,
+            upstream_protocol,
+            downstream_protocol,
             session,
         }
     }
 
+    pub(in crate::service::transform) fn is_same_wire(&self) -> bool {
+        matches!(
+            (self.upstream_protocol, self.downstream_protocol),
+            (
+                UpstreamProtocol::Openai,
+                crate::schema::enum_def::DownstreamProtocol::Openai
+            ) | (
+                UpstreamProtocol::Responses,
+                crate::schema::enum_def::DownstreamProtocol::Responses
+            ) | (
+                UpstreamProtocol::Anthropic,
+                crate::schema::enum_def::DownstreamProtocol::Anthropic
+            ) | (
+                UpstreamProtocol::Gemini,
+                crate::schema::enum_def::DownstreamProtocol::Gemini
+            )
+        )
+    }
+
     pub(in crate::service::transform) fn get_or_generate_stream_id(&mut self) -> String {
-        self.session.get_or_generate_stream_id(self.source_api)
+        self.session
+            .get_or_generate_stream_id(self.upstream_protocol)
     }
 
     pub(in crate::service::transform) fn get_or_default_stream_model(&self) -> String {
-        self.session.get_or_default_stream_model(self.source_api)
+        self.session
+            .get_or_default_stream_model(self.upstream_protocol)
     }
 
-    pub(in crate::service::transform) fn stream_id_clone(&self) -> Option<String> {
-        self.session.stream_id_clone()
+    pub(in crate::service::transform) fn native_gemini_response_id_clone(&self) -> Option<String> {
+        (self.upstream_protocol == UpstreamProtocol::Gemini)
+            .then(|| self.session.stream_id_clone())
+            .flatten()
     }
 
     pub(in crate::service::transform) fn stream_model_clone(&self) -> Option<String> {
@@ -554,6 +774,35 @@ impl<'a> StreamTransformContext<'a> {
         self.session.merge_usage(usage, self.usage_merge_strategy());
     }
 
+    pub(in crate::service::transform) fn gemini_source_usage(&self) -> Option<&UnifiedUsage> {
+        self.session.gemini.source_usage.as_ref()
+    }
+
+    pub(in crate::service::transform) fn set_gemini_source_usage(&mut self, usage: UnifiedUsage) {
+        self.session.gemini.source_usage = Some(usage);
+    }
+
+    pub(in crate::service::transform) fn invalidate_gemini_usage_observation(&mut self) {
+        self.session.gemini.usage_observation_degraded = true;
+        self.session.gemini.source_usage = None;
+        self.session.unified_usage_cache = None;
+        self.session.usage_cache = None;
+        self.session.usage_normalization_cache = None;
+    }
+
+    pub(in crate::service::transform) fn invalidate_gemini_stream_observation(
+        &mut self,
+        semantic_unit: TransformSemanticUnit,
+        reason_code: TransformReasonCode,
+    ) {
+        self.session.gemini.source_observation_degraded = true;
+        if self.session.gemini.source_observation_reason_code.is_none() {
+            self.session.gemini.source_observation_semantic_unit = Some(semantic_unit);
+            self.session.gemini.source_observation_reason_code = Some(reason_code);
+        }
+        self.invalidate_gemini_usage_observation();
+    }
+
     pub(in crate::service::transform) fn finish_reason_cache_clone(&self) -> Option<String> {
         self.session.finish_reason_cache_clone()
     }
@@ -571,18 +820,16 @@ impl<'a> StreamTransformContext<'a> {
 
     pub(in crate::service::transform) fn record_diagnostic(
         &mut self,
-        diagnostic: UnifiedTransformDiagnostic,
+        diagnostic: TransformDiagnosticFact,
     ) {
         self.session.record_diagnostic(diagnostic);
     }
 
     pub(in crate::service::transform) fn usage_merge_strategy(&self) -> UsageMergeStrategy {
-        match self.source_api {
-            LlmApiType::Gemini | LlmApiType::Responses => UsageMergeStrategy::Replace,
-            LlmApiType::Openai
-            | LlmApiType::Anthropic
-            | LlmApiType::Ollama
-            | LlmApiType::GeminiOpenai => UsageMergeStrategy::FinalOnly,
+        match self.upstream_protocol {
+            UpstreamProtocol::Gemini | UpstreamProtocol::Responses => UsageMergeStrategy::Replace,
+            UpstreamProtocol::Anthropic => UsageMergeStrategy::AnthropicFields,
+            UpstreamProtocol::Openai => UsageMergeStrategy::FinalOnly,
         }
     }
 
@@ -636,6 +883,38 @@ impl<'a> StreamTransformContext<'a> {
         &mut self,
     ) -> &mut AnthropicSessionState {
         &mut self.session.anthropic
+    }
+
+    pub(in crate::service::transform) fn gemini_target_tool_calls_mut(
+        &mut self,
+    ) -> &mut HashMap<u32, StreamToolCallState> {
+        &mut self.session.gemini.target_tool_calls
+    }
+
+    pub(in crate::service::transform) fn gemini_target_tool_calls(
+        &self,
+    ) -> &HashMap<u32, StreamToolCallState> {
+        &self.session.gemini.target_tool_calls
+    }
+
+    pub(in crate::service::transform) fn gemini(&self) -> &GeminiSessionState {
+        &self.session.gemini
+    }
+
+    pub(in crate::service::transform) fn gemini_mut(&mut self) -> &mut GeminiSessionState {
+        &mut self.session.gemini
+    }
+
+    pub(in crate::service::transform) fn openai_source_tool_calls(
+        &self,
+    ) -> &HashMap<u32, StreamToolCallState> {
+        self.session.openai_source_tool_calls()
+    }
+
+    pub(in crate::service::transform) fn openai_source_tool_calls_mut(
+        &mut self,
+    ) -> &mut HashMap<u32, StreamToolCallState> {
+        self.session.openai_source_tool_calls_mut()
     }
 
     pub(in crate::service::transform) fn responses(&self) -> &ResponsesSessionState {

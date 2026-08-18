@@ -1,11 +1,128 @@
 use serde_json::{Value, json};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 
 use super::payload::*;
 use super::response::*;
+
+impl From<ReasoningEffort> for UnifiedReasoningEffort {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::None => Self::None,
+            ReasoningEffort::Minimal => Self::Minimal,
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+            ReasoningEffort::Xhigh => Self::Xhigh,
+        }
+    }
+}
+
+impl From<UnifiedReasoningEffort> for ReasoningEffort {
+    fn from(value: UnifiedReasoningEffort) -> Self {
+        match value {
+            UnifiedReasoningEffort::None => Self::None,
+            UnifiedReasoningEffort::Minimal => Self::Minimal,
+            UnifiedReasoningEffort::Low => Self::Low,
+            UnifiedReasoningEffort::Medium => Self::Medium,
+            UnifiedReasoningEffort::High => Self::High,
+            UnifiedReasoningEffort::Xhigh => Self::Xhigh,
+        }
+    }
+}
+
+fn unified_structured_output_to_responses(output: UnifiedStructuredOutput) -> TextResponseFormat {
+    match output {
+        UnifiedStructuredOutput::JsonObject => TextResponseFormat::JsonObject,
+        UnifiedStructuredOutput::JsonSchema {
+            name,
+            description,
+            schema,
+            strict,
+        } => TextResponseFormat::JsonSchema {
+            name,
+            description,
+            schema: Some(schema),
+            strict,
+        },
+    }
+}
+
+fn split_responses_text(
+    text: Option<TextField>,
+) -> (Option<UnifiedStructuredOutput>, Option<TextField>) {
+    let Some(text) = text else {
+        return (None, None);
+    };
+    match text.format {
+        TextResponseFormat::JsonObject => (Some(UnifiedStructuredOutput::JsonObject), None),
+        TextResponseFormat::JsonSchema {
+            name,
+            description,
+            schema,
+            strict,
+        } => (
+            Some(UnifiedStructuredOutput::JsonSchema {
+                name,
+                description,
+                schema: schema.expect("Responses JSON schema is adapter-validated"),
+                strict,
+            }),
+            None,
+        ),
+        format @ TextResponseFormat::Text => (
+            None,
+            Some(TextField {
+                format,
+                verbosity: text.verbosity,
+            }),
+        ),
+    }
+}
+
+fn unified_tool_choice_to_responses(choice: UnifiedToolChoice) -> ToolChoice {
+    match choice {
+        UnifiedToolChoice::None => ToolChoice::Value(ToolChoiceValue::None),
+        UnifiedToolChoice::Auto => ToolChoice::Value(ToolChoiceValue::Auto),
+        UnifiedToolChoice::Required => ToolChoice::Value(ToolChoiceValue::Required),
+        UnifiedToolChoice::Named { name } => ToolChoice::Specific(SpecificToolChoice {
+            _type: "function".to_string(),
+            name,
+        }),
+        UnifiedToolChoice::Allowed { names, mode } => ToolChoice::Allowed(AllowedToolChoice {
+            _type: "allowed_tools".to_string(),
+            tools: names
+                .into_iter()
+                .map(|name| SpecificToolChoice {
+                    _type: "function".to_string(),
+                    name,
+                })
+                .collect(),
+            mode: match mode {
+                UnifiedAllowedToolMode::Auto => ToolChoiceValue::Auto,
+                UnifiedAllowedToolMode::Required => ToolChoiceValue::Required,
+            },
+        }),
+    }
+}
+
+fn unified_tool_choice_from_responses(choice: ToolChoice) -> UnifiedToolChoice {
+    match choice {
+        ToolChoice::Value(ToolChoiceValue::None) => UnifiedToolChoice::None,
+        ToolChoice::Value(ToolChoiceValue::Auto) => UnifiedToolChoice::Auto,
+        ToolChoice::Value(ToolChoiceValue::Required) => UnifiedToolChoice::Required,
+        ToolChoice::Specific(choice) => UnifiedToolChoice::Named { name: choice.name },
+        ToolChoice::Allowed(choice) => UnifiedToolChoice::Allowed {
+            names: choice.tools.into_iter().map(|tool| tool.name).collect(),
+            mode: match choice.mode {
+                ToolChoiceValue::Auto | ToolChoiceValue::None => UnifiedAllowedToolMode::Auto,
+                ToolChoiceValue::Required => UnifiedAllowedToolMode::Required,
+            },
+        },
+    }
+}
 
 impl From<UnifiedRequest> for ResponsesRequestPayload {
     fn from(unified_req: UnifiedRequest) -> Self {
@@ -28,7 +145,7 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
                             .into_iter()
                             .filter_map(|part| {
                                 if matches!(
-                                    part,
+                                    &part,
                                     UnifiedContentPart::Text { .. }
                                         | UnifiedContentPart::Refusal { .. }
                                         | UnifiedContentPart::Reasoning { .. }
@@ -38,10 +155,21 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
                                 let keep = apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Responses),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Responses),
                                     TransformValueKind::from(&part),
                                     "Downgrading rich system content to recoverable instruction text during Responses request conversion.",
                                 );
+                                if matches!(
+                                    part,
+                                    UnifiedContentPart::ImageUrl { .. }
+                                        | UnifiedContentPart::ImageData { .. }
+                                        | UnifiedContentPart::AudioData { .. }
+                                        | UnifiedContentPart::FileUrl { .. }
+                                        | UnifiedContentPart::FileData { .. }
+                                        | UnifiedContentPart::FileId { .. }
+                                ) {
+                                    return None;
+                                }
                                 keep.then(|| render_responses_instruction_part(part)).flatten()
                             })
                             .collect::<Vec<_>>()
@@ -110,7 +238,7 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
                         .into_iter()
                         .filter_map(|part| {
                             if matches!(
-                                part,
+                                &part,
                                 UnifiedContentPart::Text { .. }
                                     | UnifiedContentPart::Refusal { .. }
                                     | UnifiedContentPart::Reasoning { .. }
@@ -120,10 +248,21 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
                             let keep = apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Responses),
+                                TransformProtocol::Upstream(UpstreamProtocol::Responses),
                                 TransformValueKind::from(&part),
                                 "Downgrading rich system content to recoverable instruction text during Responses request conversion.",
                             );
+                            if matches!(
+                                part,
+                                UnifiedContentPart::ImageUrl { .. }
+                                    | UnifiedContentPart::ImageData { .. }
+                                    | UnifiedContentPart::AudioData { .. }
+                                    | UnifiedContentPart::FileUrl { .. }
+                                    | UnifiedContentPart::FileData { .. }
+                                    | UnifiedContentPart::FileId { .. }
+                            ) {
+                                return None;
+                            }
                             keep.then(|| render_responses_instruction_part(part)).flatten()
                         })
                         .collect::<Vec<_>>()
@@ -155,24 +294,38 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
                         name: tool.function.name,
                         description: tool.function.description,
                         parameters: Some(tool.function.parameters),
-                        strict: None,
+                        strict: tool.function.strict,
                     })
                 })
                 .collect()
         });
 
-        let tool_choice = responses_extension
+        let tool_choice = unified_req
             .tool_choice
-            .and_then(|value| serde_json::from_value(value).ok())
+            .map(unified_tool_choice_to_responses)
             .or_else(|| {
-                openai_extension
+                responses_extension
                     .tool_choice
-                    .and_then(convert_openai_tool_choice_to_responses)
+                    .map(|value| {
+                        serde_json::from_value(value)
+                            .expect("Responses tool_choice extension is source-validated")
+                    })
+                    .or_else(|| {
+                        openai_extension
+                            .tool_choice
+                            .and_then(convert_openai_tool_choice_to_responses)
+                    })
             });
 
-        let text = responses_extension
-            .text_format
-            .and_then(|value| serde_json::from_value(value).ok())
+        let text = unified_req
+            .structured_output
+            .map(unified_structured_output_to_responses)
+            .or_else(|| {
+                responses_extension.text_format.map(|value| {
+                    serde_json::from_value(value)
+                        .expect("Responses text format extension is source-validated")
+                })
+            })
             .or_else(|| {
                 openai_extension
                     .response_format
@@ -185,21 +338,27 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
         let reasoning = responses_extension
             .reasoning
-            .and_then(|value| serde_json::from_value(value).ok())
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("Responses reasoning extension is source-validated")
+            })
+            .or_else(|| {
+                unified_req.reasoning_effort.map(|effort| Reasoning {
+                    effort: Some(effort.into()),
+                    summary: None,
+                })
+            });
+
+        let parallel_tool_calls = unified_req
+            .parallel_tool_calls
+            .or(responses_extension.parallel_tool_calls)
             .or_else(|| {
                 openai_extension
                     .passthrough
                     .as_ref()
-                    .and_then(convert_openai_passthrough_to_responses_reasoning)
+                    .and_then(|value| value.get("parallel_tool_calls"))
+                    .and_then(Value::as_bool)
             });
-
-        let parallel_tool_calls = responses_extension.parallel_tool_calls.or_else(|| {
-            openai_extension
-                .passthrough
-                .as_ref()
-                .and_then(|value| value.get("parallel_tool_calls"))
-                .and_then(Value::as_bool)
-        });
 
         ResponsesRequestPayload {
             model: unified_req.model.unwrap_or_default(),
@@ -234,6 +393,11 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
             temperature,
             top_p,
         } = responses_req;
+        let reasoning_effort = reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.effort.clone())
+            .map(Into::into);
+        let (structured_output, text) = split_responses_text(text);
 
         let mut messages = Vec::new();
         if let Some(instructions) = instructions
@@ -258,8 +422,24 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
                 .into_iter()
                 .filter_map(|item| match item {
                     ItemField::Message(item) => {
-                        let (content, annotations, files) =
+                        let (mut content, annotations, files) =
                             message_content_parts_to_unified(item.content);
+                        content.extend(files.iter().filter_map(|file| {
+                            if let Some(url) = file.file_url.clone() {
+                                Some(UnifiedContentPart::FileUrl {
+                                    url,
+                                    mime_type: file.mime_type.clone(),
+                                    filename: file.filename.clone(),
+                                })
+                            } else {
+                                file.file_id
+                                    .clone()
+                                    .map(|file_id| UnifiedContentPart::FileId {
+                                        file_id,
+                                        filename: file.filename.clone(),
+                                    })
+                            }
+                        }));
                         if !content.is_empty() || !annotations.is_empty() {
                             request_items.push(UnifiedItem::Message(UnifiedMessageItem {
                                 role: message_role_to_unified(item.role.clone()),
@@ -275,7 +455,7 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
                         })
                     }
                     ItemField::FunctionCall(call) => {
-                        let arguments = parse_function_arguments(&call.arguments);
+                        let arguments = parse_validated_function_arguments(&call.arguments);
                         request_items.push(UnifiedItem::FunctionCall(UnifiedFunctionCallItem {
                             id: call.call_id.clone(),
                             name: call.name.clone(),
@@ -349,18 +529,26 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
                             name: function.name,
                             description: function.description,
                             parameters: function.parameters.unwrap_or_else(|| json!({})),
+                            strict: function.strict,
                         },
                     },
                 })
                 .collect()
         });
 
+        let tool_choice = tool_choice.map(unified_tool_choice_from_responses);
         let responses_extension = UnifiedResponsesRequestExtension {
             instructions,
-            tool_choice: tool_choice.and_then(|value| serde_json::to_value(value).ok()),
-            text_format: text.and_then(|value| serde_json::to_value(value.format).ok()),
-            reasoning: reasoning.and_then(|value| serde_json::to_value(value).ok()),
-            parallel_tool_calls,
+            tool_choice: None,
+            text_format: text.map(|value| {
+                serde_json::to_value(value.format)
+                    .expect("Responses text format serialization is structurally infallible")
+            }),
+            reasoning: reasoning.map(|value| {
+                serde_json::to_value(value)
+                    .expect("Responses reasoning serialization is structurally infallible")
+            }),
+            parallel_tool_calls: None,
         };
 
         UnifiedRequest {
@@ -368,10 +556,14 @@ impl From<ResponsesRequestPayload> for UnifiedRequest {
             messages,
             items: request_items,
             tools,
+            tool_choice,
+            parallel_tool_calls,
             stream: stream.unwrap_or(false),
             temperature,
             max_tokens,
             top_p,
+            reasoning_effort,
+            structured_output,
             extensions: (!responses_extension.is_empty()).then_some(UnifiedRequestExtensions {
                 responses: Some(responses_extension),
                 ..Default::default()

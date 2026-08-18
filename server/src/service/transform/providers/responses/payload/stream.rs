@@ -1,14 +1,24 @@
 use super::*;
+use serde::de::Error as _;
 
 #[derive(Debug, Clone)]
 pub enum ResponsesStreamEvent {
     ResponseCreated {
         response: ResponsesResponse,
     },
+    ResponseQueued {
+        response: ResponsesResponse,
+    },
+    ResponseInProgress {
+        response: ResponsesResponse,
+    },
     ResponseCompleted {
         response: ResponsesResponse,
     },
     ResponseIncomplete {
+        response: ResponsesResponse,
+    },
+    ResponseFailed {
         response: ResponsesResponse,
     },
     OutputItemAdded {
@@ -27,6 +37,30 @@ pub enum ResponsesStreamEvent {
         item_id: String,
         content_index: u32,
     },
+    OutputTextDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        text: String,
+    },
+    RefusalDelta {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        delta: String,
+    },
+    RefusalDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        refusal: String,
+    },
+    AnnotationAdded {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        annotation: Value,
+    },
     ReasoningSummaryPartAdded {
         item_id: String,
         summary_index: u32,
@@ -34,6 +68,12 @@ pub enum ResponsesStreamEvent {
     ReasoningSummaryPartDone {
         item_id: String,
         summary_index: u32,
+    },
+    ReasoningDone {
+        item_id: String,
+        item_index: Option<u32>,
+        part_index: u32,
+        text: String,
     },
     MessageStart {
         id: Option<String>,
@@ -112,10 +152,16 @@ pub enum ResponsesStreamEvent {
 enum TypedResponsesStreamEvent {
     #[serde(rename = "response.created")]
     ResponseCreated { response: ResponsesResponse },
+    #[serde(rename = "response.queued")]
+    ResponseQueued { response: ResponsesResponse },
+    #[serde(rename = "response.in_progress")]
+    ResponseInProgress { response: ResponsesResponse },
     #[serde(rename = "response.completed")]
     ResponseCompleted { response: ResponsesResponse },
     #[serde(rename = "response.incomplete")]
     ResponseIncomplete { response: ResponsesResponse },
+    #[serde(rename = "response.failed")]
+    ResponseFailed { response: ResponsesResponse },
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded { output_index: u32, item: ItemField },
     #[serde(rename = "response.output_item.done")]
@@ -126,6 +172,34 @@ enum TypedResponsesStreamEvent {
         output_index: u32,
         content_index: u32,
         delta: String,
+    },
+    #[serde(rename = "response.output_text.done")]
+    OutputTextDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        text: String,
+    },
+    #[serde(rename = "response.refusal.delta")]
+    RefusalDelta {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        delta: String,
+    },
+    #[serde(rename = "response.refusal.done")]
+    RefusalDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        refusal: String,
+    },
+    #[serde(rename = "response.output_text.annotation.added")]
+    AnnotationAdded {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        annotation: Value,
     },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta {
@@ -152,6 +226,26 @@ enum TypedResponsesStreamEvent {
         item_id: String,
         summary_index: u32,
         delta: String,
+    },
+    #[serde(rename = "response.reasoning_summary_text.done")]
+    ReasoningSummaryTextDone {
+        item_id: String,
+        summary_index: u32,
+        text: String,
+    },
+    #[serde(rename = "response.reasoning_text.delta")]
+    ReasoningTextDelta {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        delta: String,
+    },
+    #[serde(rename = "response.reasoning_text.done")]
+    ReasoningTextDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        text: String,
     },
     #[serde(rename = "response.content_part.added")]
     ContentPartAdded { item_id: String, content_index: u32 },
@@ -212,7 +306,14 @@ enum TypedResponsesStreamEvent {
         data: Value,
     },
     #[serde(rename = "response.error")]
-    Error { error: Value },
+    LegacyError { error: Value },
+    #[serde(rename = "error")]
+    Error {
+        code: String,
+        message: String,
+        #[serde(default)]
+        param: Option<Value>,
+    },
 }
 
 impl ResponsesStreamEvent {
@@ -278,11 +379,20 @@ impl ResponsesStreamEvent {
                 TypedResponsesStreamEvent::ResponseCreated { response } => {
                     Self::ResponseCreated { response }
                 }
+                TypedResponsesStreamEvent::ResponseQueued { response } => {
+                    Self::ResponseQueued { response }
+                }
+                TypedResponsesStreamEvent::ResponseInProgress { response } => {
+                    Self::ResponseInProgress { response }
+                }
                 TypedResponsesStreamEvent::ResponseCompleted { response } => {
                     Self::ResponseCompleted { response }
                 }
                 TypedResponsesStreamEvent::ResponseIncomplete { response } => {
                     Self::ResponseIncomplete { response }
+                }
+                TypedResponsesStreamEvent::ResponseFailed { response } => {
+                    Self::ResponseFailed { response }
                 }
                 TypedResponsesStreamEvent::OutputItemAdded { output_index, item } => {
                     Self::OutputItemAdded { output_index, item }
@@ -302,6 +412,50 @@ impl ResponsesStreamEvent {
                     part_index: Some(content_index),
                     text: delta,
                 },
+                TypedResponsesStreamEvent::OutputTextDone {
+                    item_id,
+                    output_index,
+                    content_index,
+                    text,
+                } => Self::OutputTextDone {
+                    item_id,
+                    output_index,
+                    content_index,
+                    text,
+                },
+                TypedResponsesStreamEvent::RefusalDelta {
+                    item_id,
+                    output_index,
+                    content_index,
+                    delta,
+                } => Self::RefusalDelta {
+                    item_id,
+                    output_index,
+                    content_index,
+                    delta,
+                },
+                TypedResponsesStreamEvent::RefusalDone {
+                    item_id,
+                    output_index,
+                    content_index,
+                    refusal,
+                } => Self::RefusalDone {
+                    item_id,
+                    output_index,
+                    content_index,
+                    refusal,
+                },
+                TypedResponsesStreamEvent::AnnotationAdded {
+                    item_id,
+                    output_index,
+                    content_index,
+                    annotation,
+                } => Self::AnnotationAdded {
+                    item_id,
+                    output_index,
+                    content_index,
+                    annotation,
+                },
                 TypedResponsesStreamEvent::FunctionCallArgumentsDelta {
                     item_id,
                     output_index,
@@ -310,8 +464,8 @@ impl ResponsesStreamEvent {
                 } => Self::ToolCallArgumentsDelta {
                     index: output_index,
                     item_index: Some(output_index),
-                    item_id: Some(item_id.clone()),
-                    id: Some(item_id),
+                    item_id: Some(item_id),
+                    id: None,
                     name,
                     arguments: delta,
                 },
@@ -365,6 +519,39 @@ impl ResponsesStreamEvent {
                     item_id: Some(item_id),
                     part_index: Some(summary_index),
                     text: delta,
+                },
+                TypedResponsesStreamEvent::ReasoningSummaryTextDone {
+                    item_id,
+                    summary_index,
+                    text,
+                } => Self::ReasoningDone {
+                    item_id,
+                    item_index: None,
+                    part_index: summary_index,
+                    text,
+                },
+                TypedResponsesStreamEvent::ReasoningTextDelta {
+                    item_id,
+                    output_index,
+                    content_index,
+                    delta,
+                } => Self::ReasoningDelta {
+                    index: content_index,
+                    item_index: Some(output_index),
+                    item_id: Some(item_id),
+                    part_index: Some(content_index),
+                    text: delta,
+                },
+                TypedResponsesStreamEvent::ReasoningTextDone {
+                    item_id,
+                    output_index,
+                    content_index,
+                    text,
+                } => Self::ReasoningDone {
+                    item_id,
+                    item_index: Some(output_index),
+                    part_index: content_index,
+                    text,
                 },
                 TypedResponsesStreamEvent::MessageStart { id, role } => {
                     Self::MessageStart { id, role }
@@ -422,19 +609,38 @@ impl ResponsesStreamEvent {
                 TypedResponsesStreamEvent::ReasoningStop { index } => Self::ReasoningStop { index },
                 TypedResponsesStreamEvent::Usage { usage } => Self::Usage { usage },
                 TypedResponsesStreamEvent::Blob { index, data } => Self::Blob { index, data },
-                TypedResponsesStreamEvent::Error { error } => Self::Error { error },
+                TypedResponsesStreamEvent::LegacyError { error } => Self::Error { error },
+                TypedResponsesStreamEvent::Error {
+                    code,
+                    message,
+                    param,
+                } => Self::Error {
+                    error: json!({
+                        "type": "error",
+                        "code": code,
+                        "message": message,
+                        "param": param,
+                    }),
+                },
             };
         }
 
-        let Some(_event_type) = value.get("type").and_then(Value::as_str) else {
+        let Some(event_type) = value.get("type").and_then(Value::as_str) else {
             return serde_json::from_value::<ItemField>(value.clone())
                 .map(Self::Item)
                 .unwrap_or(Self::Unknown(value));
         };
 
-        serde_json::from_value::<ItemField>(value.clone())
-            .map(Self::Item)
-            .unwrap_or(Self::Unknown(value))
+        if matches!(
+            event_type,
+            "message" | "function_call" | "function_call_output" | "reasoning"
+        ) {
+            serde_json::from_value::<ItemField>(value.clone())
+                .map(Self::Item)
+                .unwrap_or(Self::Unknown(value))
+        } else {
+            Self::Unknown(value)
+        }
     }
 
     fn to_value(&self) -> Value {
@@ -442,6 +648,14 @@ impl ResponsesStreamEvent {
             Self::ResponseCreated { response } => TypedResponsesStreamEvent::ResponseCreated {
                 response: response.clone(),
             },
+            Self::ResponseQueued { response } => TypedResponsesStreamEvent::ResponseQueued {
+                response: response.clone(),
+            },
+            Self::ResponseInProgress { response } => {
+                TypedResponsesStreamEvent::ResponseInProgress {
+                    response: response.clone(),
+                }
+            }
             Self::ResponseCompleted { response } => TypedResponsesStreamEvent::ResponseCompleted {
                 response: response.clone(),
             },
@@ -450,6 +664,9 @@ impl ResponsesStreamEvent {
                     response: response.clone(),
                 }
             }
+            Self::ResponseFailed { response } => TypedResponsesStreamEvent::ResponseFailed {
+                response: response.clone(),
+            },
             Self::OutputItemAdded { output_index, item } => {
                 TypedResponsesStreamEvent::OutputItemAdded {
                     output_index: *output_index,
@@ -476,6 +693,50 @@ impl ResponsesStreamEvent {
                 item_id: item_id.clone(),
                 content_index: *content_index,
             },
+            Self::OutputTextDone {
+                item_id,
+                output_index,
+                content_index,
+                text,
+            } => TypedResponsesStreamEvent::OutputTextDone {
+                item_id: item_id.clone(),
+                output_index: *output_index,
+                content_index: *content_index,
+                text: text.clone(),
+            },
+            Self::RefusalDelta {
+                item_id,
+                output_index,
+                content_index,
+                delta,
+            } => TypedResponsesStreamEvent::RefusalDelta {
+                item_id: item_id.clone(),
+                output_index: *output_index,
+                content_index: *content_index,
+                delta: delta.clone(),
+            },
+            Self::RefusalDone {
+                item_id,
+                output_index,
+                content_index,
+                refusal,
+            } => TypedResponsesStreamEvent::RefusalDone {
+                item_id: item_id.clone(),
+                output_index: *output_index,
+                content_index: *content_index,
+                refusal: refusal.clone(),
+            },
+            Self::AnnotationAdded {
+                item_id,
+                output_index,
+                content_index,
+                annotation,
+            } => TypedResponsesStreamEvent::AnnotationAdded {
+                item_id: item_id.clone(),
+                output_index: *output_index,
+                content_index: *content_index,
+                annotation: annotation.clone(),
+            },
             Self::ReasoningSummaryPartAdded {
                 item_id,
                 summary_index,
@@ -489,6 +750,24 @@ impl ResponsesStreamEvent {
             } => TypedResponsesStreamEvent::ReasoningSummaryPartDone {
                 item_id: item_id.clone(),
                 summary_index: *summary_index,
+            },
+            Self::ReasoningDone {
+                item_id,
+                item_index,
+                part_index,
+                text,
+            } => match item_index {
+                Some(output_index) => TypedResponsesStreamEvent::ReasoningTextDone {
+                    item_id: item_id.clone(),
+                    output_index: *output_index,
+                    content_index: *part_index,
+                    text: text.clone(),
+                },
+                None => TypedResponsesStreamEvent::ReasoningSummaryTextDone {
+                    item_id: item_id.clone(),
+                    summary_index: *part_index,
+                    text: text.clone(),
+                },
             },
             Self::MessageStart { id, role } => TypedResponsesStreamEvent::MessageStart {
                 id: id.clone(),
@@ -542,7 +821,10 @@ impl ResponsesStreamEvent {
                 id,
                 arguments,
             } => TypedResponsesStreamEvent::FunctionCallArgumentsDone {
-                item_id: item_id.clone().or_else(|| id.clone()).unwrap_or_default(),
+                item_id: item_id
+                    .clone()
+                    .or_else(|| id.clone())
+                    .expect("audited Responses tool arguments done must retain an item id"),
                 output_index: item_index.unwrap_or(*index),
                 call_id: id.clone(),
                 arguments: arguments.clone(),
@@ -574,14 +856,23 @@ impl ResponsesStreamEvent {
                 index: *index,
                 data: data.clone(),
             },
-            Self::Error { error } => TypedResponsesStreamEvent::Error {
-                error: error.clone(),
-            },
-            Self::Item(item) => return serde_json::to_value(item).unwrap_or(Value::Null),
+            Self::Error { error } => {
+                if error.get("type").and_then(Value::as_str) == Some("error") {
+                    return error.clone();
+                }
+                TypedResponsesStreamEvent::LegacyError {
+                    error: error.clone(),
+                }
+            }
+            Self::Item(item) => {
+                return serde_json::to_value(item)
+                    .expect("Responses item serialization is structurally infallible");
+            }
             Self::Unknown(value) => return value.clone(),
         };
 
-        serde_json::to_value(typed).unwrap_or(Value::Null)
+        serde_json::to_value(typed)
+            .expect("Responses stream event serialization is structurally infallible")
     }
 }
 
@@ -589,6 +880,7 @@ impl ResponsesStreamEvent {
 pub struct ResponsesChunkResponse {
     pub id: String,
     pub model: String,
+    pub sequence_number: Option<u64>,
     pub event: ResponsesStreamEvent,
 }
 
@@ -597,7 +889,11 @@ impl Serialize for ResponsesChunkResponse {
     where
         S: Serializer,
     {
-        self.event.to_public_value().serialize(serializer)
+        let mut value = self.event.to_public_value();
+        if let Some(sequence_number) = self.sequence_number {
+            value["sequence_number"] = json!(sequence_number);
+        }
+        value.serialize(serializer)
     }
 }
 
@@ -607,6 +903,12 @@ impl<'de> Deserialize<'de> for ResponsesChunkResponse {
         D: Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
+        let sequence_number = match value.get("sequence_number") {
+            None => None,
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                D::Error::custom("Responses sequence_number must be a non-negative integer")
+            })?),
+        };
 
         #[derive(Deserialize)]
         struct LegacyWrappedResponsesChunkResponse {
@@ -621,6 +923,7 @@ impl<'de> Deserialize<'de> for ResponsesChunkResponse {
             return Ok(Self {
                 id: raw.id,
                 model: raw.model,
+                sequence_number,
                 event: ResponsesStreamEvent::from_value(raw.delta),
             });
         }
@@ -643,6 +946,7 @@ impl<'de> Deserialize<'de> for ResponsesChunkResponse {
         Ok(Self {
             id,
             model,
+            sequence_number,
             event: ResponsesStreamEvent::from_value(value),
         })
     }

@@ -70,8 +70,6 @@ const statusOptions: Array<{ value: ProviderRuntimeStatusFilter; label: string }
   { value: "all", label: $t("providerRuntimePage.filter.all") },
   { value: "healthy", label: $t("providerRuntimePage.status.healthy") },
   { value: "degraded", label: $t("providerRuntimePage.status.degraded") },
-  { value: "open", label: $t("providerRuntimePage.status.open") },
-  { value: "half_open", label: $t("providerRuntimePage.status.half_open") },
   { value: "no_traffic", label: $t("providerRuntimePage.status.no_traffic") },
 ];
 
@@ -79,6 +77,11 @@ const sortOptions: Array<{ value: ProviderRuntimeSortField; label: string }> = [
   { value: "health", label: $t("providerRuntimePage.sort.health") },
   { value: "error_rate", label: $t("providerRuntimePage.sort.error_rate") },
   { value: "latency", label: $t("providerRuntimePage.sort.latency") },
+  {
+    value: "time_to_first_response_body",
+    label: $t("providerRuntimePage.sort.time_to_first_response_body"),
+  },
+  { value: "ttft", label: $t("providerRuntimePage.sort.ttft") },
   { value: "last_error_at", label: $t("providerRuntimePage.sort.last_error_at") },
   { value: "request_count", label: $t("providerRuntimePage.sort.request_count") },
 ];
@@ -90,6 +93,16 @@ const summaryCards = computed(() => [
     value: summary.value?.total_provider_count ?? 0,
   },
   {
+    key: "total_sources",
+    label: $t("providerRuntimePage.summary.totalSources"),
+    value: summary.value?.total_source_count ?? 0,
+  },
+  {
+    key: "enabled_sources",
+    label: $t("providerRuntimePage.summary.enabledSources"),
+    value: summary.value?.enabled_source_count ?? 0,
+  },
+  {
     key: "healthy",
     label: $t("providerRuntimePage.summary.healthy"),
     value: summary.value?.healthy_count ?? 0,
@@ -98,16 +111,6 @@ const summaryCards = computed(() => [
     key: "degraded",
     label: $t("providerRuntimePage.summary.degraded"),
     value: summary.value?.degraded_count ?? 0,
-  },
-  {
-    key: "half_open",
-    label: $t("providerRuntimePage.summary.halfOpen"),
-    value: summary.value?.half_open_count ?? 0,
-  },
-  {
-    key: "open",
-    label: $t("providerRuntimePage.summary.open"),
-    value: summary.value?.open_count ?? 0,
   },
   {
     key: "no_traffic",
@@ -249,6 +252,22 @@ function formatLatency(value: number | null) {
   return `${formatNumberValue(Math.round(value), undefined, locale.value)} ms`;
 }
 
+function formatSampleCount(sampleCount: number) {
+  if (sampleCount === 0) {
+    return $t("common.noSamples");
+  }
+  if (sampleCount === 1) {
+    return $t("common.oneSample");
+  }
+  return $t("common.samples", {
+    count: formatNumberValue(sampleCount, undefined, locale.value),
+  });
+}
+
+function formatLatencyCoverage(value: number | null, sampleCount: number) {
+  return `${formatLatency(value)} · ${formatSampleCount(sampleCount)}`;
+}
+
 function formatCount(value: number | null | undefined) {
   if (value == null) {
     return "-";
@@ -270,10 +289,6 @@ function runtimeLevelLabel(level: ProviderRuntimeLevel) {
 
 function runtimeBadgeClass(level: ProviderRuntimeLevel) {
   switch (level) {
-    case "open":
-      return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-    case "half_open":
-      return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
     case "degraded":
       return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
     case "healthy":
@@ -294,24 +309,27 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
       value: formatPercentage(item.success_rate),
     },
     {
-      label: $t("providerRuntimePage.metrics.firstByte"),
-      value: formatLatency(item.avg_first_byte_ms),
+      label: $t("providerRuntimePage.metrics.firstResponseBody"),
+      value: formatLatencyCoverage(
+        item.avg_time_to_first_response_body_ms,
+        item.time_to_first_response_body_sample_count,
+      ),
+    },
+    {
+      label: $t("providerRuntimePage.metrics.ttft"),
+      value: formatLatencyCoverage(item.avg_ttft_ms, item.ttft_sample_count),
     },
     {
       label: $t("providerRuntimePage.metrics.totalLatency"),
-      value: formatLatency(item.avg_total_latency_ms),
+      value: formatLatencyCoverage(item.avg_total_latency_ms, item.total_latency_sample_count),
     },
     {
       label: $t("providerRuntimePage.metrics.errors"),
       value: formatCount(item.error_count),
     },
     {
-      label: $t("providerRuntimePage.metrics.failures"),
-      value: formatCount(item.consecutive_failures),
-    },
-    {
       label: $t("providerRuntimePage.metrics.proxy"),
-      value: item.use_proxy ? $t("common.yes") : $t("common.no"),
+      value: item.source_use_proxy ? $t("common.yes") : $t("common.no"),
     },
   ];
 }
@@ -319,13 +337,10 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
 function openProviderRecords(item: ProviderRuntimeItem) {
   const query: Record<string, string> = {
     provider_id: String(item.provider_id),
+    source_id: String(item.source_id),
   };
 
-  if (
-    item.runtime_level === "open" ||
-    item.runtime_level === "half_open" ||
-    item.runtime_level === "degraded"
-  ) {
+  if (item.runtime_level === "degraded") {
     query.status = "ERROR";
   }
 
@@ -401,8 +416,15 @@ function handleReset() {
   });
 }
 
-function goToProviderEdit(providerId: number) {
-  void router.push(`/provider/edit/${providerId}`);
+function goToProviderEdit(providerId: number, sourceId?: number) {
+  if (sourceId == null) {
+    void router.push(`/provider/edit/${providerId}`);
+    return;
+  }
+  void router.push({
+    path: `/provider/edit/${providerId}`,
+    query: { tab: "sources", source_id: String(sourceId) },
+  });
 }
 
 watch(
@@ -536,7 +558,7 @@ onMounted(() => {
           :format-count="formatCount"
           :format-cost="formatCost"
           :format-date-time="formatDateTime"
-          :format-latency="formatLatency"
+          :format-latency-coverage="formatLatencyCoverage"
           :format-percentage="formatPercentage"
           :runtime-badge-class="runtimeBadgeClass"
           :runtime-level-label="runtimeLevelLabel"

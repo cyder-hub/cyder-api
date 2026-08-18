@@ -59,7 +59,14 @@
           @update:model-value="$emit('updateNumberFilter', 'provider_id', $event)"
         />
         <FilterSelect
-          class="xl:col-span-3"
+          class="xl:col-span-2"
+          :label="$t('recordPage.filter.sourceLabel')"
+          :model-value="String(filters.source_id)"
+          :options="sourceOptions"
+          @update:model-value="$emit('updateNumberFilter', 'source_id', $event)"
+        />
+        <FilterSelect
+          class="xl:col-span-2"
           :label="$t('recordPage.filter.modelLabel')"
           :model-value="String(filters.model_id)"
           :options="modelOptions"
@@ -72,7 +79,7 @@
           :options="statusOptions"
           @update:model-value="$emit('updateStatusFilter', $event)"
         />
-        <div class="flex flex-col gap-1.5 xl:col-span-3">
+        <div class="flex flex-col gap-1.5 xl:col-span-2">
           <span class="text-xs font-medium uppercase tracking-wide text-gray-500">
             {{ $t("recordPage.filter.searchLabel") }}
           </span>
@@ -134,10 +141,10 @@
         >
           <FilterSelect
             class="xl:col-span-3"
-            :label="$t('recordPage.filter.userApiLabel')"
-            :model-value="filters.user_api_type"
-            :options="userApiTypeOptions"
-            @update:model-value="$emit('updateFilter', 'user_api_type', $event)"
+            :label="$t('recordPage.filter.downstreamProtocolLabel')"
+            :model-value="filters.downstream_protocol"
+            :options="downstreamProtocolOptions"
+            @update:model-value="$emit('updateFilter', 'downstream_protocol', $event)"
           />
           <FilterInput
             class="xl:col-span-2"
@@ -255,15 +262,19 @@ defineProps<{
   advancedActiveFilterCount: number;
   apiKeyOptions: FilterOption[];
   providerOptions: FilterOption[];
+  sourceOptions: FilterOption[];
   modelOptions: FilterOption[];
   statusOptions: FilterOption[];
-  userApiTypeOptions: FilterOption[];
+  downstreamProtocolOptions: FilterOption[];
 }>();
 
 defineEmits<{
   "update:searchInput": [value: string];
   updateFilter: [key: keyof RecordFilters, value: string];
-  updateNumberFilter: [key: "api_key_id" | "provider_id" | "model_id", value: string];
+  updateNumberFilter: [
+    key: "api_key_id" | "provider_id" | "source_id" | "model_id",
+    value: string,
+  ];
   updateStatusFilter: [value: string];
   toggleFilterPanel: [];
   toggleAdvancedFilters: [];

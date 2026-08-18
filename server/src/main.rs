@@ -1,7 +1,9 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use cyder_api::config::CONFIG;
 use cyder_api::controller::{create_manager_router, create_system_router, handle_404};
+use cyder_api::database::runtime::DatabaseRuntime;
+use cyder_api::database::startup::StartupDatabaseConnection;
 use cyder_api::ingress::client_identity::ClientIdentityResolver;
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
 use cyder_api::proxy::create_proxy_router;
@@ -53,10 +55,21 @@ async fn main() {
             log_level = &CONFIG.log_level,
         );
     }
-    let secret_preparation = prepare_secrets_before_startup(&CONFIG.secret_encryption)
-        .unwrap_or_else(|error| {
-            panic!("failed to prepare encrypted secrets before startup: {error:?}")
-        });
+    let mut startup_database = StartupDatabaseConnection::establish(
+        &CONFIG.db_url,
+        CONFIG.database_io.sqlite_busy_timeout(),
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "failed to prepare startup database: category={}",
+            error.category()
+        )
+    });
+    let secret_preparation =
+        prepare_secrets_before_startup(&CONFIG.secret_encryption, &mut startup_database)
+            .unwrap_or_else(|error| {
+                panic!("failed to prepare encrypted secrets before startup: {error:?}")
+            });
     if secret_preparation.downstream.unavailable_preserved > 0 {
         cyder_api::warn_event!(
             "startup.downstream_secret_rotation_degraded",
@@ -100,7 +113,21 @@ async fn main() {
             );
         }
     }
-    let app_state = create_app_state().await;
+    drop(startup_database);
+    let database = Arc::new(
+        DatabaseRuntime::connect(
+            &CONFIG.db_url,
+            CONFIG.db_pool_size,
+            CONFIG.database_io.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("failed to initialize database runtime: {error}")),
+    );
+    database
+        .readiness_probe()
+        .await
+        .unwrap_or_else(|error| panic!("initial database readiness probe failed: {error}"));
+    let app_state = create_app_state(database).await;
     let client_identity_resolver =
         std::sync::Arc::new(ClientIdentityResolver::new(&CONFIG.client_identity));
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -142,12 +169,11 @@ async fn main() {
 
     cyder_api::info_event!(
         "startup.server_shutdown_waiting",
-        background_task = "proxy_logs_flush",
+        background_task = "persistence_drain",
     );
-    shutdown_app_state.flush_proxy_logs().await;
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    shutdown_app_state.shutdown_persistence().await;
     cyder_api::info_event!(
         "startup.server_shutdown_complete",
-        background_task = "proxy_logs_flush",
+        background_task = "persistence_drain",
     );
 }

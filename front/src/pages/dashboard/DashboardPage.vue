@@ -56,11 +56,12 @@ const {
   formatCount,
   formatDateTime: formatOperationsDateTime,
   formatLatency,
+  formatLatencyCoverage,
   formatPercentage,
   runtimeLevelBadgeClass,
   runtimeLevelLabel,
   showCostHotspots,
-  unstableProviders,
+  degradedProviders,
 } = dashboardOperations;
 
 const goToRuntime = () => {
@@ -123,11 +124,12 @@ onMounted(() => {
             :loading="operationsLoading"
             :error="operationsError"
             :operations-section="operationsSection"
-            :unstable-providers="unstableProviders"
+            :degraded-providers="degradedProviders"
             :show-cost-hotspots="showCostHotspots"
             :format-count="formatCount"
             :format-percentage="formatPercentage"
             :format-latency="formatLatency"
+            :format-latency-coverage="formatLatencyCoverage"
             :format-date-time="formatOperationsDateTime"
             :format-cost-entries="formatCostEntries"
             :runtime-level-badge-class="runtimeLevelBadgeClass"

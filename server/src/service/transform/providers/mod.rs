@@ -4,7 +4,6 @@
 
 pub(crate) mod anthropic;
 pub(crate) mod gemini;
-pub(crate) mod ollama;
 pub(crate) mod openai;
 pub(crate) mod responses;
 
@@ -17,74 +16,96 @@ mod tests {
     };
     use crate::utils::sse::SseEvent;
 
-    type EventEncoder =
-        fn(Vec<UnifiedStreamEvent>, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
-    type ChunkEncoder =
-        fn(UnifiedChunkResponse, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
+    type FallibleEventEncoder = fn(
+        Vec<UnifiedStreamEvent>,
+        &mut StreamTransformContext<'_>,
+    ) -> Result<Option<Vec<SseEvent>>, serde_json::Error>;
+    type FallibleChunkEncoder = fn(
+        UnifiedChunkResponse,
+        &mut StreamTransformContext<'_>,
+    ) -> Result<Option<Vec<SseEvent>>, serde_json::Error>;
 
-    fn assert_request_codec<T>()
+    fn assert_downstream_request_decoder<T>()
     where
-        T: From<UnifiedRequest> + Into<UnifiedRequest>,
+        T: Into<UnifiedRequest>,
     {
     }
 
-    fn assert_response_codec<T>()
+    fn assert_upstream_request_encoder<T>()
     where
-        T: From<UnifiedResponse> + Into<UnifiedResponse>,
+        T: From<UnifiedRequest>,
     {
     }
 
-    fn assert_bidirectional_legacy_chunk<T>()
+    fn assert_downstream_response_encoder<T>()
+    where
+        T: From<UnifiedResponse>,
+    {
+    }
+
+    fn assert_upstream_response_decoder<T>()
+    where
+        T: Into<UnifiedResponse>,
+    {
+    }
+
+    fn assert_downstream_legacy_chunk_encoder<T>()
     where
         T: From<UnifiedChunkResponse>,
+    {
+    }
+
+    fn assert_upstream_legacy_chunk_decoder<T>()
+    where
         UnifiedChunkResponse: From<T>,
     {
     }
 
     #[test]
     fn test_provider_modules_expose_required_codec_contracts() {
-        assert_request_codec::<openai::OpenAiRequestPayload>();
-        assert_response_codec::<openai::OpenAiResponse>();
-        assert_bidirectional_legacy_chunk::<openai::OpenAiChunkResponse>();
+        assert_downstream_request_decoder::<openai::OpenAiRequestPayload>();
+        assert_upstream_request_encoder::<openai::OpenAiRequestPayload>();
+        assert_downstream_response_encoder::<openai::OpenAiResponse>();
+        assert_upstream_response_decoder::<openai::OpenAiResponse>();
+        assert_downstream_legacy_chunk_encoder::<openai::OpenAiChunkResponse>();
+        assert_upstream_legacy_chunk_decoder::<openai::OpenAiChunkResponse>();
 
-        assert_request_codec::<gemini::GeminiRequestPayload>();
-        assert_response_codec::<gemini::GeminiResponse>();
-        assert_bidirectional_legacy_chunk::<gemini::GeminiChunkResponse>();
+        assert_downstream_request_decoder::<gemini::GeminiRequestPayload>();
+        assert_upstream_request_encoder::<gemini::GeminiRequestPayload>();
+        assert_downstream_response_encoder::<gemini::GeminiResponse>();
+        assert_upstream_response_decoder::<gemini::GeminiResponse>();
+        assert_downstream_legacy_chunk_encoder::<gemini::GeminiChunkResponse>();
+        assert_upstream_legacy_chunk_decoder::<gemini::GeminiChunkResponse>();
 
-        assert_request_codec::<ollama::OllamaRequestPayload>();
-        assert_response_codec::<ollama::OllamaResponse>();
-        assert_bidirectional_legacy_chunk::<ollama::OllamaChunkResponse>();
-
-        assert_request_codec::<anthropic::AnthropicRequestPayload>();
-        assert_response_codec::<anthropic::AnthropicResponse>();
+        assert_downstream_request_decoder::<anthropic::AnthropicRequestPayload>();
+        assert_upstream_request_encoder::<anthropic::AnthropicRequestPayload>();
+        assert_downstream_response_encoder::<anthropic::AnthropicResponse>();
+        assert_upstream_response_decoder::<anthropic::AnthropicResponse>();
         let _: fn(anthropic::AnthropicEvent) -> Vec<UnifiedStreamEvent> =
             anthropic::anthropic_event_to_unified_stream_events;
 
-        assert_request_codec::<responses::ResponsesRequestPayload>();
-        assert_response_codec::<responses::ResponsesResponse>();
+        assert_downstream_request_decoder::<responses::ResponsesRequestPayload>();
+        assert_upstream_request_encoder::<responses::ResponsesRequestPayload>();
+        assert_downstream_response_encoder::<responses::ResponsesResponse>();
+        assert_upstream_response_decoder::<responses::ResponsesResponse>();
         let _: fn(responses::ResponsesChunkResponse) -> Vec<UnifiedStreamEvent> =
             responses::responses_chunk_to_unified_stream_events;
     }
 
     #[test]
     fn test_provider_modules_expose_required_stream_encoders() {
-        let _: EventEncoder = openai::transform_unified_stream_events_to_openai_events;
-        let _: ChunkEncoder = openai::transform_unified_chunk_to_openai_events;
+        let _: FallibleEventEncoder = openai::try_transform_unified_stream_events_to_openai_events;
+        let _: FallibleChunkEncoder = openai::try_transform_unified_chunk_to_openai_events;
 
-        let _: EventEncoder = gemini::transform_unified_stream_events_to_gemini_events;
-        let _: ChunkEncoder = gemini::transform_unified_chunk_to_gemini_events;
+        let _: FallibleEventEncoder = gemini::try_transform_unified_stream_events_to_gemini_events;
+        let _: FallibleChunkEncoder = gemini::try_transform_unified_chunk_to_gemini_events;
 
-        let _: EventEncoder = ollama::transform_unified_stream_events_to_ollama_events;
-        let _: ChunkEncoder = ollama::transform_unified_chunk_to_ollama_events;
+        let _: FallibleEventEncoder =
+            anthropic::try_transform_unified_stream_events_to_anthropic_events;
+        let _: FallibleChunkEncoder = anthropic::try_transform_unified_chunk_to_anthropic_events;
 
-        let _: EventEncoder = anthropic::transform_unified_stream_events_to_anthropic_events;
-        let _: ChunkEncoder = anthropic::transform_unified_chunk_to_anthropic_events;
-
-        let _: EventEncoder = responses::transform_unified_stream_events_to_responses_events;
-        let _: ChunkEncoder = responses::transform_unified_chunk_to_responses_events;
-        let _: fn(
-            responses::ResponsesChunkResponse,
-            &mut StreamTransformContext<'_>,
-        ) -> Option<Vec<SseEvent>> = responses::transform_responses_chunk_to_openai_events;
+        let _: FallibleEventEncoder =
+            responses::try_transform_unified_stream_events_to_responses_events;
+        let _: FallibleChunkEncoder = responses::try_transform_unified_chunk_to_responses_events;
     }
 }

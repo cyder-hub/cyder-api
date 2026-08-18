@@ -1,16 +1,25 @@
 // Request-level gateway log types. The 1.0 cleanup baseline only retains summary
 // fields needed for operations and cost visibility.
+export type DownstreamProtocol = "OPENAI" | "RESPONSES" | "ANTHROPIC" | "GEMINI";
+export type UpstreamProtocol =
+  | "OPENAI"
+  | "RESPONSES"
+  | "ANTHROPIC"
+  | "GEMINI";
+
 export interface RecordListItem {
   id: number;
+  request_id: string;
+  client_request_id: string | null;
   api_key_id: number;
   requested_model_name?: string | null;
   base_requested_model_name?: string | null;
-  resolved_reasoning_suffix?: string | null;
-  resolved_reasoning_preset?: string | null;
+  resolved_patch_suffix?: string | null;
   overall_status: string;
   request_received_at: number;
   upstream_request_sent_at: number | null;
-  response_started_to_client_at: number | null;
+  first_response_body_at: number | null;
+  first_token_at: number | null;
   completed_at: number | null;
   is_stream: boolean;
   provider_id: number | null;
@@ -18,6 +27,9 @@ export interface RecordListItem {
   model_id: number | null;
   model_name: string | null;
   real_model_name: string | null;
+  source_id: number | null;
+  source_profile_type: string | null;
+  source_selection_reason: string | null;
   upstream_http_status: number | null;
   estimated_cost_nanos: number | null;
   estimated_cost_currency: string | null;
@@ -29,13 +41,18 @@ export interface RecordListItem {
 }
 
 export interface RecordRequest extends RecordListItem {
-  user_api_type: string;
+  downstream_protocol: DownstreamProtocol;
   final_error_code: string | null;
   final_error_message: string | null;
   client_ip: string | null;
+  upstream_response_headers_at: number | null;
+  upstream_first_body_chunk_at: number | null;
+  max_upstream_response_idle_ms: number | null;
   provider_api_key_id: number | null;
   provider_key: string | null;
-  llm_api_type: string | null;
+  upstream_protocol: UpstreamProtocol | null;
+  source_base_url: string | null;
+  model_kind: import("./models").ModelKind | null;
   cost_catalog_id: number | null;
   cost_catalog_version_id: number | null;
   cost_snapshot_json: string | null;
@@ -55,9 +72,10 @@ export interface RecordListParams {
   page_size?: number;
   api_key_id?: number;
   provider_id?: number;
+  source_id?: number;
   model_id?: number;
   status?: string;
-  user_api_type?: string;
+  downstream_protocol?: DownstreamProtocol;
   final_error_code?: string;
   latency_ms_min?: number;
   latency_ms_max?: number;

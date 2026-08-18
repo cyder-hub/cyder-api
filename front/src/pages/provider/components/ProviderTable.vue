@@ -10,6 +10,9 @@
             {{ t("providerPage.table.key") }}
           </TableHead>
           <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
+            {{ t("providerPage.table.sources") }}
+          </TableHead>
+          <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
             {{ t("providerPage.table.status") }}
           </TableHead>
           <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
@@ -27,6 +30,27 @@
           </TableCell>
           <TableCell class="font-mono text-sm text-gray-700">
             {{ provider.provider_key }}
+          </TableCell>
+          <TableCell>
+            <div class="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" class="font-mono text-[10px]">
+                {{ t("providerPage.sources.count", { count: provider.source_count }) }}
+              </Badge>
+              <span class="font-mono text-xs text-gray-500">
+                {{ t("providerPage.sources.enabled", { count: provider.enabled_source_count }) }}
+              </span>
+            </div>
+            <div v-if="provider.default_source_id" class="mt-1 flex items-center gap-2">
+              <Badge class="border-gray-900 bg-gray-900 font-mono text-[10px] text-white hover:bg-gray-900">
+                {{ t("providerPage.sources.default") }}
+              </Badge>
+              <span class="font-mono text-xs text-gray-700">
+                {{ provider.default_source_profile_type }} · #{{ provider.default_source_id }}
+              </span>
+            </div>
+            <Badge v-else class="mt-1 border-amber-200 bg-amber-50 font-mono text-[10px] text-amber-700 hover:bg-amber-50">
+              {{ t("providerPage.sources.noDefault") }}
+            </Badge>
           </TableCell>
           <TableCell>
             <div class="flex flex-wrap items-center gap-2">
@@ -56,6 +80,15 @@
                 variant="ghost"
                 size="sm"
                 class="h-8 px-2 text-gray-600"
+                :aria-label="t('providerPage.sources.manage')"
+                @click="$emit('sources', provider)"
+              >
+                <Network class="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-8 px-2 text-gray-600"
                 @click="$emit('runtime', provider)"
               >
                 <Activity class="h-4 w-4" />
@@ -77,7 +110,7 @@
 </template>
 
 <script setup lang="ts">
-import { Activity, Server, Trash2 } from "lucide-vue-next";
+import { Activity, Network, Server, Trash2 } from "lucide-vue-next";
 
 import { useAppI18n } from "@/i18n";
 import { Badge } from "@/components/ui/badge";
@@ -103,6 +136,7 @@ defineProps<{
 
 defineEmits<{
   edit: [provider: ProviderSummaryItem];
+  sources: [provider: ProviderSummaryItem];
   runtime: [provider: ProviderSummaryItem];
   delete: [provider: ProviderSummaryItem];
 }>();

@@ -1,5 +1,5 @@
 use super::{
-    ProxyError, classify_request_body_error,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, classify_request_body_error,
     util::{sha256_hex, top_level_json_field_count},
 };
 use axum::{body::Body, extract::Request};
@@ -17,8 +17,16 @@ pub(super) async fn parse_json_request(
     let body_bytes = axum::body::to_bytes(request.into_body(), max_body_size)
         .await
         .map_err(|e| classify_request_body_error(e.to_string()))?;
-    let data: Value = serde_json::from_slice(&body_bytes)
-        .map_err(|e| ProxyError::BadRequest(format!("Failed to parse request body: {}", e)))?;
+    let data: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        let message = format!("Failed to parse request body: {e}");
+        ProxyError::gateway(
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+            Some(message.clone()),
+            message,
+        )
+    })?;
 
     crate::debug_event!(
         "proxy.request_parsed",
@@ -34,7 +42,7 @@ pub(super) async fn parse_json_request(
 #[cfg(test)]
 mod tests {
     use super::parse_json_request;
-    use crate::proxy::ProxyError;
+    use crate::proxy::ProxyErrorCode;
     use axum::{body::Body, extract::Request};
     use serde_json::json;
 
@@ -59,7 +67,7 @@ mod tests {
 
         let err = parse_json_request(request, 1024 * 1024).await.unwrap_err();
 
-        assert!(matches!(err, ProxyError::BadRequest(_)));
+        assert_eq!(err.code(), ProxyErrorCode::InvalidRequestError);
     }
 
     #[tokio::test]
@@ -71,6 +79,20 @@ mod tests {
 
         let err = parse_json_request(request, 4).await.unwrap_err();
 
-        assert!(matches!(err, ProxyError::PayloadTooLarge(_)));
+        assert_eq!(err.code(), ProxyErrorCode::RequestBodyTooLargeError);
+    }
+
+    #[tokio::test]
+    async fn inline_media_uses_the_same_request_body_limit() {
+        let request = Request::builder()
+            .uri("/v1/chat/completions")
+            .body(Body::from(
+                r#"{"model":"gpt-test","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZQ=="}}]}]}"#,
+            ))
+            .unwrap();
+
+        let err = parse_json_request(request, 64).await.unwrap_err();
+
+        assert_eq!(err.code(), ProxyErrorCode::RequestBodyTooLargeError);
     }
 }

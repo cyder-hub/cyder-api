@@ -2,34 +2,89 @@ use bincode::{Decode, Encode};
 use diesel_derive_enum::DbEnum;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
-#[db_enum(pg_type = "provider_type_enum")]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default, Encode, Decode,
+)]
+#[db_enum(pg_type = "upstream_profile_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ProviderType {
+pub enum UpstreamProfileType {
     #[default]
     Openai,
+    OpenaiCompatible,
     Gemini,
     Vertex,
-    VertexOpenai,
-    Ollama,
     Anthropic,
     Responses,
     GeminiOpenai,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default)]
-#[db_enum(pg_type = "llm_api_type_enum")]
+impl UpstreamProfileType {
+    pub const ALL: [Self; 7] = [
+        Self::Openai,
+        Self::OpenaiCompatible,
+        Self::Gemini,
+        Self::Vertex,
+        Self::Anthropic,
+        Self::Responses,
+        Self::GeminiOpenai,
+    ];
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Encode, Decode,
+)]
+#[db_enum(pg_type = "model_kind_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum LlmApiType {
+pub enum ModelKind {
+    Chat,
+    Embedding,
+    Rerank,
+}
+
+impl ModelKind {
+    pub const ALL: [Self; 3] = [Self::Chat, Self::Embedding, Self::Rerank];
+}
+
+/// Public wire protocol accepted by the gateway.
+///
+/// This type intentionally excludes provider identities and upstream-only
+/// protocols so invalid downstream states cannot be represented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "downstream_protocol_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DownstreamProtocol {
     #[default]
     Openai,
-    Gemini,
-    Ollama,
-    Anthropic,
     Responses,
-    GeminiOpenai,
+    Anthropic,
+    Gemini,
+}
+
+impl DownstreamProtocol {
+    pub const ALL: [Self; 4] = [Self::Openai, Self::Responses, Self::Anthropic, Self::Gemini];
+}
+
+/// Wire protocol used for the selected upstream provider.
+///
+/// Provider-specific dialects and authentication behavior belong to
+/// `UpstreamRuntimeProfile`, not this protocol identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "upstream_protocol_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum UpstreamProtocol {
+    #[default]
+    Openai,
+    Responses,
+    Anthropic,
+    Gemini,
+}
+
+impl UpstreamProtocol {
+    pub const ALL: [Self; 4] = [Self::Openai, Self::Responses, Self::Anthropic, Self::Gemini];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
@@ -123,4 +178,21 @@ pub enum RequestStatus {
     Success,
     Error,
     Cancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UpstreamProfileType, UpstreamProtocol};
+
+    #[test]
+    fn upstream_domains_expose_only_the_retained_protocols() {
+        assert_eq!(UpstreamProfileType::ALL.len(), 7);
+        assert_eq!(UpstreamProtocol::ALL.len(), 4);
+    }
+
+    #[test]
+    fn serde_rejects_retired_ollama_values() {
+        assert!(serde_json::from_str::<UpstreamProfileType>("\"OLLAMA\"").is_err());
+        assert!(serde_json::from_str::<UpstreamProtocol>("\"OLLAMA\"").is_err());
+    }
 }

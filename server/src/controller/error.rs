@@ -31,6 +31,12 @@ impl From<diesel::result::Error> for BaseError {
     }
 }
 
+impl From<crate::database::error::PersistenceError> for BaseError {
+    fn from(err: crate::database::error::PersistenceError) -> Self {
+        BaseError::DatabaseFatal(Some(err.to_string()))
+    }
+}
+
 impl IntoResponse for BaseError {
     fn into_response(self) -> Response {
         let (status, error_code, error_message) = match self {
@@ -67,7 +73,7 @@ impl IntoResponse for BaseError {
             BaseError::ProviderRuntimeRefreshFailed => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 1201,
-                "provider credential change was committed, but runtime refresh failed; the provider is fail-closed"
+                "provider configuration was committed, but runtime refresh failed; the provider is fail-closed"
                     .to_string(),
             ),
             BaseError::Unauthorized(msg) => (
@@ -91,5 +97,72 @@ impl IntoResponse for BaseError {
             "msg": error_message,
         }));
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::to_bytes, http::StatusCode, response::IntoResponse};
+
+    use super::BaseError;
+
+    #[tokio::test]
+    async fn manager_base_error_status_and_code_contract_is_stable() {
+        let cases = [
+            (BaseError::ParamInvalid(None), StatusCode::BAD_REQUEST, 1001),
+            (
+                BaseError::DatabaseFatal(None),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                1100,
+            ),
+            (BaseError::DatabaseDup(None), StatusCode::BAD_REQUEST, 1101),
+            (BaseError::NotFound(None), StatusCode::NOT_FOUND, 1002),
+            (
+                BaseError::ApiKeySecretUnavailable,
+                StatusCode::CONFLICT,
+                1004,
+            ),
+            (
+                BaseError::ProviderApiKeySecretUnavailable,
+                StatusCode::CONFLICT,
+                1005,
+            ),
+            (
+                BaseError::ProviderRuntimeRefreshFailed,
+                StatusCode::SERVICE_UNAVAILABLE,
+                1201,
+            ),
+            (
+                BaseError::Unauthorized(None),
+                StatusCode::UNAUTHORIZED,
+                1003,
+            ),
+            (
+                BaseError::StoreError(None),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                1200,
+            ),
+            (
+                BaseError::InternalServerError(None),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                0,
+            ),
+        ];
+
+        for (error, expected_status, expected_code) in cases {
+            let response = error.into_response();
+            assert_eq!(response.status(), expected_status);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("manager error response body should read");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("manager error response should be JSON");
+            assert_eq!(body["code"], expected_code);
+            assert!(
+                body["msg"]
+                    .as_str()
+                    .is_some_and(|message| !message.is_empty())
+            );
+        }
     }
 }

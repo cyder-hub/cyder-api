@@ -11,6 +11,7 @@ use crate::database::cost::{
     UpdateCostCatalogData, UpdateCostCatalogVersionData, UpdateCostComponentData,
     import_cost_catalog_template,
 };
+use crate::database::runtime::DatabaseRuntime;
 
 use super::audit::{AdminAuditEvent, AdminAuditField};
 use super::mutation::{AdminCatalogInvalidation, AdminMutationEffect, AdminMutationRunner};
@@ -51,7 +52,8 @@ impl CostAdminService {
         payload: NewCostCatalogPayload,
     ) -> Result<CostCatalog, BaseError> {
         validate_catalog_payload(&payload)?;
-        let created = CostCatalog::create(&payload)?;
+        let database = self.mutation_runner.database();
+        let created = CostCatalog::create(&database, &payload).await?;
 
         self.run_post_commit_effects(vec![AdminMutationEffect::audit(cost_catalog_audit_event(
             "create", &created,
@@ -67,7 +69,8 @@ impl CostAdminService {
         payload: UpdateCostCatalogData,
     ) -> Result<CostCatalog, BaseError> {
         validate_optional_catalog_payload(payload.name.as_deref(), payload.description.as_ref())?;
-        let updated = CostCatalog::update(id, &payload)?;
+        let database = self.mutation_runner.database();
+        let updated = CostCatalog::update(&database, id, &payload).await?;
 
         self.run_post_commit_effects(vec![AdminMutationEffect::audit(cost_catalog_audit_event(
             "update", &updated,
@@ -78,15 +81,16 @@ impl CostAdminService {
     }
 
     pub async fn delete_catalog(&self, id: i64) -> Result<(), BaseError> {
-        let catalog = CostCatalog::get_by_id(id)?;
-        let versions = CostCatalogVersion::list_by_catalog_id(id)?;
+        let database = self.mutation_runner.database();
+        let catalog = CostCatalog::get_by_id(&database, id).await?;
+        let versions = CostCatalogVersion::list_by_catalog_id(&database, id).await?;
         if !versions.is_empty() {
             return Err(BaseError::ParamInvalid(Some(
                 "Cannot delete a cost catalog that still has versions".to_string(),
             )));
         }
 
-        CostCatalog::delete(id)?;
+        CostCatalog::delete(&database, id).await?;
 
         self.run_post_commit_effects(vec![AdminMutationEffect::audit(cost_catalog_audit_event(
             "delete", &catalog,
@@ -100,9 +104,11 @@ impl CostAdminService {
         &self,
         payload: NewCostCatalogVersionPayload,
     ) -> Result<CostCatalogVersion, BaseError> {
-        validate_new_catalog_version(&payload)?;
+        let database = self.mutation_runner.database();
+        validate_new_catalog_version(&database, &payload).await?;
 
-        let write = CostCatalogVersion::create_with_enabled_reconciliation(&payload)?;
+        let write =
+            CostCatalogVersion::create_with_enabled_reconciliation(&database, &payload).await?;
 
         self.run_post_commit_effects(cost_version_effects(
             collect_version_ids(write.version.id, &write.reconciled_versions),
@@ -118,10 +124,11 @@ impl CostAdminService {
     }
 
     pub async fn delete_version(&self, id: i64) -> Result<(), BaseError> {
-        let version = CostCatalogVersion::get_by_id(id)?;
+        let database = self.mutation_runner.database();
+        let version = CostCatalogVersion::get_by_id(&database, id).await?;
         validate_version_can_delete(&version)?;
 
-        CostCatalogVersion::delete(id)?;
+        CostCatalogVersion::delete(&database, id).await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![id],
@@ -133,10 +140,11 @@ impl CostAdminService {
     }
 
     pub async fn enable_version(&self, id: i64) -> Result<CostCatalogVersion, BaseError> {
-        let original = CostCatalogVersion::get_by_id(id)?;
+        let database = self.mutation_runner.database();
+        let original = CostCatalogVersion::get_by_id(&database, id).await?;
         validate_version_can_enable(&original)?;
 
-        let write = CostCatalogVersion::enable_with_conflict_reconciliation(id)?;
+        let write = CostCatalogVersion::enable_with_conflict_reconciliation(&database, id).await?;
 
         self.run_post_commit_effects(cost_version_effects(
             collect_version_ids(write.version.id, &write.reconciled_versions),
@@ -152,16 +160,19 @@ impl CostAdminService {
     }
 
     pub async fn disable_version(&self, id: i64) -> Result<CostCatalogVersion, BaseError> {
-        let original = CostCatalogVersion::get_by_id(id)?;
+        let database = self.mutation_runner.database();
+        let original = CostCatalogVersion::get_by_id(&database, id).await?;
         validate_version_can_disable(&original)?;
 
         let updated = CostCatalogVersion::update(
+            &database,
             id,
             &UpdateCostCatalogVersionData {
                 is_enabled: Some(false),
                 ..Default::default()
             },
-        )?;
+        )
+        .await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![id],
@@ -173,16 +184,19 @@ impl CostAdminService {
     }
 
     pub async fn archive_version(&self, id: i64) -> Result<CostCatalogVersion, BaseError> {
-        let original = CostCatalogVersion::get_by_id(id)?;
+        let database = self.mutation_runner.database();
+        let original = CostCatalogVersion::get_by_id(&database, id).await?;
         validate_version_can_archive(&original)?;
 
         let updated = CostCatalogVersion::update(
+            &database,
             id,
             &UpdateCostCatalogVersionData {
                 is_archived: Some(true),
                 ..Default::default()
             },
-        )?;
+        )
+        .await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![id],
@@ -194,17 +208,20 @@ impl CostAdminService {
     }
 
     pub async fn unarchive_version(&self, id: i64) -> Result<CostCatalogVersion, BaseError> {
-        let original = CostCatalogVersion::get_by_id(id)?;
+        let database = self.mutation_runner.database();
+        let original = CostCatalogVersion::get_by_id(&database, id).await?;
         validate_version_can_unarchive(&original)?;
 
         let updated = CostCatalogVersion::update(
+            &database,
             id,
             &UpdateCostCatalogVersionData {
                 is_archived: Some(false),
                 is_enabled: Some(false),
                 ..Default::default()
             },
-        )?;
+        )
+        .await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![id],
@@ -229,7 +246,9 @@ impl CostAdminService {
             )));
         }
 
-        let duplicated = CostCatalogVersion::duplicate_as_draft(id, requested_version)?;
+        let database = self.mutation_runner.database();
+        let duplicated =
+            CostCatalogVersion::duplicate_as_draft(&database, id, requested_version).await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![duplicated.id],
@@ -244,7 +263,8 @@ impl CostAdminService {
         &self,
         payload: NewCostComponentPayload,
     ) -> Result<CostComponent, BaseError> {
-        let version = ensure_mutable_version(payload.catalog_version_id)?;
+        let database = self.mutation_runner.database();
+        let version = ensure_mutable_version(&database, payload.catalog_version_id).await?;
         validate_component_payload(
             &payload.meter_key,
             &payload.charge_kind,
@@ -254,7 +274,7 @@ impl CostAdminService {
             payload.match_attributes_json.as_deref(),
         )?;
 
-        let created = CostComponent::create(&payload)?;
+        let created = CostComponent::create(&database, &payload).await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![version.id],
@@ -270,8 +290,9 @@ impl CostAdminService {
         id: i64,
         payload: UpdateCostComponentData,
     ) -> Result<CostComponent, BaseError> {
-        let original = CostComponent::get_by_id(id)?;
-        let version = ensure_mutable_version(original.catalog_version_id)?;
+        let database = self.mutation_runner.database();
+        let original = CostComponent::get_by_id(&database, id).await?;
+        let version = ensure_mutable_version(&database, original.catalog_version_id).await?;
 
         validate_component_payload(
             payload.meter_key.as_deref().unwrap_or(&original.meter_key),
@@ -295,7 +316,7 @@ impl CostAdminService {
                 .unwrap_or(original.match_attributes_json.as_deref()),
         )?;
 
-        let updated = CostComponent::update(id, &payload)?;
+        let updated = CostComponent::update(&database, id, &payload).await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![version.id],
@@ -307,10 +328,11 @@ impl CostAdminService {
     }
 
     pub async fn delete_component(&self, id: i64) -> Result<(), BaseError> {
-        let component = CostComponent::get_by_id(id)?;
-        let version = ensure_mutable_version(component.catalog_version_id)?;
+        let database = self.mutation_runner.database();
+        let component = CostComponent::get_by_id(&database, id).await?;
+        let version = ensure_mutable_version(&database, component.catalog_version_id).await?;
 
-        CostComponent::delete(id)?;
+        CostComponent::delete(&database, id).await?;
 
         self.run_post_commit_effects(cost_version_effects(
             vec![version.id],
@@ -361,8 +383,16 @@ impl CostAdminService {
             import_payload.effective_until,
         )?;
 
-        if let Some(existing_catalog) = CostCatalog::get_by_name(&import_payload.catalog_name)? {
-            validate_catalog_version_uniqueness(existing_catalog.id, &import_payload.version)?;
+        let database = self.mutation_runner.database();
+        if let Some(existing_catalog) =
+            CostCatalog::get_by_name(&database, &import_payload.catalog_name).await?
+        {
+            validate_catalog_version_uniqueness(
+                &database,
+                existing_catalog.id,
+                &import_payload.version,
+            )
+            .await?;
         }
 
         for component in &import_payload.components {
@@ -376,7 +406,7 @@ impl CostAdminService {
             )?;
         }
 
-        let imported = import_cost_catalog_template(&import_payload)?;
+        let imported = import_cost_catalog_template(&database, &import_payload).await?;
         let reconciled_version_count = imported.reconciled_versions.len();
 
         self.run_post_commit_effects(cost_version_effects(
@@ -423,7 +453,10 @@ fn validate_optional_catalog_payload(
     Ok(())
 }
 
-fn validate_new_catalog_version(payload: &NewCostCatalogVersionPayload) -> Result<(), BaseError> {
+async fn validate_new_catalog_version(
+    database: &DatabaseRuntime,
+    payload: &NewCostCatalogVersionPayload,
+) -> Result<(), BaseError> {
     validate_catalog_version_request_fields(
         &payload.version,
         &payload.currency,
@@ -431,8 +464,8 @@ fn validate_new_catalog_version(payload: &NewCostCatalogVersionPayload) -> Resul
         payload.effective_from,
         payload.effective_until,
     )?;
-    CostCatalog::get_by_id(payload.catalog_id)?;
-    validate_catalog_version_uniqueness(payload.catalog_id, &payload.version)
+    CostCatalog::get_by_id(database, payload.catalog_id).await?;
+    validate_catalog_version_uniqueness(database, payload.catalog_id, &payload.version).await
 }
 
 fn validate_catalog_version_request_fields(
@@ -470,8 +503,12 @@ fn validate_catalog_version_request_fields(
     Ok(())
 }
 
-fn validate_catalog_version_uniqueness(catalog_id: i64, version: &str) -> Result<(), BaseError> {
-    let existing_versions = CostCatalogVersion::list_by_catalog_id(catalog_id)?;
+async fn validate_catalog_version_uniqueness(
+    database: &DatabaseRuntime,
+    catalog_id: i64,
+    version: &str,
+) -> Result<(), BaseError> {
+    let existing_versions = CostCatalogVersion::list_by_catalog_id(database, catalog_id).await?;
     if existing_versions
         .iter()
         .any(|existing_version| existing_version.version == version)
@@ -485,8 +522,11 @@ fn validate_catalog_version_uniqueness(catalog_id: i64, version: &str) -> Result
     Ok(())
 }
 
-fn ensure_mutable_version(catalog_version_id: i64) -> Result<CostCatalogVersion, BaseError> {
-    let version = CostCatalogVersion::get_by_id(catalog_version_id)?;
+async fn ensure_mutable_version(
+    database: &DatabaseRuntime,
+    catalog_version_id: i64,
+) -> Result<CostCatalogVersion, BaseError> {
+    let version = CostCatalogVersion::get_by_id(database, catalog_version_id).await?;
     validate_version_is_mutable(&version)?;
     Ok(version)
 }
@@ -721,69 +761,83 @@ fn cost_template_import_audit_event(
 mod tests {
     use std::sync::Arc;
 
-    use diesel::connection::SimpleConnection;
-
+    use crate::database::TestDatabase;
     use crate::database::cost::{
         CostCatalog, CostCatalogVersion, NewCostCatalogPayload, NewCostCatalogVersionPayload,
         NewCostComponentPayload, UpdateCostCatalogData, UpdateCostCatalogVersionData,
         UpdateCostComponentData,
     };
-    use crate::database::{DbConnection, TestDbContext, get_connection};
     use crate::service::app_state::create_test_app_state;
 
     use super::{
         CostAdminService, DuplicateCostCatalogVersionInput, ImportCostTemplateInput,
-        validate_new_catalog_version, validate_version_can_archive, validate_version_can_delete,
-        validate_version_can_disable, validate_version_can_enable, validate_version_can_unarchive,
-        validate_version_is_mutable,
+        validate_catalog_version_request_fields, validate_version_can_archive,
+        validate_version_can_delete, validate_version_can_disable, validate_version_can_enable,
+        validate_version_can_unarchive, validate_version_is_mutable,
     };
 
-    fn seed_catalog(name: &str) -> CostCatalog {
-        CostCatalog::create(&NewCostCatalogPayload {
-            name: name.to_string(),
-            description: Some("seed".to_string()),
-        })
+    async fn seed_catalog(
+        database: &crate::database::runtime::DatabaseRuntime,
+        name: &str,
+    ) -> CostCatalog {
+        CostCatalog::create(
+            database,
+            &NewCostCatalogPayload {
+                name: name.to_string(),
+                description: Some("seed".to_string()),
+            },
+        )
+        .await
         .expect("catalog seed should succeed")
     }
 
-    fn seed_version(
+    async fn seed_version(
+        database: &crate::database::runtime::DatabaseRuntime,
         catalog_id: i64,
         version: &str,
         effective_from: i64,
         effective_until: Option<i64>,
         is_enabled: bool,
     ) -> CostCatalogVersion {
-        CostCatalogVersion::create(&NewCostCatalogVersionPayload {
-            catalog_id,
-            version: version.to_string(),
-            currency: "USD".to_string(),
-            source: Some("seed".to_string()),
-            effective_from,
-            effective_until,
-            is_enabled,
-        })
+        CostCatalogVersion::create(
+            database,
+            &NewCostCatalogVersionPayload {
+                catalog_id,
+                version: version.to_string(),
+                currency: "USD".to_string(),
+                source: Some("seed".to_string()),
+                effective_from,
+                effective_until,
+                is_enabled,
+            },
+        )
+        .await
         .expect("version seed should succeed")
     }
 
-    fn freeze_version(version_id: i64) -> CostCatalogVersion {
+    async fn freeze_version(
+        database: &crate::database::runtime::DatabaseRuntime,
+        version_id: i64,
+    ) -> CostCatalogVersion {
         CostCatalogVersion::update(
+            database,
             version_id,
             &UpdateCostCatalogVersionData {
                 first_used_at: Some(Some(111)),
                 ..Default::default()
             },
         )
+        .await
         .expect("freeze should succeed")
     }
 
-    fn install_sqlite_cost_version_reconcile_failure_trigger(version_id: i64) {
-        let mut connection = get_connection().expect("test connection should open");
-        let DbConnection::Sqlite(conn) = &mut connection else {
-            panic!("cost version reconcile rollback test requires sqlite");
-        };
-
-        conn.batch_execute(&format!(
-            "
+    async fn install_sqlite_cost_version_reconcile_failure_trigger(
+        database: &TestDatabase,
+        version_id: i64,
+    ) {
+        database
+            .execute_sqlite_batch(format!(
+                "
             CREATE TRIGGER fail_cost_version_reconcile_{version_id}
             BEFORE UPDATE ON cost_catalog_versions
             WHEN NEW.id = {version_id}
@@ -795,8 +849,9 @@ mod tests {
                 SELECT RAISE(ABORT, 'forced cost version reconcile failure');
             END;
             "
-        ))
-        .expect("cost version reconcile failure trigger should install");
+            ))
+            .await
+            .expect("cost version reconcile failure trigger should install");
     }
 
     fn service(app_state: &Arc<crate::service::app_state::AppState>) -> &CostAdminService {
@@ -826,16 +881,8 @@ mod tests {
 
     #[test]
     fn validation_rejects_invalid_cost_version_and_mutation_states() {
-        let err = validate_new_catalog_version(&NewCostCatalogVersionPayload {
-            catalog_id: 1,
-            version: " ".to_string(),
-            currency: "".to_string(),
-            source: None,
-            effective_from: 100,
-            effective_until: None,
-            is_enabled: false,
-        })
-        .expect_err("empty version should fail");
+        let err = validate_catalog_version_request_fields(" ", "", None, 100, None)
+            .expect_err("empty version should fail");
         assert!(matches!(
             err,
             crate::controller::BaseError::ParamInvalid(Some(message))
@@ -863,443 +910,482 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_lifecycle_and_version_create_refresh_caches() {
-        let test_db_context = TestDbContext::new_sqlite("admin-cost-catalog-version.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("admin-cost-catalog-version.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let created_catalog = service(&app_state)
-                    .create_catalog(NewCostCatalogPayload {
-                        name: "Google / Gemini".to_string(),
-                        description: Some("Gemini pricing".to_string()),
-                    })
-                    .await
-                    .expect("catalog create should succeed");
-                let updated_catalog = service(&app_state)
-                    .update_catalog(
-                        created_catalog.id,
-                        UpdateCostCatalogData {
-                            name: Some("Google / Gemini Updated".to_string()),
-                            description: Some(Some("Updated".to_string())),
-                        },
-                    )
-                    .await
-                    .expect("catalog update should succeed");
-                assert_eq!(updated_catalog.name, "Google / Gemini Updated");
+            let created_catalog = service(&app_state)
+                .create_catalog(NewCostCatalogPayload {
+                    name: "Google / Gemini".to_string(),
+                    description: Some("Gemini pricing".to_string()),
+                })
+                .await
+                .expect("catalog create should succeed");
+            let updated_catalog = service(&app_state)
+                .update_catalog(
+                    created_catalog.id,
+                    UpdateCostCatalogData {
+                        name: Some("Google / Gemini Updated".to_string()),
+                        description: Some(Some("Updated".to_string())),
+                    },
+                )
+                .await
+                .expect("catalog update should succeed");
+            assert_eq!(updated_catalog.name, "Google / Gemini Updated");
 
-                let existing = seed_version(created_catalog.id, "2026-04-01", 0, None, true);
-                let existing_cached_before = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing version cache should load")
-                    .expect("existing version should exist");
-                assert_eq!(existing_cached_before.effective_until, None);
-
-                let created_version = service(&app_state)
-                    .create_catalog_version(NewCostCatalogVersionPayload {
-                        catalog_id: created_catalog.id,
-                        version: "2026-05-01".to_string(),
-                        currency: "USD".to_string(),
-                        source: Some("manual".to_string()),
-                        effective_from: 2_000,
-                        effective_until: None,
-                        is_enabled: true,
-                    })
-                    .await
-                    .expect("version create should succeed");
-
-                let existing_cached_after = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing version cache should reload")
-                    .expect("existing version should still exist");
-                let created_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(created_version.id)
-                    .await
-                    .expect("created version cache should load")
-                    .expect("created version should exist");
-
-                assert_eq!(existing_cached_after.effective_until, Some(2_000));
-                assert_eq!(created_cached.id, created_version.id);
-                assert!(created_cached.is_enabled);
-
-                service(&app_state)
-                    .delete_catalog(created_catalog.id)
-                    .await
-                    .expect_err("catalog with versions should not delete");
-            })
+            let existing = seed_version(
+                &test_db_context,
+                created_catalog.id,
+                "2026-04-01",
+                0,
+                None,
+                true,
+            )
             .await;
+            let existing_cached_before = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing version cache should load")
+                .expect("existing version should exist");
+            assert_eq!(existing_cached_before.effective_until, None);
+
+            let created_version = service(&app_state)
+                .create_catalog_version(NewCostCatalogVersionPayload {
+                    catalog_id: created_catalog.id,
+                    version: "2026-05-01".to_string(),
+                    currency: "USD".to_string(),
+                    source: Some("manual".to_string()),
+                    effective_from: 2_000,
+                    effective_until: None,
+                    is_enabled: true,
+                })
+                .await
+                .expect("version create should succeed");
+
+            let existing_cached_after = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing version cache should reload")
+                .expect("existing version should still exist");
+            let created_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(created_version.id)
+                .await
+                .expect("created version cache should load")
+                .expect("created version should exist");
+
+            assert_eq!(existing_cached_after.effective_until, Some(2_000));
+            assert_eq!(created_cached.id, created_version.id);
+            assert!(created_cached.is_enabled);
+
+            service(&app_state)
+                .delete_catalog(created_catalog.id)
+                .await
+                .expect_err("catalog with versions should not delete");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn enable_version_reconciles_conflicts_and_refreshes_all_affected_caches() {
-        let test_db_context = TestDbContext::new_sqlite("admin-cost-enable-reconcile-cache.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("admin-cost-enable-reconcile-cache.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let catalog = seed_catalog("Enable Reconcile Cache");
-                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
-                let draft = seed_version(catalog.id, "2026-05-01", 2_000, None, false);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let existing_cached_before = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing cache should load")
-                    .expect("existing version should exist");
-                let draft_cached_before = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(draft.id)
-                    .await
-                    .expect("draft cache should load")
-                    .expect("draft version should exist");
-                assert_eq!(existing_cached_before.effective_until, None);
-                assert!(!draft_cached_before.is_enabled);
-
-                let enabled = service(&app_state)
-                    .enable_version(draft.id)
-                    .await
-                    .expect("enable should succeed");
-                assert!(enabled.is_enabled);
-
-                let existing_cached_after = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing cache should reload")
-                    .expect("existing version should still exist");
-                let draft_cached_after = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(draft.id)
-                    .await
-                    .expect("draft cache should reload")
-                    .expect("draft version should exist");
-
-                assert_eq!(existing_cached_after.effective_until, Some(2_000));
-                assert!(draft_cached_after.is_enabled);
-            })
+        (async {
+            let catalog = seed_catalog(&test_db_context, "Enable Reconcile Cache").await;
+            let existing =
+                seed_version(&test_db_context, catalog.id, "2026-04-01", 0, None, true).await;
+            let draft = seed_version(
+                &test_db_context,
+                catalog.id,
+                "2026-05-01",
+                2_000,
+                None,
+                false,
+            )
             .await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+
+            let existing_cached_before = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing cache should load")
+                .expect("existing version should exist");
+            let draft_cached_before = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(draft.id)
+                .await
+                .expect("draft cache should load")
+                .expect("draft version should exist");
+            assert_eq!(existing_cached_before.effective_until, None);
+            assert!(!draft_cached_before.is_enabled);
+
+            let enabled = service(&app_state)
+                .enable_version(draft.id)
+                .await
+                .expect("enable should succeed");
+            assert!(enabled.is_enabled);
+
+            let existing_cached_after = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing cache should reload")
+                .expect("existing version should still exist");
+            let draft_cached_after = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(draft.id)
+                .await
+                .expect("draft cache should reload")
+                .expect("draft version should exist");
+
+            assert_eq!(existing_cached_after.effective_until, Some(2_000));
+            assert!(draft_cached_after.is_enabled);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn create_enabled_version_rolls_back_when_conflict_reconcile_fails() {
         let test_db_context =
-            TestDbContext::new_sqlite("admin-cost-create-reconcile-rollback.sqlite");
+            TestDatabase::new_sqlite_default("admin-cost-create-reconcile-rollback.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let catalog = seed_catalog("Create Reconcile Rollback");
-                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
-                install_sqlite_cost_version_reconcile_failure_trigger(existing.id);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+        (async {
+            let catalog = seed_catalog(&test_db_context, "Create Reconcile Rollback").await;
+            let existing =
+                seed_version(&test_db_context, catalog.id, "2026-04-01", 0, None, true).await;
+            install_sqlite_cost_version_reconcile_failure_trigger(&test_db_context, existing.id)
+                .await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let err = service(&app_state)
-                    .create_catalog_version(NewCostCatalogVersionPayload {
-                        catalog_id: catalog.id,
-                        version: "rollback-create".to_string(),
-                        currency: "USD".to_string(),
-                        source: Some("manual".to_string()),
-                        effective_from: 2_000,
-                        effective_until: None,
-                        is_enabled: true,
-                    })
-                    .await
-                    .expect_err("create should fail when conflict reconcile fails");
-                let message = format!("{err:?}");
-                assert!(
-                    message.contains("forced cost version reconcile failure"),
-                    "unexpected error: {message}"
-                );
+            let err = service(&app_state)
+                .create_catalog_version(NewCostCatalogVersionPayload {
+                    catalog_id: catalog.id,
+                    version: "rollback-create".to_string(),
+                    currency: "USD".to_string(),
+                    source: Some("manual".to_string()),
+                    effective_from: 2_000,
+                    effective_until: None,
+                    is_enabled: true,
+                })
+                .await
+                .expect_err("create should fail when conflict reconcile fails");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("forced cost version reconcile failure"),
+                "unexpected error: {message}"
+            );
 
-                let existing_after = CostCatalogVersion::get_by_id(existing.id)
-                    .expect("existing version should still load");
-                let versions = CostCatalogVersion::list_by_catalog_id(catalog.id)
-                    .expect("versions should still list");
+            let existing_after = CostCatalogVersion::get_by_id(&test_db_context, existing.id)
+                .await
+                .expect("existing version should still load");
+            let versions = CostCatalogVersion::list_by_catalog_id(&test_db_context, catalog.id)
+                .await
+                .expect("versions should still list");
 
-                assert!(existing_after.is_enabled);
-                assert_eq!(existing_after.effective_until, None);
-                assert!(
-                    !versions
-                        .iter()
-                        .any(|version| version.version == "rollback-create")
-                );
-            })
-            .await;
+            assert!(existing_after.is_enabled);
+            assert_eq!(existing_after.effective_until, None);
+            assert!(
+                !versions
+                    .iter()
+                    .any(|version| version.version == "rollback-create")
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn enable_version_rolls_back_when_conflict_reconcile_fails() {
         let test_db_context =
-            TestDbContext::new_sqlite("admin-cost-enable-reconcile-rollback.sqlite");
+            TestDatabase::new_sqlite_default("admin-cost-enable-reconcile-rollback.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let catalog = seed_catalog("Enable Reconcile Rollback");
-                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
-                let draft = seed_version(catalog.id, "2026-05-01", 2_000, None, false);
-                install_sqlite_cost_version_reconcile_failure_trigger(existing.id);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let err = service(&app_state)
-                    .enable_version(draft.id)
-                    .await
-                    .expect_err("enable should fail when conflict reconcile fails");
-                let message = format!("{err:?}");
-                assert!(
-                    message.contains("forced cost version reconcile failure"),
-                    "unexpected error: {message}"
-                );
-
-                let existing_after = CostCatalogVersion::get_by_id(existing.id)
-                    .expect("existing version should still load");
-                let draft_after =
-                    CostCatalogVersion::get_by_id(draft.id).expect("draft should still load");
-
-                assert!(existing_after.is_enabled);
-                assert_eq!(existing_after.effective_until, None);
-                assert!(!draft_after.is_enabled);
-            })
+        (async {
+            let catalog = seed_catalog(&test_db_context, "Enable Reconcile Rollback").await;
+            let existing =
+                seed_version(&test_db_context, catalog.id, "2026-04-01", 0, None, true).await;
+            let draft = seed_version(
+                &test_db_context,
+                catalog.id,
+                "2026-05-01",
+                2_000,
+                None,
+                false,
+            )
             .await;
+            install_sqlite_cost_version_reconcile_failure_trigger(&test_db_context, existing.id)
+                .await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+
+            let err = service(&app_state)
+                .enable_version(draft.id)
+                .await
+                .expect_err("enable should fail when conflict reconcile fails");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("forced cost version reconcile failure"),
+                "unexpected error: {message}"
+            );
+
+            let existing_after = CostCatalogVersion::get_by_id(&test_db_context, existing.id)
+                .await
+                .expect("existing version should still load");
+            let draft_after = CostCatalogVersion::get_by_id(&test_db_context, draft.id)
+                .await
+                .expect("draft should still load");
+
+            assert!(existing_after.is_enabled);
+            assert_eq!(existing_after.effective_until, None);
+            assert!(!draft_after.is_enabled);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn version_actions_and_component_lifecycle_refresh_version_cache() {
-        let test_db_context = TestDbContext::new_sqlite("admin-cost-version-actions.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("admin-cost-version-actions.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let catalog = seed_catalog("OpenAI / GPT");
-                let draft = seed_version(catalog.id, "draft", 0, None, false);
-                let frozen =
-                    freeze_version(seed_version(catalog.id, "frozen", 100, None, false).id);
-                let deletable = seed_version(catalog.id, "delete-me", 200, None, false);
-                let component_version = seed_version(catalog.id, "component", 300, None, false);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+        (async {
+            let catalog = seed_catalog(&test_db_context, "OpenAI / GPT").await;
+            let draft = seed_version(&test_db_context, catalog.id, "draft", 0, None, false).await;
+            let frozen_seed =
+                seed_version(&test_db_context, catalog.id, "frozen", 100, None, false).await;
+            let frozen = freeze_version(&test_db_context, frozen_seed.id).await;
+            let deletable =
+                seed_version(&test_db_context, catalog.id, "delete-me", 200, None, false).await;
+            let component_version =
+                seed_version(&test_db_context, catalog.id, "component", 300, None, false).await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let enabled = service(&app_state)
-                    .enable_version(draft.id)
-                    .await
-                    .expect("enable should succeed");
-                assert!(enabled.is_enabled);
-                let enabled_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(draft.id)
-                    .await
-                    .expect("enabled cache should load")
-                    .expect("enabled version should exist");
-                assert!(enabled_cached.is_enabled);
+            let enabled = service(&app_state)
+                .enable_version(draft.id)
+                .await
+                .expect("enable should succeed");
+            assert!(enabled.is_enabled);
+            let enabled_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(draft.id)
+                .await
+                .expect("enabled cache should load")
+                .expect("enabled version should exist");
+            assert!(enabled_cached.is_enabled);
 
-                let disabled = service(&app_state)
-                    .disable_version(draft.id)
-                    .await
-                    .expect("disable should succeed");
-                assert!(!disabled.is_enabled);
-                let disabled_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(draft.id)
-                    .await
-                    .expect("disabled cache should load")
-                    .expect("disabled version should exist");
-                assert!(!disabled_cached.is_enabled);
+            let disabled = service(&app_state)
+                .disable_version(draft.id)
+                .await
+                .expect("disable should succeed");
+            assert!(!disabled.is_enabled);
+            let disabled_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(draft.id)
+                .await
+                .expect("disabled cache should load")
+                .expect("disabled version should exist");
+            assert!(!disabled_cached.is_enabled);
 
-                let archived = service(&app_state)
-                    .archive_version(frozen.id)
-                    .await
-                    .expect("archive should succeed");
-                assert!(archived.is_archived);
-                let archived_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(frozen.id)
-                    .await
-                    .expect("archived cache should load")
-                    .expect("archived version should exist");
-                assert!(!archived_cached.is_enabled);
+            let archived = service(&app_state)
+                .archive_version(frozen.id)
+                .await
+                .expect("archive should succeed");
+            assert!(archived.is_archived);
+            let archived_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(frozen.id)
+                .await
+                .expect("archived cache should load")
+                .expect("archived version should exist");
+            assert!(!archived_cached.is_enabled);
 
-                let unarchived = service(&app_state)
-                    .unarchive_version(frozen.id)
-                    .await
-                    .expect("unarchive should succeed");
-                assert!(!unarchived.is_archived);
-                let unarchived_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(frozen.id)
-                    .await
-                    .expect("unarchived cache should load")
-                    .expect("unarchived version should exist");
-                assert!(!unarchived_cached.is_enabled);
+            let unarchived = service(&app_state)
+                .unarchive_version(frozen.id)
+                .await
+                .expect("unarchive should succeed");
+            assert!(!unarchived.is_archived);
+            let unarchived_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(frozen.id)
+                .await
+                .expect("unarchived cache should load")
+                .expect("unarchived version should exist");
+            assert!(!unarchived_cached.is_enabled);
 
-                let duplicated = service(&app_state)
-                    .duplicate_version(draft.id, DuplicateCostCatalogVersionInput { version: None })
-                    .await
-                    .expect("duplicate should succeed");
-                let duplicated_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(duplicated.id)
-                    .await
-                    .expect("duplicated cache should load")
-                    .expect("duplicated version should exist");
-                assert_eq!(duplicated_cached.version, "draft Copy");
+            let duplicated = service(&app_state)
+                .duplicate_version(draft.id, DuplicateCostCatalogVersionInput { version: None })
+                .await
+                .expect("duplicate should succeed");
+            let duplicated_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(duplicated.id)
+                .await
+                .expect("duplicated cache should load")
+                .expect("duplicated version should exist");
+            assert_eq!(duplicated_cached.version, "draft Copy");
 
-                service(&app_state)
-                    .delete_version(deletable.id)
-                    .await
-                    .expect("delete version should succeed");
-                let deleted_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(deletable.id)
-                    .await
-                    .expect("deleted cache lookup should succeed");
-                assert!(deleted_cached.is_none());
+            service(&app_state)
+                .delete_version(deletable.id)
+                .await
+                .expect("delete version should succeed");
+            let deleted_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(deletable.id)
+                .await
+                .expect("deleted cache lookup should succeed");
+            assert!(deleted_cached.is_none());
 
-                let component_cached_before = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(component_version.id)
-                    .await
-                    .expect("component version cache should load")
-                    .expect("component version should exist");
-                assert!(component_cached_before.components.is_empty());
+            let component_cached_before = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(component_version.id)
+                .await
+                .expect("component version cache should load")
+                .expect("component version should exist");
+            assert!(component_cached_before.components.is_empty());
 
-                let created_component = service(&app_state)
-                    .create_component(NewCostComponentPayload {
-                        catalog_version_id: component_version.id,
-                        meter_key: "llm.input_text_tokens".to_string(),
-                        charge_kind: "per_unit".to_string(),
-                        unit_price_nanos: Some(2_500),
-                        flat_fee_nanos: None,
-                        tier_config_json: None,
-                        match_attributes_json: None,
-                        priority: 100,
-                        description: Some("input".to_string()),
-                    })
-                    .await
-                    .expect("component create should succeed");
-                let component_cached_after_create = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(component_version.id)
-                    .await
-                    .expect("component version cache should reload after create")
-                    .expect("component version should exist");
-                assert_eq!(component_cached_after_create.components.len(), 1);
+            let created_component = service(&app_state)
+                .create_component(NewCostComponentPayload {
+                    catalog_version_id: component_version.id,
+                    meter_key: "llm.input_text_tokens".to_string(),
+                    charge_kind: "per_unit".to_string(),
+                    unit_price_nanos: Some(2_500),
+                    flat_fee_nanos: None,
+                    tier_config_json: None,
+                    match_attributes_json: None,
+                    priority: 100,
+                    description: Some("input".to_string()),
+                })
+                .await
+                .expect("component create should succeed");
+            let component_cached_after_create = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(component_version.id)
+                .await
+                .expect("component version cache should reload after create")
+                .expect("component version should exist");
+            assert_eq!(component_cached_after_create.components.len(), 1);
 
-                let updated_component = service(&app_state)
-                    .update_component(
-                        created_component.id,
-                        UpdateCostComponentData {
-                            meter_key: Some("llm.output_text_tokens".to_string()),
-                            description: Some(Some("output".to_string())),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .expect("component update should succeed");
-                assert_eq!(updated_component.meter_key, "llm.output_text_tokens");
-                let component_cached_after_update = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(component_version.id)
-                    .await
-                    .expect("component version cache should reload after update")
-                    .expect("component version should exist");
-                assert_eq!(
-                    component_cached_after_update.components[0].meter_key,
-                    "llm.output_text_tokens"
-                );
+            let updated_component = service(&app_state)
+                .update_component(
+                    created_component.id,
+                    UpdateCostComponentData {
+                        meter_key: Some("llm.output_text_tokens".to_string()),
+                        description: Some(Some("output".to_string())),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("component update should succeed");
+            assert_eq!(updated_component.meter_key, "llm.output_text_tokens");
+            let component_cached_after_update = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(component_version.id)
+                .await
+                .expect("component version cache should reload after update")
+                .expect("component version should exist");
+            assert_eq!(
+                component_cached_after_update.components[0].meter_key,
+                "llm.output_text_tokens"
+            );
 
-                service(&app_state)
-                    .delete_component(created_component.id)
-                    .await
-                    .expect("component delete should succeed");
-                let component_cached_after_delete = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(component_version.id)
-                    .await
-                    .expect("component version cache should reload after delete")
-                    .expect("component version should exist");
-                assert!(component_cached_after_delete.components.is_empty());
-            })
-            .await;
+            service(&app_state)
+                .delete_component(created_component.id)
+                .await
+                .expect("component delete should succeed");
+            let component_cached_after_delete = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(component_version.id)
+                .await
+                .expect("component version cache should reload after delete")
+                .expect("component version should exist");
+            assert!(component_cached_after_delete.components.is_empty());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn template_import_invalidates_new_and_reconciled_versions() {
-        let test_db_context = TestDbContext::new_sqlite("admin-cost-template-import.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("admin-cost-template-import.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let catalog = seed_catalog("Google / Gemini 2.5 Pro");
-                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+        (async {
+            let catalog = seed_catalog(&test_db_context, "Google / Gemini 2.5 Pro").await;
+            let existing =
+                seed_version(&test_db_context, catalog.id, "2026-04-01", 0, None, true).await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let existing_cached_before = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing version cache should load")
-                    .expect("existing version should exist");
-                assert_eq!(existing_cached_before.effective_until, None);
+            let existing_cached_before = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing version cache should load")
+                .expect("existing version should exist");
+            assert_eq!(existing_cached_before.effective_until, None);
 
-                let imported = service(&app_state)
-                    .import_template(ImportCostTemplateInput {
-                        template_key: "google.gemini-2.5-pro.text".to_string(),
-                        catalog_name: None,
-                    })
-                    .await
-                    .expect("template import should succeed");
+            let imported = service(&app_state)
+                .import_template(ImportCostTemplateInput {
+                    template_key: "google.gemini-2.5-pro.text".to_string(),
+                    catalog_name: None,
+                })
+                .await
+                .expect("template import should succeed");
 
-                let imported_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(imported.imported.version.id)
-                    .await
-                    .expect("imported version cache should load")
-                    .expect("imported version should exist");
-                let existing_cached_after = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing version cache should reload")
-                    .expect("existing version should still exist");
+            let imported_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(imported.imported.version.id)
+                .await
+                .expect("imported version cache should load")
+                .expect("imported version should exist");
+            let existing_cached_after = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing version cache should reload")
+                .expect("existing version should still exist");
 
-                assert_eq!(imported.template.key, "google.gemini-2.5-pro.text");
-                assert!(!imported.imported.components.is_empty());
-                assert_eq!(imported.imported.reconciled_versions.len(), 1);
-                assert_eq!(
-                    existing_cached_after.effective_until,
-                    Some(imported.imported.version.effective_from)
-                );
-                assert_eq!(imported_cached.id, imported.imported.version.id);
-                assert_eq!(
-                    imported_cached.components.len(),
-                    imported.imported.components.len()
-                );
-            })
-            .await;
+            assert_eq!(imported.template.key, "google.gemini-2.5-pro.text");
+            assert!(!imported.imported.components.is_empty());
+            assert_eq!(imported.imported.reconciled_versions.len(), 1);
+            assert_eq!(
+                existing_cached_after.effective_until,
+                Some(imported.imported.version.effective_from)
+            );
+            assert_eq!(imported_cached.id, imported.imported.version.id);
+            assert_eq!(
+                imported_cached.components.len(),
+                imported.imported.components.len()
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn catalog_without_versions_can_be_deleted() {
-        let test_db_context = TestDbContext::new_sqlite("admin-cost-catalog-delete.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("admin-cost-catalog-delete.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let catalog = service(&app_state)
-                    .create_catalog(NewCostCatalogPayload {
-                        name: "Delete Me".to_string(),
-                        description: None,
-                    })
-                    .await
-                    .expect("catalog create should succeed");
+        (async {
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            let catalog = service(&app_state)
+                .create_catalog(NewCostCatalogPayload {
+                    name: "Delete Me".to_string(),
+                    description: None,
+                })
+                .await
+                .expect("catalog create should succeed");
 
-                service(&app_state)
-                    .delete_catalog(catalog.id)
+            service(&app_state)
+                .delete_catalog(catalog.id)
+                .await
+                .expect("catalog delete should succeed");
+            assert!(
+                CostCatalog::get_by_id(&test_db_context, catalog.id)
                     .await
-                    .expect("catalog delete should succeed");
-                assert!(CostCatalog::get_by_id(catalog.id).is_err());
-            })
-            .await;
+                    .is_err()
+            );
+        })
+        .await;
     }
 }

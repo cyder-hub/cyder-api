@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::providers::openai;
 use crate::service::transform::{StreamTransformer, unified::*};
 

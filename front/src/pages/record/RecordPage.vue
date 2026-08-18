@@ -14,9 +14,10 @@
           :advanced-active-filter-count="advancedActiveFilterCount"
           :api-key-options="apiKeyOptions"
           :provider-options="providerOptions"
+          :source-options="sourceOptions"
           :model-options="modelOptions"
           :status-options="statusOptions"
-          :user-api-type-options="userApiTypeOptions"
+          :downstream-protocol-options="downstreamProtocolOptions"
           @toggle-filter-panel="toggleFilterPanel"
           @toggle-advanced-filters="toggleAdvancedFilters"
           @update-filter="handleFilterChange"
@@ -132,9 +133,10 @@ const {
   errorMsg,
   apiKeyOptions,
   providerOptions,
+  sourceOptions,
   modelOptions,
   statusOptions,
-  userApiTypeOptions,
+  downstreamProtocolOptions,
   hasActiveFilters,
   advancedActiveFilterCount,
   filterSummary,
@@ -197,7 +199,12 @@ const handleClearSearch = () => {
 };
 
 const handleFilterChange = (key: keyof RecordFiltersState, value: string) => {
-  if (key === "api_key_id" || key === "provider_id" || key === "model_id") {
+  if (
+    key === "api_key_id" ||
+    key === "provider_id" ||
+    key === "source_id" ||
+    key === "model_id"
+  ) {
     handleNumberFilterChange(key, value);
     return;
   }
@@ -207,7 +214,7 @@ const handleFilterChange = (key: keyof RecordFiltersState, value: string) => {
 };
 
 const handleNumberFilterChange = (
-  key: "api_key_id" | "provider_id" | "model_id",
+  key: "api_key_id" | "provider_id" | "source_id" | "model_id",
   value: string,
 ) => {
   const nextId = Number(value);

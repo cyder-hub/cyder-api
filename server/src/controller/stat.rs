@@ -25,6 +25,8 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Serialize, Debug)]
@@ -149,6 +151,8 @@ enum UsageMetric {
     TotalCost,
     SuccessRate,
     AvgLatency,
+    AvgTimeToFirstResponseBody,
+    AvgTtft,
     ErrorCount,
 }
 
@@ -172,8 +176,12 @@ pub struct UsageStatItem {
     success_count: i64,
     error_count: i64,
     success_rate: Option<f64>,
+    avg_time_to_first_response_body_ms: Option<f64>,
+    time_to_first_response_body_sample_count: i64,
+    avg_ttft_ms: Option<f64>,
+    ttft_sample_count: i64,
     avg_total_latency_ms: Option<f64>,
-    latency_sample_count: i64,
+    total_latency_sample_count: i64,
     total_cost: HashMap<String, i64>,
     is_other: bool,
 }
@@ -216,8 +224,12 @@ pub struct DashboardTodayStats {
     total_reasoning_tokens: i64,
     total_tokens: i64,
     total_cost: HashMap<String, i64>,
-    avg_first_byte_ms: Option<f64>,
+    avg_time_to_first_response_body_ms: Option<f64>,
+    time_to_first_response_body_sample_count: i64,
+    avg_ttft_ms: Option<f64>,
+    ttft_sample_count: i64,
     avg_total_latency_ms: Option<f64>,
+    total_latency_sample_count: i64,
     active_provider_count: i64,
     active_model_count: i64,
     active_api_key_count: i64,
@@ -235,8 +247,13 @@ impl From<MetricsDashboardTodayStats> for DashboardTodayStats {
             total_reasoning_tokens: value.total_reasoning_tokens,
             total_tokens: value.total_tokens,
             total_cost: value.total_cost,
-            avg_first_byte_ms: value.avg_first_byte_ms,
+            avg_time_to_first_response_body_ms: value.avg_time_to_first_response_body_ms,
+            time_to_first_response_body_sample_count: value
+                .time_to_first_response_body_sample_count,
+            avg_ttft_ms: value.avg_ttft_ms,
+            ttft_sample_count: value.ttft_sample_count,
             avg_total_latency_ms: value.avg_total_latency_ms,
+            total_latency_sample_count: value.total_latency_sample_count,
             active_provider_count: value.active_provider_count,
             active_model_count: value.active_model_count,
             active_api_key_count: value.active_api_key_count,
@@ -271,10 +288,12 @@ pub struct DashboardOperationsSection {
 #[derive(Serialize, Debug)]
 pub struct DashboardRuntimeSummary {
     window: ProviderRuntimeWindow,
+    total_provider_count: i64,
+    enabled_provider_count: i64,
+    total_source_count: i64,
+    enabled_source_count: i64,
     healthy_count: i64,
     degraded_count: i64,
-    half_open_count: i64,
-    open_count: i64,
     no_traffic_count: i64,
 }
 
@@ -282,10 +301,12 @@ impl From<ProviderRuntimeSummary> for DashboardRuntimeSummary {
     fn from(value: ProviderRuntimeSummary) -> Self {
         Self {
             window: value.window,
+            total_provider_count: value.total_provider_count,
+            enabled_provider_count: value.enabled_provider_count,
+            total_source_count: value.total_source_count,
+            enabled_source_count: value.enabled_source_count,
             healthy_count: value.healthy_count,
             degraded_count: value.degraded_count,
-            half_open_count: value.half_open_count,
-            open_count: value.open_count,
             no_traffic_count: value.no_traffic_count,
         }
     }
@@ -293,8 +314,6 @@ impl From<ProviderRuntimeSummary> for DashboardRuntimeSummary {
 
 #[derive(Serialize, Debug, Default)]
 pub struct DashboardOperationalSignals {
-    open_providers: Vec<DashboardProviderSignalItem>,
-    half_open_providers: Vec<DashboardProviderSignalItem>,
     degraded_providers: Vec<DashboardProviderSignalItem>,
     top_error_providers: Vec<DashboardProviderSignalItem>,
     top_cost_providers: Vec<DashboardCostProviderItem>,
@@ -348,7 +367,12 @@ pub struct DashboardTopProviderItem {
     error_count: i64,
     success_rate: Option<f64>,
     total_cost: HashMap<String, i64>,
+    avg_time_to_first_response_body_ms: Option<f64>,
+    time_to_first_response_body_sample_count: i64,
+    avg_ttft_ms: Option<f64>,
+    ttft_sample_count: i64,
     avg_total_latency_ms: Option<f64>,
+    total_latency_sample_count: i64,
 }
 
 impl From<DashboardProviderSignalReadItem> for DashboardProviderSignalItem {
@@ -393,7 +417,13 @@ impl From<DashboardTopProviderReadItem> for DashboardTopProviderItem {
             error_count: value.error_count,
             success_rate: value.success_rate,
             total_cost: value.total_cost,
+            avg_time_to_first_response_body_ms: value.avg_time_to_first_response_body_ms,
+            time_to_first_response_body_sample_count: value
+                .time_to_first_response_body_sample_count,
+            avg_ttft_ms: value.avg_ttft_ms,
+            ttft_sample_count: value.ttft_sample_count,
             avg_total_latency_ms: value.avg_total_latency_ms,
+            total_latency_sample_count: value.total_latency_sample_count,
         }
     }
 }
@@ -401,12 +431,6 @@ impl From<DashboardTopProviderReadItem> for DashboardTopProviderItem {
 impl From<DashboardOperationalSignalsReadModel> for DashboardOperationalSignals {
     fn from(value: DashboardOperationalSignalsReadModel) -> Self {
         Self {
-            open_providers: value.open_providers.into_iter().map(Into::into).collect(),
-            half_open_providers: value
-                .half_open_providers
-                .into_iter()
-                .map(Into::into)
-                .collect(),
             degraded_providers: value
                 .degraded_providers
                 .into_iter()
@@ -447,8 +471,12 @@ fn usage_stat_item_from_query_item(item: UsageStatsQueryItem) -> UsageStatItem {
         success_count: item.success_count,
         error_count: item.error_count,
         success_rate: item.success_rate,
+        avg_time_to_first_response_body_ms: item.avg_time_to_first_response_body_ms,
+        time_to_first_response_body_sample_count: item.time_to_first_response_body_sample_count,
+        avg_ttft_ms: item.avg_ttft_ms,
+        ttft_sample_count: item.ttft_sample_count,
         avg_total_latency_ms: item.avg_total_latency_ms,
-        latency_sample_count: item.latency_sample_count,
+        total_latency_sample_count: item.total_latency_sample_count,
         total_cost: item.total_cost,
         is_other: false,
     }
@@ -464,6 +492,10 @@ fn metric_rank_value(item: &UsageStatItem, metric: UsageMetric) -> f64 {
         UsageMetric::TotalCost => item.total_cost.values().sum::<i64>() as f64,
         UsageMetric::SuccessRate => item.success_rate.unwrap_or(0.0),
         UsageMetric::AvgLatency => item.avg_total_latency_ms.unwrap_or(0.0),
+        UsageMetric::AvgTimeToFirstResponseBody => {
+            item.avg_time_to_first_response_body_ms.unwrap_or(0.0)
+        }
+        UsageMetric::AvgTtft => item.avg_ttft_ms.unwrap_or(0.0),
         UsageMetric::ErrorCount => item.error_count as f64,
     }
 }
@@ -476,13 +508,43 @@ fn merge_usage_stat_item(target: &mut UsageStatItem, item: &UsageStatItem) {
     target.request_count += item.request_count;
     target.success_count += item.success_count;
     target.error_count += item.error_count;
-    target.latency_sample_count += item.latency_sample_count;
+    let previous_body_count = target.time_to_first_response_body_sample_count;
+    let previous_body_sum =
+        target.avg_time_to_first_response_body_ms.unwrap_or(0.0) * previous_body_count as f64;
+    target.time_to_first_response_body_sample_count +=
+        item.time_to_first_response_body_sample_count;
+    target.avg_time_to_first_response_body_ms =
+        if target.time_to_first_response_body_sample_count > 0 {
+            Some(
+                (previous_body_sum
+                    + item.avg_time_to_first_response_body_ms.unwrap_or(0.0)
+                        * item.time_to_first_response_body_sample_count as f64)
+                    / target.time_to_first_response_body_sample_count as f64,
+            )
+        } else {
+            None
+        };
 
-    let weighted_latency_sum = target.avg_total_latency_ms.unwrap_or(0.0)
-        * (target.latency_sample_count - item.latency_sample_count) as f64
-        + item.avg_total_latency_ms.unwrap_or(0.0) * item.latency_sample_count as f64;
-    target.avg_total_latency_ms = if target.latency_sample_count > 0 {
-        Some(weighted_latency_sum / target.latency_sample_count as f64)
+    let previous_ttft_count = target.ttft_sample_count;
+    let previous_ttft_sum = target.avg_ttft_ms.unwrap_or(0.0) * previous_ttft_count as f64;
+    target.ttft_sample_count += item.ttft_sample_count;
+    target.avg_ttft_ms = if target.ttft_sample_count > 0 {
+        Some(
+            (previous_ttft_sum + item.avg_ttft_ms.unwrap_or(0.0) * item.ttft_sample_count as f64)
+                / target.ttft_sample_count as f64,
+        )
+    } else {
+        None
+    };
+
+    let previous_total_count = target.total_latency_sample_count;
+    let previous_total_sum =
+        target.avg_total_latency_ms.unwrap_or(0.0) * previous_total_count as f64;
+    target.total_latency_sample_count += item.total_latency_sample_count;
+    target.avg_total_latency_ms = if target.total_latency_sample_count > 0 {
+        let weighted_total_sum = previous_total_sum
+            + item.avg_total_latency_ms.unwrap_or(0.0) * item.total_latency_sample_count as f64;
+        Some(weighted_total_sum / target.total_latency_sample_count as f64)
     } else {
         None
     };
@@ -503,8 +565,12 @@ fn top_group_keys(items: &[UsageStatItem], metric: UsageMetric, top_n: usize) ->
         score_sum: f64,
         success_count: i64,
         request_count: i64,
-        latency_sample_count: i64,
+        total_latency_sample_count: i64,
         latency_weighted_sum: f64,
+        time_to_first_response_body_sample_count: i64,
+        time_to_first_response_body_weighted_sum: f64,
+        ttft_sample_count: i64,
+        ttft_weighted_sum: f64,
     }
 
     let mut scores = HashMap::<String, GroupMetricAccumulator>::new();
@@ -513,9 +579,16 @@ fn top_group_keys(items: &[UsageStatItem], metric: UsageMetric, top_n: usize) ->
         entry.score_sum += metric_rank_value(item, metric);
         entry.success_count += item.success_count;
         entry.request_count += item.request_count;
-        entry.latency_sample_count += item.latency_sample_count;
+        entry.total_latency_sample_count += item.total_latency_sample_count;
         entry.latency_weighted_sum +=
-            item.avg_total_latency_ms.unwrap_or(0.0) * item.latency_sample_count as f64;
+            item.avg_total_latency_ms.unwrap_or(0.0) * item.total_latency_sample_count as f64;
+        entry.time_to_first_response_body_sample_count +=
+            item.time_to_first_response_body_sample_count;
+        entry.time_to_first_response_body_weighted_sum +=
+            item.avg_time_to_first_response_body_ms.unwrap_or(0.0)
+                * item.time_to_first_response_body_sample_count as f64;
+        entry.ttft_sample_count += item.ttft_sample_count;
+        entry.ttft_weighted_sum += item.avg_ttft_ms.unwrap_or(0.0) * item.ttft_sample_count as f64;
     }
 
     let mut entries = scores.into_iter().collect::<Vec<_>>();
@@ -529,8 +602,23 @@ fn top_group_keys(items: &[UsageStatItem], metric: UsageMetric, top_n: usize) ->
                 }
             }
             UsageMetric::AvgLatency => {
-                if left.1.latency_sample_count > 0 {
-                    left.1.latency_weighted_sum / left.1.latency_sample_count as f64
+                if left.1.total_latency_sample_count > 0 {
+                    left.1.latency_weighted_sum / left.1.total_latency_sample_count as f64
+                } else {
+                    0.0
+                }
+            }
+            UsageMetric::AvgTimeToFirstResponseBody => {
+                if left.1.time_to_first_response_body_sample_count > 0 {
+                    left.1.time_to_first_response_body_weighted_sum
+                        / left.1.time_to_first_response_body_sample_count as f64
+                } else {
+                    0.0
+                }
+            }
+            UsageMetric::AvgTtft => {
+                if left.1.ttft_sample_count > 0 {
+                    left.1.ttft_weighted_sum / left.1.ttft_sample_count as f64
                 } else {
                     0.0
                 }
@@ -546,8 +634,23 @@ fn top_group_keys(items: &[UsageStatItem], metric: UsageMetric, top_n: usize) ->
                 }
             }
             UsageMetric::AvgLatency => {
-                if right.1.latency_sample_count > 0 {
-                    right.1.latency_weighted_sum / right.1.latency_sample_count as f64
+                if right.1.total_latency_sample_count > 0 {
+                    right.1.latency_weighted_sum / right.1.total_latency_sample_count as f64
+                } else {
+                    0.0
+                }
+            }
+            UsageMetric::AvgTimeToFirstResponseBody => {
+                if right.1.time_to_first_response_body_sample_count > 0 {
+                    right.1.time_to_first_response_body_weighted_sum
+                        / right.1.time_to_first_response_body_sample_count as f64
+                } else {
+                    0.0
+                }
+            }
+            UsageMetric::AvgTtft => {
+                if right.1.ttft_sample_count > 0 {
+                    right.1.ttft_weighted_sum / right.1.ttft_sample_count as f64
                 } else {
                     0.0
                 }
@@ -569,7 +672,7 @@ fn top_group_keys(items: &[UsageStatItem], metric: UsageMetric, top_n: usize) ->
 async fn system_overview_stats(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<SystemOverviewResponse>, BaseError> {
-    let stats = get_system_overview_stats()?;
+    let stats = get_system_overview_stats(&app_state.database).await?;
     let runtime_state_backend = app_state.runtime_state_backend_operator_status().await;
     Ok(HttpResult::new(SystemOverviewResponse {
         stats,
@@ -581,7 +684,7 @@ async fn today_request_log_stats(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<TodayRequestLogStats>, BaseError> {
     let timezone = configured_timezone(&app_state);
-    let stats = get_today_request_log_stats(timezone.as_deref())?;
+    let stats = get_today_request_log_stats(&app_state.database, timezone.as_deref()).await?;
     Ok(HttpResult::new(stats))
 }
 
@@ -591,12 +694,23 @@ fn configured_timezone(app_state: &Arc<AppState>) -> Option<String> {
 
 #[cfg(test)]
 fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntimeSummary {
+    let provider_ids = items
+        .iter()
+        .map(|item| item.provider_id)
+        .collect::<HashSet<_>>();
     let mut summary = DashboardRuntimeSummary {
         window: ProviderRuntimeWindow::OneHour,
+        total_provider_count: provider_ids.len() as i64,
+        enabled_provider_count: items
+            .iter()
+            .filter(|item| item.provider_is_enabled)
+            .map(|item| item.provider_id)
+            .collect::<HashSet<_>>()
+            .len() as i64,
+        total_source_count: items.len() as i64,
+        enabled_source_count: items.iter().filter(|item| item.source_is_enabled).count() as i64,
         healthy_count: 0,
         degraded_count: 0,
-        half_open_count: 0,
-        open_count: 0,
         no_traffic_count: 0,
     };
 
@@ -604,8 +718,6 @@ fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntime
         match item.runtime_level {
             ProviderRuntimeLevel::Healthy => summary.healthy_count += 1,
             ProviderRuntimeLevel::Degraded => summary.degraded_count += 1,
-            ProviderRuntimeLevel::HalfOpen => summary.half_open_count += 1,
-            ProviderRuntimeLevel::Open => summary.open_count += 1,
             ProviderRuntimeLevel::NoTraffic => summary.no_traffic_count += 1,
         }
     }
@@ -635,7 +747,8 @@ async fn build_dashboard_operations_section(
         DashboardOperationalSignals::from(operational_signals_from_runtime_items(runtime_items));
     operational_signals.top_cost_models = app_state
         .metrics
-        .dashboard_top_cost_models(5, timezone)?
+        .dashboard_top_cost_models(5, timezone)
+        .await?
         .into_iter()
         .map(cost_model_item_from_top_model_item)
         .collect();
@@ -646,7 +759,7 @@ async fn build_dashboard_operations_section(
             .into_iter()
             .map(Into::into)
             .collect(),
-        top_models: app_state.metrics.dashboard_top_models(5, timezone)?,
+        top_models: app_state.metrics.dashboard_top_models(5, timezone).await?,
     })
 }
 
@@ -719,16 +832,19 @@ async fn system_usage_stats(
         )));
     }
 
-    let usage_rows = app_state.metrics.usage_stats_aggregates(
-        params.start_time,
-        params.end_time,
-        interval.as_str(),
-        params.group_by.to_database_group_by(),
-        params.provider_id,
-        params.model_id,
-        params.api_key_id,
-        params.provider_api_key_id,
-    )?;
+    let usage_rows = app_state
+        .metrics
+        .usage_stats_aggregates(
+            params.start_time,
+            params.end_time,
+            interval.as_str(),
+            params.group_by.to_database_group_by(),
+            params.provider_id,
+            params.model_id,
+            params.api_key_id,
+            params.provider_api_key_id,
+        )
+        .await?;
 
     let usage_items = usage_rows
         .iter()
@@ -753,8 +869,13 @@ async fn system_usage_stats(
                 success_count: item.success_count,
                 error_count: item.error_count,
                 success_rate: item.success_rate,
+                avg_time_to_first_response_body_ms: item.avg_time_to_first_response_body_ms,
+                time_to_first_response_body_sample_count: item
+                    .time_to_first_response_body_sample_count,
+                avg_ttft_ms: item.avg_ttft_ms,
+                ttft_sample_count: item.ttft_sample_count,
                 avg_total_latency_ms: item.avg_total_latency_ms,
-                latency_sample_count: item.latency_sample_count,
+                total_latency_sample_count: item.total_latency_sample_count,
                 total_cost: item.total_cost.clone(),
             })
         })
@@ -822,10 +943,10 @@ mod tests {
         DashboardOverviewStats, DashboardRuntimeSummary, DbDashboardOverviewStats, UsageGroupBy,
         UsageMetric, UsageStatItem, runtime_summary_from_items, top_group_keys,
     };
+    use crate::schema::enum_def::UpstreamProfileType;
     use crate::service::metrics::provider_runtime::{
-        ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
-        ProviderRuntimeLevel, ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow,
-        first_runtime_backend_read_error,
+        ProviderRuntimeCostStat, ProviderRuntimeItem, ProviderRuntimeLevel,
+        ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow, first_runtime_backend_read_error,
     };
     use crate::service::metrics::runtime_overview::{
         operational_signals_from_runtime_items, top_providers_from_runtime_items,
@@ -843,19 +964,16 @@ mod tests {
             provider_id,
             provider_key: format!("p{}", provider_id),
             provider_name: format!("Provider {}", provider_id),
-            provider_type: "OPENAI".to_string(),
-            is_enabled: true,
-            use_proxy: false,
+            provider_is_enabled: true,
+            source_id: provider_id * 10 + 1,
+            source_profile_type: UpstreamProfileType::Openai,
+            source_base_url: "https://api.example.com/v1".to_string(),
+            source_use_proxy: false,
+            source_is_enabled: true,
+            source_is_default: true,
             enabled_model_count: 1,
             enabled_provider_key_count: 1,
-            health_status: ProviderRuntimeHealthStatus::Healthy,
             runtime_level,
-            consecutive_failures: 0,
-            half_open_probe_in_flight: false,
-            opened_at: None,
-            last_failure_at: None,
-            last_recovered_at: None,
-            last_error: None,
             runtime_state_backend_degraded: false,
             runtime_state_backend_error: None,
             request_count,
@@ -866,8 +984,12 @@ mod tests {
             } else {
                 None
             },
-            avg_first_byte_ms: Some(100.0),
+            avg_time_to_first_response_body_ms: Some(100.0),
+            time_to_first_response_body_sample_count: 1,
+            avg_ttft_ms: Some(80.0),
+            ttft_sample_count: 1,
             avg_total_latency_ms: Some(300.0),
+            total_latency_sample_count: 1,
             last_request_at: None,
             last_success_at: None,
             last_error_at: None,
@@ -885,7 +1007,7 @@ mod tests {
         request_count: i64,
         success_count: i64,
         avg_total_latency_ms: Option<f64>,
-        latency_sample_count: i64,
+        total_latency_sample_count: i64,
     ) -> UsageStatItem {
         UsageStatItem {
             group_key: group_key.to_string(),
@@ -897,7 +1019,7 @@ mod tests {
                 None
             },
             avg_total_latency_ms,
-            latency_sample_count,
+            total_latency_sample_count,
             total_cost: HashMap::new(),
             ..Default::default()
         }
@@ -908,18 +1030,16 @@ mod tests {
         let items = vec![
             sample_runtime_item(1, ProviderRuntimeLevel::Healthy, 10, 0),
             sample_runtime_item(2, ProviderRuntimeLevel::Degraded, 10, 3),
-            sample_runtime_item(3, ProviderRuntimeLevel::HalfOpen, 1, 1),
-            sample_runtime_item(4, ProviderRuntimeLevel::Open, 1, 1),
+            sample_runtime_item(3, ProviderRuntimeLevel::Degraded, 1, 1),
+            sample_runtime_item(4, ProviderRuntimeLevel::Healthy, 1, 0),
             sample_runtime_item(5, ProviderRuntimeLevel::NoTraffic, 0, 0),
         ];
 
         let summary: DashboardRuntimeSummary = runtime_summary_from_items(&items);
 
         assert_eq!(summary.window, ProviderRuntimeWindow::OneHour);
-        assert_eq!(summary.healthy_count, 1);
-        assert_eq!(summary.degraded_count, 1);
-        assert_eq!(summary.half_open_count, 1);
-        assert_eq!(summary.open_count, 1);
+        assert_eq!(summary.healthy_count, 2);
+        assert_eq!(summary.degraded_count, 2);
         assert_eq!(summary.no_traffic_count, 1);
     }
 
@@ -938,11 +1058,11 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_operational_signals_include_half_open_and_cost_hotspots() {
-        let mut expensive = sample_runtime_item(1, ProviderRuntimeLevel::Open, 20, 5);
+    fn dashboard_operational_signals_include_degraded_and_cost_hotspots() {
+        let mut expensive = sample_runtime_item(1, ProviderRuntimeLevel::Degraded, 20, 5);
         expensive.total_cost[0].amount_nanos = 500;
 
-        let mut recovering = sample_runtime_item(2, ProviderRuntimeLevel::HalfOpen, 8, 2);
+        let mut recovering = sample_runtime_item(2, ProviderRuntimeLevel::Degraded, 8, 2);
         recovering.total_cost[0].amount_nanos = 200;
 
         let mut steady = sample_runtime_item(3, ProviderRuntimeLevel::Healthy, 30, 1);
@@ -952,19 +1072,11 @@ mod tests {
 
         assert_eq!(
             signals
-                .open_providers
+                .degraded_providers
                 .iter()
                 .map(|item| item.provider_id)
                 .collect::<Vec<_>>(),
-            vec![1]
-        );
-        assert_eq!(
-            signals
-                .half_open_providers
-                .iter()
-                .map(|item| item.provider_id)
-                .collect::<Vec<_>>(),
-            vec![2]
+            vec![1, 2]
         );
         assert_eq!(
             signals
@@ -1021,9 +1133,57 @@ mod tests {
     }
 
     #[test]
+    fn top_group_keys_ranks_response_body_and_ttft_by_sample_weight() {
+        let mut slow_body = sample_usage_item("slow-body", 10, 10, None, 0);
+        slow_body.avg_time_to_first_response_body_ms = Some(800.0);
+        slow_body.time_to_first_response_body_sample_count = 10;
+
+        let mut fast_body = sample_usage_item("fast-body", 100, 100, None, 0);
+        fast_body.avg_time_to_first_response_body_ms = Some(120.0);
+        fast_body.time_to_first_response_body_sample_count = 100;
+
+        let mut slow_ttft = sample_usage_item("slow-ttft", 10, 10, None, 0);
+        slow_ttft.avg_ttft_ms = Some(700.0);
+        slow_ttft.ttft_sample_count = 10;
+
+        let mut fast_ttft = sample_usage_item("fast-ttft", 100, 100, None, 0);
+        fast_ttft.avg_ttft_ms = Some(90.0);
+        fast_ttft.ttft_sample_count = 100;
+
+        assert_eq!(
+            top_group_keys(
+                &[slow_body, fast_body],
+                UsageMetric::AvgTimeToFirstResponseBody,
+                1,
+            ),
+            vec!["slow-body".to_string()]
+        );
+        assert_eq!(
+            top_group_keys(&[slow_ttft, fast_ttft], UsageMetric::AvgTtft, 1),
+            vec!["slow-ttft".to_string()]
+        );
+    }
+
+    #[test]
     fn usage_group_by_serializes_api_key() {
         let value = to_value(UsageGroupBy::ApiKey).expect("enum should serialize");
         assert_eq!(value.as_str(), Some("api_key"));
+    }
+
+    #[test]
+    fn usage_latency_metrics_serialize_for_query_contract() {
+        assert_eq!(
+            to_value(UsageMetric::AvgTimeToFirstResponseBody)
+                .expect("body metric should serialize")
+                .as_str(),
+            Some("avg_time_to_first_response_body")
+        );
+        assert_eq!(
+            to_value(UsageMetric::AvgTtft)
+                .expect("ttft metric should serialize")
+                .as_str(),
+            Some("avg_ttft")
+        );
     }
 
     #[test]

@@ -29,14 +29,14 @@ const VALID_STATUS_FILTERS: ProviderRuntimeStatusFilter[] = [
   "all",
   "healthy",
   "degraded",
-  "open",
-  "half_open",
   "no_traffic",
 ];
 const VALID_SORT_FIELDS: ProviderRuntimeSortField[] = [
   "health",
   "error_rate",
   "latency",
+  "time_to_first_response_body",
+  "ttft",
   "last_error_at",
   "request_count",
 ];

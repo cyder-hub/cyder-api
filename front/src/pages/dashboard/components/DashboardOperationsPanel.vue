@@ -14,6 +14,7 @@ import type {
   DashboardFormatCount,
   DashboardFormatDateTime,
   DashboardFormatLatency,
+  DashboardFormatLatencyCoverage,
   DashboardFormatPercentage,
   DashboardRuntimeLevelClass,
   DashboardRuntimeLevelLabel,
@@ -23,11 +24,12 @@ const props = defineProps<{
   loading: boolean;
   error: string | null;
   operationsSection: DashboardOperationsSection;
-  unstableProviders: DashboardProviderSignalItem[];
+  degradedProviders: DashboardProviderSignalItem[];
   showCostHotspots: boolean;
   formatCount: DashboardFormatCount;
   formatPercentage: DashboardFormatPercentage;
   formatLatency: DashboardFormatLatency;
+  formatLatencyCoverage: DashboardFormatLatencyCoverage;
   formatDateTime: DashboardFormatDateTime;
   formatCostEntries: DashboardFormatCostEntries;
   runtimeLevelBadgeClass: DashboardRuntimeLevelClass;
@@ -73,12 +75,12 @@ const { t: $t } = useI18n();
         <div class="border-b border-gray-100 pb-4">
           <div class="border-b border-gray-100 px-4 py-3">
             <p class="text-sm font-medium text-gray-900">
-              {{ $t("dashboard.operationsGroups.unstable") }}
+              {{ $t("dashboard.operationsGroups.degraded") }}
             </p>
           </div>
-          <ul v-if="props.unstableProviders.length" class="divide-y divide-gray-100">
+          <ul v-if="props.degradedProviders.length" class="divide-y divide-gray-100">
             <li
-              v-for="item in props.unstableProviders"
+              v-for="item in props.degradedProviders"
               :key="`unstable-${item.provider_id}-${item.runtime_level}`"
               class="px-4 py-3"
             >
@@ -103,7 +105,7 @@ const { t: $t } = useI18n();
             </li>
           </ul>
           <div v-else class="px-4 py-5 text-sm text-gray-500">
-            {{ $t("dashboard.empty.noUnstableProviders") }}
+            {{ $t("dashboard.empty.noDegradedProviders") }}
           </div>
         </div>
 
@@ -304,8 +306,22 @@ const { t: $t } = useI18n();
                 >
                   {{ cost }}
                 </div>
-                <div class="mt-1 text-xs text-gray-400">
-                  {{ props.formatLatency(item.avg_total_latency_ms) }}
+                <div class="mt-1 space-y-0.5 text-xs text-gray-400">
+                  <p>
+                    {{ $t("dashboard.kpi.firstResponseBody") }}
+                    {{ props.formatLatencyCoverage(
+                      item.avg_time_to_first_response_body_ms,
+                      item.time_to_first_response_body_sample_count,
+                    ) }}
+                  </p>
+                  <p>
+                    {{ $t("dashboard.kpi.ttft") }}
+                    {{ props.formatLatencyCoverage(item.avg_ttft_ms, item.ttft_sample_count) }}
+                  </p>
+                  <p>
+                    {{ $t("dashboard.kpi.avgLatency") }}
+                    {{ props.formatLatencyCoverage(item.avg_total_latency_ms, item.total_latency_sample_count) }}
+                  </p>
                 </div>
               </div>
             </div>

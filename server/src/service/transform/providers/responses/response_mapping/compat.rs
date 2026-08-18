@@ -12,9 +12,18 @@ pub(in crate::service::transform::providers::responses) fn convert_openai_tool_c
             "none" => Some(ToolChoice::Value(ToolChoiceValue::None)),
             "auto" => Some(ToolChoice::Value(ToolChoiceValue::Auto)),
             "required" => Some(ToolChoice::Value(ToolChoiceValue::Required)),
-            _ => None,
+            _ => unreachable!("OpenAI tool_choice is adapter-validated"),
         },
-        other => serde_json::from_value(other).ok(),
+        Value::Object(value) => Some(ToolChoice::Specific(SpecificToolChoice {
+            _type: "function".to_string(),
+            name: value
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .expect("OpenAI function tool_choice is adapter-validated")
+                .to_string(),
+        })),
+        _ => unreachable!("OpenAI tool_choice is adapter-validated"),
     }
 }
 
@@ -40,20 +49,10 @@ pub(in crate::service::transform::providers::responses) fn convert_openai_respon
                 })
             }
             Some("text") => Some(TextResponseFormat::Text),
-            _ => serde_json::from_value(Value::Object(map)).ok(),
+            _ => unreachable!("OpenAI response_format is adapter-validated"),
         },
-        other => serde_json::from_value(other).ok(),
+        _ => unreachable!("OpenAI response_format is adapter-validated"),
     }
-}
-
-pub(in crate::service::transform::providers::responses) fn convert_openai_passthrough_to_responses_reasoning(
-    value: &Value,
-) -> Option<Reasoning> {
-    let effort = value.get("reasoning_effort")?;
-    Some(Reasoning {
-        effort: serde_json::from_value(effort.clone()).ok(),
-        summary: None,
-    })
 }
 
 pub(in crate::service::transform::providers::responses) fn parse_function_arguments(
@@ -62,13 +61,21 @@ pub(in crate::service::transform::providers::responses) fn parse_function_argume
     serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.to_string()))
 }
 
+pub(in crate::service::transform::providers::responses) fn parse_validated_function_arguments(
+    arguments: &str,
+) -> Value {
+    if arguments.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(arguments).expect("Responses tool arguments are adapter-validated")
+    }
+}
+
 pub(in crate::service::transform::providers::responses) fn stringify_function_arguments(
     arguments: Value,
 ) -> String {
-    match arguments {
-        Value::String(value) => value,
-        other => serde_json::to_string(&other).unwrap_or_default(),
-    }
+    serde_json::to_string(&arguments)
+        .expect("serde_json::Value serialization is structurally infallible")
 }
 
 pub(in crate::service::transform::providers::responses) fn function_output_payload_to_unified(
@@ -145,6 +152,9 @@ pub(in crate::service::transform::providers::responses) fn unified_tool_result_t
             file_url,
         }]),
         UnifiedToolResultOutput::Json { value } => FunctionCallOutputPayload::Unknown(value),
+        UnifiedToolResultOutput::Error { error } => {
+            FunctionCallOutputPayload::Unknown(serde_json::json!({ "error": error }))
+        }
     }
 }
 
@@ -196,21 +206,22 @@ pub(in crate::service::transform::providers::responses) fn parse_responses_input
     file_data: &str,
     filename: Option<String>,
 ) -> UnifiedContentPart {
-    if let Some(rest) = file_data.strip_prefix("data:") {
-        let mut split = rest.splitn(2, ';');
-        let mime_type = split.next().unwrap_or("application/octet-stream");
-        if let Some(payload) = split.next().and_then(|value| value.strip_prefix("base64,")) {
-            return UnifiedContentPart::FileData {
-                data: payload.to_string(),
-                mime_type: mime_type.to_string(),
-                filename,
-            };
-        }
+    if let Some(data_url) = crate::service::transform::media::parse_base64_data_url(file_data) {
+        return UnifiedContentPart::FileData {
+            data: data_url.data.to_string(),
+            mime_type: data_url.mime_type.to_string(),
+            filename,
+        };
     }
 
+    let mime_type = filename
+        .as_deref()
+        .and_then(crate::service::transform::media::mime_type_from_filename)
+        .unwrap_or("application/octet-stream")
+        .to_string();
     UnifiedContentPart::FileData {
         data: file_data.to_string(),
-        mime_type: "application/octet-stream".to_string(),
+        mime_type,
         filename,
     }
 }
@@ -229,6 +240,7 @@ pub(in crate::service::transform::providers::responses) fn render_responses_inst
         UnifiedContentPart::ImageData { mime_type, data } => {
             Some(build_data_url(&mime_type, &data))
         }
+        UnifiedContentPart::AudioData { .. } | UnifiedContentPart::FileId { .. } => None,
         UnifiedContentPart::FileUrl {
             url,
             mime_type,
@@ -253,7 +265,8 @@ pub(in crate::service::transform::providers::responses) fn render_responses_inst
         UnifiedContentPart::ToolCall(call) => Some(format!(
             "tool_call: {}\narguments: {}",
             call.name,
-            serde_json::to_string(&call.arguments).unwrap_or_default()
+            serde_json::to_string(&call.arguments)
+                .expect("serde_json::Value serialization is structurally infallible")
         )),
         UnifiedContentPart::ToolResult(result) => Some(match result.name {
             Some(ref name) if !name.is_empty() => format!(

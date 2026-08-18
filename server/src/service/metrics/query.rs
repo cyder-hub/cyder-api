@@ -11,6 +11,7 @@ use crate::database::metrics::{
 };
 use crate::database::model::{Model, ModelSummaryItem};
 use crate::database::provider::{Provider, ProviderSummaryItem};
+use crate::database::runtime::DatabaseRuntime;
 use crate::database::stat::{
     DashboardTopModelItem, UsageStatsGroupBy, UsageStatsQueryItem, get_dashboard_top_cost_models,
     get_dashboard_top_models, get_usage_stats_aggregates, start_of_today_timestamp_ms,
@@ -20,7 +21,7 @@ use super::service::MetricsService;
 use super::types::MetricsTimeseriesPoint;
 
 impl MetricsService {
-    pub fn query_request_window_metrics(
+    pub async fn query_request_window_metrics(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -28,14 +29,16 @@ impl MetricsService {
         scope_id_filter: Option<&str>,
     ) -> Result<Vec<MetricRequestWindowAggregate>, BaseError> {
         query_request_window_aggregates(
+            self.database(),
             start_time_ms,
             end_time_ms,
             scope_type_filter,
             scope_id_filter,
         )
+        .await
     }
 
-    pub fn query_http_status_breakdown(
+    pub async fn query_http_status_breakdown(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -43,14 +46,16 @@ impl MetricsService {
         scope_id_filter: &str,
     ) -> Result<Vec<MetricHttpStatusCount>, BaseError> {
         query_http_status_breakdown(
+            self.database(),
             start_time_ms,
             end_time_ms,
             scope_type_filter,
             scope_id_filter,
         )
+        .await
     }
 
-    pub fn query_cost_window_metrics(
+    pub async fn query_cost_window_metrics(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -58,14 +63,16 @@ impl MetricsService {
         scope_id_filter: &str,
     ) -> Result<Vec<MetricCostAggregate>, BaseError> {
         query_cost_window_aggregates(
+            self.database(),
             start_time_ms,
             end_time_ms,
             scope_type_filter,
             scope_id_filter,
         )
+        .await
     }
 
-    pub fn query_timeseries(
+    pub async fn query_timeseries(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -74,11 +81,13 @@ impl MetricsService {
         scope_id_filter: Option<&str>,
     ) -> Result<Vec<MetricsTimeseriesPoint>, BaseError> {
         let rows = list_request_rollup_minutes(
+            self.database(),
             start_time_ms,
             end_time_ms,
             scope_type_filter,
             scope_id_filter,
-        )?;
+        )
+        .await?;
         let mut points = BTreeMap::<(i64, String, String), MetricsTimeseriesPoint>::new();
         for row in rows {
             let bucket_start_ms = interval_bucket_start(row.bucket_start_ms, interval)?;
@@ -104,64 +113,77 @@ impl MetricsService {
         Ok(points.into_values().collect())
     }
 
-    pub fn dashboard_top_models(
+    pub async fn dashboard_top_models(
         &self,
         limit: usize,
         timezone: Option<&str>,
     ) -> Result<Vec<DashboardTopModelItem>, BaseError> {
         if !self.config().enabled {
-            return self.dashboard_top_models_fallback(limit, timezone, "metrics_disabled");
+            return self
+                .dashboard_top_models_fallback(limit, timezone, "metrics_disabled")
+                .await;
         }
 
         let start_time_ms = start_of_today_timestamp_ms(timezone)?;
         let end_time_ms = Utc::now().timestamp_millis();
         let request_aggregates = query_request_window_aggregates(
+            self.database(),
             start_time_ms,
             end_time_ms,
             Some("provider_model"),
             None,
-        )?;
+        )
+        .await?;
         if request_aggregates.is_empty() {
-            return self.dashboard_top_models_fallback(limit, timezone, "rollup_empty");
+            return self
+                .dashboard_top_models_fallback(limit, timezone, "rollup_empty")
+                .await;
         }
 
-        let model_map = model_summary_map()?;
-        let provider_map = provider_summary_map()?;
-        let mut items = request_aggregates
+        let model_map = model_summary_map(self.database()).await?;
+        let provider_map = provider_summary_map(self.database()).await?;
+        let mut items = Vec::new();
+        for item in request_aggregates
             .into_iter()
             .filter(|item| item.request_count > 0)
-            .filter_map(|item| {
-                let (provider_id, model_id) = parse_provider_model_scope(&item.scope_id)?;
-                let model = model_map.get(&model_id);
-                let provider = provider_map.get(&provider_id);
-                let total_cost = query_cost_window_aggregates(
-                    start_time_ms,
-                    end_time_ms,
-                    "provider_model",
-                    &item.scope_id,
-                )
-                .ok()?
+        {
+            let Some((provider_id, model_id)) = parse_provider_model_scope(&item.scope_id) else {
+                continue;
+            };
+            let model = model_map.get(&model_id);
+            let provider = provider_map.get(&provider_id);
+            let Ok(total_cost) = query_cost_window_aggregates(
+                self.database(),
+                start_time_ms,
+                end_time_ms,
+                "provider_model",
+                &item.scope_id,
+            )
+            .await
+            else {
+                continue;
+            };
+            let total_cost = total_cost
                 .into_iter()
                 .map(|cost| (cost.currency, cost.amount_nanos))
                 .collect::<HashMap<_, _>>();
-                Some(DashboardTopModelItem {
-                    provider_id,
-                    provider_key: model
-                        .map(|item| item.provider_key.clone())
-                        .or_else(|| provider.map(|item| item.provider_key.clone()))
-                        .unwrap_or_else(|| provider_id.to_string()),
-                    model_id,
-                    model_name: model
-                        .map(|item| item.model_name.clone())
-                        .or_else(|| item.scope_label.clone())
-                        .unwrap_or_else(|| model_id.to_string()),
-                    real_model_name: model.and_then(|item| item.real_model_name.clone()),
-                    request_count: item.request_count,
-                    total_tokens: item.total_tokens,
-                    total_cost,
-                })
-            })
-            .collect::<Vec<_>>();
+            items.push(DashboardTopModelItem {
+                provider_id,
+                provider_key: model
+                    .map(|item| item.provider_key.clone())
+                    .or_else(|| provider.map(|item| item.provider_key.clone()))
+                    .unwrap_or_else(|| provider_id.to_string()),
+                model_id,
+                model_name: model
+                    .map(|item| item.model_name.clone())
+                    .or_else(|| item.scope_label.clone())
+                    .unwrap_or_else(|| model_id.to_string()),
+                real_model_name: model.and_then(|item| item.real_model_name.clone()),
+                request_count: item.request_count,
+                total_tokens: item.total_tokens,
+                total_cost,
+            });
+        }
 
         items.sort_by(|left, right| {
             right
@@ -174,44 +196,52 @@ impl MetricsService {
         Ok(items)
     }
 
-    pub fn dashboard_top_cost_models(
+    pub async fn dashboard_top_cost_models(
         &self,
         limit_per_currency: usize,
         timezone: Option<&str>,
     ) -> Result<Vec<DashboardTopModelItem>, BaseError> {
         if !self.config().enabled {
-            return self.dashboard_top_cost_models_fallback(
-                limit_per_currency,
-                timezone,
-                "metrics_disabled",
-            );
+            return self
+                .dashboard_top_cost_models_fallback(
+                    limit_per_currency,
+                    timezone,
+                    "metrics_disabled",
+                )
+                .await;
         }
 
         let start_time_ms = start_of_today_timestamp_ms(timezone)?;
         let end_time_ms = Utc::now().timestamp_millis();
         let request_aggregates = query_request_window_aggregates(
+            self.database(),
             start_time_ms,
             end_time_ms,
             Some("provider_model"),
             None,
-        )?;
+        )
+        .await?;
         if request_aggregates.is_empty() {
-            return self.dashboard_top_cost_models_fallback(
-                limit_per_currency,
-                timezone,
-                "rollup_empty",
-            );
+            return self
+                .dashboard_top_cost_models_fallback(limit_per_currency, timezone, "rollup_empty")
+                .await;
         }
 
-        let model_map = model_summary_map()?;
-        let provider_map = provider_summary_map()?;
+        let model_map = model_summary_map(self.database()).await?;
+        let provider_map = provider_summary_map(self.database()).await?;
         let requests_by_scope = request_aggregates
             .into_iter()
             .map(|item| (item.scope_id.clone(), item))
             .collect::<HashMap<_, _>>();
         let mut cost_by_scope_currency = BTreeMap::<(String, String), i64>::new();
-        for cost in
-            list_cost_rollup_minutes(start_time_ms, end_time_ms, Some("provider_model"), None)?
+        for cost in list_cost_rollup_minutes(
+            self.database(),
+            start_time_ms,
+            end_time_ms,
+            Some("provider_model"),
+            None,
+        )
+        .await?
         {
             if parse_provider_model_scope(&cost.scope_id).is_none() {
                 continue;
@@ -269,7 +299,7 @@ impl MetricsService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn usage_stats_aggregates(
+    pub async fn usage_stats_aggregates(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -281,17 +311,19 @@ impl MetricsService {
         provider_api_key_id_filter: Option<i64>,
     ) -> Result<Vec<UsageStatsQueryItem>, BaseError> {
         if !self.config().enabled {
-            return self.usage_stats_fallback(
-                start_time_ms,
-                end_time_ms,
-                interval,
-                group_by,
-                provider_id_filter,
-                model_id_filter,
-                api_key_id_filter,
-                provider_api_key_id_filter,
-                "metrics_disabled",
-            );
+            return self
+                .usage_stats_fallback(
+                    start_time_ms,
+                    end_time_ms,
+                    interval,
+                    group_by,
+                    provider_id_filter,
+                    model_id_filter,
+                    api_key_id_filter,
+                    provider_api_key_id_filter,
+                    "metrics_disabled",
+                )
+                .await;
         }
 
         let Some(source) = UsageRollupSource::from_filters(
@@ -301,40 +333,46 @@ impl MetricsService {
             api_key_id_filter,
             provider_api_key_id_filter,
         ) else {
-            return self.usage_stats_fallback(
-                start_time_ms,
-                end_time_ms,
-                interval,
-                group_by,
-                provider_id_filter,
-                model_id_filter,
-                api_key_id_filter,
-                provider_api_key_id_filter,
-                "unsupported_filter_combination",
-            );
+            return self
+                .usage_stats_fallback(
+                    start_time_ms,
+                    end_time_ms,
+                    interval,
+                    group_by,
+                    provider_id_filter,
+                    model_id_filter,
+                    api_key_id_filter,
+                    provider_api_key_id_filter,
+                    "unsupported_filter_combination",
+                )
+                .await;
         };
 
         let rows = list_request_rollup_minutes(
+            self.database(),
             start_time_ms,
             end_time_ms,
             Some(source.scope_type),
             source.scope_id_filter.as_deref(),
-        )?;
+        )
+        .await?;
         if rows.is_empty() {
-            return self.usage_stats_fallback(
-                start_time_ms,
-                end_time_ms,
-                interval,
-                group_by,
-                provider_id_filter,
-                model_id_filter,
-                api_key_id_filter,
-                provider_api_key_id_filter,
-                "rollup_empty",
-            );
+            return self
+                .usage_stats_fallback(
+                    start_time_ms,
+                    end_time_ms,
+                    interval,
+                    group_by,
+                    provider_id_filter,
+                    model_id_filter,
+                    api_key_id_filter,
+                    provider_api_key_id_filter,
+                    "rollup_empty",
+                )
+                .await;
         }
 
-        let metadata = UsageMetadata::load()?;
+        let metadata = UsageMetadata::load(self.database()).await?;
         let mut items = HashMap::<(i64, i64), UsageStatsQueryItem>::new();
         let mut seen_scope_ids = HashSet::<String>::new();
         for row in rows {
@@ -367,8 +405,12 @@ impl MetricsService {
                 success_count: 0,
                 error_count: 0,
                 success_rate: None,
+                avg_time_to_first_response_body_ms: None,
+                time_to_first_response_body_sample_count: 0,
+                avg_ttft_ms: None,
+                ttft_sample_count: 0,
                 avg_total_latency_ms: None,
-                latency_sample_count: 0,
+                total_latency_sample_count: 0,
                 total_cost: HashMap::new(),
             });
             entry.total_input_tokens += row.input_tokens;
@@ -378,17 +420,24 @@ impl MetricsService {
             entry.request_count += row.request_count;
             entry.success_count += row.success_count;
             entry.error_count += row.error_count + row.cancelled_count;
-            let previous_latency_sum =
-                entry.avg_total_latency_ms.unwrap_or(0.0) * entry.latency_sample_count as f64;
-            entry.latency_sample_count += row.total_latency_count;
-            entry.avg_total_latency_ms = if entry.latency_sample_count > 0 {
-                Some(
-                    (previous_latency_sum + row.total_latency_sum_ms as f64)
-                        / entry.latency_sample_count as f64,
-                )
-            } else {
-                None
-            };
+            merge_average(
+                &mut entry.avg_time_to_first_response_body_ms,
+                &mut entry.time_to_first_response_body_sample_count,
+                row.time_to_first_response_body_sum_ms,
+                row.time_to_first_response_body_count,
+            );
+            merge_average(
+                &mut entry.avg_ttft_ms,
+                &mut entry.ttft_sample_count,
+                row.ttft_sum_ms,
+                row.ttft_count,
+            );
+            merge_average(
+                &mut entry.avg_total_latency_ms,
+                &mut entry.total_latency_sample_count,
+                row.total_latency_sum_ms,
+                row.total_latency_count,
+            );
             entry.success_rate = if entry.request_count > 0 {
                 Some(entry.success_count as f64 / entry.request_count as f64)
             } else {
@@ -397,11 +446,14 @@ impl MetricsService {
         }
 
         for cost in list_cost_rollup_minutes(
+            self.database(),
             start_time_ms,
             end_time_ms,
             Some(source.scope_type),
             source.scope_id_filter.as_deref(),
-        )? {
+        )
+        .await?
+        {
             if !seen_scope_ids.contains(&cost.scope_id) || !source.matches_cost_row(&cost) {
                 continue;
             }
@@ -424,7 +476,7 @@ impl MetricsService {
         Ok(result)
     }
 
-    fn dashboard_top_models_fallback(
+    async fn dashboard_top_models_fallback(
         &self,
         limit: usize,
         timezone: Option<&str>,
@@ -433,7 +485,7 @@ impl MetricsService {
         if !self.config().request_log_query_fallback_enabled {
             return Ok(Vec::new());
         }
-        let rows = get_dashboard_top_models(limit, timezone)?;
+        let rows = get_dashboard_top_models(self.database(), limit, timezone).await?;
         if !rows.is_empty() {
             crate::warn_event!(
                 "metrics.dashboard_top_models_request_log_fallback",
@@ -444,7 +496,7 @@ impl MetricsService {
         Ok(rows)
     }
 
-    fn dashboard_top_cost_models_fallback(
+    async fn dashboard_top_cost_models_fallback(
         &self,
         limit: usize,
         timezone: Option<&str>,
@@ -453,7 +505,7 @@ impl MetricsService {
         if !self.config().request_log_query_fallback_enabled {
             return Ok(Vec::new());
         }
-        let rows = get_dashboard_top_cost_models(limit, timezone)?;
+        let rows = get_dashboard_top_cost_models(self.database(), limit, timezone).await?;
         if !rows.is_empty() {
             crate::warn_event!(
                 "metrics.dashboard_top_cost_models_request_log_fallback",
@@ -465,7 +517,7 @@ impl MetricsService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn usage_stats_fallback(
+    async fn usage_stats_fallback(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -481,6 +533,7 @@ impl MetricsService {
             return Ok(Vec::new());
         }
         let rows = get_usage_stats_aggregates(
+            self.database(),
             start_time_ms,
             end_time_ms,
             interval,
@@ -489,7 +542,8 @@ impl MetricsService {
             model_id_filter,
             api_key_id_filter,
             provider_api_key_id_filter,
-        )?;
+        )
+        .await?;
         if !rows.is_empty() {
             crate::warn_event!(
                 "metrics.usage_stats_request_log_fallback",
@@ -499,6 +553,16 @@ impl MetricsService {
         }
         Ok(rows)
     }
+}
+
+fn merge_average(current: &mut Option<f64>, count: &mut i64, sum: i64, added_count: i64) {
+    let combined_sum = current.unwrap_or(0.0) * *count as f64 + sum as f64;
+    *count += added_count;
+    *current = if *count > 0 {
+        Some(combined_sum / *count as f64)
+    } else {
+        None
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -712,14 +776,16 @@ struct UsageMetadata {
 }
 
 impl UsageMetadata {
-    fn load() -> Result<Self, BaseError> {
+    async fn load(database: &DatabaseRuntime) -> Result<Self, BaseError> {
         Ok(Self {
-            providers: Provider::list_summary()?
+            providers: Provider::list_summary(database)
+                .await?
                 .into_iter()
                 .map(|item| (item.id, item))
                 .collect(),
-            models: model_summary_map()?,
-            api_keys: ApiKey::list_summary()?
+            models: model_summary_map(database).await?,
+            api_keys: ApiKey::list_summary(database)
+                .await?
                 .into_iter()
                 .map(|item| (item.id, item))
                 .collect(),
@@ -740,15 +806,21 @@ struct UsageIdentity {
     group_detail: Option<String>,
 }
 
-fn model_summary_map() -> Result<HashMap<i64, ModelSummaryItem>, BaseError> {
-    Ok(Model::list_summary()?
+async fn model_summary_map(
+    database: &DatabaseRuntime,
+) -> Result<HashMap<i64, ModelSummaryItem>, BaseError> {
+    Ok(Model::list_summary(database)
+        .await?
         .into_iter()
         .map(|item| (item.id, item))
         .collect())
 }
 
-fn provider_summary_map() -> Result<HashMap<i64, ProviderSummaryItem>, BaseError> {
-    Ok(Provider::list_summary()?
+async fn provider_summary_map(
+    database: &DatabaseRuntime,
+) -> Result<HashMap<i64, ProviderSummaryItem>, BaseError> {
+    Ok(Provider::list_summary(database)
+        .await?
         .into_iter()
         .map(|item| (item.id, item))
         .collect())
@@ -785,4 +857,37 @@ fn interval_bucket_start(timestamp_ms: i64, interval: &str) -> Result<i64, BaseE
         }
     };
     Ok(bucket)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_average;
+
+    #[test]
+    fn merge_average_uses_sum_and_sample_count_for_weighted_windows() {
+        let mut average = Some(100.0);
+        let mut sample_count = 1;
+
+        merge_average(&mut average, &mut sample_count, 300, 3);
+
+        assert_eq!(average, Some(100.0));
+        assert_eq!(sample_count, 4);
+    }
+
+    #[test]
+    fn merge_average_keeps_zero_duration_samples_distinct_from_no_samples() {
+        let mut average = None;
+        let mut sample_count = 0;
+
+        merge_average(&mut average, &mut sample_count, 0, 1);
+
+        assert_eq!(average, Some(0.0));
+        assert_eq!(sample_count, 1);
+
+        let mut no_average = None;
+        let mut no_samples = 0;
+        merge_average(&mut no_average, &mut no_samples, 0, 0);
+        assert_eq!(no_average, None);
+        assert_eq!(no_samples, 0);
+    }
 }

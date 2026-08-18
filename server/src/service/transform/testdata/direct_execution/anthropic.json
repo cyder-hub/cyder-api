@@ -1,6 +1,6 @@
 {
   "protocol":"ANTHROPIC",
-  "provider_type":"OPENAI",
+  "profile_type":"OPENAI",
   "downstream_path":"/anthropic/v1/messages",
   "downstream_stream_path":"/anthropic/v1/messages",
   "downstream_auth":"x_api_key",
@@ -28,18 +28,18 @@
       {"data":"[DONE]"}
     ],
     "downstream_events":[
-      {"event":"message_start","data":{"type":"message_start","message":{"id":"chatcmpl-baseline","type":"message","role":"assistant","content":[],"model":"baseline-upstream-model","usage":{"input_tokens":0,"output_tokens":0}}}},
+      {"event":"message_start","data":{"type":"message_start","message":{"id":"chatcmpl-baseline","type":"message","role":"assistant","content":[],"model":"baseline-upstream-model"}}},
       {"event":"content_block_start","data":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}},
       {"event":"content_block_delta","data":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"baseline "}}},
       {"event":"content_block_delta","data":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"pong"}}},
       {"event":"content_block_stop","data":{"type":"content_block_stop","index":0}},
-      {"event":"message_delta","data":{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}},
+      {"event":"message_delta","data":{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}},
       {"event":"message_stop","data":{"type":"message_stop"}}
     ],
     "downstream_content_type":"text/event-stream",
     "expected_text":"baseline pong"
   },
   "usage":{"input":11,"output":7,"total":18},
-  "error":{"downstream_request":{"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"user","content":"baseline ping"}]},"upstream_status":429,"upstream_response":{"error":{"message":"baseline throttled"}},"downstream_status":429,"downstream_code":"upstream_rate_limit_error","downstream_message":"Upstream returned 429: baseline throttled"},
+  "error":{"downstream_request":{"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"user","content":"baseline ping"}]},"upstream_status":429,"upstream_response":{"error":{"message":"baseline throttled"}},"downstream_status":429,"downstream_response":{"type":"error","error":{"type":"rate_limit_error","message":"Upstream provider rate limited the request.","code":"upstream_rate_limit_error"},"request_id":"$REQUEST_ID","upstream_error":{"status":429,"content_type":"application/json","body":{"error":{"message":"baseline throttled"}},"truncated":false,"captured_bytes":42,"limit_bytes":65536}}},
   "cancellation":{"downstream_request":{"model":"$REQUESTED_MODEL","max_tokens":64,"messages":[{"role":"user","content":"baseline ping"}],"stream":true},"upstream_request":{"model":"$UPSTREAM_MODEL","max_tokens":64,"messages":[{"role":"user","content":"baseline ping"}],"stream":true,"stream_options":{"include_usage":true}},"upstream_path":"/v1/chat/completions","first_upstream_event":{"data":{"id":"chatcmpl-cancel","object":"chat.completion.chunk","created":1700000000,"model":"baseline-upstream-model","choices":[{"index":0,"delta":{"role":"assistant","content":"baseline "},"finish_reason":null}]}},"expected_status":"CANCELLED"}
 }

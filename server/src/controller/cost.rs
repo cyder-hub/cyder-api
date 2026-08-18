@@ -135,9 +135,11 @@ async fn delete_catalog(
     Ok(HttpResult::new(()))
 }
 
-async fn list_catalogs() -> DbResult<HttpResult<Vec<CostCatalogListItem>>> {
-    let catalogs = CostCatalog::list_all()?;
-    let versions = CostCatalogVersion::list_all()?;
+async fn list_catalogs(
+    State(app_state): State<Arc<AppState>>,
+) -> DbResult<HttpResult<Vec<CostCatalogListItem>>> {
+    let catalogs = CostCatalog::list_all(&app_state.database).await?;
+    let versions = CostCatalogVersion::list_all(&app_state.database).await?;
 
     let result = catalogs
         .into_iter()
@@ -176,9 +178,12 @@ async fn create_catalog_version(
     Ok(HttpResult::new(created))
 }
 
-async fn get_version(Path(id): Path<i64>) -> DbResult<HttpResult<CostCatalogVersionDetail>> {
-    let version = CostCatalogVersion::get_by_id(id)?;
-    let components = CostComponent::list_by_catalog_version_id(id)?;
+async fn get_version(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> DbResult<HttpResult<CostCatalogVersionDetail>> {
+    let version = CostCatalogVersion::get_by_id(&app_state.database, id).await?;
+    let components = CostComponent::list_by_catalog_version_id(&app_state.database, id).await?;
     Ok(HttpResult::new(CostCatalogVersionDetail {
         version,
         components,
@@ -302,7 +307,7 @@ async fn preview_cost(
     let normalization = payload.normalization;
     let (ledger, total_input_tokens) = match (&normalization, payload.ledger) {
         (Some(normalization), None) => (
-            CostLedger::from(normalization),
+            CostLedger::for_successful_invocation(Some(normalization)),
             normalization.total_input_tokens,
         ),
         (None, Some(ledger)) => (ledger, payload.total_input_tokens.unwrap_or(0)),
@@ -391,7 +396,7 @@ mod tests {
     use serde_json::{Value, json};
     use tower::util::ServiceExt;
 
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::cost::{
         CostCatalog, CostCatalogVersion, NewCostCatalogPayload, NewCostCatalogVersionPayload,
     };
@@ -399,30 +404,42 @@ mod tests {
 
     use super::{DuplicateCostCatalogVersionRequest, create_cost_router};
 
-    fn seed_catalog(name: &str) -> CostCatalog {
-        CostCatalog::create(&NewCostCatalogPayload {
-            name: name.to_string(),
-            description: Some("seed".to_string()),
-        })
+    async fn seed_catalog(
+        database: &crate::database::runtime::DatabaseRuntime,
+        name: &str,
+    ) -> CostCatalog {
+        CostCatalog::create(
+            database,
+            &NewCostCatalogPayload {
+                name: name.to_string(),
+                description: Some("seed".to_string()),
+            },
+        )
+        .await
         .expect("catalog seed should succeed")
     }
 
-    fn seed_version(
+    async fn seed_version(
+        database: &crate::database::runtime::DatabaseRuntime,
         catalog_id: i64,
         version: &str,
         effective_from: i64,
         effective_until: Option<i64>,
         is_enabled: bool,
     ) -> CostCatalogVersion {
-        CostCatalogVersion::create(&NewCostCatalogVersionPayload {
-            catalog_id,
-            version: version.to_string(),
-            currency: "USD".to_string(),
-            source: Some("seed".to_string()),
-            effective_from,
-            effective_until,
-            is_enabled,
-        })
+        CostCatalogVersion::create(
+            database,
+            &NewCostCatalogVersionPayload {
+                catalog_id,
+                version: version.to_string(),
+                currency: "USD".to_string(),
+                source: Some("seed".to_string()),
+                effective_from,
+                effective_until,
+                is_enabled,
+            },
+        )
+        .await
         .expect("version seed should succeed")
     }
 
@@ -473,127 +490,136 @@ mod tests {
 
     #[tokio::test]
     async fn enable_version_http_endpoint_updates_response_and_cache() {
-        let test_db_context = TestDbContext::new_sqlite("controller-cost-enable-http.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("controller-cost-enable-http.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let catalog = seed_catalog("OpenAI / GPT");
-                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
-                let draft = seed_version(catalog.id, "2026-05-01", 2_000, None, false);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let existing_cached_before = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing version cache should load")
-                    .expect("existing version should exist");
-                assert_eq!(existing_cached_before.effective_until, None);
-
-                let response = send(
-                    &app_state,
-                    empty_request(Method::POST, &format!("/cost/version/{}/enable", draft.id)),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::OK);
-                let body = response_json(response).await;
-
-                assert_eq!(body["code"], 0);
-                assert_eq!(body["data"]["id"], draft.id);
-                assert_eq!(body["data"]["is_enabled"], true);
-
-                let draft_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(draft.id)
-                    .await
-                    .expect("draft cache should load")
-                    .expect("draft version should exist");
-                let existing_cached_after = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing cache should reload")
-                    .expect("existing version should exist");
-
-                assert!(draft_cached.is_enabled);
-                assert_eq!(existing_cached_after.effective_until, Some(2_000));
-            })
+        (async {
+            let catalog = seed_catalog(&test_db_context, "OpenAI / GPT").await;
+            let existing =
+                seed_version(&test_db_context, catalog.id, "2026-04-01", 0, None, true).await;
+            let draft = seed_version(
+                &test_db_context,
+                catalog.id,
+                "2026-05-01",
+                2_000,
+                None,
+                false,
+            )
             .await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+
+            let existing_cached_before = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing version cache should load")
+                .expect("existing version should exist");
+            assert_eq!(existing_cached_before.effective_until, None);
+
+            let response = send(
+                &app_state,
+                empty_request(Method::POST, &format!("/cost/version/{}/enable", draft.id)),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+
+            assert_eq!(body["code"], 0);
+            assert_eq!(body["data"]["id"], draft.id);
+            assert_eq!(body["data"]["is_enabled"], true);
+
+            let draft_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(draft.id)
+                .await
+                .expect("draft cache should load")
+                .expect("draft version should exist");
+            let existing_cached_after = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing cache should reload")
+                .expect("existing version should exist");
+
+            assert!(draft_cached.is_enabled);
+            assert_eq!(existing_cached_after.effective_until, Some(2_000));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn import_cost_template_http_endpoint_updates_response_and_version_cache() {
         let test_db_context =
-            TestDbContext::new_sqlite("controller-cost-template-import-http.sqlite");
+            TestDatabase::new_sqlite_default("controller-cost-template-import-http.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let catalog = seed_catalog("Google / Gemini 2.5 Pro");
-                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
+        (async {
+            let catalog = seed_catalog(&test_db_context, "Google / Gemini 2.5 Pro").await;
+            let existing =
+                seed_version(&test_db_context, catalog.id, "2026-04-01", 0, None, true).await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let existing_cached_before = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing version cache should load")
-                    .expect("existing version should exist");
-                assert_eq!(existing_cached_before.effective_until, None);
+            let existing_cached_before = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing version cache should load")
+                .expect("existing version should exist");
+            assert_eq!(existing_cached_before.effective_until, None);
 
-                let response = send(
-                    &app_state,
-                    json_request(
-                        Method::POST,
-                        "/cost/template/import",
-                        json!({
-                            "template_key": "google.gemini-2.5-pro.text"
-                        }),
-                    ),
-                )
-                .await;
-                assert_eq!(response.status(), StatusCode::OK);
-                let body = response_json(response).await;
-
-                let imported_version_id = body["data"]["imported"]["version"]["id"]
-                    .as_i64()
-                    .expect("imported version id should exist");
-                let imported_effective_from = body["data"]["imported"]["version"]["effective_from"]
-                    .as_i64()
-                    .expect("imported effective_from should exist");
-
-                assert_eq!(body["code"], 0);
-                assert_eq!(
-                    body["data"]["template"]["key"],
-                    "google.gemini-2.5-pro.text"
-                );
-                assert!(
-                    body["data"]["imported"]["components"]
-                        .as_array()
-                        .expect("components should be an array")
-                        .len()
-                        > 0
-                );
-
-                let imported_cached = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(imported_version_id)
-                    .await
-                    .expect("imported version cache should load")
-                    .expect("imported version should exist");
-                let existing_cached_after = app_state
-                    .catalog
-                    .get_cost_catalog_version_by_id(existing.id)
-                    .await
-                    .expect("existing version cache should reload")
-                    .expect("existing version should exist");
-
-                assert_eq!(imported_cached.id, imported_version_id);
-                assert!(!imported_cached.components.is_empty());
-                assert_eq!(
-                    existing_cached_after.effective_until,
-                    Some(imported_effective_from)
-                );
-            })
+            let response = send(
+                &app_state,
+                json_request(
+                    Method::POST,
+                    "/cost/template/import",
+                    json!({
+                        "template_key": "google.gemini-2.5-pro.text"
+                    }),
+                ),
+            )
             .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+
+            let imported_version_id = body["data"]["imported"]["version"]["id"]
+                .as_i64()
+                .expect("imported version id should exist");
+            let imported_effective_from = body["data"]["imported"]["version"]["effective_from"]
+                .as_i64()
+                .expect("imported effective_from should exist");
+
+            assert_eq!(body["code"], 0);
+            assert_eq!(
+                body["data"]["template"]["key"],
+                "google.gemini-2.5-pro.text"
+            );
+            assert!(
+                body["data"]["imported"]["components"]
+                    .as_array()
+                    .expect("components should be an array")
+                    .len()
+                    > 0
+            );
+
+            let imported_cached = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(imported_version_id)
+                .await
+                .expect("imported version cache should load")
+                .expect("imported version should exist");
+            let existing_cached_after = app_state
+                .catalog
+                .get_cost_catalog_version_by_id(existing.id)
+                .await
+                .expect("existing version cache should reload")
+                .expect("existing version should exist");
+
+            assert_eq!(imported_cached.id, imported_version_id);
+            assert!(!imported_cached.components.is_empty());
+            assert_eq!(
+                existing_cached_after.effective_until,
+                Some(imported_effective_from)
+            );
+        })
+        .await;
     }
 }

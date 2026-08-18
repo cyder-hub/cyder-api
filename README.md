@@ -34,11 +34,13 @@ Do not prioritize multi-tenant account systems unless explicitly required.
 
 Current code already provides:
 
-- multi-protocol proxying for OpenAI, Responses, Anthropic, Gemini, and Ollama
+- four public downstream protocol families: OpenAI, Responses, Anthropic, and Gemini
+- four upstream wire families: OpenAI, Responses, Anthropic, and Gemini
+- Ollama deployments connect through the ordinary `OPENAI_COMPATIBLE` Source recipe; native Ollama endpoints are not a Cyder gateway contract
 - deep request/response transformation, including streaming, tool calls, reasoning, and multimodal content
 - provider, model, and downstream API key management
 - API key governance: expiry, RPM, concurrency, daily/monthly quota, daily/monthly budget
-- provider circuit governance and runtime status views
+- provider runtime aggregation and operational status views
 - request patch rules with inheritance, conflict detection, and runtime trace
 - request-level log persistence with status, timing, token, and cost summaries
 - dashboard, provider runtime, record, API key, and cost management pages
@@ -151,6 +153,109 @@ Current built-in database backends are SQLite and PostgreSQL; other database URL
 
 Default `base_path` is `/ai`.
 
+### Proxy Request Identity
+
+Every request under the four public proxy prefixes—`/ai/openai/*`, `/ai/responses/*`, `/ai/anthropic/*`, and `/ai/gemini/*`—receives a gateway-owned canonical request identity:
+
+- Cyder always generates `X-Request-ID` as a lowercase, hyphenated UUID v4 at the outer proxy boundary.
+- A caller-provided `X-Request-ID` is ignored. It cannot become the canonical identity or override the response, upstream request, logs, or Request Record.
+- A caller may instead send one `X-Client-Request-ID`. It is accepted only when it is 1–64 ASCII characters from `[A-Za-z0-9._:-]`. Empty, unsafe, overlong, non-UTF-8, or repeated values are ignored without logging the rejected value.
+- A valid client ID is echoed in `X-Client-Request-ID` and stored as an optional, non-unique troubleshooting field. It is caller-provided and must never be treated as identity, authentication, authorization, or trusted evidence.
+
+The canonical ID is returned on success, authentication and client-identity errors, proxy-prefix 404/405 responses, and CORS preflight responses. It is sent to the selected upstream as `X-Request-ID`, included in structured request logs, and persisted in the existing Request Record paths. `X-Client-Request-ID` is never sent upstream. Manager, System, the base `/ai` fallback, and unknown `/ai/ollama/*` routes are outside this identity layer.
+
+Request Patch Create and Update reject both `x-request-id` and `x-client-request-id`; upstream response headers with those names also cannot override the gateway response. The Record page displays and copies the gateway ID, shows the optional caller ID separately, and searches both values by exact match. Request IDs are evidence keys, not metric labels or W3C Trace IDs. Protocol error bodies include the same canonical ID only where the downstream contract requires it: Anthropic at `request_id`, and Gemini in `google.rpc.ErrorInfo.metadata.request_id`.
+
+The paired R3.2 SQLite/PostgreSQL development migration is intentionally destructive for Request Records: upgrading clears historical `request_log` rows and their metrics-ingestion cursor before adding the constrained identity fields. It does not backfill legacy IDs, modify Request Patch rows, or delete already aggregated minute rollups. Back up the database first if historical pre-1.0 Request Records are needed outside Cyder.
+
+### Proxy Errors and Upstream Provider Errors
+
+Proxy failures use a stable error fact model with 29 enumerated `code` values, 11 execution stages, and four monotonic response-visibility states: `not_visible`, `headers_committed`, `body_started`, and `unknown`. Before response headers are committed, each public downstream protocol renders that fact in its own final envelope. Stage and visibility are operator facts emitted in structured events; they are not added to the current Request Record schema.
+
+| Downstream protocol | Envelope | Stable Cyder code | Canonical request ID |
+| --- | --- | --- | --- |
+| OpenAI | `{ "error": { "message", "type", "param": null, "code" } }` | `error.code` | `X-Request-ID` Header |
+| Responses | OpenAI-compatible error envelope | `error.code` | `X-Request-ID` Header |
+| Anthropic | `{ "type": "error", "error": { "type", "message", "code" }, "request_id" }` | `error.code` | Body `request_id`, `request-id`, and `X-Request-ID` use the same UUID |
+| Gemini | Google RPC-style `{ "error": { "code", "message", "status", "details" } }` | `error.details[0].metadata.cyder_code` | `error.details[0].metadata.request_id` and `X-Request-ID` use the same UUID |
+
+All four forms omit the old top-level `code` and `message`. The Gemini `details` array contains one `google.rpc.ErrorInfo` with domain `cyder.gateway`: its `reason` is the AIP-193-compatible uppercase form (for example, `RATE_LIMIT_ERROR`), while `metadata.cyder_code` preserves the exact lowercase Cyder stable code. Protocol-prefix 404 and 405 responses use `route_not_found_error` and `method_not_allowed_error`; 405 preserves the route's `Allow` Header. Anthropic HTTP 413 responses use the official `request_too_large` error type.
+
+When an upstream Provider explicitly returns a non-2xx HTTP response, Cyder preserves that Provider response for the current downstream caller inside the long-lived top-level `upstream_error` extension. For example, an upstream JSON 429 currently produces:
+
+```json
+{
+  "error": {
+    "message": "Upstream provider rate limited the request.",
+    "type": "rate_limit_error",
+    "param": null,
+    "code": "upstream_rate_limit_error"
+  },
+  "upstream_error": {
+    "status": 429,
+    "content_type": "application/json",
+    "body": {
+      "error": {
+        "message": "quota exceeded",
+        "type": "provider_quota"
+      }
+    },
+    "truncated": false,
+    "captured_bytes": 62,
+    "limit_bytes": 65536
+  }
+}
+```
+
+The Provider body has one reversible representation:
+
+- valid complete JSON uses `body`
+- other complete UTF-8 uses `body_text`
+- non-UTF-8 uses `body_base64` plus `"body_encoding": "base64"`
+- an empty body uses an empty `body_text`
+- an over-limit body uses `body_text` or `body_base64` for the captured prefix, sets `truncated: true`, and adds `"notice": "Upstream error body was truncated by the gateway."`
+
+`captured_bytes` is the number of exposed prefix bytes; Cyder does not claim to know the Provider's original total body length. Missing or invalid Provider `Content-Type` is represented as `null`. Other upstream headers, request URLs, queries, credentials, and gateway configuration are never attached to this extension.
+
+This is intentional pass-through diagnostics, not a claim that arbitrary Provider error bodies are safe. A gateway cannot reliably infer which Provider-owned fields are sensitive without destroying useful error evidence. Provider owners remain responsible for their error payloads, and downstream callers authorized to make the request receive the captured payload. Cyder wraps it, selects a reversible representation, and applies a configured disclosure limit; it does not silently rewrite or redact an explicit Provider error.
+
+Gateway-owned failures—such as invalid Provider configuration, connect/request failures without an HTTP response, response-read failures, and downstream response construction failures—do not carry `upstream_error`. Their public message remains fixed while bounded operator diagnostics stay in structured logs and the existing Request Record summary fields.
+
+Every protocol error returns JSON, `X-Request-ID`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. OpenAI, Responses, and Anthropic 401 responses also return `WWW-Authenticate: Bearer`; Gemini does not. Anthropic additionally returns `request-id`. `Retry-After` is emitted only from an exact local producer fact: resettable API Key limits use their next UTC bucket, and Provider Circuit uses its supplied remaining cooldown. Concurrency, ACL, half-open probe, and Provider HTTP errors without a local recovery fact omit it. Provider response Headers are not passed through by this contract.
+
+These envelopes apply only before response Headers are committed. R3.7 owns generic post-commit SSE resource termination, while protocol-specific stream completion remains with R3.14–R3.20; Cyder does not replace an in-progress stream with a new HTTP envelope. Ollama remains upstream-only, so unknown `/ai/ollama/*` paths use the ordinary application 404 without Proxy Request ID, CORS, security Headers, authentication, or Request Records.
+
+Complete non-stream responses accept only absent/`identity` or `gzip` Content-Encoding and are bounded independently on raw and decoded bytes. SSE requests advertise `Accept-Encoding: identity`; an SSE response with any other encoding is rejected before downstream Headers, while malformed UTF-8 or line/event/buffer/frame overflow after commit terminates the Body without writing a second protocol error. Successful responses inherit only a normalized `Content-Type`, never arbitrary Provider response Headers.
+
+Configure the disclosure limit in the generated or base YAML and restart:
+
+```yaml
+outbound_http:
+  connect_timeout_seconds: 10
+  auxiliary_total_timeout_seconds: 60
+proxy_request:
+  timeouts:
+    request_send_seconds: 7200
+    first_byte_seconds: 7200
+    response_idle_seconds: 7200
+    total_seconds: 7200
+  upstream_error_body_limit_bytes: 65536
+  non_stream_response:
+    raw_body_limit_bytes: 33554432
+    decoded_body_limit_bytes: 67108864
+  sse_response:
+    line_limit_bytes: 4194304
+    event_limit_bytes: 8388608
+    buffer_limit_bytes: 16777216
+    frame_count_limit: 1000000
+```
+
+Proxy timeout settings are finite and startup-only. The defaults are 2 hours for request send, first response Body, active response idle, and the request total; the accepted phase range is 60 through 86400 seconds and the total range is 300 through 86400 seconds. Auxiliary HTTP operations use a separate 60-second total, with an accepted range of 10 through 300 seconds. `outbound_http.connect_timeout_seconds` accepts 1 through 120 seconds and must not exceed the auxiliary total. The retired `proxy_request.connect_timeout_seconds`, `first_byte_timeout_seconds`, and `total_timeout_seconds` paths fail startup with their replacement paths; timeout values cannot be disabled by null, zero, or omission.
+
+The Provider error disclosure default is 65536 bytes and its accepted startup range is 1024 through 1048576. Complete non-stream responses default to 33554432 raw bytes and 67108864 decoded bytes; each accepts 1048576 through 536870912 bytes. The disclosure limit must not exceed the decoded-body limit. SSE defaults are 4194304 bytes per line, 8388608 bytes per event, 16777216 retained bytes, and 1000000 blank-line frames. SSE byte limits accept 1024 through 536870912, the frame limit accepts 1 through 10000000, and startup enforces `line <= event <= buffer`.
+
+All of these settings are startup-only. Invalid recognized values fail startup, and there is no environment-variable override or runtime write API for them. Change the base YAML and restart the server.
+
 The only environment variables that can override final config fields are:
 
 - `CYDER_HOST`
@@ -227,6 +332,24 @@ R2.7 is intentionally destructive for pre-1.0 Provider credentials. Its paired S
 
 Historical Provider secrets are not migrated or recoverable after this migration. The final pre-1.0-to-1.0 upgrade will require a clean database as described in the roadmap. The previous Portable Config import/export implementation has also been removed; no current endpoint, UI, file format, or compatibility path can be used to preserve or transfer these credentials. Portable Config will be redesigned from a new 1.0 domain contract in R7.9.
 
+### R3.20 Ollama boundary and upgrade warning
+
+R3.20 removes the unfinished native Ollama wire family. The current gateway
+has four upstream wire families and four downstream protocol families. An
+Ollama deployment can still be used through a regular `OPENAI_COMPATIBLE`
+Source pointed at its OpenAI-compatible `/v1` root; this is a deployment recipe,
+not a special Ollama Profile or transport.
+
+The R3.20 migration is destructive and has no down migration. Back up the
+database before upgrading. It clears all Request Logs and the four derived
+metric tables, and deletes Ollama Sources (including soft-deleted rows) plus
+their Source-bound model bindings and Request Patch variants/rules. It retains
+Providers, Provider Keys, Models, non-Ollama Sources, downstream API Keys and
+their governance rollups, Cost Catalog data, and Manager data. It does not
+convert base URLs, defaults, bindings, or patches; rebuild those explicitly
+after the upgrade. The full procedure and manual Chat/Embeddings smoke steps
+are in [Ollama through OpenAI-Compatible](docs/ollama-openai-compatible.md).
+
 ## Common Commands
 
 Human local shortcuts are available through `just` from the repository root:
@@ -264,11 +387,19 @@ Assuming `base_path: /ai`:
 
 ### Gateway Endpoints
 
-- OpenAI-compatible: `/ai/openai/v1/*`
-- Responses-compatible: `/ai/responses/v1/*`
-- Anthropic-compatible: `/ai/anthropic/v1/*`
-- Gemini-compatible: `/ai/gemini/v1/*`
-- Ollama-compatible: `/ai/ollama/api/*`
+- OpenAI-compatible: `/ai/openai/*` and `/ai/openai/v1/*`
+- Responses-compatible: `/ai/responses/*` and `/ai/responses/v1/*`
+- Anthropic-compatible: `/ai/anthropic/*` and `/ai/anthropic/v1/*`
+- Gemini-compatible: `/ai/gemini/*`, `/ai/gemini/v1/*`, and `/ai/gemini/v1beta/*`
+
+The unversioned routes are direct compatibility aliases for the current `/v1`
+semantics, not redirects or a permanent protocol-version claim. There is no
+public `/ai/ollama/*` route and no native `/api/chat`, `/api/embed`,
+`/api/generate`, or `/api/tags` gateway contract. See [Ollama through
+OpenAI-Compatible](docs/ollama-openai-compatible.md) for the supported
+`OPENAI_COMPATIBLE` recipe and the generated [Protocol Compatibility
+Matrix](docs/protocol-compatibility.md) for exact routes, profiles, current
+generation cells, utility boundaries, and evidence.
 
 ### System Endpoints
 
@@ -279,7 +410,7 @@ Assuming `base_path: /ai`:
 
 The Manager UI/API is same-origin and does not expose CORS. Its responses carry a strict script CSP, anti-embedding and content-type protections, a minimal permissions policy, and status-aware cache rules.
 
-The five public AI protocol prefixes allow browser calls from any Origin with GET/POST, mirrored request headers, exposed response headers, no credentials, and a 600-second preflight cache. Manager, System, and base fallback routes do not inherit this public CORS policy.
+The four public AI protocol prefixes allow browser calls from any Origin with GET/POST, mirrored request headers, exposed response headers, no credentials, and a 600-second preflight cache. Manager, System, and base fallback routes do not inherit this public CORS policy.
 
 Client IP defaults to the TCP peer. To trust a reverse proxy, add only its canonical CIDR to `client_identity.trusted_proxy_cidrs`; the proxy must clear untrusted forwarding headers before generating `Forwarded` or `X-Forwarded-For`. Invalid metadata from a trusted peer is rejected rather than silently falling back.
 

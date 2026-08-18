@@ -4,36 +4,42 @@ use axum::{body::Body, http::HeaderMap, response::Response};
 use serde_json::Value;
 
 use super::{
-    ProxyError,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
     cancellation::ProxyCancellationContext,
     request::ParsedProxyRequest,
+    request_context::ProxyRequestContext,
     runtime::{
         facade::{GenerationOrchestrationInput, execute_generation},
         route_resolver::ExecutionPlan,
     },
 };
 use crate::{
-    schema::enum_def::LlmApiType,
+    schema::enum_def::DownstreamProtocol,
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
 pub(super) struct GenerationExecutionInput {
     pub cancellation: ProxyCancellationContext,
     pub api_key: Arc<CacheApiKey>,
-    pub api_type: LlmApiType,
+    pub downstream_protocol: DownstreamProtocol,
     pub execution_plan: ExecutionPlan,
     pub is_stream: bool,
-    pub query_params: std::collections::HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
     pub parsed_request: ParsedProxyRequest,
 }
 
 pub(super) fn extract_model_from_request(data: &Value) -> Result<&str, ProxyError> {
-    data.get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ProxyError::BadRequest("'model' field must be a string".to_string()))
+    data.get("model").and_then(Value::as_str).ok_or_else(|| {
+        ProxyError::gateway(
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+            Some("'model' field must be a string".to_string()),
+            "'model' field must be a string",
+        )
+    })
 }
 
 pub(super) async fn execute_generation_proxy(
@@ -43,13 +49,12 @@ pub(super) async fn execute_generation_proxy(
     let GenerationExecutionInput {
         cancellation,
         api_key,
-        api_type,
+        downstream_protocol,
         execution_plan,
         is_stream,
-        query_params,
         original_headers,
         client_ip_addr,
-        start_time,
+        request_context,
         parsed_request,
     } = input;
     let ParsedProxyRequest { data } = parsed_request;
@@ -59,13 +64,12 @@ pub(super) async fn execute_generation_proxy(
         GenerationOrchestrationInput {
             cancellation,
             api_key,
-            api_type,
+            downstream_protocol,
             execution_plan,
             is_stream,
-            query_params,
             original_headers,
             client_ip_addr,
-            start_time,
+            request_context,
             data,
         },
     )
@@ -75,7 +79,7 @@ pub(super) async fn execute_generation_proxy(
 #[cfg(test)]
 mod tests {
     use super::extract_model_from_request;
-    use crate::proxy::ProxyError;
+    use crate::proxy::ProxyErrorCode;
     use serde_json::json;
 
     #[test]
@@ -94,6 +98,6 @@ mod tests {
 
         let err = extract_model_from_request(&data).unwrap_err();
 
-        assert!(matches!(err, ProxyError::BadRequest(_)));
+        assert_eq!(err.code(), ProxyErrorCode::InvalidRequestError);
     }
 }

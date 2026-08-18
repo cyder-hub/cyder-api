@@ -14,7 +14,7 @@ export function formatTimestamp(
   ms: number | string | Date | undefined | null,
   locale?: string | null,
 ): string {
-  if (!ms) return "";
+  if (ms == null || ms === "") return "";
 
   try {
     const date = ms instanceof Date ? ms : new Date(ms);

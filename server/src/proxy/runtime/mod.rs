@@ -1,10 +1,8 @@
 pub(crate) mod api_key_lease;
-pub(crate) mod capability;
 pub(crate) mod executor;
 pub(crate) mod facade;
 pub(crate) mod log_writer;
 pub(crate) mod materializer;
-pub(crate) mod reasoning_content_repair;
 pub(crate) mod request_patch;
 pub(crate) mod route_resolver;
 pub(crate) mod transport;

@@ -1,58 +1,83 @@
-mod cancellation;
+pub(crate) mod body;
 mod client;
+pub(crate) mod lifecycle;
 mod non_stream;
 mod response;
 mod stream;
+pub(crate) mod timing;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderMap, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use chrono::Utc;
 use reqwest::Method;
 use tokio::sync::Mutex as TokioMutex;
 
-pub(crate) use client::send_with_first_byte_timeout;
+pub(crate) use client::send_with_deadline;
 
-use self::{non_stream::handle_non_streaming_response, stream::handle_streaming_response};
+use self::{non_stream::handle_non_streaming_response, stream::handle_streaming_response_guarded};
+use crate::proxy::utility::UtilityResponseKind;
 use crate::{
     proxy::{
-        ProxyError,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
         cancellation::{CancellationDropGuard, ProxyCancellationContext},
         logging::RequestLogContext,
-        provider_governance::record_provider_failure,
         runtime::api_key_lease::ApiKeyRequestLeaseFinalizer,
-        util::serialize_upstream_response_headers_for_log,
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
-    service::runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
-    service::{app_state::AppState, cache::types::CacheCostCatalogVersion},
+    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
+    service::{
+        app_state::AppState, cache::types::CacheCostCatalogVersion,
+        upstream_response::normalize_content_type,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::proxy) enum ProxyResponseMode {
     Generation {
-        api_type: LlmApiType,
-        target_api_type: LlmApiType,
+        downstream_protocol: DownstreamProtocol,
+        upstream_protocol: UpstreamProtocol,
     },
     Utility {
-        api_type: LlmApiType,
+        downstream_protocol: DownstreamProtocol,
+        upstream_protocol: UpstreamProtocol,
+        kind: UtilityResponseKind,
     },
 }
 
 impl ProxyResponseMode {
-    fn api_types(self) -> (LlmApiType, LlmApiType) {
+    fn protocols(self) -> (DownstreamProtocol, UpstreamProtocol) {
         match self {
             Self::Generation {
-                api_type,
-                target_api_type,
-            } => (api_type, target_api_type),
-            Self::Utility { api_type } => (api_type, api_type),
+                downstream_protocol,
+                upstream_protocol,
+            }
+            | Self::Utility {
+                downstream_protocol,
+                upstream_protocol,
+                ..
+            } => (downstream_protocol, upstream_protocol),
         }
     }
+
+    fn expects_usage(self) -> bool {
+        match self {
+            Self::Generation { .. } => true,
+            Self::Utility { kind, .. } => kind == UtilityResponseKind::Embeddings,
+        }
+    }
+}
+
+fn is_sse_response(status: StatusCode, headers: &HeaderMap) -> bool {
+    status.is_success()
+        && normalize_content_type(headers)
+            .is_some_and(|content_type| content_type.essence == "text/event-stream")
 }
 
 pub(in crate::proxy) struct ProxyRequestOutcome {
@@ -65,12 +90,6 @@ pub(in crate::proxy) struct ProxyRequestFailure {
     pub log_context: RequestLogContext,
 }
 
-#[derive(Clone, Debug)]
-pub(in crate::proxy) struct ReasoningContinuationCaptureContext {
-    pub scope: ReasoningContinuationScope,
-    pub feature_enabled: bool,
-}
-
 fn finalize_send_failure_log_context(
     context: &mut RequestLogContext,
     url: &str,
@@ -79,9 +98,9 @@ fn finalize_send_failure_log_context(
     proxy_error: &ProxyError,
 ) {
     context.request_url = Some(url.to_string());
-    context.completion_ts = Some(completed_at);
+    context.completed_at = Some(completed_at);
     context.cost_catalog_version = cost_catalog_version.cloned();
-    context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+    context.overall_status = if proxy_error.code() == ProxyErrorCode::ClientCancelledError {
         RequestStatus::Cancelled
     } else {
         RequestStatus::Error
@@ -99,20 +118,38 @@ pub(in crate::proxy) async fn send_materialized_request(
     model_str: String,
     use_proxy: bool,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
-    mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
+    api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     response_mode: ProxyResponseMode,
-    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
+    response_visibility: ResponseVisibilityTracker,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
-    let provider_id = log_context.provider_id;
+    let coordinator = cancellation.coordinator();
+    let mut api_key_request_lease = api_key_request_lease.with_coordinator(coordinator.clone());
     let log_context = Arc::new(TokioMutex::new(log_context));
+    log_context
+        .lock()
+        .await
+        .set_completion_coordinator(coordinator.clone());
+    log_context
+        .lock()
+        .await
+        .attach_transport_timing(cancellation.timing());
 
     let client_bundle = app_state.infra.client_bundle().await;
-    let first_byte_timeout = client_bundle.proxy_request.first_byte_timeout();
+    let proxy_timeouts = client_bundle.proxy_request.timeouts.clone();
+    let upstream_error_body_limit_bytes =
+        client_bundle.proxy_request.upstream_error_body_limit_bytes;
+    let sse_response_limits = client_bundle.proxy_request.sse_response.clone();
     let client = match client_bundle.provider_client(use_proxy) {
         Ok(client) => client,
         Err(error) => {
-            let proxy_error = ProxyError::BadGateway(error.to_string());
+            let proxy_error = ProxyError::gateway(
+                ProxyErrorCode::ProviderConfigurationError,
+                ExecutionStage::Materialize,
+                ResponseVisibility::NotVisible,
+                None,
+                error.to_string(),
+            );
+            cancellation.try_terminate_error(&proxy_error);
             let completed_at = Utc::now().timestamp_millis();
             let failure_context = {
                 let mut context = log_context.lock().await;
@@ -133,39 +170,38 @@ pub(in crate::proxy) async fn send_materialized_request(
         }
     };
 
+    let (request_id, log_id) = {
+        let context = log_context.lock().await;
+        (context.request_id.clone(), context.id)
+    };
     let mut drop_cancellation_guard = CancellationDropGuard::new(
         cancellation.clone(),
-        format!(
-            "Client disconnected during proxy request for log_id {}.",
-            log_context.lock().await.id
-        ),
+        request_id,
+        log_id,
+        response_visibility.clone(),
+        ExecutionStage::Connect,
+        format!("Client disconnected during proxy request for log_id {log_id}."),
     );
 
-    log_context.lock().await.llm_request_sent_at = Some(Utc::now().timestamp_millis());
-    let response = match send_with_first_byte_timeout(
+    let request_sent_at = Utc::now().timestamp_millis();
+    cancellation
+        .timing()
+        .mark_upstream_request_sent(request_sent_at, tokio::time::Instant::now());
+    let response = match send_with_deadline(
         &cancellation,
         client
             .request(Method::POST, &url)
             .headers(headers)
             .body(data),
         "LLM request",
-        first_byte_timeout,
+        &proxy_timeouts,
     )
     .await
     {
         Ok(resp) => resp,
         Err(proxy_error) => {
             drop_cancellation_guard.disarm();
-            if !matches!(proxy_error, ProxyError::ClientCancelled(_)) {
-                record_provider_failure(
-                    &app_state,
-                    provider_id,
-                    &model_str,
-                    &proxy_error,
-                    provider_circuit_permit.as_ref(),
-                )
-                .await;
-            }
+            cancellation.try_terminate_error(&proxy_error);
             let completed_at = Utc::now().timestamp_millis();
 
             let mut context = log_context.lock().await;
@@ -184,39 +220,34 @@ pub(in crate::proxy) async fn send_materialized_request(
             });
         }
     };
+    let response_headers_at = Utc::now().timestamp_millis();
+    cancellation
+        .timing()
+        .mark_response_headers_received(response_headers_at, tokio::time::Instant::now());
+    drop_cancellation_guard.set_stage(ExecutionStage::UpstreamResponse);
 
-    {
-        let mut context = log_context.lock().await;
-        context.response_headers_json =
-            serialize_upstream_response_headers_for_log(response.headers());
-    }
-
-    let is_sse = response.status().is_success()
-        && response.headers().get(CONTENT_TYPE).map_or(false, |value| {
-            value.to_str().unwrap_or("").contains("text/event-stream")
-        });
+    let is_sse = is_sse_response(response.status(), response.headers());
     {
         let mut context = log_context.lock().await;
         context.is_stream = is_sse;
     }
 
     let result = if is_sse {
-        let (api_type, target_api_type) = response_mode.api_types();
-        match handle_streaming_response(
+        let (downstream_protocol, upstream_protocol) = response_mode.protocols();
+        match handle_streaming_response_guarded(
             &app_state,
             cancellation.clone(),
-            provider_id,
             log_context.clone(),
             model_str,
             response,
             &url,
             cost_catalog_version,
             api_key_request_lease,
-            provider_circuit_permit,
-            api_type,
-            target_api_type,
-            reasoning_capture.clone(),
-            first_byte_timeout,
+            downstream_protocol,
+            upstream_protocol,
+            proxy_timeouts.clone(),
+            sse_response_limits,
+            response_visibility.clone(),
         )
         .await
         {
@@ -234,21 +265,54 @@ pub(in crate::proxy) async fn send_materialized_request(
         }
     } else {
         handle_non_streaming_response(
-            &app_state,
             &cancellation,
-            provider_id,
             log_context,
             model_str,
             response,
             &url,
             cost_catalog_version.as_ref(),
             api_key_request_lease,
-            provider_circuit_permit,
             response_mode,
-            reasoning_capture.as_ref(),
+            upstream_error_body_limit_bytes,
+            &client_bundle.proxy_request.non_stream_response,
+            response_visibility,
+            &proxy_timeouts,
         )
         .await
     };
     drop_cancellation_guard.disarm();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
+
+    use super::is_sse_response;
+
+    #[test]
+    fn sse_detection_requires_success_and_exact_normalized_media_essence() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("Text/Event-Stream; Charset=UTF-8"),
+        );
+        assert!(is_sse_response(StatusCode::OK, &headers));
+        assert!(!is_sse_response(StatusCode::BAD_REQUEST, &headers));
+
+        for value in [
+            "text/event-streamish",
+            "application/text/event-stream",
+            "text/event-stream; charset=invalid charset",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_str(value).unwrap());
+            assert!(!is_sse_response(StatusCode::OK, &headers), "{value}");
+        }
+
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        duplicate.append(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        assert!(!is_sse_response(StatusCode::OK, &duplicate));
+    }
 }

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -12,20 +12,24 @@ use crate::{
             RequestLogRecord,
         },
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
-    service::app_state::StateRouter,
+    schema::enum_def::{
+        DownstreamProtocol, ModelKind, RequestStatus, UpstreamProfileType, UpstreamProtocol,
+    },
+    service::app_state::{AppState, StateRouter},
     utils::HttpResult,
 };
 
 use super::error::BaseError;
 
 #[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 struct RequestLogQueryParams {
     api_key_id: Option<i64>,
     provider_id: Option<i64>,
     model_id: Option<i64>,
+    source_id: Option<i64>,
     status: Option<RequestStatus>,
-    user_api_type: Option<LlmApiType>,
+    downstream_protocol: Option<DownstreamProtocol>,
     final_error_code: Option<String>,
     latency_ms_min: Option<i64>,
     latency_ms_max: Option<i64>,
@@ -46,8 +50,9 @@ impl From<RequestLogQueryParams> for DbRequestLogQueryPayload {
             api_key_id: value.api_key_id,
             provider_id: value.provider_id,
             model_id: value.model_id,
+            source_id: value.source_id,
             status: value.status,
-            user_api_type: value.user_api_type,
+            downstream_protocol: value.downstream_protocol,
             final_error_code: value.final_error_code,
             latency_ms_min: value.latency_ms_min,
             latency_ms_max: value.latency_ms_max,
@@ -67,15 +72,17 @@ impl From<RequestLogQueryParams> for DbRequestLogQueryPayload {
 #[derive(Serialize, Debug)]
 struct RequestLogListItemResponse {
     id: i64,
+    request_id: String,
+    client_request_id: Option<String>,
     api_key_id: i64,
     requested_model_name: Option<String>,
     base_requested_model_name: Option<String>,
-    resolved_reasoning_suffix: Option<String>,
-    resolved_reasoning_preset: Option<String>,
+    resolved_patch_suffix: Option<String>,
     overall_status: RequestStatus,
     request_received_at: i64,
     upstream_request_sent_at: Option<i64>,
-    response_started_to_client_at: Option<i64>,
+    first_response_body_at: Option<i64>,
+    first_token_at: Option<i64>,
     completed_at: Option<i64>,
     is_stream: bool,
     provider_id: Option<i64>,
@@ -83,6 +90,9 @@ struct RequestLogListItemResponse {
     model_id: Option<i64>,
     model_name: Option<String>,
     real_model_name: Option<String>,
+    source_id: Option<i64>,
+    source_selection_reason: Option<String>,
+    source_profile_type: Option<UpstreamProfileType>,
     upstream_http_status: Option<i32>,
     estimated_cost_nanos: Option<i64>,
     estimated_cost_currency: Option<String>,
@@ -97,15 +107,17 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
     fn from(value: RequestLogListItem) -> Self {
         Self {
             id: value.id,
+            request_id: value.request_id,
+            client_request_id: value.client_request_id,
             api_key_id: value.api_key_id,
             requested_model_name: value.requested_model_name,
             base_requested_model_name: value.base_requested_model_name,
-            resolved_reasoning_suffix: value.resolved_reasoning_suffix,
-            resolved_reasoning_preset: value.resolved_reasoning_preset,
+            resolved_patch_suffix: value.resolved_patch_suffix,
             overall_status: value.overall_status,
             request_received_at: value.request_received_at,
             upstream_request_sent_at: value.upstream_request_sent_at,
-            response_started_to_client_at: value.response_started_to_client_at,
+            first_response_body_at: value.first_response_body_at,
+            first_token_at: value.first_token_at,
             completed_at: value.completed_at,
             is_stream: value.is_stream,
             provider_id: value.provider_id,
@@ -113,6 +125,9 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
             model_id: value.model_id,
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
+            source_id: value.source_id,
+            source_selection_reason: value.source_selection_reason,
+            source_profile_type: value.source_profile_type_snapshot,
             upstream_http_status: value.upstream_http_status,
             estimated_cost_nanos: value.estimated_cost_nanos,
             estimated_cost_currency: value.estimated_cost_currency,
@@ -128,29 +143,39 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
 #[derive(Serialize, Debug)]
 struct RequestLogResponse {
     id: i64,
+    request_id: String,
+    client_request_id: Option<String>,
     api_key_id: i64,
     requested_model_name: Option<String>,
     base_requested_model_name: Option<String>,
-    resolved_reasoning_suffix: Option<String>,
-    resolved_reasoning_preset: Option<String>,
-    user_api_type: LlmApiType,
+    resolved_patch_suffix: Option<String>,
+    downstream_protocol: DownstreamProtocol,
     overall_status: RequestStatus,
     final_error_code: Option<String>,
     final_error_message: Option<String>,
     request_received_at: i64,
     upstream_request_sent_at: Option<i64>,
-    response_started_to_client_at: Option<i64>,
+    upstream_response_headers_at: Option<i64>,
+    upstream_first_body_chunk_at: Option<i64>,
+    first_response_body_at: Option<i64>,
+    first_token_at: Option<i64>,
+    max_upstream_response_idle_ms: Option<i64>,
     completed_at: Option<i64>,
     is_stream: bool,
     client_ip: Option<String>,
     provider_id: Option<i64>,
     provider_api_key_id: Option<i64>,
     model_id: Option<i64>,
+    source_id: Option<i64>,
+    source_selection_reason: Option<String>,
     provider_key: Option<String>,
     provider_name: Option<String>,
     model_name: Option<String>,
     real_model_name: Option<String>,
-    llm_api_type: Option<LlmApiType>,
+    model_kind: Option<ModelKind>,
+    source_profile_type: Option<UpstreamProfileType>,
+    source_base_url: Option<String>,
+    upstream_protocol: Option<UpstreamProtocol>,
     upstream_http_status: Option<i32>,
     estimated_cost_nanos: Option<i64>,
     estimated_cost_currency: Option<String>,
@@ -175,29 +200,39 @@ impl From<RequestLogRecord> for RequestLogResponse {
     fn from(value: RequestLogRecord) -> Self {
         Self {
             id: value.id,
+            request_id: value.request_id,
+            client_request_id: value.client_request_id,
             api_key_id: value.api_key_id,
             requested_model_name: value.requested_model_name,
             base_requested_model_name: value.base_requested_model_name,
-            resolved_reasoning_suffix: value.resolved_reasoning_suffix,
-            resolved_reasoning_preset: value.resolved_reasoning_preset,
-            user_api_type: value.user_api_type,
+            resolved_patch_suffix: value.resolved_patch_suffix,
+            downstream_protocol: value.downstream_protocol,
             overall_status: value.overall_status,
             final_error_code: value.final_error_code,
             final_error_message: value.final_error_message,
             request_received_at: value.request_received_at,
             upstream_request_sent_at: value.upstream_request_sent_at,
-            response_started_to_client_at: value.response_started_to_client_at,
+            upstream_response_headers_at: value.upstream_response_headers_at,
+            upstream_first_body_chunk_at: value.upstream_first_body_chunk_at,
+            first_response_body_at: value.first_response_body_at,
+            first_token_at: value.first_token_at,
+            max_upstream_response_idle_ms: value.max_upstream_response_idle_ms,
             completed_at: value.completed_at,
             is_stream: value.is_stream,
             client_ip: value.client_ip,
             provider_id: value.provider_id,
             provider_api_key_id: value.provider_api_key_id,
             model_id: value.model_id,
+            source_id: value.source_id,
+            source_selection_reason: value.source_selection_reason,
             provider_key: value.provider_key_snapshot,
             provider_name: value.provider_name_snapshot,
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
-            llm_api_type: value.llm_api_type,
+            model_kind: value.model_kind_snapshot,
+            source_profile_type: value.source_profile_type_snapshot,
+            source_base_url: value.source_base_url_snapshot,
+            upstream_protocol: value.upstream_protocol,
             upstream_http_status: value.upstream_http_status,
             estimated_cost_nanos: value.estimated_cost_nanos,
             estimated_cost_currency: value.estimated_cost_currency,
@@ -221,9 +256,10 @@ impl From<RequestLogRecord> for RequestLogResponse {
 }
 
 async fn list_request_log(
+    State(app_state): State<std::sync::Arc<AppState>>,
     Query(params): Query<RequestLogQueryParams>,
 ) -> Result<HttpResult<ListResult<RequestLogListItemResponse>>, BaseError> {
-    let result = RequestLog::list(params.into())?;
+    let result = RequestLog::list(&app_state.database, params.into()).await?;
     Ok(HttpResult::new(ListResult {
         total: result.total,
         page: result.page,
@@ -232,8 +268,13 @@ async fn list_request_log(
     }))
 }
 
-async fn get_request_log(Path(id): Path<i64>) -> Result<HttpResult<RequestLogResponse>, BaseError> {
-    Ok(HttpResult::new(RequestLog::get_by_id(id)?.into()))
+async fn get_request_log(
+    State(app_state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<HttpResult<RequestLogResponse>, BaseError> {
+    Ok(HttpResult::new(
+        RequestLog::get_by_id(&app_state.database, id).await?.into(),
+    ))
 }
 
 pub fn create_record_router() -> StateRouter {
@@ -243,4 +284,127 @@ pub fn create_record_router() -> StateRouter {
             .route("/list", get(list_request_log))
             .route("/{id}", get(get_request_log)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{DbRequestLogQueryPayload, RequestLogQueryParams, RequestLogResponse};
+    use crate::{
+        database::request_log::RequestLogRecord,
+        schema::enum_def::{DownstreamProtocol, ModelKind, RequestStatus, UpstreamProfileType},
+    };
+
+    fn request_log_record() -> RequestLogRecord {
+        RequestLogRecord {
+            id: 1,
+            request_id: "018fa7d8-6a00-4c9a-8f7e-111111111111".to_string(),
+            client_request_id: Some("controller-test".to_string()),
+            api_key_id: 2,
+            requested_model_name: Some("provider/model".to_string()),
+            base_requested_model_name: Some("provider/model".to_string()),
+            resolved_patch_suffix: None,
+            downstream_protocol: DownstreamProtocol::Openai,
+            overall_status: RequestStatus::Success,
+            final_error_code: None,
+            final_error_message: None,
+            request_received_at: 100,
+            upstream_request_sent_at: None,
+            upstream_response_headers_at: None,
+            upstream_first_body_chunk_at: None,
+            first_response_body_at: None,
+            first_token_at: None,
+            max_upstream_response_idle_ms: None,
+            completed_at: Some(110),
+            is_stream: false,
+            client_ip: None,
+            provider_id: None,
+            provider_api_key_id: None,
+            model_id: None,
+            source_id: Some(3),
+            source_selection_reason: None,
+            provider_key_snapshot: None,
+            provider_name_snapshot: None,
+            model_name_snapshot: None,
+            real_model_name_snapshot: None,
+            model_kind_snapshot: Some(ModelKind::Chat),
+            source_profile_type_snapshot: Some(UpstreamProfileType::Openai),
+            source_base_url_snapshot: Some("https://api.example.com/v1".to_string()),
+            upstream_protocol: None,
+            upstream_http_status: None,
+            estimated_cost_nanos: None,
+            estimated_cost_currency: None,
+            cost_catalog_id: None,
+            cost_catalog_version_id: None,
+            cost_snapshot_json: None,
+            total_input_tokens: None,
+            total_output_tokens: None,
+            input_text_tokens: None,
+            output_text_tokens: None,
+            input_image_tokens: None,
+            output_image_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            created_at: 100,
+            updated_at: 110,
+        }
+    }
+
+    #[test]
+    fn request_log_query_accepts_only_new_four_value_downstream_filter() {
+        let parsed: RequestLogQueryParams =
+            serde_json::from_value(json!({"downstream_protocol": "RESPONSES"}))
+                .expect("new downstream filter should parse");
+        let database_query = DbRequestLogQueryPayload::from(parsed);
+        assert_eq!(
+            database_query.downstream_protocol,
+            Some(DownstreamProtocol::Responses)
+        );
+
+        assert!(
+            serde_json::from_value::<RequestLogQueryParams>(
+                json!({"downstream_protocol": "OLLAMA"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RequestLogQueryParams>(json!({"user_api_type": "OPENAI"}))
+                .is_err(),
+            "legacy query aliases must not be accepted"
+        );
+    }
+
+    #[test]
+    fn request_log_query_maps_source_filter() {
+        let parsed: RequestLogQueryParams =
+            serde_json::from_value(json!({"source_id": 42})).expect("source filter should parse");
+        let database_query = DbRequestLogQueryPayload::from(parsed);
+        assert_eq!(database_query.source_id, Some(42));
+    }
+
+    #[test]
+    fn request_log_detail_serializes_directional_fields_without_legacy_aliases() {
+        let response = RequestLogResponse::from(request_log_record());
+        let value = serde_json::to_value(response).expect("response should serialize");
+
+        assert_eq!(value["downstream_protocol"], "OPENAI");
+        assert!(value["upstream_protocol"].is_null());
+        assert_eq!(value["request_id"], "018fa7d8-6a00-4c9a-8f7e-111111111111");
+        assert_eq!(value["client_request_id"], "controller-test");
+        assert_eq!(value["source_id"], 3);
+        assert!(value.get("source_key").is_none());
+        assert_eq!(value["source_profile_type"], "OPENAI");
+        assert_eq!(value["source_base_url"], "https://api.example.com/v1");
+        assert!(value.get("first_response_body_at").is_some());
+        assert!(value.get("first_token_at").is_some());
+        assert!(value.get("upstream_response_headers_at").is_some());
+        assert!(value.get("upstream_first_body_chunk_at").is_some());
+        assert!(value.get("max_upstream_response_idle_ms").is_some());
+        assert!(value.get("response_started_to_client_at").is_none());
+        assert!(value.get("user_api_type").is_none());
+        assert!(value.get("llm_api_type").is_none());
+    }
 }

@@ -1,166 +1,143 @@
 import { request } from "./http";
 import type {
-  ModelEffectiveRequestPatchResponse,
-  ModelReasoningConfigPayload,
-  ProviderReasoningConfigPayload,
-  ProviderReasoningConfigPreviewPayload,
-  ReasoningConfigCatalog,
-  ReasoningConfigPreview,
-  ReasoningConfigResponse,
+  ModelRequestPatchOverviewResponse,
   RequestPatchExplainResponse,
-  RequestPatchMutationOutcome,
-  RequestPatchPayload,
-  RequestPatchRule,
-  RequestPatchUpdatePayload,
+  RequestPatchPreviewResponse,
+  RequestPatchVariantAggregate,
+  RequestPatchVariantInput,
+  RequestPatchVariantListResponse,
 } from "./types";
 
-export function getReasoningConfigCatalog(): Promise<ReasoningConfigCatalog> {
-  return request.get("/ai/manager/api/reasoning_config/catalog");
+export function listSourceRequestPatchVariants(
+  providerId: number,
+  sourceId: number,
+): Promise<RequestPatchVariantListResponse> {
+  return request.get(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/request_patch`,
+  );
 }
 
-export function getProviderReasoningConfig(
-  providerId: number | string,
-): Promise<ReasoningConfigResponse> {
-  return request.get(`/ai/manager/api/provider/${providerId}/reasoning_config`);
+export function createSourceRequestPatchVariant(
+  providerId: number,
+  sourceId: number,
+  payload: RequestPatchVariantInput,
+): Promise<RequestPatchVariantAggregate> {
+  return request.post(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/request_patch/variants`,
+    payload,
+  );
 }
 
-export function updateProviderReasoningConfig(
-  providerId: number | string,
-  payload: ProviderReasoningConfigPayload,
-): Promise<ReasoningConfigResponse> {
+export function updateSourceRequestPatchVariant(
+  providerId: number,
+  sourceId: number,
+  variantId: number,
+  payload: RequestPatchVariantInput,
+): Promise<RequestPatchVariantAggregate> {
   return request.put(
-    `/ai/manager/api/provider/${providerId}/reasoning_config`,
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/request_patch/variants/${variantId}`,
     payload,
   );
 }
 
-export function deleteProviderReasoningConfig(
-  providerId: number | string,
-): Promise<void> {
+export function deleteSourceRequestPatchVariant(
+  providerId: number,
+  sourceId: number,
+  variantId: number,
+): Promise<RequestPatchVariantAggregate> {
   return request.delete(
-    `/ai/manager/api/provider/${providerId}/reasoning_config`,
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/request_patch/variants/${variantId}`,
   );
 }
 
-export function previewProviderReasoningConfig(
-  providerId: number | string,
-): Promise<ReasoningConfigPreview> {
-  return request.get(
-    `/ai/manager/api/provider/${providerId}/reasoning_config/preview`,
-  );
-}
-
-export function previewProviderReasoningConfigDraft(
-  providerId: number | string,
-  payload: ProviderReasoningConfigPreviewPayload,
-): Promise<ReasoningConfigPreview> {
+export function previewSourceRequestPatchVariant(
+  providerId: number,
+  sourceId: number,
+  payload: RequestPatchVariantInput & { variant_id?: number | null },
+): Promise<RequestPatchPreviewResponse> {
   return request.post(
-    `/ai/manager/api/provider/${providerId}/reasoning_config/preview`,
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/request_patch/preview`,
     payload,
   );
 }
 
-export function getModelReasoningConfig(
-  modelId: number | string,
-): Promise<ReasoningConfigResponse> {
-  return request.get(`/ai/manager/api/model/${modelId}/reasoning_config`);
-}
-
-export function updateModelReasoningConfig(
-  modelId: number | string,
-  payload: ModelReasoningConfigPayload,
-): Promise<ReasoningConfigResponse> {
-  return request.put(`/ai/manager/api/model/${modelId}/reasoning_config`, payload);
-}
-
-export function deleteModelReasoningConfig(
-  modelId: number | string,
-): Promise<void> {
-  return request.delete(`/ai/manager/api/model/${modelId}/reasoning_config`);
-}
-
-export function previewModelReasoningConfig(
-  modelId: number | string,
-): Promise<ReasoningConfigPreview> {
-  return request.get(
-    `/ai/manager/api/model/${modelId}/reasoning_config/preview`,
-  );
-}
-
-export function previewModelReasoningConfigDraft(
-  modelId: number | string,
-  payload: ModelReasoningConfigPayload,
-): Promise<ReasoningConfigPreview> {
-  return request.post(
-    `/ai/manager/api/model/${modelId}/reasoning_config/preview`,
-    payload,
-  );
-}
-
-export function listProviderRequestPatches(
-  id: number | string,
-): Promise<RequestPatchRule[]> {
-  return request.get(`/ai/manager/api/provider/${id}/request_patch`);
-}
-
-export function createProviderRequestPatch(
-  id: number | string,
-  payload: RequestPatchPayload,
-): Promise<RequestPatchMutationOutcome> {
-  return request.post(`/ai/manager/api/provider/${id}/request_patch`, payload);
-}
-
-export function updateProviderRequestPatch(
-  id: number | string,
-  ruleId: number | string,
-  payload: RequestPatchUpdatePayload,
-): Promise<RequestPatchMutationOutcome> {
-  return request.put(`/ai/manager/api/provider/${id}/request_patch/${ruleId}`, payload);
-}
-
-export function deleteProviderRequestPatch(
-  id: number | string,
-  ruleId: number | string,
-): Promise<void> {
-  return request.delete(`/ai/manager/api/provider/${id}/request_patch/${ruleId}`);
-}
-
-export function listModelRequestPatches(
-  id: number | string,
-): Promise<RequestPatchRule[]> {
-  return request.get(`/ai/manager/api/model/${id}/request_patch`);
-}
-
-export function createModelRequestPatch(
-  id: number | string,
-  payload: RequestPatchPayload,
-): Promise<RequestPatchMutationOutcome> {
-  return request.post(`/ai/manager/api/model/${id}/request_patch`, payload);
-}
-
-export function updateModelRequestPatch(
-  id: number | string,
-  ruleId: number | string,
-  payload: RequestPatchUpdatePayload,
-): Promise<RequestPatchMutationOutcome> {
-  return request.put(`/ai/manager/api/model/${id}/request_patch/${ruleId}`, payload);
-}
-
-export function deleteModelRequestPatch(
-  id: number | string,
-  ruleId: number | string,
-): Promise<void> {
-  return request.delete(`/ai/manager/api/model/${id}/request_patch/${ruleId}`);
-}
-
-export function getModelEffectiveRequestPatches(
-  id: number | string,
-): Promise<ModelEffectiveRequestPatchResponse> {
-  return request.get(`/ai/manager/api/model/${id}/request_patch/effective`);
-}
-
-export function getModelRequestPatchExplain(
-  id: number | string,
+export function explainSourceRequestPatchVariants(
+  providerId: number,
+  sourceId: number,
+  suffix?: string | null,
 ): Promise<RequestPatchExplainResponse> {
-  return request.get(`/ai/manager/api/model/${id}/request_patch/explain`);
+  return request.get(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/request_patch/explain`,
+    suffix ? { params: { suffix } } : undefined,
+  );
+}
+
+export function listModelRequestPatchOverview(
+  modelId: number,
+): Promise<ModelRequestPatchOverviewResponse> {
+  return request.get(`/ai/manager/api/model/${modelId}/request_patch`);
+}
+
+export function listModelSourceRequestPatchVariants(
+  modelId: number,
+  sourceId: number,
+): Promise<RequestPatchVariantListResponse> {
+  return request.get(
+    `/ai/manager/api/model/${modelId}/sources/${sourceId}/request_patch`,
+  );
+}
+
+export function createModelSourceRequestPatchVariant(
+  modelId: number,
+  sourceId: number,
+  payload: RequestPatchVariantInput,
+): Promise<RequestPatchVariantAggregate> {
+  return request.post(
+    `/ai/manager/api/model/${modelId}/sources/${sourceId}/request_patch/variants`,
+    payload,
+  );
+}
+
+export function updateModelSourceRequestPatchVariant(
+  modelId: number,
+  sourceId: number,
+  variantId: number,
+  payload: RequestPatchVariantInput,
+): Promise<RequestPatchVariantAggregate> {
+  return request.put(
+    `/ai/manager/api/model/${modelId}/sources/${sourceId}/request_patch/variants/${variantId}`,
+    payload,
+  );
+}
+
+export function deleteModelSourceRequestPatchVariant(
+  modelId: number,
+  sourceId: number,
+  variantId: number,
+): Promise<RequestPatchVariantAggregate> {
+  return request.delete(
+    `/ai/manager/api/model/${modelId}/sources/${sourceId}/request_patch/variants/${variantId}`,
+  );
+}
+
+export function previewModelSourceRequestPatchVariant(
+  modelId: number,
+  sourceId: number,
+  payload: RequestPatchVariantInput & { variant_id?: number | null },
+): Promise<RequestPatchPreviewResponse> {
+  return request.post(
+    `/ai/manager/api/model/${modelId}/sources/${sourceId}/request_patch/preview`,
+    payload,
+  );
+}
+
+export function explainModelSourceRequestPatchVariants(
+  modelId: number,
+  sourceId: number,
+  suffix?: string | null,
+): Promise<RequestPatchExplainResponse> {
+  return request.get(
+    `/ai/manager/api/model/${modelId}/sources/${sourceId}/request_patch/explain`,
+    suffix ? { params: { suffix } } : undefined,
+  );
 }

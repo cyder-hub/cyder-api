@@ -51,14 +51,19 @@ Before adding a protocol field, answer these in the code review and tests:
 
 ## Diagnostics Boundary
 
-Provider modules must not hand-write transform diagnostic JSON. Use only the
-diagnostics owner entry points:
+Provider modules must not hand-write transform diagnostic JSON or emit private
+diagnostic SSE events. Record typed internal facts through the diagnostics
+owner entry points:
 
-- `diagnostics::build_transform_diagnostic`
-- `diagnostics::build_stream_diagnostic_sse`
-- `diagnostics::build_fatal_stream_error_payload`
+- `apply_transform_policy`
+- `diagnostics::record_stream_diagnostic`
+
+The request/response/stream facades own `diagnostics::capture_transform_diagnostics`;
+provider modules only emit typed policy facts into that active capture.
 
 Provider-specific code may build provider metadata, lifecycle state, and native
 payloads. Lossy conversion, capability downgrade, and fatal transform errors must
-flow through the diagnostics owner so replay, request logs, and stream snapshots
-keep a stable schema.
+flow through the typed transform result and diagnostics owners so replay,
+request logs, and stream snapshots keep a stable schema. Header-committed fatal
+errors are encoded only by `stream::error::encode_fatal_stream_error`; provider
+adapters must not route them back through the failing transform chain.

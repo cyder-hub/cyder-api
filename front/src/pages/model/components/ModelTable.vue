@@ -13,7 +13,10 @@
             {{ t("modelPage.table.realModel") }}
           </TableHead>
           <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
-            {{ t("modelPage.table.capabilities") }}
+            {{ t("modelPage.table.kind") }}
+          </TableHead>
+          <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
+            {{ t("modelPage.table.sourceConfig") }}
           </TableHead>
           <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
             {{ t("modelPage.table.enabled") }}
@@ -40,14 +43,24 @@
             {{ model.real_model_name || t("common.notAvailable") }}
           </TableCell>
           <TableCell>
-            <div class="flex max-w-md flex-wrap gap-1.5">
+            <Badge variant="outline" class="font-mono text-[11px]">
+              {{ t(`modelKinds.${model.model_kind}`) }}
+            </Badge>
+          </TableCell>
+          <TableCell>
+            <div class="flex max-w-md flex-wrap items-center gap-1.5">
+              <Badge variant="secondary" class="font-mono text-[11px]">
+                {{ model.source_config.source_selection_mode }}
+              </Badge>
+              <span class="font-mono text-xs text-gray-500">
+                {{ model.source_config.declared_source_count }}
+              </span>
               <Badge
-                v-for="capability in capabilityItems"
-                :key="capability.key"
-                :variant="model[capability.key] ? 'secondary' : 'outline'"
-                class="font-mono text-[11px]"
+                v-if="model.source_config.warnings.length > 0"
+                variant="outline"
+                class="font-mono text-[11px] text-gray-600"
               >
-                {{ t(capability.labelKey) }}
+                {{ t("modelPage.sourceWarnings", { count: model.source_config.warnings.length }) }}
               </Badge>
             </div>
           </TableCell>
@@ -76,11 +89,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { ModelSummaryItem } from "@/services/types";
-import type { ModelCapabilityItem } from "../types";
 
 defineProps<{
   models: ModelSummaryItem[];
-  capabilityItems: ModelCapabilityItem[];
 }>();
 
 defineEmits<{

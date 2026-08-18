@@ -79,6 +79,10 @@ impl From<OpenAiResponse> for UnifiedResponse {
 
                 let mut content = Vec::new();
 
+                if let Some(reasoning) = choice.message.reasoning_content {
+                    content.push(UnifiedContentPart::Reasoning { text: reasoning });
+                }
+
                 if let Some(c) = choice.message.content {
                     match c {
                         OpenAiContent::Text(text) => {
@@ -96,6 +100,26 @@ impl From<OpenAiResponse> for UnifiedResponse {
                                             detail: image_url.detail,
                                         });
                                     }
+                                    OpenAiContentPart::InputAudio { input_audio } => {
+                                        content.push(UnifiedContentPart::AudioData {
+                                            data: input_audio.data,
+                                            format: input_audio.format,
+                                        });
+                                    }
+                                    OpenAiContentPart::File { file } => {
+                                        if let Some(file_id) = file.file_id {
+                                            content.push(UnifiedContentPart::FileId {
+                                                file_id,
+                                                filename: file.filename,
+                                            });
+                                        } else if let Some(file_data) = file.file_data {
+                                            content.push(UnifiedContentPart::FileData {
+                                                data: file_data,
+                                                mime_type: "application/octet-stream".to_string(),
+                                                filename: file.filename,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -108,8 +132,12 @@ impl From<OpenAiResponse> for UnifiedResponse {
 
                 if let Some(tool_calls) = choice.message.tool_calls {
                     for tc in tool_calls {
-                        let args: Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                        let args: Value = if tc.function.arguments.trim().is_empty() {
+                            json!({})
+                        } else {
+                            serde_json::from_str(&tc.function.arguments)
+                                .expect("OpenAI tool arguments are validated by the adapter")
+                        };
                         content.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                             id: tc.id,
                             name: tc.function.name,
@@ -151,9 +179,10 @@ impl From<OpenAiResponse> for UnifiedResponse {
                     message,
                     items: Vec::new(),
                     finish_reason: choice.finish_reason,
-                    logprobs: choice
-                        .logprobs
-                        .map(|lp| serde_json::to_value(lp).unwrap_or(Value::Null)),
+                    logprobs: choice.logprobs.map(|lp| {
+                        serde_json::to_value(lp)
+                            .expect("OpenAI logprobs serialization is structurally infallible")
+                    }),
                 }
             })
             .collect();
@@ -192,6 +221,7 @@ impl From<UnifiedResponse> for OpenAiResponse {
                 let mut tool_call_id = None;
                 let mut name = None;
                 let mut refusal = None;
+                let mut reasoning_content = String::new();
                 let mut has_multimodal = false;
 
                 for part in choice.message.content {
@@ -209,7 +239,7 @@ impl From<UnifiedResponse> for OpenAiResponse {
                             });
                         }
                         UnifiedContentPart::Reasoning { text } => {
-                            content_parts.push(OpenAiContentPart::Text { text });
+                            reasoning_content.push_str(&text);
                         }
                         UnifiedContentPart::ImageData { mime_type, data } => {
                             has_multimodal = true;
@@ -220,6 +250,8 @@ impl From<UnifiedResponse> for OpenAiResponse {
                                 },
                             });
                         }
+                        UnifiedContentPart::AudioData { .. }
+                        | UnifiedContentPart::FileId { .. } => {}
                         UnifiedContentPart::FileUrl {
                             url,
                             mime_type,
@@ -288,6 +320,7 @@ impl From<UnifiedResponse> for OpenAiResponse {
                 let message = OpenAiMessage {
                     role,
                     content,
+                    reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                     tool_calls: if tool_calls.is_empty() {
                         None
                     } else {
@@ -302,7 +335,10 @@ impl From<UnifiedResponse> for OpenAiResponse {
                     index: choice.index,
                     message,
                     finish_reason: choice.finish_reason,
-                    logprobs: choice.logprobs.and_then(|v| serde_json::from_value(v).ok()),
+                    logprobs: choice.logprobs.map(|value| {
+                        serde_json::from_value(value)
+                            .expect("OpenAI target logprobs are adapter-validated")
+                    }),
                 }
             })
             .collect();

@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { normalizeError } from "@/utils/error";
 import * as providerService from "@/services/providers";
-import type { ProviderSummaryItem } from "@/services/types";
+import type { ProviderSummaryItem, UpstreamSource } from "@/services/types";
 import {
   buildProviderNameById,
   buildProviderOptions,
@@ -13,6 +13,7 @@ import {
 
 export const useProviderStore = defineStore("provider", () => {
   const providers = ref<ProviderSummaryItem[]>([]);
+  const sources = ref<UpstreamSource[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
 
@@ -33,6 +34,20 @@ export const useProviderStore = defineStore("provider", () => {
     }
   }
 
+  async function fetchProviderSources() {
+    try {
+      const details = await providerService.getProviderDetailList();
+      sources.value = details.flatMap((item) => item.provider.upstream_sources);
+      return sources.value;
+    } catch (err) {
+      const normalizedError = normalizeError(err);
+      console.error("Failed to fetch provider sources:", normalizedError);
+      sources.value = [];
+      error.value = normalizedError.message;
+      throw normalizedError;
+    }
+  }
+
   const providerOptions = computed(() =>
     buildProviderOptions(providers.value),
   );
@@ -46,11 +61,13 @@ export const useProviderStore = defineStore("provider", () => {
 
   return {
     providers,
+    sources,
     loading,
     error,
     providerOptions,
     providerNameById,
     getProviderById,
     fetchProviders,
+    fetchProviderSources,
   };
 });

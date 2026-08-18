@@ -13,9 +13,10 @@ export const FALLBACK_RECORD_PAGE_SIZE = 10;
 export const DEFAULT_RECORD_FILTERS: RecordFilters = {
   api_key_id: 0,
   provider_id: 0,
+  source_id: 0,
   model_id: 0,
   status: "ALL",
-  user_api_type: "ALL",
+  downstream_protocol: "ALL",
   final_error_code: "",
   latency_ms_min: "",
   latency_ms_max: "",
@@ -36,8 +37,16 @@ export const VALID_RECORD_STATUSES = new Set([
   "CANCELLED",
 ]);
 
+export const VALID_DOWNSTREAM_PROTOCOLS = new Set([
+  "ALL",
+  "OPENAI",
+  "RESPONSES",
+  "ANTHROPIC",
+  "GEMINI",
+]);
+
 export const RECORD_ADVANCED_FILTER_KEYS: Array<keyof RecordFilters> = [
-  "user_api_type",
+  "downstream_protocol",
   "final_error_code",
   "latency_ms_min",
   "latency_ms_max",
@@ -53,6 +62,7 @@ const validDetailTabs = new Set(RECORD_DETAIL_TABS.map((tab) => tab.value));
 
 export type RecordQueryEntityValidators = {
   hasProviderId?: (id: number) => boolean;
+  hasSourceId?: (id: number) => boolean;
   hasApiKeyId?: (id: number) => boolean;
   hasModelId?: (id: number) => boolean;
 };
@@ -92,6 +102,13 @@ export const parseRecordStatusQuery = (value: LocationQuery[string]) => {
   return raw && VALID_RECORD_STATUSES.has(raw) ? raw : DEFAULT_RECORD_FILTERS.status;
 };
 
+export const parseDownstreamProtocolQuery = (value: LocationQuery[string]) => {
+  const raw = getSingleRecordQueryValue(value);
+  return raw && VALID_DOWNSTREAM_PROTOCOLS.has(raw)
+    ? (raw as RecordFilters["downstream_protocol"])
+    : DEFAULT_RECORD_FILTERS.downstream_protocol;
+};
+
 export const parseRecordDetailTabQuery = (
   value: LocationQuery[string],
 ): RecordDetailTab => {
@@ -124,6 +141,10 @@ export const parseRecordQueryState = (
     query.api_key_id,
     DEFAULT_RECORD_FILTERS.api_key_id,
   );
+  const sourceId = parsePositiveIntRecordQuery(
+    query.source_id,
+    DEFAULT_RECORD_FILTERS.source_id,
+  );
   const modelId = parsePositiveIntRecordQuery(
     query.model_id,
     DEFAULT_RECORD_FILTERS.model_id,
@@ -134,9 +155,10 @@ export const parseRecordQueryState = (
     provider_id: acceptsEntityId(providerId, validators.hasProviderId)
       ? providerId
       : 0,
+    source_id: acceptsEntityId(sourceId, validators.hasSourceId) ? sourceId : 0,
     model_id: acceptsEntityId(modelId, validators.hasModelId) ? modelId : 0,
     status: parseRecordStatusQuery(query.status),
-    user_api_type: parseStringRecordQuery(query.user_api_type, "ALL") || "ALL",
+    downstream_protocol: parseDownstreamProtocolQuery(query.downstream_protocol),
     final_error_code: parseStringRecordQuery(query.final_error_code),
     latency_ms_min: parseStringRecordQuery(query.latency_ms_min),
     latency_ms_max: parseStringRecordQuery(query.latency_ms_max),
@@ -239,9 +261,11 @@ export const buildRecordListParams = (
   page_size: pageSize,
   api_key_id: filters.api_key_id || undefined,
   provider_id: filters.provider_id || undefined,
+  source_id: filters.source_id || undefined,
   model_id: filters.model_id || undefined,
   status: filters.status === "ALL" ? undefined : filters.status,
-  user_api_type: filters.user_api_type === "ALL" ? undefined : filters.user_api_type,
+  downstream_protocol:
+    filters.downstream_protocol === "ALL" ? undefined : filters.downstream_protocol,
   final_error_code: filters.final_error_code.trim() || undefined,
   latency_ms_min: numberRecordParam(filters.latency_ms_min),
   latency_ms_max: numberRecordParam(filters.latency_ms_max),

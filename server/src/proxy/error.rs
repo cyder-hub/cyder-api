@@ -1,280 +1,261 @@
-use axum::{
-    Json,
-    response::{IntoResponse, Response},
-};
+use axum::http::HeaderValue;
 use reqwest::{Error as ReqwestError, StatusCode};
-use serde::Serialize;
 use std::fmt;
 
-pub(crate) const REQUEST_PATCH_CONFLICT_ERROR: &str = "request_patch_conflict_error";
+use crate::service::transform::{TransformFailure, TransformFailureOrigin};
+use crate::service::upstream_response::UpstreamHttpErrorKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProxyLogLevel {
-    Debug,
-    Warn,
-    Error,
-}
+pub(crate) mod fact;
+pub(crate) mod response;
+pub(crate) mod upstream;
+pub(crate) mod visibility;
 
-/// Structured error type for the proxy module.
-///
-/// All proxy errors are serialized to a flat JSON format:
-/// ```json
-/// { "code": "invalid_request_error", "message": "..." }
-/// ```
-#[derive(Debug)]
-pub enum ProxyError {
-    /// 401 — API key missing, invalid, or format error.
-    Unauthorized(String),
-    /// 403 — API key exists but is disabled.
-    KeyDisabled(String),
-    /// 403 — API key exists but is expired.
-    KeyExpired(String),
-    /// 400 — Malformed request body, missing fields, invalid model format.
-    BadRequest(String),
-    /// 403 — Access control policy denied the request.
-    Forbidden(String),
-    /// 429 — API key local rate limit was exceeded.
-    RateLimited(String),
-    /// 429 — API key concurrent request limit was exceeded.
-    ConcurrencyLimited(String),
-    /// 429 — API key quota was exhausted.
-    QuotaExhausted(String),
-    /// 403 — API key budget was exhausted.
-    BudgetExhausted(String),
-    /// 503 — Provider circuit is open and this candidate was skipped.
-    ProviderOpenSkipped(String),
-    /// 503 — Provider half-open probe is already in flight and this candidate was skipped.
-    ProviderHalfOpenProbeInFlight(String),
-    /// 413 — Request body exceeds configured size or upstream rejects payload size.
-    PayloadTooLarge(String),
-    /// 499 — Client disconnected before the request lifecycle completed.
-    ClientCancelled(String),
-    /// 500 — Effective provider/model request patch rules conflict.
-    RequestPatchConflict(String),
-    /// 500 — Internal gateway error (cache failure, serialization, etc.).
-    InternalError(String),
-    /// 500 — Request/response transform or serialization failed.
-    ProtocolTransformError(String),
-    /// 400 — Upstream rejected the request as invalid.
-    UpstreamBadRequest(String),
-    /// 429 — Upstream rate limited the request.
-    UpstreamRateLimited(String),
-    /// 502 — Upstream authentication/authorization failed.
-    UpstreamAuthentication(String),
-    /// 502 — Upstream LLM service unreachable or returned a connection error.
-    BadGateway(String),
-    /// 503 — Upstream service returned a server-side failure.
-    UpstreamService(String),
-    /// 504 — Upstream request or body read timed out.
-    UpstreamTimeout(String),
-}
-
-impl ProxyError {
-    pub(crate) fn operator_log_level(&self) -> ProxyLogLevel {
-        match self {
-            ProxyError::Unauthorized(_)
-            | ProxyError::KeyDisabled(_)
-            | ProxyError::KeyExpired(_)
-            | ProxyError::BadRequest(_)
-            | ProxyError::Forbidden(_)
-            | ProxyError::RateLimited(_)
-            | ProxyError::ConcurrencyLimited(_)
-            | ProxyError::QuotaExhausted(_)
-            | ProxyError::BudgetExhausted(_)
-            | ProxyError::PayloadTooLarge(_)
-            | ProxyError::ClientCancelled(_) => ProxyLogLevel::Debug,
-            ProxyError::ProviderOpenSkipped(_) | ProxyError::ProviderHalfOpenProbeInFlight(_) => {
-                ProxyLogLevel::Warn
-            }
-            ProxyError::RequestPatchConflict(_)
-            | ProxyError::InternalError(_)
-            | ProxyError::ProtocolTransformError(_)
-            | ProxyError::UpstreamBadRequest(_)
-            | ProxyError::UpstreamRateLimited(_)
-            | ProxyError::UpstreamAuthentication(_)
-            | ProxyError::BadGateway(_)
-            | ProxyError::UpstreamService(_)
-            | ProxyError::UpstreamTimeout(_) => ProxyLogLevel::Error,
-        }
-    }
-
-    pub(crate) fn status_code(&self) -> StatusCode {
-        match self {
-            ProxyError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            ProxyError::KeyDisabled(_) => StatusCode::FORBIDDEN,
-            ProxyError::KeyExpired(_) => StatusCode::FORBIDDEN,
-            ProxyError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            ProxyError::Forbidden(_) => StatusCode::FORBIDDEN,
-            ProxyError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-            ProxyError::ConcurrencyLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-            ProxyError::QuotaExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
-            ProxyError::BudgetExhausted(_) => StatusCode::FORBIDDEN,
-            ProxyError::ProviderOpenSkipped(_) | ProxyError::ProviderHalfOpenProbeInFlight(_) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            ProxyError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            ProxyError::ClientCancelled(_) => {
-                StatusCode::from_u16(499).expect("499 should be a valid status code")
-            }
-            ProxyError::RequestPatchConflict(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ProxyError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ProxyError::ProtocolTransformError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ProxyError::UpstreamBadRequest(_) => StatusCode::BAD_REQUEST,
-            ProxyError::UpstreamRateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-            ProxyError::UpstreamAuthentication(_) => StatusCode::BAD_GATEWAY,
-            ProxyError::BadGateway(_) => StatusCode::BAD_GATEWAY,
-            ProxyError::UpstreamService(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ProxyError::UpstreamTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
-        }
-    }
-
-    pub(crate) fn error_code(&self) -> &'static str {
-        match self {
-            ProxyError::Unauthorized(_) => "authentication_error",
-            ProxyError::KeyDisabled(_) => "api_key_disabled_error",
-            ProxyError::KeyExpired(_) => "api_key_expired_error",
-            ProxyError::BadRequest(_) => "invalid_request_error",
-            ProxyError::Forbidden(_) => "permission_error",
-            ProxyError::RateLimited(_) => "rate_limit_error",
-            ProxyError::ConcurrencyLimited(_) => "concurrency_limit_error",
-            ProxyError::QuotaExhausted(_) => "quota_exhausted_error",
-            ProxyError::BudgetExhausted(_) => "budget_exhausted_error",
-            ProxyError::ProviderOpenSkipped(_) => "provider_open_skipped",
-            ProxyError::ProviderHalfOpenProbeInFlight(_) => "provider_half_open_skipped",
-            ProxyError::PayloadTooLarge(_) => "body_too_large_error",
-            ProxyError::ClientCancelled(_) => "client_cancelled_error",
-            ProxyError::RequestPatchConflict(_) => REQUEST_PATCH_CONFLICT_ERROR,
-            ProxyError::InternalError(_) => "server_error",
-            ProxyError::ProtocolTransformError(_) => "protocol_transform_error",
-            ProxyError::UpstreamBadRequest(_) => "upstream_invalid_request_error",
-            ProxyError::UpstreamRateLimited(_) => "upstream_rate_limit_error",
-            ProxyError::UpstreamAuthentication(_) => "upstream_authentication_error",
-            ProxyError::BadGateway(_) => "upstream_error",
-            ProxyError::UpstreamService(_) => "upstream_service_error",
-            ProxyError::UpstreamTimeout(_) => "upstream_timeout_error",
-        }
-    }
-
-    pub(crate) fn message(&self) -> &str {
-        match self {
-            ProxyError::Unauthorized(msg)
-            | ProxyError::KeyDisabled(msg)
-            | ProxyError::KeyExpired(msg)
-            | ProxyError::BadRequest(msg)
-            | ProxyError::Forbidden(msg)
-            | ProxyError::RateLimited(msg)
-            | ProxyError::ConcurrencyLimited(msg)
-            | ProxyError::QuotaExhausted(msg)
-            | ProxyError::BudgetExhausted(msg)
-            | ProxyError::ProviderOpenSkipped(msg)
-            | ProxyError::ProviderHalfOpenProbeInFlight(msg)
-            | ProxyError::PayloadTooLarge(msg)
-            | ProxyError::ClientCancelled(msg)
-            | ProxyError::RequestPatchConflict(msg)
-            | ProxyError::InternalError(msg)
-            | ProxyError::ProtocolTransformError(msg)
-            | ProxyError::UpstreamBadRequest(msg)
-            | ProxyError::UpstreamRateLimited(msg)
-            | ProxyError::UpstreamAuthentication(msg)
-            | ProxyError::BadGateway(msg)
-            | ProxyError::UpstreamService(msg)
-            | ProxyError::UpstreamTimeout(msg) => msg,
-        }
-    }
-}
+#[allow(unused_imports)] // C1 exports consumed by the retry producer and HTTP adapter tasks.
+pub(crate) use fact::{
+    ErrorResponseHints, ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel,
+    RetryAfterSeconds, TimeoutPhase,
+};
+pub(crate) use response::{ProtocolErrorResponseAdapter, RouterRejection, proxy_error_category};
+pub(crate) use upstream::UpstreamErrorPayload;
+pub(crate) use visibility::{ResponseVisibility, ResponseVisibilityTracker};
 
 pub(super) fn classify_request_body_error(message: impl Into<String>) -> ProxyError {
     let message = message.into();
     if is_body_too_large_message(&message) {
-        ProxyError::PayloadTooLarge(format!(
-            "Request body exceeds configured size limit: {message}"
-        ))
+        let operator_message = format!("Request body exceeds configured size limit: {message}");
+        ProxyError::gateway(
+            ProxyErrorCode::RequestBodyTooLargeError,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+            Some(operator_message.clone()),
+            operator_message,
+        )
     } else {
-        ProxyError::BadRequest(format!("Failed to read request body: {message}"))
+        let operator_message = format!("Failed to read request body: {message}");
+        ProxyError::gateway(
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+            Some(operator_message.clone()),
+            operator_message,
+        )
     }
 }
 
-pub(crate) fn protocol_transform_error(operation: &str, err: impl fmt::Display) -> ProxyError {
-    ProxyError::ProtocolTransformError(format!("{operation}: {err}"))
+pub(crate) fn protocol_transform_error(
+    stage: ExecutionStage,
+    response_visibility: ResponseVisibility,
+    operation: &str,
+    err: impl fmt::Display,
+) -> ProxyError {
+    ProxyError::gateway(
+        ProxyErrorCode::ProtocolTransformError,
+        stage,
+        response_visibility,
+        None,
+        format!("{operation}: {err}"),
+    )
 }
 
-pub(crate) fn classify_reqwest_error(context: &str, err: &ReqwestError) -> ProxyError {
-    if err.is_timeout() {
-        return ProxyError::UpstreamTimeout(format!("{context} timed out: {err}"));
-    }
-
-    if let Some(status) = err.status() {
-        return classify_upstream_status(status, err.to_string().as_bytes());
-    }
-
-    if err.is_connect() {
-        return ProxyError::BadGateway(format!("{context} could not connect to upstream: {err}"));
-    }
-
-    if err.is_body() || err.is_decode() {
-        return ProxyError::BadGateway(format!(
-            "{context} failed while reading upstream body: {err}"
-        ));
-    }
-
-    if err.is_request() {
-        return ProxyError::BadGateway(format!("{context} could not be sent to upstream: {err}"));
-    }
-
-    ProxyError::BadGateway(format!("{context} failed: {err}"))
+pub(crate) fn classify_transform_failure(
+    failure: &TransformFailure,
+    response_visibility: ResponseVisibility,
+) -> ProxyError {
+    let (code, stage) = match failure.origin {
+        TransformFailureOrigin::DownstreamInput => {
+            (ProxyErrorCode::InvalidRequestError, ExecutionStage::Parse)
+        }
+        TransformFailureOrigin::TargetCapability => (
+            ProxyErrorCode::UnsupportedCapabilityError,
+            ExecutionStage::Capability,
+        ),
+        TransformFailureOrigin::UpstreamPayload => (
+            ProxyErrorCode::UpstreamResponseError,
+            ExecutionStage::UpstreamResponse,
+        ),
+        TransformFailureOrigin::TargetEncoding | TransformFailureOrigin::InternalInvariant => (
+            ProxyErrorCode::ProtocolTransformError,
+            ExecutionStage::Transform,
+        ),
+    };
+    ProxyError::gateway(
+        code,
+        stage,
+        response_visibility,
+        None,
+        format!(
+            "Transform failed at {} for {}: {}",
+            failure.phase.as_str(),
+            failure.semantic_unit.as_str(),
+            failure.reason_code.as_str()
+        ),
+    )
 }
 
-pub(crate) fn classify_upstream_status(status: StatusCode, body: &[u8]) -> ProxyError {
-    let body_message = extract_upstream_error_message(body);
-    let message = format!("Upstream returned {}: {}", status.as_u16(), body_message);
+pub(crate) fn classify_reqwest_error(
+    context: &str,
+    err: &ReqwestError,
+    stage: ExecutionStage,
+    response_visibility: ResponseVisibility,
+) -> ProxyError {
+    let kind = UpstreamHttpErrorKind::from_reqwest(err);
+    let (code, message) = if kind == UpstreamHttpErrorKind::Timeout {
+        let phase = if err.is_connect() {
+            TimeoutPhase::Connect
+        } else {
+            match stage {
+                ExecutionStage::UpstreamResponse => TimeoutPhase::ResponseIdle,
+                ExecutionStage::Connect => TimeoutPhase::RequestSend,
+                _ => TimeoutPhase::Total,
+            }
+        };
+        return ProxyError::upstream_timeout(
+            phase,
+            stage,
+            response_visibility,
+            format!("{context} timed out ({})", kind.as_str()),
+        );
+    } else if kind == UpstreamHttpErrorKind::Connect {
+        (
+            ProxyErrorCode::UpstreamConnectError,
+            format!(
+                "{context} could not connect to upstream ({})",
+                kind.as_str()
+            ),
+        )
+    } else if matches!(
+        kind,
+        UpstreamHttpErrorKind::Body | UpstreamHttpErrorKind::Decode
+    ) {
+        (
+            ProxyErrorCode::UpstreamResponseError,
+            format!(
+                "{context} failed while reading upstream body ({})",
+                kind.as_str()
+            ),
+        )
+    } else if kind == UpstreamHttpErrorKind::Request {
+        (
+            ProxyErrorCode::UpstreamRequestError,
+            format!(
+                "{context} could not be sent to upstream ({})",
+                kind.as_str()
+            ),
+        )
+    } else if kind == UpstreamHttpErrorKind::Status || stage == ExecutionStage::UpstreamResponse {
+        (
+            ProxyErrorCode::UpstreamResponseError,
+            format!(
+                "{context} failed while processing the upstream response ({})",
+                kind.as_str()
+            ),
+        )
+    } else {
+        (
+            ProxyErrorCode::UpstreamRequestError,
+            format!("{context} failed ({})", kind.as_str()),
+        )
+    };
 
-    match status {
+    ProxyError::gateway(code, stage, response_visibility, None, message)
+}
+
+#[cfg(test)]
+pub(crate) fn classify_upstream_status(
+    status: StatusCode,
+    content_type: Option<&HeaderValue>,
+    body: &[u8],
+    limit_bytes: usize,
+    response_visibility: ResponseVisibility,
+) -> ProxyError {
+    classify_upstream_status_captured(
+        status,
+        content_type,
+        &body[..body.len().min(limit_bytes)],
+        limit_bytes,
+        body.len() > limit_bytes,
+        response_visibility,
+    )
+}
+
+pub(crate) fn classify_upstream_status_captured(
+    status: StatusCode,
+    content_type: Option<&HeaderValue>,
+    captured_body: &[u8],
+    limit_bytes: usize,
+    truncated: bool,
+    response_visibility: ResponseVisibility,
+) -> ProxyError {
+    let code = match status {
         StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
-            ProxyError::UpstreamTimeout(message)
+            ProxyErrorCode::UpstreamTimeoutError
         }
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            ProxyError::UpstreamAuthentication(message)
+            ProxyErrorCode::UpstreamAuthenticationError
         }
-        StatusCode::PAYLOAD_TOO_LARGE => ProxyError::PayloadTooLarge(message),
-        StatusCode::TOO_MANY_REQUESTS => ProxyError::UpstreamRateLimited(message),
-        status if status.is_client_error() => ProxyError::UpstreamBadRequest(message),
-        status if status.is_server_error() => ProxyError::UpstreamService(message),
-        _ => ProxyError::BadGateway(message),
-    }
+        StatusCode::PAYLOAD_TOO_LARGE => ProxyErrorCode::UpstreamPayloadTooLargeError,
+        StatusCode::TOO_MANY_REQUESTS => ProxyErrorCode::UpstreamRateLimitError,
+        status if status.is_client_error() => ProxyErrorCode::UpstreamInvalidRequestError,
+        status if status.is_server_error() => ProxyErrorCode::UpstreamServiceError,
+        _ => ProxyErrorCode::UpstreamUnexpectedStatusError,
+    };
+    let payload = UpstreamErrorPayload::from_captured_prefix(
+        status,
+        content_type,
+        captured_body,
+        limit_bytes,
+        truncated,
+    );
+    let body_message = summarize_upstream_error_body(captured_body, truncated);
+
+    ProxyError::upstream(
+        code,
+        ExecutionStage::UpstreamResponse,
+        response_visibility,
+        payload,
+        format!("Upstream returned {}: {body_message}", status.as_u16()),
+    )
 }
 
-fn extract_upstream_error_message(body: &[u8]) -> String {
+fn summarize_upstream_error_body(body: &[u8], truncated: bool) -> String {
     if body.is_empty() {
         return "empty upstream error body".to_string();
     }
 
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-        if let Some(message) = value
+        if value
             .get("error")
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
+            .is_some()
         {
-            return truncate_message(message);
+            return format!(
+                "JSON error body with a message field ({} captured bytes{})",
+                body.len(),
+                if truncated { ", truncated" } else { "" }
+            );
         }
 
-        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
-            return truncate_message(message);
+        if value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            return format!(
+                "JSON error body with a message field ({} captured bytes{})",
+                body.len(),
+                if truncated { ", truncated" } else { "" }
+            );
         }
 
-        return truncate_message(&value.to_string());
+        return "JSON error body without a message field".to_string();
     }
 
-    truncate_message(&String::from_utf8_lossy(body))
-}
-
-fn truncate_message(message: &str) -> String {
-    const MAX_LEN: usize = 512;
-    if message.chars().count() <= MAX_LEN {
-        return message.to_string();
+    if std::str::from_utf8(body).is_ok() {
+        format!("text error body ({} bytes)", body.len())
+    } else {
+        format!("binary error body ({} bytes)", body.len())
     }
-
-    let truncated = message.chars().take(MAX_LEN).collect::<String>();
-    format!("{truncated}...")
 }
 
 fn is_body_too_large_message(message: &str) -> bool {
@@ -284,207 +265,313 @@ fn is_body_too_large_message(message: &str) -> bool {
         || normalized.contains("payload too large")
 }
 
-impl fmt::Display for ProxyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}", self.error_code(), self.message())
-    }
-}
-
-#[derive(Serialize)]
-struct ProxyErrorBody {
-    code: &'static str,
-    message: String,
-}
-
-impl IntoResponse for ProxyError {
-    fn into_response(self) -> Response {
-        let status = self.status_code();
-        let body = ProxyErrorBody {
-            code: self.error_code(),
-            message: self.message().to_string(),
-        };
-        (status, Json(body)).into_response()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ProxyError, ProxyLogLevel, classify_request_body_error, classify_upstream_status,
-        protocol_transform_error,
+        ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode, ProxyLogLevel,
+        ResponseVisibility, classify_request_body_error, classify_reqwest_error,
+        classify_transform_failure, classify_upstream_status, protocol_transform_error,
     };
-    use axum::response::IntoResponse;
+    use crate::{
+        proxy::request_context::RequestId,
+        schema::enum_def::DownstreamProtocol,
+        service::transform::{
+            TransformFailureOrigin, TransformPhase, TransformReasonCode, TransformSemanticUnit,
+            diagnostics::transform_failure,
+        },
+    };
+    use axum::{body::to_bytes, http::HeaderValue};
     use reqwest::StatusCode;
+    use tokio::net::TcpListener;
 
     #[test]
-    fn classify_request_body_error_maps_length_limit_to_payload_too_large() {
-        assert!(matches!(
-            classify_request_body_error("length limit exceeded"),
-            ProxyError::PayloadTooLarge(_)
-        ));
+    fn classify_request_body_error_maps_length_limit_to_request_payload_code() {
+        let error = classify_request_body_error("length limit exceeded");
+        assert_eq!(error.code(), ProxyErrorCode::RequestBodyTooLargeError);
+        assert_eq!(error.stage(), ExecutionStage::Parse);
+        assert_eq!(error.response_visibility(), ResponseVisibility::NotVisible);
+    }
+
+    #[tokio::test]
+    async fn reqwest_error_classification_never_copies_url_or_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let marker = "query-secret-marker";
+        let reqwest_error = reqwest::Client::new()
+            .get(format!("http://{address}/private?api_key={marker}"))
+            .send()
+            .await
+            .expect_err("closed local address must reject the connection");
+        assert!(
+            reqwest_error
+                .url()
+                .is_some_and(|url| url.as_str().contains(marker)),
+            "fixture must prove the source error carries the sensitive URL"
+        );
+
+        let error = classify_reqwest_error(
+            "sentinel request",
+            &reqwest_error,
+            ExecutionStage::Connect,
+            ResponseVisibility::NotVisible,
+        );
+        assert_eq!(error.code(), ProxyErrorCode::UpstreamConnectError);
+        assert!(!error.operator_message().contains(marker));
+        assert!(!error.operator_message().contains(&address.to_string()));
+        assert!(!error.operator_message().contains("api_key"));
+    }
+
+    #[tokio::test]
+    async fn classify_upstream_status_preserves_json_payload() {
+        let content_type = HeaderValue::from_static("application/json");
+        let error = classify_upstream_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(&content_type),
+            br#"{"error":{"message":"quota exceeded","type":"provider_quota"}}"#,
+            65_536,
+            ResponseVisibility::NotVisible,
+        );
+
+        assert_eq!(error.code(), ProxyErrorCode::UpstreamRateLimitError);
+        assert_eq!(error.stage(), ExecutionStage::UpstreamResponse);
+        assert!(
+            error
+                .operator_message()
+                .contains("JSON error body with a message field")
+        );
+        assert!(!error.operator_message().contains("quota exceeded"));
+        assert_eq!(
+            error.response_hints().retry_after(),
+            None,
+            "provider Retry-After is not a local R3.4 producer fact"
+        );
+
+        let response =
+            ProtocolErrorResponseAdapter::new(DownstreamProtocol::Openai, RequestId::new())
+                .proxy_error_response(error);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be json");
+        assert_eq!(
+            body["error"]["message"],
+            "Upstream provider rate limited the request."
+        );
+        assert_eq!(body["upstream_error"]["status"], 429);
+        assert_eq!(
+            body["upstream_error"]["body"]["error"]["type"],
+            "provider_quota"
+        );
     }
 
     #[test]
-    fn classify_upstream_status_extracts_json_message() {
-        let err = classify_upstream_status(
-            StatusCode::TOO_MANY_REQUESTS,
-            br#"{"error":{"message":"quota exceeded"}}"#,
-        );
+    fn classify_every_upstream_5xx_status_with_only_504_as_timeout() {
+        for raw_status in 500..=599 {
+            let status = StatusCode::from_u16(raw_status).expect("5xx status should be valid");
+            let error = classify_upstream_status(
+                status,
+                None,
+                b"provider failure",
+                65_536,
+                ResponseVisibility::NotVisible,
+            );
+            let expected_code = if raw_status == 504 {
+                ProxyErrorCode::UpstreamTimeoutError
+            } else {
+                ProxyErrorCode::UpstreamServiceError
+            };
+            let expected_status = if raw_status == 504 {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
 
-        match err {
-            ProxyError::UpstreamRateLimited(message) => {
-                assert!(message.contains("quota exceeded"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+            assert_eq!(
+                error.code(),
+                expected_code,
+                "classification for {raw_status}"
+            );
+            assert_eq!(
+                error.status_code(),
+                expected_status,
+                "downstream status for {raw_status}"
+            );
+            assert_eq!(
+                error.stage(),
+                ExecutionStage::UpstreamResponse,
+                "stage for {raw_status}"
+            );
+            assert_eq!(
+                error.response_visibility(),
+                ResponseVisibility::NotVisible,
+                "visibility for {raw_status}"
+            );
+            assert_eq!(
+                error.timeout_phase(),
+                None,
+                "provider status {raw_status} must not carry a local timeout phase"
+            );
+            assert_eq!(
+                error.response_hints().retry_after(),
+                None,
+                "provider Retry-After must not become a gateway hint for {raw_status}"
+            );
+            assert_eq!(
+                error
+                    .upstream_error()
+                    .expect("explicit upstream status should preserve payload")
+                    .status(),
+                status.as_u16(),
+                "upstream status payload for {raw_status}"
+            );
         }
     }
 
     #[test]
-    fn protocol_transform_error_uses_dedicated_code() {
-        let response =
-            protocol_transform_error("serialize final request body", "boom").into_response();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    fn upstream_operator_summary_never_copies_complete_body_fallbacks() {
+        for (body, expected_summary) in [
+            (
+                br#"{"detail":"provider-secret-json-detail"}"#.as_slice(),
+                "JSON error body without a message field",
+            ),
+            (
+                b"provider-secret-text-detail".as_slice(),
+                "text error body (27 bytes)",
+            ),
+            (
+                b"\xff\x00provider-secret-binary-detail".as_slice(),
+                "binary error body (31 bytes)",
+            ),
+        ] {
+            let error = classify_upstream_status(
+                StatusCode::BAD_GATEWAY,
+                None,
+                body,
+                65_536,
+                ResponseVisibility::NotVisible,
+            );
+
+            assert!(error.operator_message().contains(expected_summary));
+            assert!(!error.operator_message().contains("provider-secret"));
+        }
+    }
+
+    #[test]
+    fn protocol_transform_error_uses_fixed_public_message() {
+        let error = protocol_transform_error(
+            ExecutionStage::Transform,
+            ResponseVisibility::NotVisible,
+            "serialize final request body",
+            "secret detail",
+        );
+
+        assert_eq!(error.code(), ProxyErrorCode::ProtocolTransformError);
+        assert_eq!(
+            error.client_payload().public_message(),
+            "The gateway could not transform the request or response."
+        );
+        assert!(error.operator_message().contains("secret detail"));
+    }
+
+    #[test]
+    fn transform_failure_origin_has_one_stable_proxy_classification() {
+        for (origin, expected_code, expected_stage, expected_status) in [
+            (
+                TransformFailureOrigin::DownstreamInput,
+                ProxyErrorCode::InvalidRequestError,
+                ExecutionStage::Parse,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                TransformFailureOrigin::TargetCapability,
+                ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                TransformFailureOrigin::UpstreamPayload,
+                ProxyErrorCode::UpstreamResponseError,
+                ExecutionStage::UpstreamResponse,
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                TransformFailureOrigin::TargetEncoding,
+                ProxyErrorCode::ProtocolTransformError,
+                ExecutionStage::Transform,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                TransformFailureOrigin::InternalInvariant,
+                ProxyErrorCode::ProtocolTransformError,
+                ExecutionStage::Transform,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let failure = transform_failure(
+                origin,
+                TransformPhase::RequestEncode,
+                TransformSemanticUnit::RequestEnvelope,
+                TransformReasonCode::TargetEncodeFailed,
+                None,
+            );
+            let error = classify_transform_failure(&failure, ResponseVisibility::NotVisible);
+
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(error.stage(), expected_stage);
+            assert_eq!(error.status_code(), expected_status);
+            assert_eq!(
+                error.public_message(),
+                expected_code.default_public_message()
+            );
+        }
     }
 
     #[test]
     fn key_lifecycle_errors_use_dedicated_status_and_codes() {
-        let disabled = ProxyError::KeyDisabled("disabled".to_string()).into_response();
-        assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
-
-        let expired = ProxyError::KeyExpired("expired".to_string()).into_response();
-        assert_eq!(expired.status(), StatusCode::FORBIDDEN);
-
-        assert_eq!(
-            ProxyError::KeyDisabled("disabled".to_string()).to_string(),
-            "[api_key_disabled_error] disabled"
-        );
-        assert_eq!(
-            ProxyError::KeyExpired("expired".to_string()).to_string(),
-            "[api_key_expired_error] expired"
-        );
-    }
-
-    #[test]
-    fn provider_governance_skip_errors_use_dedicated_codes() {
-        let open = ProxyError::ProviderOpenSkipped("open".to_string()).into_response();
-        let half_open =
-            ProxyError::ProviderHalfOpenProbeInFlight("half-open".to_string()).into_response();
-
-        assert_eq!(open.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(half_open.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            ProxyError::ProviderOpenSkipped("open".to_string()).to_string(),
-            "[provider_open_skipped] open"
-        );
-        assert_eq!(
-            ProxyError::ProviderHalfOpenProbeInFlight("half-open".to_string()).to_string(),
-            "[provider_half_open_skipped] half-open"
-        );
+        for (code, expected_message) in [
+            (
+                ProxyErrorCode::ApiKeyDisabledError,
+                "The API key is disabled.",
+            ),
+            (
+                ProxyErrorCode::ApiKeyExpiredError,
+                "The API key has expired.",
+            ),
+        ] {
+            let error = ProxyError::gateway(
+                code,
+                ExecutionStage::Authentication,
+                ResponseVisibility::NotVisible,
+                None,
+                "operator detail",
+            );
+            assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+            assert_eq!(error.client_payload().public_message(), expected_message);
+        }
     }
 
     #[test]
     fn request_patch_conflict_uses_dedicated_code() {
-        let response = ProxyError::RequestPatchConflict("conflict".to_string()).into_response();
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            ProxyError::RequestPatchConflict("conflict".to_string()).to_string(),
-            "[request_patch_conflict_error] conflict"
+        let error = ProxyError::gateway(
+            ProxyErrorCode::RequestPatchConflictError,
+            ExecutionStage::Patch,
+            ResponseVisibility::NotVisible,
+            None,
+            "conflict",
         );
+
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code().as_str(), "request_patch_conflict_error");
     }
 
     #[test]
-    fn operator_log_level_explicitly_maps_every_proxy_error_variant() {
-        let cases = vec![
-            (
-                ProxyError::Unauthorized("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::KeyDisabled("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::KeyExpired("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::BadRequest("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (ProxyError::Forbidden("x".to_string()), ProxyLogLevel::Debug),
-            (
-                ProxyError::RateLimited("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::ConcurrencyLimited("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::QuotaExhausted("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::BudgetExhausted("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::ProviderOpenSkipped("x".to_string()),
-                ProxyLogLevel::Warn,
-            ),
-            (
-                ProxyError::ProviderHalfOpenProbeInFlight("x".to_string()),
-                ProxyLogLevel::Warn,
-            ),
-            (
-                ProxyError::PayloadTooLarge("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::ClientCancelled("x".to_string()),
-                ProxyLogLevel::Debug,
-            ),
-            (
-                ProxyError::RequestPatchConflict("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::InternalError("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::ProtocolTransformError("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::UpstreamBadRequest("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::UpstreamRateLimited("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::UpstreamAuthentication("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::BadGateway("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::UpstreamService("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-            (
-                ProxyError::UpstreamTimeout("x".to_string()),
-                ProxyLogLevel::Error,
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(error.operator_log_level(), expected);
+    fn operator_log_level_is_derived_from_stable_code() {
+        for code in ProxyErrorCode::ALL {
+            let level = code.operator_log_level();
+            assert!(matches!(level, ProxyLogLevel::Debug | ProxyLogLevel::Error));
         }
     }
 }

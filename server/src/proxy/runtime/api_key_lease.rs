@@ -1,32 +1,56 @@
 use std::sync::Arc;
 
-use crate::service::{
-    app_state::AppState,
-    runtime::{ApiKeyGovernanceService, ApiKeyRequestLease},
+use crate::{
+    proxy::request_context::RequestId,
+    service::{
+        app_state::AppState,
+        runtime::{ApiKeyGovernanceService, ApiKeyRequestLease},
+    },
 };
+
+use super::transport::lifecycle::ProxyTerminationCoordinator;
 
 pub(crate) struct ApiKeyRequestLeaseFinalizer {
     governance: Arc<ApiKeyGovernanceService>,
     lease: Option<ApiKeyRequestLease>,
+    request_id: RequestId,
+    coordinator: Option<ProxyTerminationCoordinator>,
 }
 
 impl ApiKeyRequestLeaseFinalizer {
-    pub(crate) fn new(app_state: &Arc<AppState>, lease: Option<ApiKeyRequestLease>) -> Self {
+    pub(crate) fn new(
+        app_state: &Arc<AppState>,
+        lease: Option<ApiKeyRequestLease>,
+        request_id: RequestId,
+    ) -> Self {
         Self {
             governance: Arc::clone(&app_state.api_key_governance),
             lease,
+            request_id,
+            coordinator: None,
         }
+    }
+
+    pub(crate) fn with_coordinator(mut self, coordinator: ProxyTerminationCoordinator) -> Self {
+        self.coordinator = Some(coordinator);
+        self
     }
 
     pub(crate) async fn release(&mut self) {
         let Some(lease) = self.lease.take() else {
             return;
         };
+        if let Some(coordinator) = &self.coordinator
+            && !coordinator.claim_lease_release()
+        {
+            return;
+        }
         let api_key_id = lease.api_key_id();
         let lease_id = lease.lease_id().to_string();
         if let Err(err) = self.governance.release_api_key_request_lease(lease).await {
             crate::warn_event!(
                 "auth.request_lease_release_failed",
+                request_id = &self.request_id,
                 api_key_id = api_key_id,
                 lease_id = lease_id,
                 error = err.to_string(),
@@ -40,13 +64,20 @@ impl Drop for ApiKeyRequestLeaseFinalizer {
         let Some(lease) = self.lease.take() else {
             return;
         };
+        if let Some(coordinator) = &self.coordinator
+            && !coordinator.claim_lease_release()
+        {
+            return;
+        }
         let governance = Arc::clone(&self.governance);
+        let request_id = self.request_id.clone();
         let api_key_id = lease.api_key_id();
         let lease_id = lease.lease_id().to_string();
 
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             crate::warn_event!(
                 "auth.request_lease_drop_without_runtime",
+                request_id = &request_id,
                 api_key_id = api_key_id,
                 lease_id = lease_id,
             );
@@ -57,6 +88,7 @@ impl Drop for ApiKeyRequestLeaseFinalizer {
             if let Err(err) = governance.release_api_key_request_lease(lease).await {
                 crate::warn_event!(
                     "auth.request_lease_drop_release_failed",
+                    request_id = &request_id,
                     api_key_id = api_key_id,
                     lease_id = lease_id,
                     error = err.to_string(),

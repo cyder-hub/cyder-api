@@ -2,6 +2,7 @@ import { formatTimestamp } from "../../../utils/datetime.ts";
 import { formatPriceFromNanos } from "../../../utils/money.ts";
 
 export const emptyValue = "/";
+export const invalidValue = "—";
 
 export const formatDate = (timestamp: number | null | undefined) =>
   formatTimestamp(timestamp) || emptyValue;
@@ -21,10 +22,18 @@ export const formatDuration = (
   start: number | null | undefined,
   end: number | null | undefined,
 ) => {
-  if (start == null || end == null || end < start) {
+  if (start == null || end == null) {
     return emptyValue;
   }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return invalidValue;
+  }
   return `${((end - start) / 1000).toFixed(3)} s`;
+};
+
+export const formatMilliseconds = (value: number | null | undefined) => {
+  if (value == null) return emptyValue;
+  return Number.isFinite(value) && value >= 0 ? `${value} ms` : invalidValue;
 };
 
 export const formatPrice = (

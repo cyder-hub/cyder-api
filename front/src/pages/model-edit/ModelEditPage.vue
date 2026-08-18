@@ -31,8 +31,7 @@ import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
 import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./components/ModelBaseInfoForm.vue";
 import ModelRequestPatchPanel from "./components/ModelRequestPatchPanel.vue";
-import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
-import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
+import ModelSourceConfigEditor from "@/components/model-source-config/ModelSourceConfigEditor.vue";
 import { useModelEdit } from "./composables/useModelEdit";
 
 const { t } = useI18n();
@@ -41,16 +40,21 @@ const {
   isLoading,
   modelDetail,
   editingData,
+  providerSources,
+  sourceConfigSummary,
+  sourceConfigDraft,
+  isSourceConfigDirty,
+  isSourceConfigSaving,
+  sourceConfigError,
+  sourceConfigExplain,
   costManager,
-  capabilityItems,
   currentProvider,
   selectedCatalog,
   selectedCatalogVersions,
-  reasoningActions,
   fetchData,
   handleSaveModel,
-  handleReasoningConfigSaved,
-  handleRuntimeFeatureConfigSaved,
+  handleSaveSourceConfig,
+  handleExplainSourceConfig,
   handleNavigateToModels,
   handleNavigateToProviders,
   handleOpenSelectedCostCatalog,
@@ -124,28 +128,19 @@ const {
 
         <ModelBaseInfoForm
           v-model:editingData="editingData"
-          :capability-items="capabilityItems"
         />
 
-        <div class="border-t border-gray-200 pt-5">
-          <ReasoningConfigPanel
-            owner-kind="model"
-            :owner-id="editingData.id"
-            :actions="reasoningActions"
-            :title="t('modelEditPage.advancedConfig.title')"
-            :model-supports-reasoning="editingData.supports_reasoning"
-            @saved="handleReasoningConfigSaved"
-          >
-            <template #runtime-feature>
-              <RuntimeFeatureConfigPanel
-                owner-kind="model"
-                :owner-id="editingData.id"
-                embedded
-                @saved="handleRuntimeFeatureConfigSaved"
-              />
-            </template>
-          </ReasoningConfigPanel>
-        </div>
+        <ModelSourceConfigEditor
+          v-model="sourceConfigDraft"
+          :sources="providerSources"
+          :summary="sourceConfigSummary"
+          :explain="sourceConfigExplain"
+          :dirty="isSourceConfigDirty"
+          :saving="isSourceConfigSaving"
+          :error="sourceConfigError"
+          @save="handleSaveSourceConfig"
+          @explain="handleExplainSourceConfig"
+        />
 
       <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
         <SectionHeader :title="t('modelEditPage.priceSection.title')" />
@@ -334,8 +329,11 @@ const {
 
         <ModelRequestPatchPanel
           :model-id="editingData.id"
+          :provider-id="editingData.provider_id"
           :provider-name="currentProvider?.name"
           :provider-key="currentProvider?.provider_key"
+          :sources="providerSources"
+          :source-config="sourceConfigSummary"
         />
 
         <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 mt-2 sm:flex-row sm:justify-end">

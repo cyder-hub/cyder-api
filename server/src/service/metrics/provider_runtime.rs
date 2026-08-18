@@ -15,11 +15,9 @@ use crate::database::provider_runtime::{
     ProviderRuntimeAggregate, ProviderRuntimeCostAggregate, ProviderRuntimeStatusCodeCount,
     get_provider_runtime_aggregates_in_range,
 };
-use crate::schema::enum_def::ProviderType;
+use crate::schema::enum_def::UpstreamProfileType;
 use crate::service::app_state::AppState;
-use crate::service::runtime::{
-    ProviderHealthSnapshot, ProviderHealthStatus, RuntimeStateBackendOperatorStatus,
-};
+use crate::service::runtime::RuntimeStateBackendOperatorStatus;
 
 use super::service::MetricsService;
 
@@ -68,19 +66,9 @@ impl ProviderRuntimeWindow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProviderRuntimeHealthStatus {
-    Healthy,
-    Open,
-    HalfOpen,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ProviderRuntimeLevel {
     Healthy,
     Degraded,
-    Open,
-    HalfOpen,
     NoTraffic,
 }
 
@@ -90,8 +78,6 @@ pub enum ProviderRuntimeStatusFilter {
     All,
     Healthy,
     Degraded,
-    Open,
-    HalfOpen,
     NoTraffic,
 }
 
@@ -107,6 +93,8 @@ pub enum ProviderRuntimeSortField {
     Health,
     ErrorRate,
     Latency,
+    TimeToFirstResponseBody,
+    Ttft,
     LastErrorAt,
     RequestCount,
 }
@@ -165,27 +153,28 @@ pub struct ProviderRuntimeItem {
     pub provider_id: i64,
     pub provider_key: String,
     pub provider_name: String,
-    pub provider_type: String,
-    pub is_enabled: bool,
-    pub use_proxy: bool,
+    pub provider_is_enabled: bool,
+    pub source_id: i64,
+    pub source_profile_type: UpstreamProfileType,
+    pub source_base_url: String,
+    pub source_use_proxy: bool,
+    pub source_is_enabled: bool,
+    pub source_is_default: bool,
     pub enabled_model_count: i64,
     pub enabled_provider_key_count: i64,
-    pub health_status: ProviderRuntimeHealthStatus,
     pub runtime_level: ProviderRuntimeLevel,
-    pub consecutive_failures: u32,
-    pub half_open_probe_in_flight: bool,
-    pub opened_at: Option<i64>,
-    pub last_failure_at: Option<i64>,
-    pub last_recovered_at: Option<i64>,
-    pub last_error: Option<String>,
     pub runtime_state_backend_degraded: bool,
     pub runtime_state_backend_error: Option<String>,
     pub request_count: i64,
     pub success_count: i64,
     pub error_count: i64,
     pub success_rate: Option<f64>,
-    pub avg_first_byte_ms: Option<f64>,
+    pub avg_time_to_first_response_body_ms: Option<f64>,
+    pub time_to_first_response_body_sample_count: i64,
+    pub avg_ttft_ms: Option<f64>,
+    pub ttft_sample_count: i64,
     pub avg_total_latency_ms: Option<f64>,
+    pub total_latency_sample_count: i64,
     pub last_request_at: Option<i64>,
     pub last_success_at: Option<i64>,
     pub last_error_at: Option<i64>,
@@ -197,10 +186,11 @@ pub struct ProviderRuntimeItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderRuntimeSummary {
     pub total_provider_count: i64,
+    pub enabled_provider_count: i64,
+    pub total_source_count: i64,
+    pub enabled_source_count: i64,
     pub healthy_count: i64,
     pub degraded_count: i64,
-    pub half_open_count: i64,
-    pub open_count: i64,
     pub no_traffic_count: i64,
     pub window: ProviderRuntimeWindow,
     pub generated_at: i64,
@@ -228,66 +218,95 @@ impl MetricsService {
         })
     }
 
-    pub fn provider_runtime_aggregates_in_range(
+    pub async fn provider_runtime_aggregates_in_range(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
         provider_id_filter: Option<i64>,
     ) -> Result<Vec<ProviderRuntimeAggregate>, BaseError> {
         if !self.config().enabled {
-            return self.provider_runtime_request_log_fallback(
-                start_time_ms,
-                end_time_ms,
-                provider_id_filter,
-                "metrics_disabled",
-            );
+            return self
+                .provider_runtime_request_log_fallback(
+                    start_time_ms,
+                    end_time_ms,
+                    provider_id_filter,
+                    "metrics_disabled",
+                )
+                .await;
         }
 
-        let rollup_aggregates = self.provider_runtime_rollup_aggregates(
-            start_time_ms,
-            end_time_ms,
-            provider_id_filter,
-        )?;
+        let rollup_aggregates = self
+            .provider_runtime_rollup_aggregates(start_time_ms, end_time_ms, provider_id_filter)
+            .await?;
         if !rollup_aggregates.is_empty() {
             return Ok(rollup_aggregates);
         }
 
         if self.config().request_log_query_fallback_enabled {
-            return self.provider_runtime_request_log_fallback(
-                start_time_ms,
-                end_time_ms,
-                provider_id_filter,
-                "rollup_empty",
-            );
+            return self
+                .provider_runtime_request_log_fallback(
+                    start_time_ms,
+                    end_time_ms,
+                    provider_id_filter,
+                    "rollup_empty",
+                )
+                .await;
         }
 
         Ok(Vec::new())
     }
 
-    fn provider_runtime_rollup_aggregates(
+    async fn provider_runtime_rollup_aggregates(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
         provider_id_filter: Option<i64>,
     ) -> Result<Vec<ProviderRuntimeAggregate>, BaseError> {
-        let provider_scope_id = provider_id_filter.map(|value| value.to_string());
-        let request_aggregates = self.query_request_window_metrics(
-            start_time_ms,
-            end_time_ms,
-            Some("provider"),
-            provider_scope_id.as_deref(),
-        )?;
+        let providers = Provider::list_all(self.database()).await?;
+        let source_to_provider = providers
+            .into_iter()
+            .flat_map(|provider| {
+                let provider_id = provider.id;
+                provider
+                    .upstream_sources
+                    .into_iter()
+                    .map(move |source| (source.id, provider_id))
+            })
+            .filter(|(_, provider_id)| {
+                provider_id_filter.is_none_or(|filter| *provider_id == filter)
+            })
+            .collect::<HashMap<_, _>>();
+        let request_aggregates = self
+            .query_request_window_metrics(start_time_ms, end_time_ms, Some("source"), None)
+            .await?;
         let request_by_scope = request_aggregates
             .into_iter()
+            .filter(|item| {
+                item.scope_id
+                    .parse::<i64>()
+                    .ok()
+                    .is_some_and(|source_id| source_to_provider.contains_key(&source_id))
+            })
             .map(|item| (item.scope_id.clone(), item))
             .collect::<HashMap<_, _>>();
         let mut status_by_scope = HashMap::<String, HashMap<i32, i64>>::new();
         for row in list_http_status_rollup_minutes(
+            self.database(),
             start_time_ms,
             end_time_ms,
-            "provider",
-            provider_scope_id.as_deref(),
-        )? {
+            "source",
+            None,
+        )
+        .await?
+        {
+            if row
+                .scope_id
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|source_id| !source_to_provider.contains_key(&source_id))
+            {
+                continue;
+            }
             *status_by_scope
                 .entry(row.scope_id)
                 .or_default()
@@ -296,11 +315,22 @@ impl MetricsService {
         }
         let mut cost_by_scope = HashMap::<String, BTreeMap<String, i64>>::new();
         for row in list_cost_rollup_minutes(
+            self.database(),
             start_time_ms,
             end_time_ms,
-            Some("provider"),
-            provider_scope_id.as_deref(),
-        )? {
+            Some("source"),
+            None,
+        )
+        .await?
+        {
+            if row
+                .scope_id
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|source_id| !source_to_provider.contains_key(&source_id))
+            {
+                continue;
+            }
             *cost_by_scope
                 .entry(row.scope_id)
                 .or_default()
@@ -312,8 +342,8 @@ impl MetricsService {
         let mut result = Vec::with_capacity(scope_ids.len());
 
         for scope_id in scope_ids {
-            let provider_id = match scope_id.parse::<i64>() {
-                Ok(provider_id) => provider_id,
+            let source_id = match scope_id.parse::<i64>() {
+                Ok(source_id) => source_id,
                 Err(err) => {
                     crate::warn_event!(
                         "metrics.provider_runtime_invalid_scope_id",
@@ -322,6 +352,9 @@ impl MetricsService {
                     );
                     continue;
                 }
+            };
+            let Some(provider_id) = source_to_provider.get(&source_id).copied() else {
+                continue;
             };
             let request = request_by_scope.get(&scope_id);
 
@@ -350,11 +383,19 @@ impl MetricsService {
 
             result.push(ProviderRuntimeAggregate {
                 provider_id,
+                source_id,
                 request_count: request.map_or(0, |item| item.request_count),
                 success_count: request.map_or(0, |item| item.success_count),
                 error_count: request.map_or(0, |item| item.error_count + item.cancelled_count),
-                avg_first_byte_ms: provider_runtime_first_byte_latency(request),
+                avg_time_to_first_response_body_ms: provider_runtime_time_to_first_response_body(
+                    request,
+                ),
+                time_to_first_response_body_sample_count: request
+                    .map_or(0, |item| item.time_to_first_response_body_count),
+                avg_ttft_ms: provider_runtime_ttft(request),
+                ttft_sample_count: request.map_or(0, |item| item.ttft_count),
                 avg_total_latency_ms: provider_runtime_total_latency(request),
+                total_latency_sample_count: request.map_or(0, |item| item.total_latency_count),
                 last_request_at: request.and_then(|item| item.last_request_at),
                 last_success_at: request.and_then(|item| item.last_success_at),
                 last_error_at: request.and_then(|item| item.last_error_at),
@@ -363,11 +404,11 @@ impl MetricsService {
             });
         }
 
-        result.sort_by_key(|item| item.provider_id);
+        result.sort_by_key(|item| (item.provider_id, item.source_id));
         Ok(result)
     }
 
-    fn provider_runtime_request_log_fallback(
+    async fn provider_runtime_request_log_fallback(
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -379,10 +420,12 @@ impl MetricsService {
         }
 
         let fallback = get_provider_runtime_aggregates_in_range(
+            self.database(),
             start_time_ms,
             end_time_ms,
             provider_id_filter,
-        )?;
+        )
+        .await?;
         if !fallback.is_empty() {
             let provider_filter = provider_id_filter
                 .map(|value| value.to_string())
@@ -401,25 +444,25 @@ impl MetricsService {
 
     pub async fn build_provider_runtime_items(
         &self,
-        app_state: &Arc<AppState>,
         window: ProviderRuntimeWindow,
         only_enabled: bool,
     ) -> Result<Vec<ProviderRuntimeItem>, BaseError> {
-        let providers = if only_enabled {
-            Provider::list_all_active()?
-        } else {
-            Provider::list_all()?
-        };
-        let models = Model::list_all()?;
-        let provider_api_keys = ProviderApiKeyRepository::list_all_summaries()?;
+        let mut providers = Provider::list_all(self.database()).await?;
+        if only_enabled {
+            providers.retain(|provider| provider.is_enabled);
+        }
+        let models = Model::list_all(self.database()).await?;
+        let provider_api_keys =
+            ProviderApiKeyRepository::list_all_summaries(self.database()).await?;
 
         let now = Utc::now().timestamp_millis();
         let start_time_ms = now - window.duration_ms();
-        let runtime_aggregates =
-            self.provider_runtime_aggregates_in_range(start_time_ms, now, None)?;
+        let runtime_aggregates = self
+            .provider_runtime_aggregates_in_range(start_time_ms, now, None)
+            .await?;
         let aggregate_map = runtime_aggregates
             .into_iter()
-            .map(|item| (item.provider_id, item))
+            .map(|item| (item.source_id, item))
             .collect::<HashMap<_, _>>();
 
         let mut enabled_model_count_by_provider: HashMap<i64, i64> = HashMap::new();
@@ -442,106 +485,105 @@ impl MetricsService {
                 .or_insert(0) += 1;
         }
 
-        let mut items = Vec::with_capacity(providers.len());
+        let mut items = Vec::new();
         for provider in providers {
-            let (health_snapshot, runtime_state_backend_degraded, runtime_state_backend_error) =
-                app_state
-                    .provider_circuit
-                    .get_provider_health_snapshot(provider.id)
-                    .await
-                    .map(|snapshot| (snapshot, false, None))
-                    .unwrap_or_else(|err| {
-                        let error = err.to_string();
-                        crate::warn_event!(
-                            "runtime_state.read_failed",
-                            read_model = "provider_runtime",
-                            component = "provider_circuit",
-                            provider_id = provider.id,
-                            error = &error,
-                        );
-                        (ProviderHealthSnapshot::default(), true, Some(error))
-                    });
-            let runtime_aggregate =
-                aggregate_map
-                    .get(&provider.id)
-                    .cloned()
-                    .unwrap_or(ProviderRuntimeAggregate {
-                        provider_id: provider.id,
-                        request_count: 0,
-                        success_count: 0,
-                        error_count: 0,
-                        avg_first_byte_ms: None,
-                        avg_total_latency_ms: None,
-                        last_request_at: None,
-                        last_success_at: None,
-                        last_error_at: None,
-                        status_code_breakdown: Vec::new(),
-                        total_cost: Vec::new(),
-                    });
+            let provider_id = provider.id;
+            let provider_key = provider.provider_key.clone();
+            let provider_name = provider.name.clone();
+            let provider_is_enabled = provider.is_enabled;
+            for source in provider.upstream_sources {
+                if only_enabled && !source.is_enabled {
+                    continue;
+                }
+                let runtime_aggregate =
+                    aggregate_map
+                        .get(&source.id)
+                        .cloned()
+                        .unwrap_or(ProviderRuntimeAggregate {
+                            provider_id,
+                            source_id: source.id,
+                            request_count: 0,
+                            success_count: 0,
+                            error_count: 0,
+                            avg_time_to_first_response_body_ms: None,
+                            time_to_first_response_body_sample_count: 0,
+                            avg_ttft_ms: None,
+                            ttft_sample_count: 0,
+                            avg_total_latency_ms: None,
+                            total_latency_sample_count: 0,
+                            last_request_at: None,
+                            last_success_at: None,
+                            last_error_at: None,
+                            status_code_breakdown: Vec::new(),
+                            total_cost: Vec::new(),
+                        });
 
-            let runtime_level = compute_runtime_level(
-                health_snapshot.status,
-                runtime_aggregate.request_count,
-                runtime_aggregate.error_count,
-                runtime_aggregate.avg_total_latency_ms,
-            );
-
-            let item = ProviderRuntimeItem {
-                provider_id: provider.id,
-                provider_key: provider.provider_key.clone(),
-                provider_name: provider.name.clone(),
-                provider_type: map_provider_type(&provider.provider_type).to_string(),
-                is_enabled: provider.is_enabled,
-                use_proxy: provider.use_proxy,
-                enabled_model_count: enabled_model_count_by_provider
-                    .get(&provider.id)
-                    .copied()
-                    .unwrap_or(0),
-                enabled_provider_key_count: enabled_provider_key_count_by_provider
-                    .get(&provider.id)
-                    .copied()
-                    .unwrap_or(0),
-                health_status: map_health_status(health_snapshot.status),
-                runtime_level,
-                consecutive_failures: health_snapshot.consecutive_failures,
-                half_open_probe_in_flight: health_snapshot.half_open_probe_in_flight,
-                opened_at: health_snapshot.opened_at,
-                last_failure_at: health_snapshot.last_failure_at,
-                last_recovered_at: health_snapshot.last_recovered_at,
-                last_error: health_snapshot.last_error.clone(),
-                runtime_state_backend_degraded,
-                runtime_state_backend_error,
-                request_count: runtime_aggregate.request_count,
-                success_count: runtime_aggregate.success_count,
-                error_count: runtime_aggregate.error_count,
-                success_rate: calculate_success_rate(
+                let runtime_level = compute_runtime_level(
                     runtime_aggregate.request_count,
-                    runtime_aggregate.success_count,
-                ),
-                avg_first_byte_ms: runtime_aggregate.avg_first_byte_ms,
-                avg_total_latency_ms: runtime_aggregate.avg_total_latency_ms,
-                last_request_at: runtime_aggregate.last_request_at,
-                last_success_at: runtime_aggregate.last_success_at,
-                last_error_at: runtime_aggregate.last_error_at,
-                last_error_summary: build_last_error_summary(&health_snapshot, &runtime_aggregate),
-                status_code_breakdown: runtime_aggregate
-                    .status_code_breakdown
-                    .into_iter()
-                    .map(|item| ProviderRuntimeStatusCodeStat {
-                        status_code: item.status_code,
-                        count: item.count,
-                    })
-                    .collect(),
-                total_cost: runtime_aggregate
-                    .total_cost
-                    .into_iter()
-                    .map(|item| ProviderRuntimeCostStat {
-                        currency: item.currency,
-                        amount_nanos: item.amount_nanos,
-                    })
-                    .collect(),
-            };
-            items.push(item);
+                    runtime_aggregate.error_count,
+                    runtime_aggregate.avg_total_latency_ms,
+                );
+
+                let item = ProviderRuntimeItem {
+                    provider_id,
+                    provider_key: provider_key.clone(),
+                    provider_name: provider_name.clone(),
+                    provider_is_enabled,
+                    source_id: source.id,
+                    source_profile_type: source.profile_type.clone(),
+                    source_base_url: source.base_url.clone(),
+                    source_use_proxy: source.use_proxy,
+                    source_is_enabled: source.is_enabled,
+                    source_is_default: source.is_default,
+                    enabled_model_count: enabled_model_count_by_provider
+                        .get(&provider_id)
+                        .copied()
+                        .unwrap_or(0),
+                    enabled_provider_key_count: enabled_provider_key_count_by_provider
+                        .get(&provider_id)
+                        .copied()
+                        .unwrap_or(0),
+                    runtime_level,
+                    runtime_state_backend_degraded: false,
+                    runtime_state_backend_error: None,
+                    request_count: runtime_aggregate.request_count,
+                    success_count: runtime_aggregate.success_count,
+                    error_count: runtime_aggregate.error_count,
+                    success_rate: calculate_success_rate(
+                        runtime_aggregate.request_count,
+                        runtime_aggregate.success_count,
+                    ),
+                    avg_time_to_first_response_body_ms: runtime_aggregate
+                        .avg_time_to_first_response_body_ms,
+                    time_to_first_response_body_sample_count: runtime_aggregate
+                        .time_to_first_response_body_sample_count,
+                    avg_ttft_ms: runtime_aggregate.avg_ttft_ms,
+                    ttft_sample_count: runtime_aggregate.ttft_sample_count,
+                    avg_total_latency_ms: runtime_aggregate.avg_total_latency_ms,
+                    total_latency_sample_count: runtime_aggregate.total_latency_sample_count,
+                    last_request_at: runtime_aggregate.last_request_at,
+                    last_success_at: runtime_aggregate.last_success_at,
+                    last_error_at: runtime_aggregate.last_error_at,
+                    last_error_summary: build_last_error_summary(&runtime_aggregate),
+                    status_code_breakdown: runtime_aggregate
+                        .status_code_breakdown
+                        .into_iter()
+                        .map(|item| ProviderRuntimeStatusCodeStat {
+                            status_code: item.status_code,
+                            count: item.count,
+                        })
+                        .collect(),
+                    total_cost: runtime_aggregate
+                        .total_cost
+                        .into_iter()
+                        .map(|item| ProviderRuntimeCostStat {
+                            currency: item.currency,
+                            amount_nanos: item.amount_nanos,
+                        })
+                        .collect(),
+                };
+                items.push(item);
+            }
         }
 
         Ok(items)
@@ -551,16 +593,26 @@ impl MetricsService {
         &self,
         app_state: &Arc<AppState>,
         window: ProviderRuntimeWindow,
-        items: &[ProviderRuntimeItem],
-    ) -> ProviderRuntimeSummary {
+        items: &mut [ProviderRuntimeItem],
+        only_enabled: bool,
+    ) -> Result<ProviderRuntimeSummary, BaseError> {
         let runtime_state_backend =
             runtime_backend_status_for_provider_items(app_state, items).await;
+        apply_runtime_backend_status_to_items(items, &runtime_state_backend);
+        let mut providers = Provider::list_all(self.database()).await?;
+        if only_enabled {
+            providers.retain(|provider| provider.is_enabled);
+        }
         let mut summary = ProviderRuntimeSummary {
-            total_provider_count: items.len() as i64,
+            total_provider_count: providers.len() as i64,
+            enabled_provider_count: providers
+                .iter()
+                .filter(|provider| provider.is_enabled)
+                .count() as i64,
+            total_source_count: items.len() as i64,
+            enabled_source_count: items.iter().filter(|item| item.source_is_enabled).count() as i64,
             healthy_count: 0,
             degraded_count: 0,
-            half_open_count: 0,
-            open_count: 0,
             no_traffic_count: 0,
             window,
             generated_at: Utc::now().timestamp_millis(),
@@ -571,13 +623,11 @@ impl MetricsService {
             match item.runtime_level {
                 ProviderRuntimeLevel::Healthy => summary.healthy_count += 1,
                 ProviderRuntimeLevel::Degraded => summary.degraded_count += 1,
-                ProviderRuntimeLevel::HalfOpen => summary.half_open_count += 1,
-                ProviderRuntimeLevel::Open => summary.open_count += 1,
                 ProviderRuntimeLevel::NoTraffic => summary.no_traffic_count += 1,
             }
         }
 
-        summary
+        Ok(summary)
     }
 }
 
@@ -589,40 +639,23 @@ fn average_or_none(sum: i64, count: i64) -> Option<f64> {
     }
 }
 
-fn provider_runtime_first_byte_latency(
+fn provider_runtime_time_to_first_response_body(
     request: Option<&MetricRequestWindowAggregate>,
 ) -> Option<f64> {
     request.and_then(|item| {
         average_or_none(
-            item.first_byte_latency_sum_ms,
-            item.first_byte_latency_count,
+            item.time_to_first_response_body_sum_ms,
+            item.time_to_first_response_body_count,
         )
     })
 }
 
+fn provider_runtime_ttft(request: Option<&MetricRequestWindowAggregate>) -> Option<f64> {
+    request.and_then(|item| average_or_none(item.ttft_sum_ms, item.ttft_count))
+}
+
 fn provider_runtime_total_latency(request: Option<&MetricRequestWindowAggregate>) -> Option<f64> {
     request.and_then(|item| average_or_none(item.total_latency_sum_ms, item.total_latency_count))
-}
-
-fn map_health_status(status: ProviderHealthStatus) -> ProviderRuntimeHealthStatus {
-    match status {
-        ProviderHealthStatus::Healthy => ProviderRuntimeHealthStatus::Healthy,
-        ProviderHealthStatus::Open => ProviderRuntimeHealthStatus::Open,
-        ProviderHealthStatus::HalfOpen => ProviderRuntimeHealthStatus::HalfOpen,
-    }
-}
-
-fn map_provider_type(provider_type: &ProviderType) -> &'static str {
-    match provider_type {
-        ProviderType::Openai => "OPENAI",
-        ProviderType::Gemini => "GEMINI",
-        ProviderType::Vertex => "VERTEX",
-        ProviderType::VertexOpenai => "VERTEX_OPENAI",
-        ProviderType::Ollama => "OLLAMA",
-        ProviderType::Anthropic => "ANTHROPIC",
-        ProviderType::Responses => "RESPONSES",
-        ProviderType::GeminiOpenai => "GEMINI_OPENAI",
-    }
 }
 
 fn calculate_success_rate(request_count: i64, success_count: i64) -> Option<f64> {
@@ -642,40 +675,28 @@ fn calculate_error_rate(request_count: i64, error_count: i64) -> Option<f64> {
 }
 
 pub(crate) fn compute_runtime_level(
-    health_status: ProviderHealthStatus,
     request_count: i64,
     error_count: i64,
     avg_total_latency_ms: Option<f64>,
 ) -> ProviderRuntimeLevel {
-    match health_status {
-        ProviderHealthStatus::Open => ProviderRuntimeLevel::Open,
-        ProviderHealthStatus::HalfOpen => ProviderRuntimeLevel::HalfOpen,
-        ProviderHealthStatus::Healthy => {
-            if request_count == 0 {
-                return ProviderRuntimeLevel::NoTraffic;
-            }
+    if request_count == 0 {
+        return ProviderRuntimeLevel::NoTraffic;
+    }
 
-            let error_rate = calculate_error_rate(request_count, error_count).unwrap_or(0.0);
-            let degraded_by_error_rate = request_count >= 5 && error_rate >= 0.2;
-            let degraded_by_latency = avg_total_latency_ms.is_some_and(|value| value >= 10_000.0);
+    let error_rate = calculate_error_rate(request_count, error_count).unwrap_or(0.0);
+    let degraded_by_error_rate = request_count >= 5 && error_rate >= 0.2;
+    let degraded_by_latency = avg_total_latency_ms.is_some_and(|value| value >= 10_000.0);
 
-            if degraded_by_error_rate || degraded_by_latency {
-                ProviderRuntimeLevel::Degraded
-            } else {
-                ProviderRuntimeLevel::Healthy
-            }
-        }
+    if degraded_by_error_rate || degraded_by_latency {
+        ProviderRuntimeLevel::Degraded
+    } else {
+        ProviderRuntimeLevel::Healthy
     }
 }
 
 pub(crate) fn build_last_error_summary(
-    health_snapshot: &ProviderHealthSnapshot,
     runtime_aggregate: &ProviderRuntimeAggregate,
 ) -> Option<String> {
-    if let Some(last_error) = health_snapshot.last_error.as_ref() {
-        return Some(last_error.clone());
-    }
-
     let status_code = runtime_aggregate
         .status_code_breakdown
         .iter()
@@ -686,8 +707,6 @@ pub(crate) fn build_last_error_summary(
 
 fn health_rank(level: ProviderRuntimeLevel) -> i32 {
     match level {
-        ProviderRuntimeLevel::Open => 5,
-        ProviderRuntimeLevel::HalfOpen => 4,
         ProviderRuntimeLevel::Degraded => 3,
         ProviderRuntimeLevel::Healthy => 2,
         ProviderRuntimeLevel::NoTraffic => 1,
@@ -715,16 +734,28 @@ pub(crate) fn matches_status_filter(
         ProviderRuntimeStatusFilter::All => true,
         ProviderRuntimeStatusFilter::Healthy => runtime_level == ProviderRuntimeLevel::Healthy,
         ProviderRuntimeStatusFilter::Degraded => runtime_level == ProviderRuntimeLevel::Degraded,
-        ProviderRuntimeStatusFilter::Open => runtime_level == ProviderRuntimeLevel::Open,
-        ProviderRuntimeStatusFilter::HalfOpen => runtime_level == ProviderRuntimeLevel::HalfOpen,
         ProviderRuntimeStatusFilter::NoTraffic => runtime_level == ProviderRuntimeLevel::NoTraffic,
     }
 }
 
-pub(crate) fn search_matches(provider_name: &str, provider_key: &str, search: &str) -> bool {
-    let needle = search.to_ascii_lowercase();
-    provider_name.to_ascii_lowercase().contains(&needle)
-        || provider_key.to_ascii_lowercase().contains(&needle)
+pub(crate) fn search_matches(item: &ProviderRuntimeItem, search: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .map(|character| character.to_ascii_lowercase())
+            .collect::<String>()
+    };
+    let needle = normalize(search);
+    [
+        item.provider_name.as_str(),
+        item.provider_key.as_str(),
+        item.source_base_url.as_str(),
+    ]
+    .into_iter()
+    .any(|value| normalize(value).contains(&needle))
+        || normalize(&format!("{:?}", item.source_profile_type)).contains(&needle)
+        || item.source_id.to_string().contains(&needle)
 }
 
 pub(crate) fn sort_provider_runtime_items(
@@ -748,6 +779,16 @@ pub(crate) fn sort_provider_runtime_items(
                     || health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level)),
                 )
             }
+            ProviderRuntimeSortField::TimeToFirstResponseBody => compare_f64_option(
+                left.avg_time_to_first_response_body_ms,
+                right.avg_time_to_first_response_body_ms,
+            )
+            .then_with(|| health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))),
+            ProviderRuntimeSortField::Ttft => {
+                compare_f64_option(left.avg_ttft_ms, right.avg_ttft_ms).then_with(|| {
+                    health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))
+                })
+            }
             ProviderRuntimeSortField::LastErrorAt => {
                 compare_i64_option(left.last_error_at, right.last_error_at).then_with(|| {
                     health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))
@@ -762,7 +803,8 @@ pub(crate) fn sort_provider_runtime_items(
 
         let with_tiebreaker = ordering
             .then_with(|| left.provider_name.cmp(&right.provider_name))
-            .then_with(|| left.provider_id.cmp(&right.provider_id));
+            .then_with(|| left.provider_id.cmp(&right.provider_id))
+            .then_with(|| left.source_id.cmp(&right.source_id));
 
         match direction {
             SortDirection::Asc => with_tiebreaker,
@@ -790,6 +832,16 @@ pub(crate) fn merge_runtime_backend_item_read_errors(
             status.last_error = Some(error);
             status.last_checked_at = checked_at;
         }
+    }
+}
+
+fn apply_runtime_backend_status_to_items(
+    runtime_items: &mut [ProviderRuntimeItem],
+    status: &RuntimeStateBackendOperatorStatus,
+) {
+    for item in runtime_items {
+        item.runtime_state_backend_degraded = status.runtime_degraded;
+        item.runtime_state_backend_error = status.last_error.clone();
     }
 }
 

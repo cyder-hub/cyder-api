@@ -112,12 +112,17 @@ pub(in crate::service::transform::providers::responses) fn build_responses_respo
                 refusals,
                 files,
                 metadata,
-                reasoning: reasoning_metadata.and_then(|value| serde_json::to_value(value).ok()),
+                reasoning: reasoning_metadata.map(|value| {
+                    serde_json::to_value(value).expect(
+                        "Responses reasoning metadata serialization is structurally infallible",
+                    )
+                }),
                 status: Some(
                     serde_json::to_value(status)
-                        .ok()
-                        .and_then(|value| value.as_str().map(ToString::to_string))
-                        .unwrap_or_else(|| "completed".to_string()),
+                        .expect("Responses status serialization is structurally infallible")
+                        .as_str()
+                        .expect("Responses status enum serializes as a string")
+                        .to_string(),
                 ),
                 incomplete_details: incomplete_details.map(|details| {
                     UnifiedResponsesIncompleteDetails {
@@ -170,7 +175,10 @@ pub(in crate::service::transform::providers::responses) fn unified_responses_met
                 metadata.prompt_cache_key,
                 metadata
                     .status
-                    .and_then(|status| serde_json::from_value(json!(status)).ok())
+                    .map(|status| {
+                        serde_json::from_value(json!(status))
+                            .expect("Responses status metadata is source-validated")
+                    })
                     .unwrap_or(ResponseStatus::Completed),
                 metadata
                     .incomplete_details
@@ -196,12 +204,22 @@ pub(in crate::service::transform::providers::responses) fn responses_finish_reas
     }
 
     match response.status {
+        ResponseStatus::Completed
+            if response
+                .output
+                .iter()
+                .any(|item| matches!(item, ItemField::FunctionCall(_))) =>
+        {
+            Some("tool_calls".to_string())
+        }
+        ResponseStatus::Completed => Some("stop".to_string()),
         ResponseStatus::Incomplete => {
             response
                 .incomplete_details
                 .as_ref()
                 .map(|details| match details.reason.as_str() {
-                    "max_output_tokens" => "length".to_string(),
+                    "max_tokens" | "max_output_tokens" => "length".to_string(),
+                    "content_filter" => "content_filter".to_string(),
                     other => other.to_string(),
                 })
         }
@@ -223,6 +241,7 @@ pub(in crate::service::transform::providers::responses) fn response_terminal_str
             usage: usage.into(),
         });
     }
+    terminal.push(UnifiedStreamEvent::MessageStop);
     terminal
 }
 
@@ -235,6 +254,12 @@ pub(in crate::service::transform::providers::responses) fn response_status_from_
             ResponseStatus::Incomplete,
             Some(IncompleteDetails {
                 reason: "max_output_tokens".to_string(),
+            }),
+        ),
+        Some("content_filter") => (
+            ResponseStatus::Incomplete,
+            Some(IncompleteDetails {
+                reason: "content_filter".to_string(),
             }),
         ),
         Some(reason) => (

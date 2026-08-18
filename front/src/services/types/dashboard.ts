@@ -41,8 +41,12 @@ export interface DashboardTodayStats {
   total_reasoning_tokens: number;
   total_tokens: number;
   total_cost: Record<string, number>;
-  avg_first_byte_ms: number | null;
+  avg_time_to_first_response_body_ms: number | null;
+  time_to_first_response_body_sample_count: number;
+  avg_ttft_ms: number | null;
+  ttft_sample_count: number;
   avg_total_latency_ms: number | null;
+  total_latency_sample_count: number;
   active_provider_count: number;
   active_model_count: number;
   active_api_key_count: number;
@@ -50,10 +54,12 @@ export interface DashboardTodayStats {
 
 export interface DashboardRuntimeSummary {
   window: DashboardRuntimeWindow;
+  total_provider_count: number;
+  enabled_provider_count: number;
+  total_source_count: number;
+  enabled_source_count: number;
   healthy_count: number;
   degraded_count: number;
-  half_open_count: number;
-  open_count: number;
   no_traffic_count: number;
 }
 
@@ -92,8 +98,6 @@ export interface DashboardCostModelItem {
 }
 
 export interface DashboardOperationalSignals {
-  open_providers: DashboardProviderSignalItem[];
-  half_open_providers: DashboardProviderSignalItem[];
   degraded_providers: DashboardProviderSignalItem[];
   top_error_providers: DashboardProviderSignalItem[];
   top_cost_providers: DashboardCostProviderItem[];
@@ -109,7 +113,12 @@ export interface DashboardTopProviderItem {
   error_count: number;
   success_rate: number | null;
   total_cost: Record<string, number>;
+  avg_time_to_first_response_body_ms: number | null;
+  time_to_first_response_body_sample_count: number;
+  avg_ttft_ms: number | null;
+  ttft_sample_count: number;
   avg_total_latency_ms: number | null;
+  total_latency_sample_count: number;
 }
 
 export interface DashboardTopModelItem {
@@ -170,8 +179,12 @@ export interface UsageStatItem {
   success_count: number;
   error_count: number;
   success_rate: number | null;
+  avg_time_to_first_response_body_ms: number | null;
+  time_to_first_response_body_sample_count: number;
+  avg_ttft_ms: number | null;
+  ttft_sample_count: number;
   avg_total_latency_ms: number | null;
-  latency_sample_count: number;
+  total_latency_sample_count: number;
   total_cost: Record<string, number>;
   is_other: boolean;
 }

@@ -43,24 +43,28 @@ export function buildEmptyDashboard(): DashboardResponse {
       total_reasoning_tokens: 0,
       total_tokens: 0,
       total_cost: {},
-      avg_first_byte_ms: null,
+      avg_time_to_first_response_body_ms: null,
+      time_to_first_response_body_sample_count: 0,
+      avg_ttft_ms: null,
+      ttft_sample_count: 0,
       avg_total_latency_ms: null,
+      total_latency_sample_count: 0,
       active_provider_count: 0,
       active_model_count: 0,
       active_api_key_count: 0,
     },
     runtime: {
       window: "1h",
+      total_provider_count: 0,
+      enabled_provider_count: 0,
+      total_source_count: 0,
+      enabled_source_count: 0,
       healthy_count: 0,
       degraded_count: 0,
-      half_open_count: 0,
-      open_count: 0,
       no_traffic_count: 0,
     },
     runtime_state_backend: buildDefaultRuntimeStateBackendStatus(),
     operational_signals: {
-      open_providers: [],
-      half_open_providers: [],
       degraded_providers: [],
       top_error_providers: [],
       top_cost_providers: [],
@@ -186,6 +190,16 @@ export function useDashboardData(options: UseDashboardDataOptions) {
       ? t("dashboard.empty.noLatency")
       : `${formatNumberValue(Math.round(value))} ms`;
 
+  const formatSampleCount = (sampleCount: number) =>
+    sampleCount === 0
+      ? t("common.noSamples")
+      : sampleCount === 1
+        ? t("common.oneSample")
+        : t("common.samples", { count: formatNumberValue(sampleCount) });
+
+  const formatLatencyCoverage = (value: number | null, sampleCount: number) =>
+    `${formatLatency(value)} · ${formatSampleCount(sampleCount)}`;
+
   const formatDateTime = (value: number | null | undefined) =>
     formatTimestamp(value) || "-";
 
@@ -213,10 +227,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
 
   const runtimeBadgeClass = (key: string) => {
     switch (key) {
-      case "open_count":
-        return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-      case "half_open_count":
-        return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
       case "degraded_count":
         return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
       case "healthy_count":
@@ -228,10 +238,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
 
   const runtimeLevelBadgeClass = (level: ProviderRuntimeLevel) => {
     switch (level) {
-      case "open":
-        return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-      case "half_open":
-        return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
       case "degraded":
         return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
       case "healthy":
@@ -336,21 +342,39 @@ export function useDashboardData(options: UseDashboardDataOptions) {
       description: t("dashboard.kpi.multiCurrencyHint"),
     },
     {
-      key: "latency",
+      key: "first_response_body_latency",
+      label: t("dashboard.kpi.firstResponseBody"),
+      value: formatLatencyCoverage(
+        kpiSection.value.today.avg_time_to_first_response_body_ms,
+        kpiSection.value.today.time_to_first_response_body_sample_count,
+      ),
+      description: t("dashboard.kpi.latencyTooltip"),
+      title: t("dashboard.kpi.latencyTooltip"),
+    },
+    {
+      key: "ttft",
+      label: t("dashboard.kpi.ttft"),
+      value: formatLatencyCoverage(
+        kpiSection.value.today.avg_ttft_ms,
+        kpiSection.value.today.ttft_sample_count,
+      ),
+      description: t("dashboard.kpi.latencyTooltip"),
+      title: t("dashboard.kpi.latencyTooltip"),
+    },
+    {
+      key: "total_latency",
       label: t("dashboard.kpi.avgLatency"),
-      value: formatLatency(kpiSection.value.today.avg_total_latency_ms),
-      description: `${t("dashboard.kpi.firstByte")} ${formatLatency(
-        kpiSection.value.today.avg_first_byte_ms,
-      )}`,
+      value: formatLatencyCoverage(
+        kpiSection.value.today.avg_total_latency_ms,
+        kpiSection.value.today.total_latency_sample_count,
+      ),
+      description: t("dashboard.kpi.latencyTooltip"),
+      title: t("dashboard.kpi.latencyTooltip"),
     },
     {
       key: "runtime_issues",
       label: t("dashboard.kpi.runtimeIssues"),
-      value: formatCount(
-        kpiSection.value.runtime.open_count +
-          kpiSection.value.runtime.half_open_count +
-          kpiSection.value.runtime.degraded_count,
-      ),
+      value: formatCount(kpiSection.value.runtime.degraded_count),
       description: `${t("dashboard.kpi.runtimeWindow")} ${runtimeWindowLabel(
         kpiSection.value.runtime.window,
       )}`,
@@ -396,6 +420,30 @@ export function useDashboardData(options: UseDashboardDataOptions) {
 
   const runtimeItems = computed(() => [
     {
+      key: "total_provider_count",
+      label: t("dashboard.runtime.providers"),
+      value: formatCount(resourcesSection.value.runtime.total_provider_count),
+      description: t("dashboard.runtime.windowDetail", {
+        window: runtimeWindowLabel(resourcesSection.value.runtime.window),
+      }),
+    },
+    {
+      key: "total_source_count",
+      label: t("dashboard.runtime.sources"),
+      value: formatCount(resourcesSection.value.runtime.total_source_count),
+      description: t("dashboard.runtime.windowDetail", {
+        window: runtimeWindowLabel(resourcesSection.value.runtime.window),
+      }),
+    },
+    {
+      key: "enabled_source_count",
+      label: t("dashboard.runtime.enabledSources"),
+      value: formatCount(resourcesSection.value.runtime.enabled_source_count),
+      description: t("dashboard.runtime.windowDetail", {
+        window: runtimeWindowLabel(resourcesSection.value.runtime.window),
+      }),
+    },
+    {
       key: "healthy_count",
       label: t("providerRuntimePage.summary.healthy"),
       value: formatCount(resourcesSection.value.runtime.healthy_count),
@@ -408,18 +456,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
       label: t("providerRuntimePage.summary.degraded"),
       value: formatCount(resourcesSection.value.runtime.degraded_count),
       description: t("dashboard.runtime.degradedHint"),
-    },
-    {
-      key: "half_open_count",
-      label: t("providerRuntimePage.summary.halfOpen"),
-      value: formatCount(resourcesSection.value.runtime.half_open_count),
-      description: t("dashboard.runtime.halfOpenHint"),
-    },
-    {
-      key: "open_count",
-      label: t("providerRuntimePage.summary.open"),
-      value: formatCount(resourcesSection.value.runtime.open_count),
-      description: t("dashboard.runtime.openHint"),
     },
     {
       key: "no_traffic_count",

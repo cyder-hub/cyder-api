@@ -35,6 +35,16 @@ manager_auth:
 db_url: /data/cyder/db/cyder.sqlite
 # db_url: postgres://user:pass@host:port/schema_name
 # Supported database URL forms are SQLite paths and PostgreSQL URLs.
+db_pool_size: 5
+database_io:
+  # Number of callers allowed to wait after all immediately available database
+  # execution capacity is occupied. Set to 0 to reject instead of queueing.
+  max_waiters: 64
+  queue_wait_timeout_seconds: 1
+  operation_deadline_seconds: 30
+  # SQLite lock waiting is bounded independently and must not exceed the
+  # operation deadline. PostgreSQL does not use this setting.
+  sqlite_busy_timeout_seconds: 5
 secret_encryption:
   # one_time stores only the downstream API key authentication hash.
   # recoverable additionally stores downstream ciphertext and permits explicit reveal.
@@ -65,10 +75,27 @@ id:
   # Reserved Snowflake worker id. Pre-1.0 supports one running server instance.
   worker_id: 1
 # proxy: http://127.0.0.1:1080
-proxy_request:
+outbound_http:
   connect_timeout_seconds: 10
-  # LLM 流式/长生成请求可能持续很久，因此默认建议留空关闭整体超时。
-  # total_timeout_seconds: 1800
+  auxiliary_total_timeout_seconds: 60
+proxy_request:
+  timeouts:
+    request_send_seconds: 7200
+    first_byte_seconds: 7200
+    response_idle_seconds: 7200
+    total_seconds: 7200
+  # Provider error bodies exposed to the current caller are capped and marked as truncated.
+  upstream_error_body_limit_bytes: 65536
+  # Complete non-stream responses accept identity/gzip and are counted in raw bytes and decoded bytes.
+  non_stream_response:
+    raw_body_limit_bytes: 33554432
+    decoded_body_limit_bytes: 67108864
+  # SSE responses must use identity encoding. Limits count UTF-8 bytes retained by the parser and blank-line frames.
+  sse_response:
+    line_limit_bytes: 4194304
+    event_limit_bytes: 8388608
+    buffer_limit_bytes: 16777216
+    frame_count_limit: 1000000
 # cache:
 #   backend: memory # memory or redis
 #   ttl: 3600 # 1 hour

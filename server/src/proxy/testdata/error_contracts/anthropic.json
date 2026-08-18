@@ -1,0 +1,46 @@
+{
+  "protocol": "ANTHROPIC",
+  "authentication": {
+    "status": 401,
+    "body": {"type":"error","error":{"type":"authentication_error","message":"Missing API key. Provide it in 'x-api-key' header or 'Authorization: Bearer <api-key>' header.","code":"authentication_error"},"request_id":"$REQUEST_ID"},
+    "cors": true,
+    "www_authenticate": "Bearer"
+  },
+  "rate_limit": {
+    "status": 429,
+    "body": {"type":"error","error":{"type":"rate_limit_error","message":"API key '$API_KEY_NAME' exceeded rate_limit_rpm=1 (current_window_requests=1)","code":"rate_limit_error"},"request_id":"$REQUEST_ID"},
+    "cors": true,
+    "retry_after": "1"
+  },
+  "capability": {
+    "status": 400,
+    "body": {"type":"error","error":{"type":"invalid_request_error","message":"Enabled provider 'missing-provider' was not found.","code":"unsupported_capability_error"},"request_id":"$REQUEST_ID"},
+    "cors": true
+  },
+  "provider": {
+    "status": 429,
+    "body": {"type":"error","error":{"type":"rate_limit_error","message":"Upstream provider rate limited the request.","code":"upstream_rate_limit_error"},"request_id":"$REQUEST_ID","upstream_error":{"status":429,"content_type":"application/json","body":{"error":{"message":"baseline throttled"}},"truncated":false,"captured_bytes":42,"limit_bytes":65536}},
+    "cors": true
+  },
+  "internal": {
+    "status": 500,
+    "body": {"type":"error","error":{"type":"api_error","message":"The gateway encountered an internal error.","code":"server_error"},"request_id":"$REQUEST_ID"},
+    "cors": false
+  },
+  "query_rejection": {
+    "status": 400,
+    "body": {"type":"error","error":{"type":"invalid_request_error","message":"The request query parameters are invalid.","code":"invalid_request_error"},"request_id":"$REQUEST_ID"},
+    "cors": true
+  },
+  "route_not_found": {
+    "status": 404,
+    "body": {"type":"error","error":{"type":"not_found_error","message":"The requested gateway route was not found.","code":"route_not_found_error"},"request_id":"$REQUEST_ID"},
+    "cors": true
+  },
+  "method_not_allowed": {
+    "status": 405,
+    "body": {"type":"error","error":{"type":"invalid_request_error","message":"The requested HTTP method is not allowed for this gateway route.","code":"method_not_allowed_error"},"request_id":"$REQUEST_ID"},
+    "cors": true,
+    "allow": "POST"
+  }
+}

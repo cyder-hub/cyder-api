@@ -1,4 +1,4 @@
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::utils::sse::SseEvent;
 
 use super::replay::{
@@ -6,6 +6,59 @@ use super::replay::{
     stage2_replay_fixture_cases, validate_provider_native_schema,
 };
 use super::*;
+
+#[test]
+fn test_transform_contract_summary_covers_failures_outcomes_and_accounting() {
+    let summary = build_transform_contract_summary();
+    let failures = summary
+        .cases
+        .iter()
+        .filter(|case| !case.passed)
+        .collect::<Vec<_>>();
+
+    assert_eq!(summary.required_case_count, 11);
+    assert_eq!(summary.case_count, 11);
+    assert_eq!(summary.passed_case_count, 11, "{failures:#?}");
+    assert!(summary.accounting_closed, "{:#?}", summary.cases);
+    assert!(summary.payload_free);
+    for outcome in [
+        "lossless",
+        "controlled_loss_minor",
+        "explicit_reject",
+        "fatal_error",
+    ] {
+        assert!(summary.outcome_counts.contains_key(outcome), "{outcome}");
+    }
+    assert!(summary.dropped_diagnostic_count > 0);
+    assert!(summary.passed);
+}
+
+#[test]
+fn test_transform_contract_report_omits_payload_and_safe_summary() {
+    let payload = serde_json::to_string(&build_transform_contract_summary())
+        .expect("contract summary must serialize");
+
+    assert!(!payload.contains("QUALITY_PRIVATE_SENTINEL"));
+    assert!(!payload.contains("safe_summary"));
+    assert!(!payload.contains("sha256"));
+}
+
+#[test]
+fn test_transform_contract_gate_rejects_silent_unaccounted_input() {
+    let mut cases = build_transform_contract_summary().cases;
+    let case = cases
+        .iter_mut()
+        .find(|case| case.contract_name == "stream_decode_failure")
+        .expect("stream decode contract case");
+    case.accounted_input_count = 0;
+    case.accounting_closed = false;
+    case.passed = false;
+
+    let summary = super::contracts::summarize_contract_cases(cases);
+
+    assert!(!summary.accounting_closed);
+    assert!(!summary.passed);
+}
 
 #[test]
 fn test_stage2_replay_regression_summary_matches_expected_counts() {
@@ -41,10 +94,14 @@ fn test_stage2_replay_regression_summary_matches_expected_counts() {
     );
     assert!(summary.provider_schema_conformant);
     assert_eq!(summary.preserved_text_count, 9);
-    assert_eq!(summary.preserved_tool_call_count, 9);
+    assert_eq!(
+        summary.preserved_tool_call_count, 9,
+        "{:?}",
+        summary.reports
+    );
     assert_eq!(summary.preserved_finish_reason_count, 9);
     assert_eq!(summary.preserved_usage_count, 9);
-    assert_eq!(summary.preserved_reasoning_count, 8);
+    assert_eq!(summary.preserved_reasoning_count, 9);
     assert_eq!(summary.preserved_binary_payload_count, 9);
     assert!(summary.passed);
 }
@@ -53,8 +110,8 @@ fn test_stage2_replay_regression_summary_matches_expected_counts() {
 fn test_replay_report_emitted_all_frames_rejects_partial_output() {
     let report = ReplayRegressionReport {
         fixture_name: "partial".to_string(),
-        source_api: LlmApiType::Openai,
-        target_api: LlmApiType::Responses,
+        upstream_protocol: UpstreamProtocol::Openai,
+        downstream_protocol: DownstreamProtocol::Responses,
         source: SemanticReplaySnapshot::default(),
         target: SemanticReplaySnapshot::default(),
         source_frame_count: 4,
@@ -135,7 +192,7 @@ fn test_replay_report_openai_compatible_fixture_preserves_model_and_schema() {
 #[test]
 fn test_provider_native_schema_validation_rejects_legacy_wrapped_responses_frame() {
     let failures = validate_provider_native_schema(
-        LlmApiType::Responses,
+        DownstreamProtocol::Responses,
         &[SseEvent {
             data: serde_json::to_string(&serde_json::json!({
                 "id": "resp_legacy",
@@ -166,7 +223,7 @@ fn test_benchmark_threshold_evaluation_reports_regressions() {
         sample_rounds: 8,
         scenarios: vec![BenchmarkScenarioMetrics {
             kind: "stream".to_string(),
-            name: "responses_to_openai_long_session".to_string(),
+            name: "responses_to_anthropic_long_session".to_string(),
             throughput_ops_per_sec: 2400.0,
             throughput_mib_per_sec: 64.0,
             p50_ms: 0.40,
@@ -183,7 +240,7 @@ fn test_benchmark_threshold_evaluation_reports_regressions() {
         require_native_schema_conformance: true,
         checks: vec![BenchmarkThresholdRule {
             kind: "stream".to_string(),
-            scenario: "responses_to_openai_long_session".to_string(),
+            scenario: "responses_to_anthropic_long_session".to_string(),
             min_ops_per_sec: Some(2600.0),
             max_p95_ms: Some(0.40),
             max_allocs_per_op: Some(4600.0),
@@ -230,7 +287,8 @@ fn test_quality_report_file_helpers_round_trip_gate_artifacts() {
         },
         &loaded,
     );
-    assert!(report.passed);
+    assert!(report.passed, "{:#?}", report.contract_summary.cases);
+    assert_eq!(report.format_version, 2);
 
     write_transform_quality_report(&report_path, &report).expect("write quality report");
     let persisted: TransformQualityReport = serde_json::from_slice(

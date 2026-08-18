@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: Cyder Manager Provider Key Living Contract
-  version: 1.0.0-pre.3
-  description: Provider credential lifecycle contract for the single-manager gateway.
+  title: Cyder Manager Logical Provider Living Contract
+  version: 1.0.0-pre.5
+  description: Logical Provider, zero-to-many Upstream Source aggregate, deterministic Source selection, and Provider-owned opaque credential lifecycle contract for the single-manager gateway.
 servers:
   - url: /
 security:
@@ -12,6 +12,368 @@ x-cyder-web-security-client-identity-contract: ../web-security-client-identity.m
 x-cyder-secret-governance-reauth-operation-ids: [revealProviderKeySecret]
 x-cyder-provider-mutation-operation-ids-without-totp: [createProviderKey, updateProviderKeyMetadata, replaceProviderKeySecret, deleteProviderKey]
 paths:
+  /ai/manager/api/model:
+    post:
+      operationId: createModel
+      description: Creates a Provider-scoped Model and optionally commits its complete Source Config in the same transaction. Omitting source_config persists INHERIT_ALL with no bindings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelCreate" }
+      responses:
+        "200": { $ref: "#/components/responses/Model" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/list:
+    get:
+      operationId: listModels
+      description: Returns active and historical Model rows with batched Source Config summaries.
+      responses:
+        "200": { $ref: "#/components/responses/ModelList" }
+  /ai/manager/api/model/summary/list:
+    get:
+      operationId: listModelSummaries
+      description: Returns Model summary rows with batched Source Config summaries.
+      responses:
+        "200": { $ref: "#/components/responses/ModelSummaryList" }
+  /ai/manager/api/model/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    put:
+      operationId: updateModel
+      description: Updates only Model core fields. Source Config is changed through its dedicated complete-replacement endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelUpdate" }
+      responses:
+        "200": { $ref: "#/components/responses/ModelCore" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+    delete:
+      operationId: deleteModel
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+  /ai/manager/api/model/{id}/detail:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    get:
+      operationId: getModelDetail
+      responses:
+        "200": { $ref: "#/components/responses/ModelDetail" }
+  /ai/manager/api/model/{id}/source-config:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    get:
+      operationId: getModelSourceConfig
+      responses:
+        "200": { $ref: "#/components/responses/ModelSourceConfig" }
+    put:
+      operationId: replaceModelSourceConfig
+      description: Atomically replaces the complete Model Source Config. INHERIT_ALL requires an empty bindings array; EXPLICIT may be empty and may contain at most one default.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModelSourceConfig" }
+      responses:
+        "200": { $ref: "#/components/responses/ModelSourceConfig" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{id}/source-config/explain:
+    parameters:
+      - $ref: "#/components/parameters/ModelId"
+    get:
+      operationId: explainModelSourceConfig
+      description: Explains deterministic Source selection for OpenAI, Responses, Anthropic, and Gemini without selecting credentials or making an upstream call.
+      responses:
+        "200": { $ref: "#/components/responses/ModelSourceExplain" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{model_id}/request_patch:
+    parameters:
+      - $ref: "#/components/parameters/ModelRouteId"
+    get:
+      operationId: listModelRequestPatchOverview
+      description: Returns all active Request Patch Variants owned by a Model, including zero-rule disabled tombstones.
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchModelOverview" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{model_id}/sources/{source_id}/request_patch:
+    parameters:
+      - $ref: "#/components/parameters/ModelRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    get:
+      operationId: listModelSourceRequestPatchVariants
+      description: Returns active Model+Source Request Patch Variants, including zero-rule disabled tombstones.
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantList" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/variants:
+    parameters:
+      - $ref: "#/components/parameters/ModelRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    post:
+      operationId: createModelSourceRequestPatchVariant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RequestPatchVariantInput" }
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/variants/{variant_id}:
+    parameters:
+      - $ref: "#/components/parameters/ModelRouteId"
+      - $ref: "#/components/parameters/SourceId"
+      - $ref: "#/components/parameters/RequestPatchVariantId"
+    put:
+      operationId: updateModelSourceRequestPatchVariant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RequestPatchVariantInput" }
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+    delete:
+      operationId: deleteModelSourceRequestPatchVariant
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/preview:
+    parameters:
+      - $ref: "#/components/parameters/ModelRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    post:
+      operationId: previewModelSourceRequestPatchVariant
+      description: Validates and reports dangerous targets, cross-layer conflicts, and affected model count without mutation, audit, or cache invalidation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RequestPatchPreviewInput" }
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchPreview" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/model/{model_id}/sources/{source_id}/request_patch/explain:
+    parameters:
+      - $ref: "#/components/parameters/ModelRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    get:
+      operationId: explainModelSourceRequestPatchVariants
+      description: Returns the bounded four-layer Request Patch evaluation for one Model, Source, and optional suffix.
+      parameters:
+        - $ref: "#/components/parameters/RequestPatchSuffix"
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchExplain" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch:
+    parameters:
+      - $ref: "#/components/parameters/ProviderRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    get:
+      operationId: listSourceRequestPatchVariants
+      description: Returns active Source Request Patch Variants, including zero-rule disabled tombstones.
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantList" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/variants:
+    parameters:
+      - $ref: "#/components/parameters/ProviderRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    post:
+      operationId: createSourceRequestPatchVariant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RequestPatchVariantInput" }
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/variants/{variant_id}:
+    parameters:
+      - $ref: "#/components/parameters/ProviderRouteId"
+      - $ref: "#/components/parameters/SourceId"
+      - $ref: "#/components/parameters/RequestPatchVariantId"
+    put:
+      operationId: updateSourceRequestPatchVariant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RequestPatchVariantInput" }
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+    delete:
+      operationId: deleteSourceRequestPatchVariant
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchVariantAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/preview:
+    parameters:
+      - $ref: "#/components/parameters/ProviderRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    post:
+      operationId: previewSourceRequestPatchVariant
+      description: Validates and reports dangerous targets, cross-layer conflicts, and affected model count without mutation, audit, or cache invalidation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RequestPatchPreviewInput" }
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchPreview" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{provider_id}/sources/{source_id}/request_patch/explain:
+    parameters:
+      - $ref: "#/components/parameters/ProviderRouteId"
+      - $ref: "#/components/parameters/SourceId"
+    get:
+      operationId: explainSourceRequestPatchVariants
+      description: Returns the bounded four-layer Source Request Patch evaluation for an optional suffix.
+      parameters:
+        - $ref: "#/components/parameters/RequestPatchSuffix"
+      responses:
+        "200": { $ref: "#/components/responses/RequestPatchExplain" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider:
+    post:
+      operationId: createProvider
+      description: Creates one Logical Provider. The optional initial_source creates one explicit Source in the same transaction; a Provider may legitimately have zero Sources. Legacy top-level endpoint, provider_type, and use_proxy fields are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderUpsert" }
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/list:
+    get:
+      operationId: listProviders
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregateList" }
+  /ai/manager/api/provider/summary/list:
+    get:
+      operationId: listProviderSummaries
+      responses:
+        "200": { $ref: "#/components/responses/ProviderSummaryList" }
+  /ai/manager/api/provider/bootstrap:
+    post:
+      operationId: bootstrapProvider
+      description: Atomically creates the Logical Provider, its required enabled default initial Source, one Provider credential, and one model. The credential is an opaque Provider-owned string interpreted by the selected Source Profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderBootstrap" }
+      responses:
+        "200": { $ref: "#/components/responses/ProviderBootstrap" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+    get:
+      operationId: getProvider
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregate" }
+    put:
+      operationId: updateProvider
+      description: Updates only Logical Provider fields. It never creates, deletes, enables, selects, or changes the Profile of a Source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderUpdate" }
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+    delete:
+      operationId: deleteProvider
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+  /ai/manager/api/provider/{id}/detail:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+    get:
+      operationId: getProviderDetail
+      description: Returns the Provider aggregate with its active Models, Provider credential summaries, and request patch summaries.
+      responses:
+        "200": { $ref: "#/components/responses/ProviderDetail" }
+  /ai/manager/api/provider/detail/list:
+    get:
+      operationId: listProviderDetails
+      description: Returns the aggregate detail rows used by management selectors and Record Source flattening.
+      responses:
+        "200": { $ref: "#/components/responses/ProviderDetailList" }
+  /ai/manager/api/provider/{id}/sources:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+    post:
+      operationId: createProviderSource
+      description: Creates a Source with an immutable Profile. Source identity is source_id; no legacy key or implicit default alias is exposed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpstreamSourceInput" }
+      responses:
+        "200": { $ref: "#/components/responses/UpstreamSource" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{id}/sources/{source_id}:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+      - $ref: "#/components/parameters/SourceId"
+    put:
+      operationId: updateProviderSource
+      description: Updates Source base URL, Profile-allowed operation settings, proxy, enabled, and default target state. Profile is immutable and is rejected when supplied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpstreamSourceUpdate" }
+      responses:
+        "200": { $ref: "#/components/responses/UpstreamSource" }
+        "400": { $ref: "#/components/responses/ManagerError" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+    delete:
+      operationId: deleteProviderSource
+      description: Soft-deletes the addressed Source, including the final or default Source; no replacement is required.
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+  /ai/manager/api/provider/{id}/sources/{source_id}/model-impact:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+      - $ref: "#/components/parameters/SourceId"
+    post:
+      operationId: previewProviderSourceModelImpact
+      description: Previews bounded Model Source selection impact for a Source mutation. This endpoint has no side effects and never returns Model IDs or request payloads.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceImpactRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/SourceImpact" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{id}/sources/{source_id}/check:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+      - $ref: "#/components/parameters/SourceId"
+    post:
+      operationId: checkProviderSource
+      description: Checks the explicitly addressed Source with an explicitly selected saved Provider credential or draft opaque credential and Model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderCheck" }
+      responses:
+        "200": { $ref: "#/components/responses/SourceEvidence" }
+        "422": { $ref: "#/components/responses/ManagerError" }
   /ai/manager/api/provider/{id}/provider_keys:
     parameters:
       - $ref: "#/components/parameters/ProviderId"
@@ -126,11 +488,803 @@ components:
       in: path
       required: true
       schema: { type: integer, format: int64 }
+    SourceId:
+      name: source_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    ModelId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    ProviderRouteId:
+      name: provider_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    ModelRouteId:
+      name: model_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    RequestPatchVariantId:
+      name: variant_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    RequestPatchSuffix:
+      name: suffix
+      in: query
+      required: false
+      schema: { type: string, minLength: 1 }
   headers:
     NoStore:
       required: true
       schema: { type: string, const: no-store }
   schemas:
+    UpstreamProfileType:
+      type: string
+      enum: [OPENAI, OPENAI_COMPATIBLE, GEMINI, VERTEX, ANTHROPIC, RESPONSES, GEMINI_OPENAI]
+    SourceLifecycleInput:
+      type: object
+      properties:
+        use_proxy: { type: boolean, default: false }
+        is_enabled: { type: boolean, default: true }
+        is_default: { type: boolean, default: false }
+    OpenAiSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type]
+          properties:
+            profile_type: { type: string, const: OPENAI }
+            base_url: { type: [string, "null"], format: uri, minLength: 1, description: Null or omission persists the official OpenAI base URL. }
+            chat_completions_enabled: { type: [boolean, "null"], default: true }
+            chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+            embeddings_enabled: { type: [boolean, "null"], default: true }
+            embeddings_path_override: { type: [string, "null"], minLength: 1 }
+      unevaluatedProperties: false
+    GeminiOpenAiSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type]
+          properties:
+            profile_type: { type: string, const: GEMINI_OPENAI }
+            base_url: { type: [string, "null"], format: uri, minLength: 1, description: Null or omission persists the official Gemini OpenAI-compatible base URL. }
+            chat_completions_enabled: { type: [boolean, "null"], default: true }
+            chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+            embeddings_enabled: { type: [boolean, "null"], default: true }
+            embeddings_path_override: { type: [string, "null"], minLength: 1 }
+      unevaluatedProperties: false
+    OpenAiCompatibleSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type, base_url]
+          properties:
+            profile_type: { type: string, const: OPENAI_COMPATIBLE }
+            base_url: { type: string, format: uri, minLength: 1 }
+            chat_completions_enabled: { type: [boolean, "null"], default: true }
+            chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+            embeddings_enabled: { type: [boolean, "null"], default: false }
+            embeddings_path_override: { type: [string, "null"], minLength: 1 }
+            rerank_enabled: { type: [boolean, "null"], default: false }
+            rerank_path_override: { type: [string, "null"], minLength: 1 }
+      unevaluatedProperties: false
+    NativeSourceInput:
+      allOf:
+        - $ref: "#/components/schemas/SourceLifecycleInput"
+        - type: object
+          required: [profile_type, base_url]
+          properties:
+            profile_type: { type: string, enum: [GEMINI, VERTEX, ANTHROPIC, RESPONSES] }
+            base_url: { type: string, format: uri, minLength: 1 }
+      unevaluatedProperties: false
+    UpstreamSourceInput:
+      oneOf:
+        - $ref: "#/components/schemas/OpenAiSourceInput"
+        - $ref: "#/components/schemas/OpenAiCompatibleSourceInput"
+        - $ref: "#/components/schemas/GeminiOpenAiSourceInput"
+        - $ref: "#/components/schemas/NativeSourceInput"
+      discriminator:
+        propertyName: profile_type
+        mapping:
+          OPENAI: "#/components/schemas/OpenAiSourceInput"
+          OPENAI_COMPATIBLE: "#/components/schemas/OpenAiCompatibleSourceInput"
+          GEMINI_OPENAI: "#/components/schemas/GeminiOpenAiSourceInput"
+          GEMINI: "#/components/schemas/NativeSourceInput"
+          VERTEX: "#/components/schemas/NativeSourceInput"
+          ANTHROPIC: "#/components/schemas/NativeSourceInput"
+          RESPONSES: "#/components/schemas/NativeSourceInput"
+    UpstreamSourceUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType", description: Immutable; the server rejects this field when present. }
+        base_url: { type: [string, "null"], format: uri, minLength: 1 }
+        use_proxy: { type: [boolean, "null"] }
+        chat_completions_enabled: { type: [boolean, "null"] }
+        chat_completions_path_override: { type: [string, "null"], minLength: 1 }
+        embeddings_enabled: { type: [boolean, "null"] }
+        embeddings_path_override: { type: [string, "null"], minLength: 1 }
+        rerank_enabled: { type: [boolean, "null"] }
+        rerank_path_override: { type: [string, "null"], minLength: 1 }
+        is_enabled: { type: [boolean, "null"] }
+        is_default: { type: [boolean, "null"] }
+    SourceCommon:
+      type: object
+      required: [id, provider_id, base_url, base_url_is_default, use_proxy, is_enabled, is_default, deleted_at, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        base_url: { type: string, format: uri }
+        base_url_is_default: { type: boolean }
+        use_proxy: { type: boolean }
+        is_enabled: { type: boolean }
+        is_default: { type: boolean }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    OpenAiSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type, chat_completions_enabled, chat_completions_path_override, embeddings_enabled, embeddings_path_override]
+          properties:
+            profile_type: { type: string, const: OPENAI }
+            chat_completions_enabled: { type: boolean }
+            chat_completions_path_override: { type: [string, "null"] }
+            embeddings_enabled: { type: boolean }
+            embeddings_path_override: { type: [string, "null"] }
+      unevaluatedProperties: false
+    GeminiOpenAiSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type, chat_completions_enabled, chat_completions_path_override, embeddings_enabled, embeddings_path_override]
+          properties:
+            profile_type: { type: string, const: GEMINI_OPENAI }
+            chat_completions_enabled: { type: boolean }
+            chat_completions_path_override: { type: [string, "null"] }
+            embeddings_enabled: { type: boolean }
+            embeddings_path_override: { type: [string, "null"] }
+      unevaluatedProperties: false
+    OpenAiCompatibleSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type, chat_completions_enabled, chat_completions_path_override, embeddings_enabled, embeddings_path_override, rerank_enabled, rerank_path_override]
+          properties:
+            profile_type: { type: string, const: OPENAI_COMPATIBLE }
+            chat_completions_enabled: { type: boolean }
+            chat_completions_path_override: { type: [string, "null"] }
+            embeddings_enabled: { type: boolean }
+            embeddings_path_override: { type: [string, "null"] }
+            rerank_enabled: { type: boolean }
+            rerank_path_override: { type: [string, "null"] }
+      unevaluatedProperties: false
+    NativeSource:
+      allOf:
+        - $ref: "#/components/schemas/SourceCommon"
+        - type: object
+          required: [profile_type]
+          properties:
+            profile_type: { type: string, enum: [GEMINI, VERTEX, ANTHROPIC, RESPONSES] }
+      unevaluatedProperties: false
+    UpstreamSource:
+      oneOf:
+        - $ref: "#/components/schemas/OpenAiSource"
+        - $ref: "#/components/schemas/OpenAiCompatibleSource"
+        - $ref: "#/components/schemas/GeminiOpenAiSource"
+        - $ref: "#/components/schemas/NativeSource"
+      discriminator:
+        propertyName: profile_type
+    ProviderAggregate:
+      type: object
+      additionalProperties: false
+      required: [id, provider_key, name, is_enabled, deleted_at, created_at, updated_at, provider_api_key_mode, upstream_sources]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_key: { type: string }
+        name: { type: string }
+        is_enabled: { type: boolean }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+        provider_api_key_mode: { type: string, enum: [QUEUE, RANDOM] }
+        upstream_sources:
+          type: array
+          items: { $ref: "#/components/schemas/UpstreamSource" }
+    ProviderSummary:
+      type: object
+      additionalProperties: false
+      required: [id, provider_key, name, is_enabled, source_count, enabled_source_count, default_source_id, default_source_profile_type]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_key: { type: string }
+        name: { type: string }
+        is_enabled: { type: boolean }
+        source_count: { type: integer, format: int64, minimum: 0 }
+        enabled_source_count: { type: integer, format: int64, minimum: 0 }
+        default_source_id: { type: [integer, "null"], format: int64 }
+        default_source_profile_type:
+          anyOf:
+            - $ref: "#/components/schemas/UpstreamProfileType"
+            - type: "null"
+    ProviderUpsert:
+      type: object
+      additionalProperties: false
+      required: [name, key]
+      properties:
+        name: { type: string, minLength: 1 }
+        key: { type: string, minLength: 1 }
+        initial_source: { $ref: "#/components/schemas/UpstreamSourceInput" }
+        provider_api_key_mode: { type: [string, "null"], enum: [QUEUE, RANDOM, null] }
+        is_enabled: { type: [boolean, "null"] }
+    ProviderUpdate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1 }
+        is_enabled: { type: [boolean, "null"] }
+        provider_api_key_mode: { type: [string, "null"], enum: [QUEUE, RANDOM, null] }
+    ProviderBootstrap:
+      type: object
+      additionalProperties: false
+      required: [initial_source, api_key, model_name, model_kind, key]
+      properties:
+        initial_source: { $ref: "#/components/schemas/UpstreamSourceInput" }
+        api_key: { type: string, minLength: 1 }
+        model_name: { type: string, minLength: 1 }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
+        name: { type: [string, "null"] }
+        key: { type: string, minLength: 1 }
+        real_model_name: { type: [string, "null"] }
+        save_and_test: { type: boolean, default: false }
+        api_key_description: { type: [string, "null"] }
+    ProviderCheck:
+      description: Exactly one saved CHAT model or ephemeral CHAT draft model. Draft models are neither persisted nor bound and do not select Model-level or suffix Patch variants.
+      oneOf:
+        - $ref: "#/components/schemas/ProviderCheckSavedModel"
+        - $ref: "#/components/schemas/ProviderCheckDraftModel"
+    ProviderCheckSavedModel:
+      type: object
+      additionalProperties: false
+      required: [model_id]
+      anyOf:
+        - required: [provider_api_key_id]
+        - required: [provider_api_key]
+      properties:
+        model_id: { type: integer, format: int64 }
+        provider_api_key_id: { type: [integer, "null"], format: int64 }
+        provider_api_key: { type: [string, "null"] }
+    ProviderCheckDraftModel:
+      type: object
+      additionalProperties: false
+      required: [draft_model]
+      anyOf:
+        - required: [provider_api_key_id]
+        - required: [provider_api_key]
+      properties:
+        draft_model: { $ref: "#/components/schemas/ProviderCheckDraftModelValue" }
+        provider_api_key_id: { type: [integer, "null"], format: int64 }
+        provider_api_key: { type: [string, "null"] }
+    ProviderCheckDraftModelValue:
+      type: object
+      additionalProperties: false
+      required: [model_kind, upstream_model_name]
+      properties:
+        model_kind:
+          type: string
+          const: CHAT
+        upstream_model_name: { type: string, minLength: 1 }
+    SourceEvidence:
+      type: object
+      additionalProperties: false
+      required: [source_id, profile_type, provider_api_key_id]
+      properties:
+        source_id: { type: integer, format: int64 }
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
+        provider_api_key_id: { type: [integer, "null"], format: int64 }
+    DownstreamProtocol:
+      type: string
+      enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI]
+    UpstreamProtocol:
+      type: string
+      enum: [OPENAI, RESPONSES, ANTHROPIC, GEMINI]
+    ModelSourceSelectionMode:
+      type: string
+      enum: [INHERIT_ALL, EXPLICIT]
+    ModelKind:
+      type: string
+      enum: [CHAT, EMBEDDING, RERANK]
+    ModelSourceBinding:
+      type: object
+      additionalProperties: false
+      required: [source_id]
+      properties:
+        source_id: { type: integer, format: int64, minimum: 1 }
+        is_default: { type: boolean, default: false }
+    ModelSourceBindingSummary:
+      type: object
+      additionalProperties: false
+      required: [source_id, is_default, profile_type, is_enabled]
+      properties:
+        source_id: { type: integer, format: int64 }
+        is_default: { type: boolean }
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
+        is_enabled: { type: boolean }
+    ModelSourceConfig:
+      type: object
+      additionalProperties: false
+      required: [source_selection_mode, bindings]
+      properties:
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/ModelSourceBinding" }
+    ModelSourceConfigSummary:
+      type: object
+      additionalProperties: false
+      required: [source_selection_mode, bindings, declared_source_count, enabled_source_count, model_default_source_id, warnings]
+      properties:
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        bindings:
+          type: array
+          items: { $ref: "#/components/schemas/ModelSourceBindingSummary" }
+        declared_source_count: { type: integer, minimum: 0 }
+        enabled_source_count: { type: integer, minimum: 0 }
+        model_default_source_id: { type: [integer, "null"], format: int64 }
+        warnings:
+          type: array
+          items: { type: string }
+    SourceSelectionTraceEntry:
+      type: object
+      additionalProperties: false
+      required: [key, source_ids]
+      properties:
+        key: { type: string }
+        source_ids:
+          type: array
+          items: { type: integer, format: int64 }
+    ModelSourceProtocolExplain:
+      type: object
+      additionalProperties: false
+      required: [downstream_protocol, selection_status, source_id, profile_type, upstream_protocol, selection_reason, transform_required, decision_trace, failure_reason, generation_execution_status, generation_execution_reason]
+      properties:
+        downstream_protocol: { $ref: "#/components/schemas/DownstreamProtocol" }
+        selection_status: { type: string, enum: [selected, unselectable] }
+        source_id: { type: [integer, "null"], format: int64 }
+        profile_type:
+          anyOf:
+            - $ref: "#/components/schemas/UpstreamProfileType"
+            - type: "null"
+        upstream_protocol:
+          anyOf:
+            - $ref: "#/components/schemas/UpstreamProtocol"
+            - type: "null"
+        selection_reason:
+          type: [string, "null"]
+          enum: [protocol_match, provider_default_transform, model_default_transform, null]
+        transform_required: { type: [boolean, "null"] }
+        decision_trace:
+          type: array
+          items: { $ref: "#/components/schemas/SourceSelectionTraceEntry" }
+        failure_reason: { type: [string, "null"] }
+        generation_execution_status: { type: string }
+        generation_execution_reason: { type: string }
+    ModelSourceExplain:
+      type: object
+      additionalProperties: false
+      required: [model_id, provider_id, source_selection_mode, provider_enabled, model_enabled, declared_source_count, enabled_source_count, model_default_source_id, warnings, protocols]
+      properties:
+        model_id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        provider_enabled: { type: boolean }
+        model_enabled: { type: boolean }
+        declared_source_count: { type: integer, minimum: 0 }
+        enabled_source_count: { type: integer, minimum: 0 }
+        model_default_source_id: { type: [integer, "null"], format: int64 }
+        warnings:
+          type: array
+          items: { type: string }
+        protocols:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/ModelSourceProtocolExplain" }
+    ModelCreate:
+      type: object
+      additionalProperties: false
+      required: [provider_id, model_name, model_kind]
+      properties:
+        provider_id: { type: integer, format: int64 }
+        model_name: { type: string, minLength: 1 }
+        real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
+        is_enabled: { type: boolean, default: true }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfig" }
+    ModelUpdate:
+      type: object
+      additionalProperties: false
+      required: [model_name, is_enabled, cost_catalog_id]
+      properties:
+        model_name: { type: string, minLength: 1 }
+        real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind", description: Immutable; the server rejects this field when present. }
+        is_enabled: { type: boolean }
+        cost_catalog_id: { type: [integer, "null"], format: int64 }
+    Model:
+      type: object
+      additionalProperties: false
+      required: [id, provider_id, model_name, real_model_name, model_kind, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        model_name: { type: string }
+        real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
+        cost_catalog_id: { type: [integer, "null"], format: int64 }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        is_enabled: { type: boolean }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    ModelResponse:
+      type: object
+      additionalProperties: false
+      required: [id, provider_id, model_name, real_model_name, model_kind, cost_catalog_id, source_selection_mode, deleted_at, is_enabled, created_at, updated_at, source_config]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        model_name: { type: string }
+        real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
+        cost_catalog_id: { type: [integer, "null"], format: int64 }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        is_enabled: { type: boolean }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    ModelSummary:
+      type: object
+      additionalProperties: false
+      required: [id, provider_id, provider_key, provider_name, model_name, real_model_name, model_kind, source_selection_mode, is_enabled, source_config]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        provider_key: { type: string }
+        provider_name: { type: string }
+        model_name: { type: string }
+        real_model_name: { type: [string, "null"] }
+        model_kind: { $ref: "#/components/schemas/ModelKind" }
+        source_selection_mode: { $ref: "#/components/schemas/ModelSourceSelectionMode" }
+        is_enabled: { type: boolean }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    RequestPatchPlacement:
+      type: string
+      enum: [HEADER, QUERY, BODY]
+    RequestPatchOperation:
+      type: string
+      enum: [SET, REMOVE]
+    RequestPatchVariantOrigin:
+      type: string
+      enum: [SourceBase, ModelBase, SourceSuffix, ModelSuffix]
+    RequestPatchExplainStatus:
+      type: string
+      enum: [Effective, Overridden, Conflicted, Masked, Dormant]
+    RequestPatchScalarValue:
+      type: [string, number, boolean, "null"]
+    RequestPatchRuleInput:
+      type: object
+      additionalProperties: false
+      required: [placement, target, operation]
+      properties:
+        placement: { $ref: "#/components/schemas/RequestPatchPlacement" }
+        target: { type: string, minLength: 1 }
+        operation: { $ref: "#/components/schemas/RequestPatchOperation" }
+        value_json: { $ref: "#/components/schemas/RequestPatchScalarValue" }
+        description: { type: [string, "null"] }
+    RequestPatchVariantInput:
+      type: object
+      additionalProperties: false
+      required: [source_id, enabled, expose_in_models, rules]
+      properties:
+        source_id: { type: integer, format: int64, minimum: 1 }
+        model_id: { type: [integer, "null"], format: int64, minimum: 1 }
+        suffix: { type: [string, "null"], minLength: 1 }
+        enabled: { type: boolean }
+        expose_in_models: { type: boolean }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchRuleInput" }
+    RequestPatchPreviewInput:
+      type: object
+      additionalProperties: false
+      required: [source_id, enabled, expose_in_models, rules]
+      properties:
+        variant_id: { type: [integer, "null"], format: int64, minimum: 1 }
+        source_id: { type: integer, format: int64, minimum: 1 }
+        model_id: { type: [integer, "null"], format: int64, minimum: 1 }
+        suffix: { type: [string, "null"], minLength: 1 }
+        enabled: { type: boolean }
+        expose_in_models: { type: boolean }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchRuleInput" }
+    RequestPatchVariant:
+      type: object
+      additionalProperties: false
+      required: [id, source_id, model_id, suffix, enabled, expose_in_models, deleted_at, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        source_id: { type: integer, format: int64 }
+        model_id: { type: [integer, "null"], format: int64 }
+        suffix: { type: [string, "null"] }
+        enabled: { type: boolean }
+        expose_in_models: { type: boolean }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    RequestPatchRule:
+      type: object
+      additionalProperties: false
+      required: [id, variant_id, placement, target, operation, value_json, description, deleted_at, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        variant_id: { type: integer, format: int64 }
+        placement: { $ref: "#/components/schemas/RequestPatchPlacement" }
+        target: { type: string }
+        operation: { $ref: "#/components/schemas/RequestPatchOperation" }
+        value_json: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    RequestPatchVariantAggregate:
+      type: object
+      additionalProperties: false
+      required: [variant, rules]
+      properties:
+        variant: { $ref: "#/components/schemas/RequestPatchVariant" }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchRule" }
+    RequestPatchVariantListData:
+      type: object
+      additionalProperties: false
+      required: [source_id, model_id, variants, variant_count, rule_count]
+      properties:
+        source_id: { type: integer, format: int64 }
+        model_id: { type: [integer, "null"], format: int64 }
+        variants:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchVariantAggregate" }
+        variant_count: { type: integer, minimum: 0 }
+        rule_count: { type: integer, minimum: 0 }
+    ModelRequestPatchOverviewData:
+      type: object
+      additionalProperties: false
+      required: [model_id, variants, variant_count, rule_count]
+      properties:
+        model_id: { type: integer, format: int64 }
+        variants:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchVariantAggregate" }
+        variant_count: { type: integer, minimum: 0 }
+        rule_count: { type: integer, minimum: 0 }
+    RequestPatchPreviewConflict:
+      type: object
+      additionalProperties: false
+      required: [existing_variant_id, existing_model_id, existing_suffix, placement, candidate_target, existing_target, reason]
+      properties:
+        existing_variant_id: { type: integer, format: int64 }
+        existing_model_id: { type: [integer, "null"], format: int64 }
+        existing_suffix: { type: [string, "null"] }
+        placement: { $ref: "#/components/schemas/RequestPatchPlacement" }
+        candidate_target: { type: string }
+        existing_target: { type: string }
+        reason: { type: string }
+    RequestPatchVariantPreview:
+      type: object
+      additionalProperties: false
+      required: [suffix, rule_count, conflicts, affected_model_count, valid, failure_reason]
+      properties:
+        suffix: { type: [string, "null"] }
+        rule_count: { type: integer, minimum: 0 }
+        conflicts:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchPreviewConflict" }
+        affected_model_count: { type: integer, minimum: 0 }
+        valid: { type: boolean }
+        failure_reason: { type: [string, "null"] }
+    RequestPatchCacheRule:
+      type: object
+      additionalProperties: false
+      required: [id, variant_id, placement, target, operation, value_json, description, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        variant_id: { type: integer, format: int64 }
+        placement: { $ref: "#/components/schemas/RequestPatchPlacement" }
+        target: { type: string }
+        operation: { $ref: "#/components/schemas/RequestPatchOperation" }
+        value_json: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    RequestPatchLayerState:
+      type: object
+      additionalProperties: false
+      required: [origin, variant_id, enabled, rule_count, expose_in_models, status, reason]
+      properties:
+        origin: { $ref: "#/components/schemas/RequestPatchVariantOrigin" }
+        variant_id: { type: [integer, "null"], format: int64 }
+        enabled: { type: boolean }
+        rule_count: { type: integer, minimum: 0 }
+        expose_in_models: { type: boolean }
+        status: { $ref: "#/components/schemas/RequestPatchExplainStatus" }
+        reason: { type: [string, "null"] }
+    RequestPatchEffectiveRule:
+      type: object
+      additionalProperties: false
+      required: [placement, target, operation, value_json, source_variant_id, source_rule_id, source_origin, overridden_rule_ids, description]
+      properties:
+        placement: { $ref: "#/components/schemas/RequestPatchPlacement" }
+        target: { type: string }
+        operation: { $ref: "#/components/schemas/RequestPatchOperation" }
+        value_json: { type: [string, "null"] }
+        source_variant_id: { type: integer, format: int64 }
+        source_rule_id: { type: integer, format: int64 }
+        source_origin: { $ref: "#/components/schemas/RequestPatchVariantOrigin" }
+        overridden_rule_ids:
+          type: array
+          items: { type: integer, format: int64 }
+        description: { type: [string, "null"] }
+    RequestPatchExplainEntry:
+      type: object
+      additionalProperties: false
+      required: [rule, origin, status, effective_rule_id, conflict_with_rule_ids, message]
+      properties:
+        rule: { $ref: "#/components/schemas/RequestPatchCacheRule" }
+        origin: { $ref: "#/components/schemas/RequestPatchVariantOrigin" }
+        status: { $ref: "#/components/schemas/RequestPatchExplainStatus" }
+        effective_rule_id: { type: [integer, "null"], format: int64 }
+        conflict_with_rule_ids:
+          type: array
+          items: { type: integer, format: int64 }
+        message: { type: [string, "null"] }
+    RequestPatchConflict:
+      type: object
+      additionalProperties: false
+      required: [lower_priority_variant_id, higher_priority_variant_id, lower_priority_origin, higher_priority_origin, placement, lower_priority_target, higher_priority_target, reason]
+      properties:
+        lower_priority_variant_id: { type: integer, format: int64 }
+        higher_priority_variant_id: { type: integer, format: int64 }
+        lower_priority_origin: { $ref: "#/components/schemas/RequestPatchVariantOrigin" }
+        higher_priority_origin: { $ref: "#/components/schemas/RequestPatchVariantOrigin" }
+        placement: { $ref: "#/components/schemas/RequestPatchPlacement" }
+        lower_priority_target: { type: string }
+        higher_priority_target: { type: string }
+        reason: { type: string }
+    RequestPatchEvaluation:
+      type: object
+      additionalProperties: false
+      required: [source_id, model_id, suffix, layers, effective_rules, explain, conflicts, has_conflicts, exposed_in_models, executable, failure_reason]
+      properties:
+        source_id: { type: integer, format: int64 }
+        model_id: { type: [integer, "null"], format: int64 }
+        suffix: { type: [string, "null"] }
+        layers:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/RequestPatchLayerState" }
+        effective_rules:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchEffectiveRule" }
+        explain:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchExplainEntry" }
+        conflicts:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchConflict" }
+        has_conflicts: { type: boolean }
+        exposed_in_models: { type: boolean }
+        executable: { type: boolean }
+        failure_reason: { type: [string, "null"] }
+    RequestPatchPreviewData:
+      type: object
+      additionalProperties: false
+      required: [historical_snapshot, preview, evaluation]
+      properties:
+        historical_snapshot: { type: boolean, const: false }
+        preview: { $ref: "#/components/schemas/RequestPatchVariantPreview" }
+        evaluation:
+          oneOf:
+            - $ref: "#/components/schemas/RequestPatchEvaluation"
+            - type: "null"
+    RequestPatchExplainData:
+      type: object
+      additionalProperties: false
+      required: [historical_snapshot, source_id, model_id, suffix, evaluation]
+      properties:
+        historical_snapshot: { type: boolean, const: false }
+        source_id: { type: integer, format: int64 }
+        model_id: { type: [integer, "null"], format: int64 }
+        suffix: { type: [string, "null"] }
+        evaluation: { $ref: "#/components/schemas/RequestPatchEvaluation" }
+    ModelDetail:
+      type: object
+      additionalProperties: false
+      required: [model, request_patch_variants, source_config]
+      properties:
+        model: { $ref: "#/components/schemas/Model" }
+        request_patch_variants:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchVariantAggregate" }
+        source_config: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    ProviderModelDetail:
+      allOf:
+        - $ref: "#/components/schemas/ModelDetail"
+    SourceImpactAction:
+      type: string
+      enum: [DISABLE, DELETE, SET_DEFAULT, UNSET_DEFAULT]
+    SourceImpactRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: { $ref: "#/components/schemas/SourceImpactAction" }
+    SourceImpactProtocolSummary:
+      type: object
+      additionalProperties: false
+      required: [downstream_protocol, selection_changed_count, would_become_unselectable_count]
+      properties:
+        downstream_protocol: { $ref: "#/components/schemas/DownstreamProtocol" }
+        selection_changed_count: { type: integer, minimum: 0 }
+        would_become_unselectable_count: { type: integer, minimum: 0 }
+    SourceImpactReport:
+      type: object
+      additionalProperties: false
+      required: [action, provider_id, source_id, inherit_all_model_count, explicit_binding_model_count, explicit_default_model_count, protocols]
+      properties:
+        action: { $ref: "#/components/schemas/SourceImpactAction" }
+        provider_id: { type: integer, format: int64 }
+        source_id: { type: integer, format: int64 }
+        inherit_all_model_count: { type: integer, minimum: 0 }
+        explicit_binding_model_count: { type: integer, minimum: 0 }
+        explicit_default_model_count: { type: integer, minimum: 0 }
+        protocols:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/SourceImpactProtocolSummary" }
+    BootstrapCheckResult:
+      type: object
+      additionalProperties: false
+      required: [status, message]
+      properties:
+        status: { type: string, enum: [success, failed, check_skipped] }
+        message: { type: string }
+    ProviderBootstrapResult:
+      type: object
+      additionalProperties: false
+      required: [provider, created_key, created_model, provider_name, provider_key, check_result]
+      properties:
+        provider: { $ref: "#/components/schemas/ProviderAggregate" }
+        created_key: { $ref: "#/components/schemas/ProviderKeySummary" }
+        created_model: { $ref: "#/components/schemas/Model" }
+        provider_name: { type: string }
+        provider_key: { type: string }
+        check_result:
+          anyOf:
+            - $ref: "#/components/schemas/BootstrapCheckResult"
+            - type: "null"
     ProviderKeyCreate:
       type: object
       additionalProperties: false
@@ -171,6 +1325,178 @@ components:
           required: [api_key]
           properties:
             api_key: { type: string }
+    ModelEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelResponse" }
+    ModelListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ModelResponse" }
+    ModelSummaryListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ModelSummary" }
+    ModelCoreEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/Model" }
+    ModelDetailEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelDetail" }
+    RequestPatchVariantListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/RequestPatchVariantListData" }
+    RequestPatchModelOverviewEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelRequestPatchOverviewData" }
+    RequestPatchVariantAggregateEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/RequestPatchVariantAggregate" }
+    RequestPatchPreviewEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/RequestPatchPreviewData" }
+    RequestPatchExplainEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/RequestPatchExplainData" }
+    ModelSourceConfigEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelSourceConfigSummary" }
+    ModelSourceExplainEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ModelSourceExplain" }
+    SourceImpactEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/SourceImpactReport" }
+    ProviderAggregateEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ProviderAggregate" }
+    ProviderAggregateListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderAggregate" }
+    ProviderDetail:
+      type: object
+      additionalProperties: false
+      required: [provider, models, provider_keys, request_patch_variants]
+      properties:
+        provider: { $ref: "#/components/schemas/ProviderAggregate" }
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderModelDetail" }
+        provider_keys:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderKeySummary" }
+        request_patch_variants:
+          type: array
+          items: { $ref: "#/components/schemas/RequestPatchVariantAggregate" }
+    ProviderDetailEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ProviderDetail" }
+    ProviderDetailListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderDetail" }
+    ProviderSummaryListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderSummary" }
+    ProviderBootstrapEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ProviderBootstrapResult" }
+    UpstreamSourceEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/UpstreamSource" }
+    SourceEvidenceEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/SourceEvidence" }
     ProviderKeySummaryEnvelope:
       type: object
       required: [code, data]
@@ -204,6 +1530,153 @@ components:
         code: { type: integer }
         msg: { type: string }
   responses:
+    Model:
+      description: Model core and batched Source Config summary.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelEnvelope" }
+    ModelList:
+      description: Model rows with batched Source Config summaries.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelListEnvelope" }
+    ModelSummaryList:
+      description: Model summary rows with batched Source Config summaries.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelSummaryListEnvelope" }
+    ModelCore:
+      description: Updated Model core without Source Config mutation.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelCoreEnvelope" }
+    ModelDetail:
+      description: Model detail with request patch diagnostics and Source Config summary.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelDetailEnvelope" }
+    RequestPatchVariantList:
+      description: Active Source or Model+Source Request Patch Variant aggregates, including zero-rule disabled tombstones.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RequestPatchVariantListEnvelope" }
+    RequestPatchModelOverview:
+      description: Active Model-owned Request Patch Variant aggregates and bounded counts.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RequestPatchModelOverviewEnvelope" }
+    RequestPatchVariantAggregate:
+      description: Persisted Request Patch Variant aggregate with its owned Rules.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RequestPatchVariantAggregateEnvelope" }
+    RequestPatchPreview:
+      description: Side-effect-free Request Patch validation, danger confirmation, conflict, and impact preview.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RequestPatchPreviewEnvelope" }
+    RequestPatchExplain:
+      description: Side-effect-free bounded four-layer Request Patch evaluation and explanation.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RequestPatchExplainEnvelope" }
+    ModelSourceConfig:
+      description: Complete visible Model Source Config summary; deleted Sources are omitted.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelSourceConfigEnvelope" }
+    ModelSourceExplain:
+      description: Deterministic four-protocol Source selection explanation with bounded trace and failure reasons.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ModelSourceExplainEnvelope" }
+    SourceImpact:
+      description: Bounded Source mutation impact counts by mode and downstream protocol.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SourceImpactEnvelope" }
+    ProviderAggregate:
+      description: Logical Provider with zero-to-many nested Upstream Sources.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderAggregateEnvelope" }
+    ProviderAggregateList:
+      description: Logical Providers with zero-to-many nested Upstream Sources each.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderAggregateListEnvelope" }
+    ProviderSummaryList:
+      description: Provider summaries with Source counts and optional default metadata.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderSummaryListEnvelope" }
+    ProviderDetail:
+      description: Provider aggregate detail with active Models, Provider credential summaries, and request patch summaries.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderDetailEnvelope" }
+    ProviderDetailList:
+      description: Provider aggregate detail list used by management and Record Source selectors.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderDetailListEnvelope" }
+    ProviderBootstrap:
+      description: Atomically bootstrapped Provider aggregate, Provider credential summary, model, and optional check result.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderBootstrapEnvelope" }
+    SourceEvidence:
+      description: Exact Source addressed by the Provider check.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SourceEvidenceEnvelope" }
+    UpstreamSource:
+      description: Complete active or soft-deleted Source record identified only by source_id.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/UpstreamSourceEnvelope" }
     ProviderKeyList:
       description: Safe provider key summaries without plaintext or encrypted secret fields.
       headers:
@@ -251,7 +1724,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     ProviderRevealConflict:
-      description: Either the stored provider credential is unavailable or the supplied TOTP step is replayed/stale.
+      description: Either the stored provider credential is unavailable or the current secret-governance reauthentication grant is stale or replayed.
       headers:
         Cache-Control: { $ref: "#/components/headers/NoStore" }
       content:

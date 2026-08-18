@@ -7,7 +7,7 @@ This document defines the browser boundary and client-IP trust contract for the 
 | Surface | Routes | Browser contract | Client identity |
 | --- | --- | --- | --- |
 | Manager | `/ai/manager/ui`, `/ai/manager/api/*` | Same-origin only; no CORS headers | Required before auth/UI handling |
-| Public AI proxy | `/ai/openai/*`, `/ai/responses/*`, `/ai/anthropic/*`, `/ai/gemini/*`, `/ai/ollama/*` | Fixed public CORS | Required before proxy auth/routing |
+| Public AI proxy | `/ai/openai/*`, `/ai/responses/*`, `/ai/anthropic/*`, `/ai/gemini/*` | Fixed public CORS | Required before proxy auth/routing |
 | System | `/ai/health`, `/ai/ready` | No CORS added by this contract | Not resolved |
 | Base fallback | other `/ai/*` paths | No CORS added by this contract | Not resolved |
 
@@ -76,7 +76,9 @@ Manager never returns `Access-Control-Allow-Origin` or `Access-Control-Allow-Cre
 
 ## Public proxy CORS
 
-The five AI protocol prefixes share one fixed public policy:
+The four AI protocol prefixes share one fixed public policy. Their exact
+version aliases, methods, and endpoint ownership are defined by the generated
+[Protocol Compatibility Matrix](protocol-compatibility.md):
 
 - origin: `*`
 - browser methods: `GET`, `POST`

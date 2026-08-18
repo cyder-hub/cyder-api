@@ -11,6 +11,8 @@ pub struct AnthropicRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<AnthropicToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
@@ -22,6 +24,59 @@ pub struct AnthropicRequestPayload {
     pub metadata: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<AnthropicThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<AnthropicOutputConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnthropicThinkingConfig {
+    #[serde(rename = "type")]
+    pub type_: AnthropicThinkingType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<AnthropicThinkingDisplay>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicThinkingType {
+    Adaptive,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicThinkingDisplay {
+    Summarized,
+    Omitted,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnthropicOutputConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<AnthropicEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<AnthropicOutputFormat>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicOutputFormat {
+    JsonSchema { schema: Value },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicEffort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +113,18 @@ pub struct AnthropicTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: Value, // JSON Schema
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnthropicToolChoice {
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_parallel_tool_use: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,10 +159,30 @@ pub enum AnthropicContentBlock {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_input_tokens: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_creation_input_tokens: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AnthropicStreamUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+}
+
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,14 +205,15 @@ pub enum AnthropicEvent {
     MessageDelta {
         delta: MessageDelta,
         #[serde(skip_serializing_if = "Option::is_none")]
-        usage: Option<AnthropicUsage>,
+        usage: Option<AnthropicStreamUsage>,
     },
     MessageStop,
     Error {
         error: Value,
     },
-    #[serde(other)]
     Ping,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -161,5 +249,5 @@ pub struct MessageDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<AnthropicUsage>,
+    pub usage: Option<AnthropicStreamUsage>,
 }

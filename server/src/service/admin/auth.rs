@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 use cyder_tools::log::{debug, info, warn};
 use tokio::sync::Mutex as AsyncMutex;
+#[cfg(test)]
+use tokio::sync::Notify;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -18,6 +20,7 @@ use crate::database::manager_credential::{
 use crate::database::manager_totp_recovery_code::{
     ManagerTotpRecoveryCode, NewManagerTotpRecoveryCode,
 };
+use crate::database::runtime::DatabaseRuntime;
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
 use crate::utils::ID_GENERATOR;
 use crate::utils::auth::{
@@ -38,6 +41,8 @@ use totp::{
     generate_manager_totp_recovery_codes, match_manager_totp_step,
     normalize_manager_totp_recovery_code, validate_manager_totp_code,
 };
+
+use super::await_cancellation_safe;
 
 const LOGIN_FAILURE_LIMIT: u32 = 5;
 const LOGIN_FAILURE_WINDOW_SEC: i64 = 60;
@@ -416,45 +421,88 @@ struct TotpChallengeState {
     recovery: HashMap<Uuid, RecoveryTotpChallenge>,
 }
 
+#[derive(Clone)]
 pub struct ManagerAuthService {
-    login_protection: StdMutex<LoginProtectionState>,
-    totp_protection: StdMutex<TotpProtectionState>,
-    totp_challenges: StdMutex<TotpChallengeState>,
-    credential_snapshot: RwLock<ManagerCredentialSnapshot>,
-    session_registry: RwLock<SessionRegistryState>,
-    access_flights: StdMutex<HashMap<i64, Arc<AsyncMutex<()>>>>,
-    credential_lifecycle: AsyncMutex<()>,
-    password_engine: PasswordEngine,
+    database: Arc<DatabaseRuntime>,
+    login_protection: Arc<StdMutex<LoginProtectionState>>,
+    totp_protection: Arc<StdMutex<TotpProtectionState>>,
+    totp_challenges: Arc<StdMutex<TotpChallengeState>>,
+    credential_snapshot: Arc<RwLock<ManagerCredentialSnapshot>>,
+    session_registry: Arc<RwLock<SessionRegistryState>>,
+    access_flights: Arc<StdMutex<HashMap<i64, Arc<AsyncMutex<()>>>>>,
+    credential_lifecycle: Arc<AsyncMutex<()>>,
+    password_engine: Arc<PasswordEngine>,
     secret_encryption: Arc<SecretEncryptionService>,
     now: NowFn,
+    #[cfg(test)]
+    before_publication_gate: Arc<StdMutex<Option<ManagerAuthPublicationTestGate>>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct ManagerAuthPublicationTestGate {
+    reached: Arc<Notify>,
+    resume: Arc<Notify>,
+    completed: Arc<Notify>,
+}
+
+#[cfg(test)]
+impl ManagerAuthPublicationTestGate {
+    async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    fn resume(&self) {
+        self.resume.notify_one();
+    }
+
+    async fn wait_until_completed(&self) {
+        self.completed.notified().await;
+    }
 }
 
 impl ManagerAuthService {
-    pub(crate) fn new(secret_encryption: Arc<SecretEncryptionService>) -> Self {
-        Self::new_with_clock(Arc::new(get_current_timestamp), secret_encryption)
+    pub(crate) async fn new(
+        database: Arc<DatabaseRuntime>,
+        secret_encryption: Arc<SecretEncryptionService>,
+    ) -> Self {
+        Self::new_with_clock(database, Arc::new(get_current_timestamp), secret_encryption).await
     }
 
     #[cfg(test)]
-    pub(crate) fn new_for_test(now: NowFn) -> Self {
+    pub(crate) fn database(&self) -> &DatabaseRuntime {
+        &self.database
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_for_test(database: Arc<DatabaseRuntime>, now: NowFn) -> Self {
         Self::new_with_clock(
+            database,
             now,
             Arc::new(SecretEncryptionService::from_config(
                 &crate::config::SecretEncryptionConfig::default(),
             )),
         )
+        .await
     }
 
     #[cfg(test)]
-    pub(crate) fn new_for_test_with_secret_encryption(
+    pub(crate) async fn new_for_test_with_secret_encryption(
+        database: Arc<DatabaseRuntime>,
         now: NowFn,
         secret_encryption: Arc<SecretEncryptionService>,
     ) -> Self {
-        Self::new_with_clock(now, secret_encryption)
+        Self::new_with_clock(database, now, secret_encryption).await
     }
 
-    fn new_with_clock(now: NowFn, secret_encryption: Arc<SecretEncryptionService>) -> Self {
+    async fn new_with_clock(
+        database: Arc<DatabaseRuntime>,
+        now: NowFn,
+        secret_encryption: Arc<SecretEncryptionService>,
+    ) -> Self {
         let current_time = now();
-        let credential_snapshot = ManagerCredentialSnapshot::load(&secret_encryption);
+        let credential_snapshot =
+            ManagerCredentialSnapshot::load(&database, &secret_encryption).await;
         if let ManagerCredentialSnapshot::Unavailable(reason) = &credential_snapshot {
             warn!(
                 "{}",
@@ -484,8 +532,13 @@ impl ManagerAuthService {
             );
         }
 
-        if ManagerAuthInstance::revoke_signing_key_mismatches(manager_jwt_key_id(), current_time)
-            .is_err()
+        if ManagerAuthInstance::revoke_signing_key_mismatches(
+            &database,
+            manager_jwt_key_id(),
+            current_time,
+        )
+        .await
+        .is_err()
         {
             warn!(
                 "{}",
@@ -495,7 +548,10 @@ impl ManagerAuthService {
                 )
             );
         }
-        if ManagerAuthInstance::cleanup_expired_instances(current_time).is_err() {
+        if ManagerAuthInstance::cleanup_expired_instances(&database, current_time)
+            .await
+            .is_err()
+        {
             warn!(
                 "{}",
                 crate::logging::event_message_with_fields(
@@ -504,31 +560,35 @@ impl ManagerAuthService {
                 )
             );
         }
-        let session_registry = match ManagerAuthInstance::list_active_instances(current_time) {
-            Ok(instances) => Self::registry_from_instances(instances),
-            Err(_) => {
-                warn!(
-                    "{}",
-                    crate::logging::event_message_with_fields(
-                        "manager.auth.session_registry_unavailable",
-                        &[("reason", Some("storage".to_string()))],
-                    )
-                );
-                SessionRegistryState::Unavailable
-            }
-        };
+        let session_registry =
+            match ManagerAuthInstance::list_active_instances(&database, current_time).await {
+                Ok(instances) => Self::registry_from_instances(instances),
+                Err(_) => {
+                    warn!(
+                        "{}",
+                        crate::logging::event_message_with_fields(
+                            "manager.auth.session_registry_unavailable",
+                            &[("reason", Some("storage".to_string()))],
+                        )
+                    );
+                    SessionRegistryState::Unavailable
+                }
+            };
 
         Self {
-            login_protection: StdMutex::new(LoginProtectionState::default()),
-            totp_protection: StdMutex::new(TotpProtectionState::default()),
-            totp_challenges: StdMutex::new(TotpChallengeState::default()),
-            credential_snapshot: RwLock::new(credential_snapshot),
-            session_registry: RwLock::new(session_registry),
-            access_flights: StdMutex::new(HashMap::new()),
-            credential_lifecycle: AsyncMutex::new(()),
-            password_engine: PasswordEngine::new(),
+            database,
+            login_protection: Arc::new(StdMutex::new(LoginProtectionState::default())),
+            totp_protection: Arc::new(StdMutex::new(TotpProtectionState::default())),
+            totp_challenges: Arc::new(StdMutex::new(TotpChallengeState::default())),
+            credential_snapshot: Arc::new(RwLock::new(credential_snapshot)),
+            session_registry: Arc::new(RwLock::new(session_registry)),
+            access_flights: Arc::new(StdMutex::new(HashMap::new())),
+            credential_lifecycle: Arc::new(AsyncMutex::new(())),
+            password_engine: Arc::new(PasswordEngine::new()),
             secret_encryption,
             now,
+            #[cfg(test)]
+            before_publication_gate: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -541,6 +601,14 @@ impl ManagerAuthService {
     }
 
     pub async fn bootstrap(&self, password: &str) -> Result<AuthTokenPair, BootstrapError> {
+        let service = self.clone();
+        let password = Zeroizing::new(password.to_string());
+        await_cancellation_safe(async move { service.bootstrap_owned(password.as_str()).await })
+            .await
+            .unwrap_or(Err(BootstrapError::Unavailable))
+    }
+
+    async fn bootstrap_owned(&self, password: &str) -> Result<AuthTokenPair, BootstrapError> {
         let _lifecycle = self
             .credential_lifecycle
             .try_lock()
@@ -571,6 +639,7 @@ impl ManagerAuthService {
         let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
         let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
         let mutation = ManagerCredential::bootstrap_with_session(
+            &self.database,
             NewManagerCredential {
                 password_verifier: verifier.to_string(),
                 credential_epoch: epoch.to_string(),
@@ -585,7 +654,10 @@ impl ManagerAuthService {
             ),
             "credential_bootstrap",
         )
+        .await
         .map_err(map_bootstrap_repository_error)?;
+        #[cfg(test)]
+        let publication_gate = self.wait_before_publication_for_test().await;
         let ready = self.install_ready_snapshot(mutation.credential)?;
         let mut pair = issue_token_pair(
             &mutation.session,
@@ -613,6 +685,10 @@ impl ManagerAuthService {
                 ],
             )
         );
+        #[cfg(test)]
+        if let Some(gate) = publication_gate {
+            gate.completed.notify_one();
+        }
         Ok(pair)
     }
 
@@ -688,6 +764,7 @@ impl ManagerAuthService {
         match ready.totp() {
             ManagerTotpState::Disabled => self
                 .create_login_session(&ready, now, ManagerReauthEvidence::Password)
+                .await
                 .map(LoginPasswordResult::Authenticated)
                 .map_err(|_| LoginPasswordError::Storage),
             ManagerTotpState::Enabled(_) => {
@@ -726,7 +803,7 @@ impl ManagerAuthService {
         let now = self.now();
         self.validate_login_totp_challenge(challenge, ready.credential_epoch(), source, now)?;
 
-        if let Err(error) = self.verify_active_totp(&ready, source, code, now) {
+        if let Err(error) = self.verify_active_totp(&ready, source, code, now).await {
             if counts_challenge_attempt(error) {
                 self.record_login_challenge_failure(challenge)?;
             }
@@ -734,6 +811,7 @@ impl ManagerAuthService {
         }
         self.remove_login_challenge(challenge);
         self.create_login_session(&ready, now, ManagerReauthEvidence::Totp)
+            .await
     }
 
     pub fn totp_status(&self) -> Result<ManagerTotpPublicState, ManagerTotpVerificationError> {
@@ -749,7 +827,7 @@ impl ManagerAuthService {
         Ok(public_totp_state(ready.totp()))
     }
 
-    pub fn verify_sensitive_totp(
+    pub async fn verify_sensitive_totp(
         &self,
         auth_context: &ManagerAuthContext,
         source: IpAddr,
@@ -770,7 +848,8 @@ impl ManagerAuthService {
             ManagerTotpState::Disabled => Ok(ManagerTotpSensitiveVerification::Disabled),
             ManagerTotpState::Enabled(_) => {
                 let code = code.ok_or(ManagerTotpVerificationError::Required)?;
-                self.verify_active_totp(&ready, source, code, self.now())?;
+                self.verify_active_totp(&ready, source, code, self.now())
+                    .await?;
                 Ok(ManagerTotpSensitiveVerification::Verified)
             }
             ManagerTotpState::Unavailable { .. } => Err(ManagerTotpVerificationError::Unavailable),
@@ -806,7 +885,8 @@ impl ManagerAuthService {
                 ManagerReauthEvidence::Password
             }
             (ManagerTotpState::Enabled(_), ManagerReauthCredential::Totp(code)) => {
-                self.verify_active_totp(&ready, source, code, self.now())?;
+                self.verify_active_totp(&ready, source, code, self.now())
+                    .await?;
                 ManagerReauthEvidence::Totp
             }
             (ManagerTotpState::Unavailable { .. }, _) => {
@@ -923,6 +1003,25 @@ impl ManagerAuthService {
         challenge: Uuid,
         code: &str,
     ) -> Result<ManagerTotpLifecycleResult, ManagerTotpVerificationError> {
+        let service = self.clone();
+        let auth_context = auth_context.clone();
+        let code = Zeroizing::new(code.to_string());
+        await_cancellation_safe(async move {
+            service
+                .confirm_totp_enrollment_owned(&auth_context, source, challenge, code.as_str())
+                .await
+        })
+        .await
+        .unwrap_or(Err(ManagerTotpVerificationError::Unavailable))
+    }
+
+    async fn confirm_totp_enrollment_owned(
+        &self,
+        auth_context: &ManagerAuthContext,
+        source: IpAddr,
+        challenge: Uuid,
+        code: &str,
+    ) -> Result<ManagerTotpLifecycleResult, ManagerTotpVerificationError> {
         let _lifecycle = self
             .credential_lifecycle
             .try_lock()
@@ -977,7 +1076,8 @@ impl ManagerAuthService {
         }
         self.verify_current_password(&ready, source, current_password)
             .await?;
-        self.verify_active_totp(&ready, source, current_totp_code, self.now())?;
+        self.verify_active_totp(&ready, source, current_totp_code, self.now())
+            .await?;
         self.create_setup_totp_challenge(
             ManagerTotpSetupAction::Replace,
             auth_context.login_instance_id,
@@ -988,6 +1088,25 @@ impl ManagerAuthService {
     }
 
     pub async fn confirm_totp_replacement(
+        &self,
+        auth_context: &ManagerAuthContext,
+        source: IpAddr,
+        challenge: Uuid,
+        code: &str,
+    ) -> Result<ManagerTotpLifecycleResult, ManagerTotpVerificationError> {
+        let service = self.clone();
+        let auth_context = auth_context.clone();
+        let code = Zeroizing::new(code.to_string());
+        await_cancellation_safe(async move {
+            service
+                .confirm_totp_replacement_owned(&auth_context, source, challenge, code.as_str())
+                .await
+        })
+        .await
+        .unwrap_or(Err(ManagerTotpVerificationError::Unavailable))
+    }
+
+    async fn confirm_totp_replacement_owned(
         &self,
         auth_context: &ManagerAuthContext,
         source: IpAddr,
@@ -1039,6 +1158,31 @@ impl ManagerAuthService {
         current_password: &str,
         current_totp_code: &str,
     ) -> Result<ManagerTotpLifecycleResult, ManagerTotpVerificationError> {
+        let service = self.clone();
+        let auth_context = auth_context.clone();
+        let current_password = Zeroizing::new(current_password.to_string());
+        let current_totp_code = Zeroizing::new(current_totp_code.to_string());
+        await_cancellation_safe(async move {
+            service
+                .disable_totp_owned(
+                    &auth_context,
+                    source,
+                    current_password.as_str(),
+                    current_totp_code.as_str(),
+                )
+                .await
+        })
+        .await
+        .unwrap_or(Err(ManagerTotpVerificationError::Unavailable))
+    }
+
+    async fn disable_totp_owned(
+        &self,
+        auth_context: &ManagerAuthContext,
+        source: IpAddr,
+        current_password: &str,
+        current_totp_code: &str,
+    ) -> Result<ManagerTotpLifecycleResult, ManagerTotpVerificationError> {
         let _lifecycle = self
             .credential_lifecycle
             .try_lock()
@@ -1055,7 +1199,8 @@ impl ManagerAuthService {
         }
         self.verify_current_password(&ready, source, current_password)
             .await?;
-        self.verify_active_totp(&ready, source, current_totp_code, self.now())?;
+        self.verify_active_totp(&ready, source, current_totp_code, self.now())
+            .await?;
 
         let now = self.now();
         let new_epoch = Uuid::new_v4();
@@ -1063,6 +1208,7 @@ impl ManagerAuthService {
         let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
         let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
         let mutation = ManagerCredential::disable_totp_with_session(
+            &self.database,
             &ready.credential_epoch().to_string(),
             &new_epoch.to_string(),
             new_session(
@@ -1075,6 +1221,7 @@ impl ManagerAuthService {
             now,
             "totp_disabled",
         )
+        .await
         .map_err(map_totp_repository_error)?;
         let installed = self
             .install_ready_snapshot(mutation.credential)
@@ -1114,6 +1261,28 @@ impl ManagerAuthService {
         submitted_password: &str,
         submitted_recovery_code: &str,
     ) -> Result<ManagerTotpSetup, ManagerTotpVerificationError> {
+        let service = self.clone();
+        let submitted_password = Zeroizing::new(submitted_password.to_string());
+        let submitted_recovery_code = Zeroizing::new(submitted_recovery_code.to_string());
+        await_cancellation_safe(async move {
+            service
+                .start_totp_recovery_owned(
+                    source,
+                    submitted_password.as_str(),
+                    submitted_recovery_code.as_str(),
+                )
+                .await
+        })
+        .await
+        .unwrap_or(Err(ManagerTotpVerificationError::Unavailable))
+    }
+
+    async fn start_totp_recovery_owned(
+        &self,
+        source: IpAddr,
+        submitted_password: &str,
+        submitted_recovery_code: &str,
+    ) -> Result<ManagerTotpSetup, ManagerTotpVerificationError> {
         let _lifecycle = self
             .credential_lifecycle
             .try_lock()
@@ -1135,7 +1304,8 @@ impl ManagerAuthService {
 
         let normalized = normalize_manager_totp_recovery_code(submitted_recovery_code).ok();
         let recovery_row = match normalized.as_ref() {
-            Some((code_id, _)) => ManagerTotpRecoveryCode::load_by_code_id(code_id)
+            Some((code_id, _)) => ManagerTotpRecoveryCode::load_by_code_id(&self.database, code_id)
+                .await
                 .map_err(|_| ManagerTotpVerificationError::Storage)?,
             None => None,
         };
@@ -1180,12 +1350,14 @@ impl ManagerAuthService {
         let recovery_row =
             recovery_row.expect("successful recovery verification requires a repository row");
         let mutation = ManagerCredential::consume_recovery_code_and_revoke_sessions(
+            &self.database,
             &ready.credential_epoch().to_string(),
             &recovery_row.code_id,
             &recovery_row.code_verifier,
             now,
             "totp_recovery_started",
         )
+        .await
         .map_err(|error| match error {
             ManagerCredentialRepositoryError::RecoveryCodeConflict => {
                 ManagerTotpVerificationError::RecoveryCredentialsInvalid
@@ -1220,6 +1392,23 @@ impl ManagerAuthService {
         challenge: Uuid,
         code: &str,
     ) -> Result<ManagerTotpLifecycleResult, ManagerTotpVerificationError> {
+        let service = self.clone();
+        let code = Zeroizing::new(code.to_string());
+        await_cancellation_safe(async move {
+            service
+                .confirm_totp_recovery_owned(source, challenge, code.as_str())
+                .await
+        })
+        .await
+        .unwrap_or(Err(ManagerTotpVerificationError::Unavailable))
+    }
+
+    async fn confirm_totp_recovery_owned(
+        &self,
+        source: IpAddr,
+        challenge: Uuid,
+        code: &str,
+    ) -> Result<ManagerTotpLifecycleResult, ManagerTotpVerificationError> {
         let _lifecycle = self
             .credential_lifecycle
             .try_lock()
@@ -1235,7 +1424,8 @@ impl ManagerAuthService {
         };
         let last_accepted_step = match ready.totp() {
             ManagerTotpState::Enabled(totp) => totp.last_accepted_step(),
-            ManagerTotpState::Unavailable { .. } => ManagerCredential::load()
+            ManagerTotpState::Unavailable { .. } => ManagerCredential::load(&self.database)
+                .await
                 .map_err(|_| ManagerTotpVerificationError::Storage)?
                 .and_then(|credential| credential.totp_last_accepted_step)
                 .ok_or(ManagerTotpVerificationError::StateConflict)?,
@@ -1266,6 +1456,34 @@ impl ManagerAuthService {
     }
 
     pub async fn rotate_password(
+        &self,
+        auth_context: &ManagerAuthContext,
+        source: IpAddr,
+        totp_code: Option<&str>,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<AuthTokenPair, RotatePasswordError> {
+        let service = self.clone();
+        let auth_context = auth_context.clone();
+        let totp_code = totp_code.map(|code| Zeroizing::new(code.to_string()));
+        let current_password = Zeroizing::new(current_password.to_string());
+        let new_password = Zeroizing::new(new_password.to_string());
+        await_cancellation_safe(async move {
+            service
+                .rotate_password_owned(
+                    &auth_context,
+                    source,
+                    totp_code.as_ref().map(|code| code.as_str()),
+                    current_password.as_str(),
+                    new_password.as_str(),
+                )
+                .await
+        })
+        .await
+        .unwrap_or(Err(RotatePasswordError::Unavailable))
+    }
+
+    async fn rotate_password_owned(
         &self,
         auth_context: &ManagerAuthContext,
         source: IpAddr,
@@ -1316,6 +1534,7 @@ impl ManagerAuthService {
             }
         }
         self.verify_sensitive_totp(auth_context, source, totp_code)
+            .await
             .map_err(RotatePasswordError::Totp)?;
         let verifier = self
             .password_engine
@@ -1328,6 +1547,7 @@ impl ManagerAuthService {
         let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
         let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
         let mutation = ManagerCredential::rotate_with_session(
+            &self.database,
             &ready.credential_epoch().to_string(),
             RotatedManagerCredential {
                 password_verifier: verifier.to_string(),
@@ -1343,6 +1563,7 @@ impl ManagerAuthService {
             ),
             "credential_rotated",
         )
+        .await
         .map_err(map_rotate_repository_error)?;
         let installed = self
             .install_ready_snapshot(mutation.credential)
@@ -1458,14 +1679,13 @@ impl ManagerAuthService {
             || current_session.current_refresh_jti != refresh.jwt_id
             || current_session.refresh_generation != refresh.refresh_generation
         {
-            return self.revoke_refresh_replay(
-                refresh.login_instance_id,
-                "stale_token",
-                self.now(),
-            );
+            return self
+                .revoke_refresh_replay(refresh.login_instance_id, "stale_token", self.now())
+                .await;
         }
 
-        let instance = ManagerAuthInstance::get_instance(refresh.login_instance_id)
+        let instance = ManagerAuthInstance::get_instance(&self.database, refresh.login_instance_id)
+            .await
             .map_err(|_| RefreshError::Storage)?
             .ok_or_else(|| {
                 self.log_refresh_rejected("instance_missing", Some(refresh.login_instance_id));
@@ -1490,12 +1710,15 @@ impl ManagerAuthService {
             || instance.credential_epoch != refresh.credential_epoch.to_string()
             || instance.signing_key_id != manager_jwt_key_id()
         {
-            return self.revoke_refresh_replay(instance.id, "stale_token", now);
+            return self
+                .revoke_refresh_replay(instance.id, "stale_token", now)
+                .await;
         }
 
         let new_refresh_jti = generate_token_jti();
         let new_idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(instance.absolute_expires_at);
         let rotated = ManagerAuthInstance::rotate_refresh_jti(
+            &self.database,
             instance.id,
             &refresh.jwt_id,
             refresh.refresh_generation,
@@ -1504,11 +1727,13 @@ impl ManagerAuthService {
             now,
             new_idle_expires_at,
         )
+        .await
         .map_err(|_| RefreshError::Storage)?;
         let rotated = match rotated {
             Some(rotated) => rotated,
             None => {
-                let current = ManagerAuthInstance::get_instance(instance.id)
+                let current = ManagerAuthInstance::get_instance(&self.database, instance.id)
+                    .await
                     .map_err(|_| RefreshError::Storage)?;
                 if current.is_some_and(|current| {
                     current.manager_id == refresh.manager_id
@@ -1520,7 +1745,9 @@ impl ManagerAuthService {
                             || current.refresh_generation != refresh.refresh_generation
                             || current.credential_epoch != refresh.credential_epoch.to_string())
                 }) {
-                    return self.revoke_refresh_replay(instance.id, "rotation_conflict", now);
+                    return self
+                        .revoke_refresh_replay(instance.id, "rotation_conflict", now)
+                        .await;
                 }
                 self.log_refresh_rejected("rotation_conflict", Some(instance.id));
                 return Err(RefreshError::Invalid);
@@ -1556,11 +1783,13 @@ impl ManagerAuthService {
     ) -> Result<(), LogoutError> {
         let now = self.now();
         let revoked = ManagerAuthInstance::revoke_instance_for_epoch(
+            &self.database,
             login_instance_id,
             &credential_epoch.to_string(),
             now,
             "logout",
         )
+        .await
         .map_err(|_| LogoutError::Storage)?;
         self.remove_session(login_instance_id);
         info!(
@@ -1583,6 +1812,31 @@ impl ManagerAuthService {
         current_password: &str,
         totp_code: Option<&str>,
     ) -> Result<usize, ManagerTotpVerificationError> {
+        let service = self.clone();
+        let auth_context = auth_context.clone();
+        let current_password = Zeroizing::new(current_password.to_string());
+        let totp_code = totp_code.map(|code| Zeroizing::new(code.to_string()));
+        await_cancellation_safe(async move {
+            service
+                .logout_all_owned(
+                    &auth_context,
+                    source,
+                    current_password.as_str(),
+                    totp_code.as_ref().map(|code| code.as_str()),
+                )
+                .await
+        })
+        .await
+        .unwrap_or(Err(ManagerTotpVerificationError::Unavailable))
+    }
+
+    async fn logout_all_owned(
+        &self,
+        auth_context: &ManagerAuthContext,
+        source: IpAddr,
+        current_password: &str,
+        totp_code: Option<&str>,
+    ) -> Result<usize, ManagerTotpVerificationError> {
         let _lifecycle = self
             .credential_lifecycle
             .try_lock()
@@ -1594,14 +1848,16 @@ impl ManagerAuthService {
             ManagerTotpState::Disabled => {}
             ManagerTotpState::Enabled(_) => {
                 let code = totp_code.ok_or(ManagerTotpVerificationError::Required)?;
-                self.verify_active_totp(&ready, source, code, self.now())?;
+                self.verify_active_totp(&ready, source, code, self.now())
+                    .await?;
             }
             ManagerTotpState::Unavailable { .. } => {
                 return Err(ManagerTotpVerificationError::Unavailable);
             }
         }
         let now = self.now();
-        let revoked = ManagerAuthInstance::revoke_all_active(now, "logout_all")
+        let revoked = ManagerAuthInstance::revoke_all_active(&self.database, now, "logout_all")
+            .await
             .map_err(|_| ManagerTotpVerificationError::Storage)?;
         self.clear_sessions();
         info!(
@@ -1643,9 +1899,9 @@ impl ManagerAuthService {
         }
     }
 
-    pub fn cleanup_expired_instances(&self) -> Result<usize, BaseError> {
+    pub async fn cleanup_expired_instances(&self) -> Result<usize, BaseError> {
         let now = self.now();
-        let removed = ManagerAuthInstance::cleanup_expired_instances(now)?;
+        let removed = ManagerAuthInstance::cleanup_expired_instances(&self.database, now).await?;
         let mut registry = self
             .session_registry
             .write()
@@ -1679,7 +1935,7 @@ impl ManagerAuthService {
         }
     }
 
-    fn create_login_session(
+    async fn create_login_session(
         &self,
         ready: &ReadyManagerCredential,
         now: i64,
@@ -1689,6 +1945,7 @@ impl ManagerAuthService {
         let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
         let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
         let instance = ManagerAuthInstance::create_instance(
+            &self.database,
             refresh_jti.clone(),
             manager_jwt_key_id().to_string(),
             ready.credential_epoch().to_string(),
@@ -1696,6 +1953,7 @@ impl ManagerAuthService {
             idle_expires_at,
             absolute_expires_at,
         )
+        .await
         .map_err(|_| ManagerTotpVerificationError::Storage)?;
         let mut pair = issue_token_pair(
             &instance,
@@ -1990,7 +2248,7 @@ impl ManagerAuthService {
         }
     }
 
-    fn verify_active_totp(
+    async fn verify_active_totp(
         &self,
         ready: &ReadyManagerCredential,
         source: IpAddr,
@@ -2031,10 +2289,13 @@ impl ManagerAuthService {
         };
 
         match ManagerCredential::advance_totp_step_if_newer(
+            &self.database,
             &ready.credential_epoch().to_string(),
             matched_step,
             now,
-        ) {
+        )
+        .await
+        {
             Ok(credential) => {
                 self.install_totp_step_snapshot_if_current(
                     credential,
@@ -2045,8 +2306,9 @@ impl ManagerAuthService {
                 Ok(matched_step)
             }
             Err(ManagerCredentialRepositoryError::TotpStepConflict) => {
-                let error =
-                    self.classify_totp_step_conflict(ready.credential_epoch(), matched_step, now);
+                let error = self
+                    .classify_totp_step_conflict(ready.credential_epoch(), matched_step, now)
+                    .await;
                 self.record_totp_failure(source, now);
                 self.log_totp_rejected(
                     match error {
@@ -2110,13 +2372,13 @@ impl ManagerAuthService {
         Ok(matched_step)
     }
 
-    fn classify_totp_step_conflict(
+    async fn classify_totp_step_conflict(
         &self,
         expected_epoch: Uuid,
         matched_step: i64,
         now: i64,
     ) -> ManagerTotpVerificationError {
-        let current = ManagerCredential::load().ok().flatten();
+        let current = ManagerCredential::load(&self.database).await.ok().flatten();
         let Some(current) = current else {
             return ManagerTotpVerificationError::Storage;
         };
@@ -2241,6 +2503,7 @@ impl ManagerAuthService {
         let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
         let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
         let mutation = ManagerCredential::install_totp_with_session(
+            &self.database,
             &ready.credential_epoch().to_string(),
             expected_state,
             &new_epoch.to_string(),
@@ -2263,14 +2526,18 @@ impl ManagerAuthService {
             now,
             revoke_reason,
         )
-        .map_err(|error| match error {
-            ManagerCredentialRepositoryError::StateConflict
+        .await;
+        let mutation = match mutation {
+            Ok(mutation) => mutation,
+            Err(ManagerCredentialRepositoryError::StateConflict)
                 if expected_state == ExpectedManagerTotpState::Enabled =>
             {
-                self.classify_totp_step_conflict(ready.credential_epoch(), matched_step, now)
+                return Err(self
+                    .classify_totp_step_conflict(ready.credential_epoch(), matched_step, now)
+                    .await);
             }
-            other => map_totp_repository_error(other),
-        })?;
+            Err(other) => return Err(map_totp_repository_error(other)),
+        };
         let installed = self
             .install_ready_snapshot(mutation.credential)
             .map_err(|_| ManagerTotpVerificationError::Unavailable)?;
@@ -2686,13 +2953,19 @@ impl ManagerAuthService {
         Ok(grant)
     }
 
-    fn revoke_refresh_replay(
+    async fn revoke_refresh_replay(
         &self,
         login_instance_id: i64,
         reason: &str,
         detected_at: i64,
     ) -> Result<AuthTokenPair, RefreshError> {
-        match ManagerAuthInstance::revoke_instance(login_instance_id, detected_at, "refresh_replay")
+        match ManagerAuthInstance::revoke_instance(
+            &self.database,
+            login_instance_id,
+            detected_at,
+            "refresh_replay",
+        )
+        .await
         {
             Ok(_) => {
                 self.remove_session(login_instance_id);
@@ -2749,6 +3022,34 @@ impl ManagerAuthService {
     #[cfg(test)]
     pub(crate) fn secret_encryption(&self) -> &Arc<SecretEncryptionService> {
         &self.secret_encryption
+    }
+
+    #[cfg(test)]
+    fn pause_before_publication_for_test(&self) -> ManagerAuthPublicationTestGate {
+        let gate = ManagerAuthPublicationTestGate {
+            reached: Arc::new(Notify::new()),
+            resume: Arc::new(Notify::new()),
+            completed: Arc::new(Notify::new()),
+        };
+        *self
+            .before_publication_gate
+            .lock()
+            .expect("manager auth publication test gate should lock") = Some(gate.clone());
+        gate
+    }
+
+    #[cfg(test)]
+    async fn wait_before_publication_for_test(&self) -> Option<ManagerAuthPublicationTestGate> {
+        let gate = self
+            .before_publication_gate
+            .lock()
+            .expect("manager auth publication test gate should lock")
+            .take();
+        if let Some(gate) = &gate {
+            gate.reached.notify_one();
+            gate.resume.notified().await;
+        }
+        gate
     }
 
     fn validate_refresh_epoch(&self, epoch: Uuid) -> Result<(), RefreshError> {
@@ -3259,20 +3560,18 @@ mod tests {
 
     use tokio::sync::Barrier;
 
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::database::manager_auth_instance::{
         INITIAL_SESSION_VERSION, MANAGER_SUBJECT as SESSION_MANAGER_SUBJECT, ManagerAuthInstance,
     };
     use crate::database::manager_credential::{ManagerCredential, NewManagerCredential};
     use crate::database::manager_totp_recovery_code::ManagerTotpRecoveryCode;
-    use crate::database::{DbConnection, get_connection};
     use crate::service::admin::auth::totp::{
         generate_manager_totp_code, generate_manager_totp_provisioning,
     };
     use crate::service::app_state::create_test_app_state;
     use crate::service::secret_encryption::{SecretEncryptionService, SensitiveSecret};
     use crate::utils::auth::{ACCESS_TOKEN_ISSUE_SEC, decode_access_token, decode_refresh_token};
-    use diesel::RunQueryDsl;
     use zeroize::Zeroizing;
 
     use super::{
@@ -3306,12 +3605,16 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, last_octet))
     }
 
-    fn test_auth_service() -> ManagerAuthService {
-        ManagerAuthService::new(Arc::new(
-            crate::service::secret_encryption::SecretEncryptionService::from_config(
-                &crate::config::SecretEncryptionConfig::default(),
+    async fn test_auth_service(test_db_context: &TestDatabase) -> ManagerAuthService {
+        ManagerAuthService::new(
+            test_db_context.runtime(),
+            Arc::new(
+                crate::service::secret_encryption::SecretEncryptionService::from_config(
+                    &crate::config::SecretEncryptionConfig::default(),
+                ),
             ),
-        ))
+        )
+        .await
     }
 
     fn test_secret_encryption() -> Arc<SecretEncryptionService> {
@@ -3322,15 +3625,18 @@ mod tests {
         Arc::new(SecretEncryptionService::from_config(&config))
     }
 
-    fn test_totp_auth_service(
+    async fn test_totp_auth_service(
+        test_db_context: &TestDatabase,
         now: &Arc<AtomicI64>,
         secret_encryption: Arc<SecretEncryptionService>,
     ) -> ManagerAuthService {
         let service_now = Arc::clone(now);
         ManagerAuthService::new_for_test_with_secret_encryption(
+            test_db_context.runtime(),
             Arc::new(move || service_now.load(Ordering::SeqCst)),
             secret_encryption,
         )
+        .await
     }
 
     fn code_for(secret: &str, now: i64) -> String {
@@ -3388,123 +3694,126 @@ mod tests {
 
     #[tokio::test]
     async fn manager_totp_disabled_and_enabled_login_session_contracts_are_distinct() {
-        let disabled_db = TestDbContext::new_sqlite("manager-totp-disabled-login.sqlite");
-        disabled_db
-            .run_async(async {
-                let service = test_auth_service();
-                service
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-                let result = service
-                    .login_password(test_source(1), INITIAL_PASSWORD)
-                    .await
-                    .expect("disabled password login should authenticate");
-                assert!(matches!(result, LoginPasswordResult::Authenticated(_)));
-                assert_eq!(service.session_count(), Ok(2));
-                assert_eq!(service.totp_status(), Ok(ManagerTotpPublicState::Disabled));
-            })
-            .await;
+        let disabled_db =
+            TestDatabase::new_sqlite_default("manager-totp-disabled-login.sqlite").await;
+        (async {
+            let service = test_auth_service(&disabled_db).await;
+            service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let result = service
+                .login_password(test_source(1), INITIAL_PASSWORD)
+                .await
+                .expect("disabled password login should authenticate");
+            assert!(matches!(result, LoginPasswordResult::Authenticated(_)));
+            assert_eq!(service.session_count(), Ok(2));
+            assert_eq!(service.totp_status(), Ok(ManagerTotpPublicState::Disabled));
+        })
+        .await;
 
-        let enabled_db = TestDbContext::new_sqlite("manager-totp-enabled-login.sqlite");
+        let enabled_db =
+            TestDatabase::new_sqlite_default("manager-totp-enabled-login.sqlite").await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        enabled_db
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let service = test_totp_auth_service(&now, test_secret_encryption());
-                    let enrolled =
-                        enroll_manager(&service, test_source(2), now.load(Ordering::SeqCst)).await;
-                    assert_eq!(
-                        service.validate_access_context(&enrolled.initial_access),
-                        Err(AccessCredentialError::EpochMismatchOrUninitialized)
-                    );
-                    assert_eq!(service.session_count(), Ok(1));
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service =
+                    test_totp_auth_service(&enabled_db, &now, test_secret_encryption()).await;
+                let enrolled =
+                    enroll_manager(&service, test_source(2), now.load(Ordering::SeqCst)).await;
+                assert_eq!(
+                    service.validate_access_context(&enrolled.initial_access),
+                    Err(AccessCredentialError::EpochMismatchOrUninitialized)
+                );
+                assert_eq!(service.session_count(), Ok(1));
 
-                    let first = match service
-                        .login_password(test_source(3), INITIAL_PASSWORD)
+                let first = match service
+                    .login_password(test_source(3), INITIAL_PASSWORD)
+                    .await
+                    .expect("enabled password stage should succeed")
+                {
+                    LoginPasswordResult::TotpRequired(challenge) => challenge,
+                    LoginPasswordResult::Authenticated(_) => {
+                        panic!("enabled password stage must not authenticate")
+                    }
+                };
+                assert_eq!(first.expires_in, LOGIN_TOTP_CHALLENGE_TTL_SEC as u64);
+                assert_eq!(service.session_count(), Ok(1));
+
+                let replacement = match service
+                    .login_password(test_source(3), INITIAL_PASSWORD)
+                    .await
+                    .expect("same-context password stage should replace its challenge")
+                {
+                    LoginPasswordResult::TotpRequired(challenge) => challenge,
+                    LoginPasswordResult::Authenticated(_) => {
+                        panic!("enabled password stage must not authenticate")
+                    }
+                };
+                assert_ne!(first.challenge, replacement.challenge);
+                let protection_before_invalid_challenge = service.totp_protection_counts();
+                assert!(matches!(
+                    service
+                        .login_totp(test_source(3), first.challenge, "000000",)
+                        .await,
+                    Err(ManagerTotpVerificationError::ChallengeInvalidOrExpired)
+                ));
+                assert_eq!(
+                    service.totp_protection_counts(),
+                    protection_before_invalid_challenge
+                );
+
+                now.fetch_add(30, Ordering::SeqCst);
+                let current = now.load(Ordering::SeqCst);
+                assert!(matches!(
+                    service
+                        .login_totp(
+                            test_source(4),
+                            replacement.challenge,
+                            &code_for(&enrolled.secret, current),
+                        )
+                        .await,
+                    Err(ManagerTotpVerificationError::ChallengeInvalidOrExpired)
+                ));
+                assert_eq!(
+                    service.totp_protection_counts(),
+                    protection_before_invalid_challenge
+                );
+                assert_eq!(
+                    service
+                        .login_totp(
+                            test_source(3),
+                            replacement.challenge,
+                            &code_for(&enrolled.secret, current),
+                        )
                         .await
-                        .expect("enabled password stage should succeed")
-                    {
-                        LoginPasswordResult::TotpRequired(challenge) => challenge,
-                        LoginPasswordResult::Authenticated(_) => {
-                            panic!("enabled password stage must not authenticate")
-                        }
-                    };
-                    assert_eq!(first.expires_in, LOGIN_TOTP_CHALLENGE_TTL_SEC as u64);
-                    assert_eq!(service.session_count(), Ok(1));
-
-                    let replacement = match service
-                        .login_password(test_source(3), INITIAL_PASSWORD)
-                        .await
-                        .expect("same-context password stage should replace its challenge")
-                    {
-                        LoginPasswordResult::TotpRequired(challenge) => challenge,
-                        LoginPasswordResult::Authenticated(_) => {
-                            panic!("enabled password stage must not authenticate")
-                        }
-                    };
-                    assert_ne!(first.challenge, replacement.challenge);
-                    let protection_before_invalid_challenge = service.totp_protection_counts();
-                    assert!(matches!(
-                        service
-                            .login_totp(test_source(3), first.challenge, "000000",)
-                            .await,
-                        Err(ManagerTotpVerificationError::ChallengeInvalidOrExpired)
-                    ));
-                    assert_eq!(
-                        service.totp_protection_counts(),
-                        protection_before_invalid_challenge
-                    );
-
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let current = now.load(Ordering::SeqCst);
-                    assert!(matches!(
-                        service
-                            .login_totp(
-                                test_source(4),
-                                replacement.challenge,
-                                &code_for(&enrolled.secret, current),
-                            )
-                            .await,
-                        Err(ManagerTotpVerificationError::ChallengeInvalidOrExpired)
-                    ));
-                    assert_eq!(
-                        service.totp_protection_counts(),
-                        protection_before_invalid_challenge
-                    );
-                    assert_eq!(
-                        service
-                            .login_totp(
-                                test_source(3),
-                                replacement.challenge,
-                                &code_for(&enrolled.secret, current),
-                            )
-                            .await
-                            .map(|_| ()),
-                        Ok(())
-                    );
-                    assert_eq!(service.session_count(), Ok(2));
-                    assert!(matches!(
-                        service
-                            .login_totp(
-                                test_source(3),
-                                replacement.challenge,
-                                &code_for(&enrolled.secret, current),
-                            )
-                            .await,
-                        Err(ManagerTotpVerificationError::ChallengeInvalidOrExpired)
-                    ));
-                }
-            })
-            .await;
+                        .map(|_| ()),
+                    Ok(())
+                );
+                assert_eq!(service.session_count(), Ok(2));
+                assert!(matches!(
+                    service
+                        .login_totp(
+                            test_source(3),
+                            replacement.challenge,
+                            &code_for(&enrolled.secret, current),
+                        )
+                        .await,
+                    Err(ManagerTotpVerificationError::ChallengeInvalidOrExpired)
+                ));
+            }
+        })
+        .await;
     }
 
-    #[test]
-    fn manager_totp_challenge_containers_enforce_binding_ttl_attempts_replacement_and_capacity() {
-        let test_db_context = TestDbContext::new_sqlite("manager-totp-challenge-containers.sqlite");
-        test_db_context.run_sync(|| {
-            let service = test_auth_service();
+    #[tokio::test]
+    async fn manager_totp_challenge_containers_enforce_binding_ttl_attempts_replacement_and_capacity()
+     {
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-totp-challenge-containers.sqlite").await;
+        (async {
+            let service = test_auth_service(&test_db_context).await;
             let now = 1_800_000_000;
             let epoch = uuid::Uuid::from_u128(1);
             let source = test_source(10);
@@ -3759,783 +4068,838 @@ mod tests {
                 );
             }
             assert_eq!(service.totp_challenge_counts(), (0, 0, 0));
-        });
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_totp_protection_is_independent_bounded_and_dummy_verifier_is_valid() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-totp-independent-protection.sqlite");
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
-                let now = 1_800_000_000;
-                let locked_source = test_source(20);
-                for _ in 0..TOTP_FAILURE_LIMIT {
-                    service.record_totp_failure(locked_source, now);
-                }
-                assert_eq!(
-                    service.precheck_totp_source(locked_source, now),
-                    Err(ManagerTotpVerificationError::SourceRateLimited { retry_after: 60 })
-                );
-                assert_eq!(service.login_protection_counts(), (0, 0));
+            TestDatabase::new_sqlite_default("manager-totp-independent-protection.sqlite").await;
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            let now = 1_800_000_000;
+            let locked_source = test_source(20);
+            for _ in 0..TOTP_FAILURE_LIMIT {
+                service.record_totp_failure(locked_source, now);
+            }
+            assert_eq!(
+                service.precheck_totp_source(locked_source, now),
+                Err(ManagerTotpVerificationError::SourceRateLimited { retry_after: 60 })
+            );
+            assert_eq!(service.login_protection_counts(), (0, 0));
 
-                service.clear_totp_failures(locked_source);
-                for index in 0..=TOTP_SOURCE_CAPACITY {
-                    service.record_totp_failure(
-                        IpAddr::V4(Ipv4Addr::from(0x0a00_0000_u32 + index as u32)),
-                        now,
-                    );
-                }
-                assert_eq!(service.totp_protection_counts().0, TOTP_SOURCE_CAPACITY);
-
-                for _ in 0..GLOBAL_TOTP_VERIFICATION_LIMIT {
-                    assert_eq!(service.reserve_totp_global_verification(now), Ok(()));
-                }
-                assert_eq!(
-                    service.reserve_totp_global_verification(now),
-                    Err(ManagerTotpVerificationError::GlobalRateLimited { retry_after: 60 })
+            service.clear_totp_failures(locked_source);
+            for index in 0..=TOTP_SOURCE_CAPACITY {
+                service.record_totp_failure(
+                    IpAddr::V4(Ipv4Addr::from(0x0a00_0000_u32 + index as u32)),
+                    now,
                 );
-                assert_eq!(service.login_protection_counts(), (0, 0));
-                assert_eq!(service.reserve_totp_global_verification(now + 60), Ok(()));
+            }
+            assert_eq!(service.totp_protection_counts().0, TOTP_SOURCE_CAPACITY);
 
-                assert_eq!(
-                    PasswordEngine::new()
-                        .verify(
-                            Zeroizing::new(DUMMY_RECOVERY_CODE.to_string()),
-                            Zeroizing::new(DUMMY_RECOVERY_CODE_VERIFIER.to_string()),
-                        )
-                        .await,
-                    Err(PasswordOperationError::IncorrectPassword),
-                    "the fixed dummy PHC must be structurally valid and perform Argon2 verification"
-                );
-            })
-            .await;
+            for _ in 0..GLOBAL_TOTP_VERIFICATION_LIMIT {
+                assert_eq!(service.reserve_totp_global_verification(now), Ok(()));
+            }
+            assert_eq!(
+                service.reserve_totp_global_verification(now),
+                Err(ManagerTotpVerificationError::GlobalRateLimited { retry_after: 60 })
+            );
+            assert_eq!(service.login_protection_counts(), (0, 0));
+            assert_eq!(service.reserve_totp_global_verification(now + 60), Ok(()));
+
+            assert_eq!(
+                PasswordEngine::new()
+                    .verify(
+                        Zeroizing::new(DUMMY_RECOVERY_CODE.to_string()),
+                        Zeroizing::new(DUMMY_RECOVERY_CODE_VERIFIER.to_string()),
+                    )
+                    .await,
+                Err(PasswordOperationError::IncorrectPassword),
+                "the fixed dummy PHC must be structurally valid and perform Argon2 verification"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_totp_enroll_replace_and_disable_rotate_epoch_sessions_and_recovery_codes() {
-        let test_db_context = TestDbContext::new_sqlite("manager-totp-service-lifecycle.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-totp-service-lifecycle.sqlite").await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let service = test_totp_auth_service(&now, test_secret_encryption());
-                    let enrolled =
-                        enroll_manager(&service, test_source(30), now.load(Ordering::SeqCst)).await;
-                    assert_eq!(enrolled.recovery_codes.len(), 10);
-                    assert_eq!(
-                        ManagerTotpRecoveryCode::list()
-                            .expect("recovery rows should load")
-                            .len(),
-                        10
-                    );
-                    assert_eq!(service.session_count(), Ok(1));
-
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let replacement_started_at = now.load(Ordering::SeqCst);
-                    let old_recovery_rows =
-                        ManagerTotpRecoveryCode::list().expect("old recovery rows should load");
-                    let replacement = service
-                        .start_totp_replacement(
-                            &enrolled.access,
-                            test_source(30),
-                            INITIAL_PASSWORD,
-                            &code_for(&enrolled.secret, replacement_started_at),
-                        )
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service =
+                    test_totp_auth_service(&test_db_context, &now, test_secret_encryption()).await;
+                let enrolled =
+                    enroll_manager(&service, test_source(30), now.load(Ordering::SeqCst)).await;
+                assert_eq!(enrolled.recovery_codes.len(), 10);
+                assert_eq!(
+                    ManagerTotpRecoveryCode::list(&test_db_context,)
                         .await
-                        .expect("replacement start should accept the old authenticator");
-                    assert_eq!(replacement.expires_in, SETUP_TOTP_CHALLENGE_TTL_SEC as u64);
-                    let replacement_secret = replacement.manual_secret.expose().to_string();
-                    assert_eq!(
-                        ManagerTotpRecoveryCode::list().expect("old recovery rows should remain"),
-                        old_recovery_rows,
-                        "replacement start must preserve old recovery codes"
-                    );
-                    assert_eq!(
-                        service.session_count(),
-                        Ok(1),
-                        "replacement start must not rotate sessions"
-                    );
+                        .expect("recovery rows should load")
+                        .len(),
+                    10
+                );
+                assert_eq!(service.session_count(), Ok(1));
 
-                    assert!(matches!(
-                        service
-                            .confirm_totp_replacement(
-                                &enrolled.access,
-                                test_source(30),
-                                replacement.challenge,
-                                &code_for(&replacement_secret, replacement_started_at),
-                            )
-                            .await,
-                        Err(ManagerTotpVerificationError::StepReplayed { .. })
-                    ));
-                    assert_eq!(service.totp_challenge_counts(), (0, 1, 0));
-                    {
-                        let challenges = service
-                            .totp_challenges
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        assert_eq!(
-                            challenges
-                                .setup
-                                .get(&replacement.challenge)
-                                .expect("replayed setup challenge should remain")
-                                .attempts,
-                            1
-                        );
-                    }
+                now.fetch_add(30, Ordering::SeqCst);
+                let replacement_started_at = now.load(Ordering::SeqCst);
+                let old_recovery_rows = ManagerTotpRecoveryCode::list(&test_db_context)
+                    .await
+                    .expect("old recovery rows should load");
+                let replacement = service
+                    .start_totp_replacement(
+                        &enrolled.access,
+                        test_source(30),
+                        INITIAL_PASSWORD,
+                        &code_for(&enrolled.secret, replacement_started_at),
+                    )
+                    .await
+                    .expect("replacement start should accept the old authenticator");
+                assert_eq!(replacement.expires_in, SETUP_TOTP_CHALLENGE_TTL_SEC as u64);
+                let replacement_secret = replacement.manual_secret.expose().to_string();
+                assert_eq!(
+                    ManagerTotpRecoveryCode::list(&test_db_context,)
+                        .await
+                        .expect("old recovery rows should remain"),
+                    old_recovery_rows,
+                    "replacement start must preserve old recovery codes"
+                );
+                assert_eq!(
+                    service.session_count(),
+                    Ok(1),
+                    "replacement start must not rotate sessions"
+                );
 
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let replaced_at = now.load(Ordering::SeqCst);
-                    let replaced = service
+                assert!(matches!(
+                    service
                         .confirm_totp_replacement(
                             &enrolled.access,
                             test_source(30),
                             replacement.challenge,
-                            &code_for(&replacement_secret, replaced_at),
+                            &code_for(&replacement_secret, replacement_started_at),
                         )
-                        .await
-                        .expect("replacement confirmation should accept the next step");
-                    let replaced_access = decode_access_token(&replaced.tokens.access_token)
-                        .expect("replacement access should decode");
+                        .await,
+                    Err(ManagerTotpVerificationError::StepReplayed { .. })
+                ));
+                assert_eq!(service.totp_challenge_counts(), (0, 1, 0));
+                {
+                    let challenges = service
+                        .totp_challenges
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     assert_eq!(
-                        service.validate_access_context(&enrolled.access),
-                        Err(AccessCredentialError::EpochMismatchOrUninitialized)
+                        challenges
+                            .setup
+                            .get(&replacement.challenge)
+                            .expect("replayed setup challenge should remain")
+                            .attempts,
+                        1
                     );
-                    assert_eq!(service.validate_access_context(&replaced_access), Ok(()));
-                    assert_eq!(service.session_count(), Ok(1));
-                    assert_eq!(
-                        replaced
+                }
+
+                now.fetch_add(30, Ordering::SeqCst);
+                let replaced_at = now.load(Ordering::SeqCst);
+                let replaced = service
+                    .confirm_totp_replacement(
+                        &enrolled.access,
+                        test_source(30),
+                        replacement.challenge,
+                        &code_for(&replacement_secret, replaced_at),
+                    )
+                    .await
+                    .expect("replacement confirmation should accept the next step");
+                let replaced_access = decode_access_token(&replaced.tokens.access_token)
+                    .expect("replacement access should decode");
+                assert_eq!(
+                    service.validate_access_context(&enrolled.access),
+                    Err(AccessCredentialError::EpochMismatchOrUninitialized)
+                );
+                assert_eq!(service.validate_access_context(&replaced_access), Ok(()));
+                assert_eq!(service.session_count(), Ok(1));
+                assert_eq!(
+                    replaced
+                        .recovery_codes
+                        .as_ref()
+                        .expect("replacement should return new recovery codes")
+                        .expose()
+                        .count(),
+                    10
+                );
+                let new_recovery_rows = ManagerTotpRecoveryCode::list(&test_db_context)
+                    .await
+                    .expect("new recovery rows should load");
+                assert_eq!(new_recovery_rows.len(), 10);
+                assert_ne!(
+                    new_recovery_rows, old_recovery_rows,
+                    "replacement must replace the complete recovery-code set"
+                );
+                for row in &new_recovery_rows {
+                    assert!(
+                        !replaced
                             .recovery_codes
                             .as_ref()
-                            .expect("replacement should return new recovery codes")
+                            .expect("replacement codes should remain in memory")
                             .expose()
-                            .count(),
-                        10
+                            .any(|code| row.code_verifier.contains(code)),
+                        "persisted rows must contain only Argon2 verifiers"
                     );
-                    let new_recovery_rows =
-                        ManagerTotpRecoveryCode::list().expect("new recovery rows should load");
-                    assert_eq!(new_recovery_rows.len(), 10);
-                    assert_ne!(
-                        new_recovery_rows, old_recovery_rows,
-                        "replacement must replace the complete recovery-code set"
-                    );
-                    for row in &new_recovery_rows {
-                        assert!(
-                            !replaced
-                                .recovery_codes
-                                .as_ref()
-                                .expect("replacement codes should remain in memory")
-                                .expose()
-                                .any(|code| row.code_verifier.contains(code)),
-                            "persisted rows must contain only Argon2 verifiers"
-                        );
-                    }
-
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let disabled = service
-                        .disable_totp(
-                            &replaced_access,
-                            test_source(30),
-                            INITIAL_PASSWORD,
-                            &code_for(&replacement_secret, now.load(Ordering::SeqCst)),
-                        )
-                        .await
-                        .expect("disable should accept password and current TOTP");
-                    let disabled_access = decode_access_token(&disabled.tokens.access_token)
-                        .expect("disabled access should decode");
-                    assert_eq!(disabled.state, ManagerTotpPublicState::Disabled);
-                    assert!(disabled.recovery_codes.is_none());
-                    assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 0);
-                    assert_eq!(service.session_count(), Ok(1));
-                    assert_eq!(
-                        service.validate_access_context(&replaced_access),
-                        Err(AccessCredentialError::EpochMismatchOrUninitialized)
-                    );
-                    assert_eq!(service.validate_access_context(&disabled_access), Ok(()));
-                    assert_eq!(service.totp_status(), Ok(ManagerTotpPublicState::Disabled));
-                    assert!(matches!(
-                        service
-                            .login_password(test_source(31), INITIAL_PASSWORD)
-                            .await,
-                        Ok(LoginPasswordResult::Authenticated(_))
-                    ));
                 }
-            })
-            .await;
+
+                now.fetch_add(30, Ordering::SeqCst);
+                let disabled = service
+                    .disable_totp(
+                        &replaced_access,
+                        test_source(30),
+                        INITIAL_PASSWORD,
+                        &code_for(&replacement_secret, now.load(Ordering::SeqCst)),
+                    )
+                    .await
+                    .expect("disable should accept password and current TOTP");
+                let disabled_access = decode_access_token(&disabled.tokens.access_token)
+                    .expect("disabled access should decode");
+                assert_eq!(disabled.state, ManagerTotpPublicState::Disabled);
+                assert!(disabled.recovery_codes.is_none());
+                assert_eq!(
+                    ManagerTotpRecoveryCode::list(&test_db_context,)
+                        .await
+                        .unwrap()
+                        .len(),
+                    0
+                );
+                assert_eq!(service.session_count(), Ok(1));
+                assert_eq!(
+                    service.validate_access_context(&replaced_access),
+                    Err(AccessCredentialError::EpochMismatchOrUninitialized)
+                );
+                assert_eq!(service.validate_access_context(&disabled_access), Ok(()));
+                assert_eq!(service.totp_status(), Ok(ManagerTotpPublicState::Disabled));
+                assert!(matches!(
+                    service
+                        .login_password(test_source(31), INITIAL_PASSWORD)
+                        .await,
+                    Ok(LoginPasswordResult::Authenticated(_))
+                ));
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_totp_unavailable_keeps_sessions_operational_and_recovery_rebinds() {
-        let test_db_context = TestDbContext::new_sqlite("manager-totp-unavailable-recovery.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-totp-unavailable-recovery.sqlite").await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let secret_encryption = test_secret_encryption();
-                    let service =
-                        test_totp_auth_service(&now, Arc::clone(&secret_encryption));
-                    let enrolled = enroll_manager(
-                        &service,
-                        test_source(40),
-                        now.load(Ordering::SeqCst),
-                    )
-                    .await;
-                    let stored_before = ManagerCredential::load()
-                        .expect("credential should load")
-                        .expect("credential should exist");
-                    let stored_step = stored_before
-                        .totp_last_accepted_step
-                        .expect("enrolled credential should have a step");
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let secret_encryption = test_secret_encryption();
+                let service =
+                    test_totp_auth_service(&test_db_context, &now, Arc::clone(&secret_encryption))
+                        .await;
+                let enrolled =
+                    enroll_manager(&service, test_source(40), now.load(Ordering::SeqCst)).await;
+                let stored_before = ManagerCredential::load(&test_db_context)
+                    .await
+                    .expect("credential should load")
+                    .expect("credential should exist");
+                let stored_step = stored_before
+                    .totp_last_accepted_step
+                    .expect("enrolled credential should have a step");
 
-                    let pending = match service
-                        .login_password(test_source(41), INITIAL_PASSWORD)
-                        .await
-                        .expect("enabled password stage should create a challenge")
-                    {
-                        LoginPasswordResult::TotpRequired(challenge) => challenge,
-                        LoginPasswordResult::Authenticated(_) => {
-                            panic!("enabled password stage must not create a session")
-                        }
-                    };
-                    let protection_before_invalid_code =
-                        service.totp_protection_counts();
-                    assert!(matches!(
-                        service
-                            .login_totp(test_source(41), pending.challenge, "abcdef")
-                            .await,
-                        Err(ManagerTotpVerificationError::Invalid)
-                    ));
-                    assert_eq!(service.totp_challenge_counts(), (1, 0, 0));
-                    assert_eq!(
-                        service.totp_protection_counts(),
-                        (1, protection_before_invalid_code.1),
-                        "format errors count toward the source and challenge, not global crypto"
-                    );
-
-                    let mut conn = get_connection().expect("connection should load");
-                    match &mut conn {
-                        DbConnection::Postgres(conn) => {
-                            diesel::sql_query(
-                                "UPDATE manager_credential SET totp_secret_ciphertext = $1 WHERE manager_id = 0",
-                            )
-                            .bind::<diesel::sql_types::Binary, _>(vec![1_u8])
-                            .execute(conn)
-                            .expect("PostgreSQL ciphertext corruption should succeed");
-                        }
-                        DbConnection::Sqlite(conn) => {
-                            diesel::sql_query(
-                                "UPDATE manager_credential SET totp_secret_ciphertext = ? WHERE manager_id = 0",
-                            )
-                            .bind::<diesel::sql_types::Binary, _>(vec![1_u8])
-                            .execute(conn)
-                            .expect("SQLite ciphertext corruption should succeed");
-                        }
+                let pending = match service
+                    .login_password(test_source(41), INITIAL_PASSWORD)
+                    .await
+                    .expect("enabled password stage should create a challenge")
+                {
+                    LoginPasswordResult::TotpRequired(challenge) => challenge,
+                    LoginPasswordResult::Authenticated(_) => {
+                        panic!("enabled password stage must not create a session")
                     }
-                    drop(conn);
+                };
+                let protection_before_invalid_code = service.totp_protection_counts();
+                assert!(matches!(
+                    service
+                        .login_totp(test_source(41), pending.challenge, "abcdef")
+                        .await,
+                    Err(ManagerTotpVerificationError::Invalid)
+                ));
+                assert_eq!(service.totp_challenge_counts(), (1, 0, 0));
+                assert_eq!(
+                    service.totp_protection_counts(),
+                    (1, protection_before_invalid_code.1),
+                    "format errors count toward the source and challenge, not global crypto"
+                );
 
-                    let restarted =
-                        test_totp_auth_service(&now, Arc::clone(&secret_encryption));
-                    assert_eq!(
-                        restarted.totp_challenge_counts(),
-                        (0, 0, 0),
-                        "restart must clear in-memory challenges"
-                    );
-                    assert_eq!(
-                        restarted.totp_protection_counts(),
-                        (0, 0),
-                        "restart must clear in-memory TOTP protection"
-                    );
-                    assert_eq!(
-                        ManagerCredential::load()
-                            .unwrap()
-                            .unwrap()
-                            .totp_last_accepted_step,
-                        Some(stored_step),
-                        "restart must preserve the persisted replay watermark"
-                    );
-                    assert_eq!(restarted.session_count(), Ok(1));
+                ManagerCredential::corrupt_totp_ciphertext_for_test(&test_db_context)
+                    .await
+                    .expect("ciphertext corruption should succeed");
 
-                    let rebuilt_access = restarted
-                        .access_for_session(
-                            enrolled.access.login_instance_id,
-                            enrolled.access.credential_epoch,
-                        )
+                let restarted =
+                    test_totp_auth_service(&test_db_context, &now, Arc::clone(&secret_encryption))
+                        .await;
+                assert_eq!(
+                    restarted.totp_challenge_counts(),
+                    (0, 0, 0),
+                    "restart must clear in-memory challenges"
+                );
+                assert_eq!(
+                    restarted.totp_protection_counts(),
+                    (0, 0),
+                    "restart must clear in-memory TOTP protection"
+                );
+                assert_eq!(
+                    ManagerCredential::load(&test_db_context,)
                         .await
-                        .expect("existing session should recover an access token");
-                    let rebuilt_access = decode_access_token(&rebuilt_access)
-                        .expect("recovered access should decode");
-                    assert_eq!(restarted.validate_access_context(&rebuilt_access), Ok(()));
-                    assert_eq!(
-                        restarted.totp_status(),
-                        Ok(ManagerTotpPublicState::Unavailable {
-                            enabled_at: Some(1_800_000_000)
-                        })
-                    );
-                    assert!(matches!(
-                        restarted
-                            .login_password(test_source(42), INITIAL_PASSWORD)
-                            .await,
-                        Err(LoginPasswordError::ManagerTotpUnavailable)
-                    ));
-                    assert_eq!(restarted.session_count(), Ok(1));
-                    assert_eq!(
-                        restarted.verify_sensitive_totp(
-                            &rebuilt_access,
-                            test_source(42),
-                            Some("000000"),
-                        ),
-                        Err(ManagerTotpVerificationError::Unavailable)
-                    );
+                        .unwrap()
+                        .unwrap()
+                        .totp_last_accepted_step,
+                    Some(stored_step),
+                    "restart must preserve the persisted replay watermark"
+                );
+                assert_eq!(restarted.session_count(), Ok(1));
 
-                    let existing_ids = ManagerTotpRecoveryCode::list()
-                        .expect("recovery rows should load")
-                        .into_iter()
-                        .map(|row| row.code_id)
-                        .collect::<Vec<_>>();
-                    let missing_id = (0..10_000)
-                        .map(|value| format!("{value:04}"))
-                        .find(|candidate| !existing_ids.contains(candidate))
-                        .expect("ten rows cannot exhaust four decimal characters");
-                    let missing_recovery_code = format!("{missing_id}{}", "0".repeat(16));
-                    assert!(matches!(
-                        restarted
-                            .start_totp_recovery(
-                                test_source(43),
-                                INITIAL_PASSWORD,
-                                &missing_recovery_code,
-                            )
-                            .await,
-                        Err(ManagerTotpVerificationError::RecoveryCredentialsInvalid)
-                    ));
-                    assert_eq!(restarted.session_count(), Ok(1));
-                    assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 10);
+                let rebuilt_access = restarted
+                    .access_for_session(
+                        enrolled.access.login_instance_id,
+                        enrolled.access.credential_epoch,
+                    )
+                    .await
+                    .expect("existing session should recover an access token");
+                let rebuilt_access =
+                    decode_access_token(&rebuilt_access).expect("recovered access should decode");
+                assert_eq!(restarted.validate_access_context(&rebuilt_access), Ok(()));
+                assert_eq!(
+                    restarted.totp_status(),
+                    Ok(ManagerTotpPublicState::Unavailable {
+                        enabled_at: Some(1_800_000_000)
+                    })
+                );
+                assert!(matches!(
+                    restarted
+                        .login_password(test_source(42), INITIAL_PASSWORD)
+                        .await,
+                    Err(LoginPasswordError::ManagerTotpUnavailable)
+                ));
+                assert_eq!(restarted.session_count(), Ok(1));
+                assert_eq!(
+                    restarted
+                        .verify_sensitive_totp(&rebuilt_access, test_source(42), Some("000000"),)
+                        .await,
+                    Err(ManagerTotpVerificationError::Unavailable)
+                );
 
-                    let recovery = restarted
+                let existing_ids = ManagerTotpRecoveryCode::list(&test_db_context)
+                    .await
+                    .expect("recovery rows should load")
+                    .into_iter()
+                    .map(|row| row.code_id)
+                    .collect::<Vec<_>>();
+                let missing_id = (0..10_000)
+                    .map(|value| format!("{value:04}"))
+                    .find(|candidate| !existing_ids.contains(candidate))
+                    .expect("ten rows cannot exhaust four decimal characters");
+                let missing_recovery_code = format!("{missing_id}{}", "0".repeat(16));
+                assert!(matches!(
+                    restarted
                         .start_totp_recovery(
                             test_source(43),
                             INITIAL_PASSWORD,
-                            &enrolled.recovery_codes[0],
+                            &missing_recovery_code,
                         )
+                        .await,
+                    Err(ManagerTotpVerificationError::RecoveryCredentialsInvalid)
+                ));
+                assert_eq!(restarted.session_count(), Ok(1));
+                assert_eq!(
+                    ManagerTotpRecoveryCode::list(&test_db_context,)
                         .await
-                        .expect("a recovery code must recover an unavailable TOTP secret");
-                    assert_eq!(restarted.session_count(), Ok(0));
-                    assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 9);
-                    let normalized_consumed = enrolled.recovery_codes[0].replace('-', "");
-                    assert!(
-                        ManagerTotpRecoveryCode::load_by_code_id(&normalized_consumed[..4])
-                            .unwrap()
-                            .is_none(),
-                        "recovery start must consume exactly the submitted row"
-                    );
-                    let during_recovery = ManagerCredential::load().unwrap().unwrap();
-                    assert_eq!(during_recovery.credential_epoch, stored_before.credential_epoch);
-                    assert_eq!(during_recovery.totp_last_accepted_step, Some(stored_step));
-                    assert_eq!(during_recovery.totp_secret_ciphertext, Some(vec![1_u8]));
+                        .unwrap()
+                        .len(),
+                    10
+                );
 
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let recovery_secret = recovery.manual_secret.expose().to_string();
-                    let recovered = restarted
-                        .confirm_totp_recovery(
-                            test_source(43),
-                            recovery.challenge,
-                            &code_for(&recovery_secret, now.load(Ordering::SeqCst)),
-                        )
+                let recovery = restarted
+                    .start_totp_recovery(
+                        test_source(43),
+                        INITIAL_PASSWORD,
+                        &enrolled.recovery_codes[0],
+                    )
+                    .await
+                    .expect("a recovery code must recover an unavailable TOTP secret");
+                assert_eq!(restarted.session_count(), Ok(0));
+                assert_eq!(
+                    ManagerTotpRecoveryCode::list(&test_db_context,)
                         .await
-                        .expect("recovery confirmation should install a new TOTP tuple");
-                    let recovered_access = decode_access_token(&recovered.tokens.access_token)
-                        .expect("recovery access should decode");
-                    assert_eq!(restarted.session_count(), Ok(1));
-                    assert_eq!(
-                        restarted.validate_access_context(&recovered_access),
-                        Ok(())
-                    );
-                    assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 10);
-                    assert!(matches!(
-                        restarted.totp_status(),
-                        Ok(ManagerTotpPublicState::Enabled { .. })
-                    ));
-                    let stored_after = ManagerCredential::load().unwrap().unwrap();
-                    assert_ne!(stored_after.credential_epoch, stored_before.credential_epoch);
-                    assert_ne!(stored_after.totp_secret_ciphertext, Some(vec![1_u8]));
-                    assert!(
-                        stored_after.totp_last_accepted_step.unwrap() > stored_step,
-                        "recovery confirmation must install a strictly newer step"
-                    );
+                        .unwrap()
+                        .len(),
+                    9
+                );
+                let normalized_consumed = enrolled.recovery_codes[0].replace('-', "");
+                assert!(
+                    ManagerTotpRecoveryCode::load_by_code_id(
+                        &test_db_context,
+                        &normalized_consumed[..4]
+                    )
+                    .await
+                    .unwrap()
+                    .is_none(),
+                    "recovery start must consume exactly the submitted row"
+                );
+                let during_recovery = ManagerCredential::load(&test_db_context)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    during_recovery.credential_epoch,
+                    stored_before.credential_epoch
+                );
+                assert_eq!(during_recovery.totp_last_accepted_step, Some(stored_step));
+                assert_eq!(during_recovery.totp_secret_ciphertext, Some(vec![1_u8]));
 
-                    let final_restart =
-                        test_totp_auth_service(&now, Arc::clone(&secret_encryption));
-                    assert_eq!(final_restart.totp_challenge_counts(), (0, 0, 0));
-                    assert_eq!(final_restart.totp_protection_counts(), (0, 0));
-                    assert!(matches!(
-                        final_restart.totp_status(),
-                        Ok(ManagerTotpPublicState::Enabled { .. })
-                    ));
-                    assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 10);
-                }
-            })
-            .await;
+                now.fetch_add(30, Ordering::SeqCst);
+                let recovery_secret = recovery.manual_secret.expose().to_string();
+                let recovered = restarted
+                    .confirm_totp_recovery(
+                        test_source(43),
+                        recovery.challenge,
+                        &code_for(&recovery_secret, now.load(Ordering::SeqCst)),
+                    )
+                    .await
+                    .expect("recovery confirmation should install a new TOTP tuple");
+                let recovered_access = decode_access_token(&recovered.tokens.access_token)
+                    .expect("recovery access should decode");
+                assert_eq!(restarted.session_count(), Ok(1));
+                assert_eq!(restarted.validate_access_context(&recovered_access), Ok(()));
+                assert_eq!(
+                    ManagerTotpRecoveryCode::list(&test_db_context,)
+                        .await
+                        .unwrap()
+                        .len(),
+                    10
+                );
+                assert!(matches!(
+                    restarted.totp_status(),
+                    Ok(ManagerTotpPublicState::Enabled { .. })
+                ));
+                let stored_after = ManagerCredential::load(&test_db_context)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(
+                    stored_after.credential_epoch,
+                    stored_before.credential_epoch
+                );
+                assert_ne!(stored_after.totp_secret_ciphertext, Some(vec![1_u8]));
+                assert!(
+                    stored_after.totp_last_accepted_step.unwrap() > stored_step,
+                    "recovery confirmation must install a strictly newer step"
+                );
+
+                let final_restart =
+                    test_totp_auth_service(&test_db_context, &now, Arc::clone(&secret_encryption))
+                        .await;
+                assert_eq!(final_restart.totp_challenge_counts(), (0, 0, 0));
+                assert_eq!(final_restart.totp_protection_counts(), (0, 0));
+                assert!(matches!(
+                    final_restart.totp_status(),
+                    Ok(ManagerTotpPublicState::Enabled { .. })
+                ));
+                assert_eq!(
+                    ManagerTotpRecoveryCode::list(&test_db_context,)
+                        .await
+                        .unwrap()
+                        .len(),
+                    10
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_totp_same_step_login_and_sensitive_verification_have_one_winner() {
-        let test_db_context = TestDbContext::new_sqlite("manager-totp-cross-scenario-cas.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-totp-cross-scenario-cas.sqlite").await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                let spawn_context = test_db_context.clone();
-                async move {
-                    let service = Arc::new(test_totp_auth_service(&now, test_secret_encryption()));
-                    let enrolled =
-                        enroll_manager(&service, test_source(50), now.load(Ordering::SeqCst)).await;
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let current = now.load(Ordering::SeqCst);
-                    let challenge = match service
-                        .login_password(test_source(51), INITIAL_PASSWORD)
-                        .await
-                        .expect("password stage should create a challenge")
-                    {
-                        LoginPasswordResult::TotpRequired(challenge) => challenge,
-                        LoginPasswordResult::Authenticated(_) => {
-                            panic!("enabled password stage must not authenticate")
-                        }
-                    };
-                    let code = code_for(&enrolled.secret, current);
-                    let barrier = Arc::new(Barrier::new(3));
-                    let login = {
-                        let service = Arc::clone(&service);
-                        let barrier = Arc::clone(&barrier);
-                        let code = code.clone();
-                        spawn_context.spawn(async move {
-                            barrier.wait().await;
-                            service
-                                .login_totp(test_source(51), challenge.challenge, &code)
-                                .await
-                                .map(|_| ManagerTotpSensitiveVerification::Verified)
-                        })
-                    };
-                    let sensitive = {
-                        let service = Arc::clone(&service);
-                        let barrier = Arc::clone(&barrier);
-                        let access = enrolled.access.clone();
-                        spawn_context.spawn(async move {
-                            barrier.wait().await;
-                            service.verify_sensitive_totp(&access, test_source(52), Some(&code))
-                        })
-                    };
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service = Arc::new(
+                    test_totp_auth_service(&test_db_context, &now, test_secret_encryption()).await,
+                );
+                let enrolled =
+                    enroll_manager(&service, test_source(50), now.load(Ordering::SeqCst)).await;
+                now.fetch_add(30, Ordering::SeqCst);
+                let current = now.load(Ordering::SeqCst);
+                let challenge = match service
+                    .login_password(test_source(51), INITIAL_PASSWORD)
+                    .await
+                    .expect("password stage should create a challenge")
+                {
+                    LoginPasswordResult::TotpRequired(challenge) => challenge,
+                    LoginPasswordResult::Authenticated(_) => {
+                        panic!("enabled password stage must not authenticate")
+                    }
+                };
+                let code = code_for(&enrolled.secret, current);
+                let barrier = Arc::new(Barrier::new(3));
+                let login = {
+                    let service = Arc::clone(&service);
+                    let barrier = Arc::clone(&barrier);
+                    let code = code.clone();
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        service
+                            .login_totp(test_source(51), challenge.challenge, &code)
+                            .await
+                            .map(|_| ManagerTotpSensitiveVerification::Verified)
+                    })
+                };
+                let sensitive = {
+                    let service = Arc::clone(&service);
+                    let barrier = Arc::clone(&barrier);
+                    let access = enrolled.access.clone();
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        service
+                            .verify_sensitive_totp(&access, test_source(52), Some(&code))
+                            .await
+                    })
+                };
 
-                    barrier.wait().await;
-                    let results = [
-                        login.await.expect("login task should join"),
-                        sensitive.await.expect("sensitive task should join"),
-                    ];
-                    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-                    assert_eq!(
-                        results
-                            .iter()
-                            .filter(|result| {
-                                matches!(
-                                    result,
-                                    Err(ManagerTotpVerificationError::StepReplayed { .. })
-                                        | Err(ManagerTotpVerificationError::StepStale { .. })
-                                )
-                            })
-                            .count(),
-                        1
-                    );
-                    let stored = ManagerCredential::load().unwrap().unwrap();
-                    assert!(
-                        stored.totp_last_accepted_step.unwrap()
-                            > 1_800_000_000 / super::MANAGER_TOTP_PERIOD_SEC
-                    );
-                }
-            })
-            .await;
+                barrier.wait().await;
+                let results = [
+                    login.await.expect("login task should join"),
+                    sensitive.await.expect("sensitive task should join"),
+                ];
+                assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+                assert_eq!(
+                    results
+                        .iter()
+                        .filter(|result| {
+                            matches!(
+                                result,
+                                Err(ManagerTotpVerificationError::StepReplayed { .. })
+                                    | Err(ManagerTotpVerificationError::StepStale { .. })
+                            )
+                        })
+                        .count(),
+                    1
+                );
+                let stored = ManagerCredential::load(&test_db_context)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    stored.totp_last_accepted_step.unwrap()
+                        > 1_800_000_000 / super::MANAGER_TOTP_PERIOD_SEC
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_secret_governance_password_reauth_is_fixed_non_sliding_and_session_bound() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-secret-governance-password-reauth.sqlite");
+            TestDatabase::new_sqlite_default("manager-secret-governance-password-reauth.sqlite")
+                .await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let service = test_totp_auth_service(&now, test_secret_encryption());
-                    let bootstrapped = service
-                        .bootstrap(INITIAL_PASSWORD)
-                        .await
-                        .expect("bootstrap should establish the first session");
-                    let access = decode_access_token(&bootstrapped.access_token)
-                        .expect("bootstrap access should decode");
-                    let initial = bootstrapped
-                        .reauth
-                        .expect("bootstrap should seed password reauthentication");
-                    assert_eq!(initial.evidence, ManagerReauthEvidence::Password);
-                    assert_eq!(
-                        initial.verified_until,
-                        now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC
-                    );
-                    assert_eq!(service.authorize_secret_governance(&access), Ok(initial));
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service =
+                    test_totp_auth_service(&test_db_context, &now, test_secret_encryption()).await;
+                let bootstrapped = service
+                    .bootstrap(INITIAL_PASSWORD)
+                    .await
+                    .expect("bootstrap should establish the first session");
+                let access = decode_access_token(&bootstrapped.access_token)
+                    .expect("bootstrap access should decode");
+                let initial = bootstrapped
+                    .reauth
+                    .expect("bootstrap should seed password reauthentication");
+                assert_eq!(initial.evidence, ManagerReauthEvidence::Password);
+                assert_eq!(
+                    initial.verified_until,
+                    now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC
+                );
+                assert_eq!(service.authorize_secret_governance(&access), Ok(initial));
 
-                    now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC - 1, Ordering::SeqCst);
-                    assert_eq!(
-                        service.authorize_secret_governance(&access),
-                        Ok(initial),
-                        "authorization checks must not slide the expiry"
-                    );
-                    now.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(
-                        service.authorize_secret_governance(&access),
-                        Err(ManagerTotpVerificationError::ReauthRequired)
-                    );
-                    assert_eq!(
-                        service
-                            .reauthenticate_secret_governance(
-                                &access,
-                                test_source(57),
-                                ManagerReauthCredential::Totp("000000"),
-                            )
-                            .await,
-                        Err(ManagerTotpVerificationError::ReauthMethodChanged)
-                    );
-
-                    let renewed = service
+                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC - 1, Ordering::SeqCst);
+                assert_eq!(
+                    service.authorize_secret_governance(&access),
+                    Ok(initial),
+                    "authorization checks must not slide the expiry"
+                );
+                now.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    service.authorize_secret_governance(&access),
+                    Err(ManagerTotpVerificationError::ReauthRequired)
+                );
+                assert_eq!(
+                    service
                         .reauthenticate_secret_governance(
                             &access,
                             test_source(57),
-                            ManagerReauthCredential::Password(INITIAL_PASSWORD),
+                            ManagerReauthCredential::Totp("000000"),
                         )
-                        .await
-                        .expect("disabled TOTP should require the current password");
-                    assert_eq!(renewed.evidence, ManagerReauthEvidence::Password);
-                    assert_eq!(service.authorize_secret_governance(&access), Ok(renewed));
-                }
-            })
-            .await;
+                        .await,
+                    Err(ManagerTotpVerificationError::ReauthMethodChanged)
+                );
+
+                let renewed = service
+                    .reauthenticate_secret_governance(
+                        &access,
+                        test_source(57),
+                        ManagerReauthCredential::Password(INITIAL_PASSWORD),
+                    )
+                    .await
+                    .expect("disabled TOTP should require the current password");
+                assert_eq!(renewed.evidence, ManagerReauthEvidence::Password);
+                assert_eq!(service.authorize_secret_governance(&access), Ok(renewed));
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_secret_governance_totp_reauth_consumes_once_and_is_lost_on_restart() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-secret-governance-totp-reauth.sqlite");
+            TestDatabase::new_sqlite_default("manager-secret-governance-totp-reauth.sqlite").await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let secret_encryption = test_secret_encryption();
-                    let service = test_totp_auth_service(&now, Arc::clone(&secret_encryption));
-                    let enrolled =
-                        enroll_manager(&service, test_source(58), now.load(Ordering::SeqCst)).await;
-                    now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
-                    assert_eq!(
-                        service.authorize_secret_governance(&enrolled.access),
-                        Err(ManagerTotpVerificationError::ReauthRequired)
-                    );
-                    assert_eq!(
-                        service
-                            .reauthenticate_secret_governance(
-                                &enrolled.access,
-                                test_source(58),
-                                ManagerReauthCredential::Password(INITIAL_PASSWORD),
-                            )
-                            .await,
-                        Err(ManagerTotpVerificationError::ReauthMethodChanged)
-                    );
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let secret_encryption = test_secret_encryption();
+                let service =
+                    test_totp_auth_service(&test_db_context, &now, Arc::clone(&secret_encryption))
+                        .await;
+                let enrolled =
+                    enroll_manager(&service, test_source(58), now.load(Ordering::SeqCst)).await;
+                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
+                assert_eq!(
+                    service.authorize_secret_governance(&enrolled.access),
+                    Err(ManagerTotpVerificationError::ReauthRequired)
+                );
+                assert_eq!(
+                    service
+                        .reauthenticate_secret_governance(
+                            &enrolled.access,
+                            test_source(58),
+                            ManagerReauthCredential::Password(INITIAL_PASSWORD),
+                        )
+                        .await,
+                    Err(ManagerTotpVerificationError::ReauthMethodChanged)
+                );
 
-                    let code = code_for(&enrolled.secret, now.load(Ordering::SeqCst));
-                    let grant = service
+                let code = code_for(&enrolled.secret, now.load(Ordering::SeqCst));
+                let grant = service
+                    .reauthenticate_secret_governance(
+                        &enrolled.access,
+                        test_source(58),
+                        ManagerReauthCredential::Totp(&code),
+                    )
+                    .await
+                    .expect("enabled TOTP should establish the governance window");
+                assert_eq!(grant.evidence, ManagerReauthEvidence::Totp);
+                assert_eq!(
+                    service.authorize_secret_governance(&enrolled.access),
+                    Ok(grant)
+                );
+                assert_eq!(
+                    service.authorize_secret_governance(&enrolled.access),
+                    Ok(grant),
+                    "multiple commands in one TOTP step must share the window"
+                );
+                assert!(matches!(
+                    service
                         .reauthenticate_secret_governance(
                             &enrolled.access,
                             test_source(58),
                             ManagerReauthCredential::Totp(&code),
                         )
-                        .await
-                        .expect("enabled TOTP should establish the governance window");
-                    assert_eq!(grant.evidence, ManagerReauthEvidence::Totp);
-                    assert_eq!(
-                        service.authorize_secret_governance(&enrolled.access),
-                        Ok(grant)
-                    );
-                    assert_eq!(
-                        service.authorize_secret_governance(&enrolled.access),
-                        Ok(grant),
-                        "multiple commands in one TOTP step must share the window"
-                    );
-                    assert!(matches!(
-                        service
-                            .reauthenticate_secret_governance(
-                                &enrolled.access,
-                                test_source(58),
-                                ManagerReauthCredential::Totp(&code),
-                            )
-                            .await,
-                        Err(ManagerTotpVerificationError::StepReplayed { .. })
-                    ));
+                        .await,
+                    Err(ManagerTotpVerificationError::StepReplayed { .. })
+                ));
 
-                    let restarted = test_totp_auth_service(&now, Arc::clone(&secret_encryption));
-                    let rebuilt_access = restarted
-                        .access_for_session(
-                            enrolled.access.login_instance_id,
-                            enrolled.access.credential_epoch,
-                        )
-                        .await
-                        .expect("the persisted session should survive restart");
-                    let rebuilt_access =
-                        decode_access_token(&rebuilt_access).expect("rebuilt access should decode");
-                    assert_eq!(
-                        restarted.authorize_secret_governance(&rebuilt_access),
-                        Err(ManagerTotpVerificationError::ReauthRequired),
-                        "the in-memory governance grant must not survive restart"
-                    );
-                }
-            })
-            .await;
+                let restarted =
+                    test_totp_auth_service(&test_db_context, &now, Arc::clone(&secret_encryption))
+                        .await;
+                let rebuilt_access = restarted
+                    .access_for_session(
+                        enrolled.access.login_instance_id,
+                        enrolled.access.credential_epoch,
+                    )
+                    .await
+                    .expect("the persisted session should survive restart");
+                let rebuilt_access =
+                    decode_access_token(&rebuilt_access).expect("rebuilt access should decode");
+                assert_eq!(
+                    restarted.authorize_secret_governance(&rebuilt_access),
+                    Err(ManagerTotpVerificationError::ReauthRequired),
+                    "the in-memory governance grant must not survive restart"
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_totp_stale_cas_result_cannot_replace_rotated_epoch_snapshot() {
-        let test_db_context = TestDbContext::new_sqlite("manager-totp-stale-cas-install.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-totp-stale-cas-install.sqlite").await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let service = test_totp_auth_service(&now, test_secret_encryption());
-                    let enrolled =
-                        enroll_manager(&service, test_source(54), now.load(Ordering::SeqCst)).await;
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service =
+                    test_totp_auth_service(&test_db_context, &now, test_secret_encryption()).await;
+                let enrolled =
+                    enroll_manager(&service, test_source(54), now.load(Ordering::SeqCst)).await;
 
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let stale_step = now.load(Ordering::SeqCst) / super::MANAGER_TOTP_PERIOD_SEC;
-                    let stale_credential = ManagerCredential::advance_totp_step_if_newer(
-                        &enrolled.access.credential_epoch.to_string(),
-                        stale_step,
-                        now.load(Ordering::SeqCst),
+                now.fetch_add(30, Ordering::SeqCst);
+                let stale_step = now.load(Ordering::SeqCst) / super::MANAGER_TOTP_PERIOD_SEC;
+                let stale_credential = ManagerCredential::advance_totp_step_if_newer(
+                    &test_db_context,
+                    &enrolled.access.credential_epoch.to_string(),
+                    stale_step,
+                    now.load(Ordering::SeqCst),
+                )
+                .await
+                .expect("the simulated sensitive CAS should advance the old epoch");
+
+                now.fetch_add(30, Ordering::SeqCst);
+                let rotated = service
+                    .rotate_password(
+                        &enrolled.access,
+                        test_source(54),
+                        Some(&code_for(&enrolled.secret, now.load(Ordering::SeqCst))),
+                        INITIAL_PASSWORD,
+                        ROTATED_PASSWORD,
                     )
-                    .expect("the simulated sensitive CAS should advance the old epoch");
+                    .await
+                    .expect("password rotation should install a newer epoch");
+                let rotated_access = decode_access_token(&rotated.access_token)
+                    .expect("rotated access should decode");
 
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let rotated = service
-                        .rotate_password(
-                            &enrolled.access,
-                            test_source(54),
-                            Some(&code_for(&enrolled.secret, now.load(Ordering::SeqCst))),
-                            INITIAL_PASSWORD,
-                            ROTATED_PASSWORD,
-                        )
-                        .await
-                        .expect("password rotation should install a newer epoch");
-                    let rotated_access = decode_access_token(&rotated.access_token)
-                        .expect("rotated access should decode");
-
-                    assert_eq!(
-                        service.install_totp_step_snapshot_if_current(
-                            stale_credential,
-                            enrolled.access.credential_epoch,
-                            stale_step,
-                        ),
-                        Err(ManagerTotpVerificationError::StateConflict),
-                        "a late sensitive verification result must not replace the rotated snapshot"
-                    );
-                    assert_eq!(
-                        service.validate_access_context(&rotated_access),
-                        Ok(()),
-                        "the new session must remain valid after the stale install attempt"
-                    );
-                    assert!(matches!(
-                        service
-                            .login_password(test_source(55), INITIAL_PASSWORD)
-                            .await,
-                        Err(LoginPasswordError::InvalidPassword)
-                    ));
-                    assert!(matches!(
-                        service
-                            .login_password(test_source(56), ROTATED_PASSWORD)
-                            .await,
-                        Ok(LoginPasswordResult::TotpRequired(_))
-                    ));
-                }
-            })
-            .await;
+                assert_eq!(
+                    service.install_totp_step_snapshot_if_current(
+                        stale_credential,
+                        enrolled.access.credential_epoch,
+                        stale_step,
+                    ),
+                    Err(ManagerTotpVerificationError::StateConflict),
+                    "a late sensitive verification result must not replace the rotated snapshot"
+                );
+                assert_eq!(
+                    service.validate_access_context(&rotated_access),
+                    Ok(()),
+                    "the new session must remain valid after the stale install attempt"
+                );
+                assert!(matches!(
+                    service
+                        .login_password(test_source(55), INITIAL_PASSWORD)
+                        .await,
+                    Err(LoginPasswordError::InvalidPassword)
+                ));
+                assert!(matches!(
+                    service
+                        .login_password(test_source(56), ROTATED_PASSWORD)
+                        .await,
+                    Ok(LoginPasswordResult::TotpRequired(_))
+                ));
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_totp_future_step_requires_waiting_past_persisted_watermark() {
-        let test_db_context = TestDbContext::new_sqlite("manager-totp-future-step.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-totp-future-step.sqlite").await;
         let now = Arc::new(AtomicI64::new(1_800_000_000));
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let service = test_totp_auth_service(&now, test_secret_encryption());
-                    let enrolled =
-                        enroll_manager(&service, test_source(53), now.load(Ordering::SeqCst)).await;
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service =
+                    test_totp_auth_service(&test_db_context, &now, test_secret_encryption()).await;
+                let enrolled =
+                    enroll_manager(&service, test_source(53), now.load(Ordering::SeqCst)).await;
 
-                    now.fetch_add(30, Ordering::SeqCst);
-                    let current = now.load(Ordering::SeqCst);
-                    let future = current + super::MANAGER_TOTP_PERIOD_SEC;
-                    assert_eq!(
-                        service.verify_sensitive_totp(
+                now.fetch_add(30, Ordering::SeqCst);
+                let current = now.load(Ordering::SeqCst);
+                let future = current + super::MANAGER_TOTP_PERIOD_SEC;
+                assert_eq!(
+                    service
+                        .verify_sensitive_totp(
                             &enrolled.access,
                             test_source(53),
                             Some(&code_for(&enrolled.secret, future)),
-                        ),
-                        Ok(ManagerTotpSensitiveVerification::Verified),
-                        "the +1 drift window may accept the future step"
-                    );
-                    let future_step = future / super::MANAGER_TOTP_PERIOD_SEC;
-                    assert_eq!(
-                        ManagerCredential::load()
-                            .unwrap()
-                            .unwrap()
-                            .totp_last_accepted_step,
-                        Some(future_step)
-                    );
+                        )
+                        .await,
+                    Ok(ManagerTotpSensitiveVerification::Verified),
+                    "the +1 drift window may accept the future step"
+                );
+                let future_step = future / super::MANAGER_TOTP_PERIOD_SEC;
+                assert_eq!(
+                    ManagerCredential::load(&test_db_context,)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .totp_last_accepted_step,
+                    Some(future_step)
+                );
 
-                    assert_eq!(
-                        service.verify_sensitive_totp(
+                assert_eq!(
+                    service
+                        .verify_sensitive_totp(
                             &enrolled.access,
                             test_source(53),
                             Some(&code_for(&enrolled.secret, current)),
-                        ),
-                        Err(ManagerTotpVerificationError::StepStale { retry_after: 30 })
-                    );
-                    now.fetch_add(30, Ordering::SeqCst);
-                    assert_eq!(
-                        service.verify_sensitive_totp(
+                        )
+                        .await,
+                    Err(ManagerTotpVerificationError::StepStale { retry_after: 30 })
+                );
+                now.fetch_add(30, Ordering::SeqCst);
+                assert_eq!(
+                    service
+                        .verify_sensitive_totp(
                             &enrolled.access,
                             test_source(53),
                             Some(&code_for(&enrolled.secret, now.load(Ordering::SeqCst),)),
-                        ),
-                        Err(ManagerTotpVerificationError::StepReplayed { retry_after: 30 }),
-                        "reaching the accepted future step is still a replay"
-                    );
+                        )
+                        .await,
+                    Err(ManagerTotpVerificationError::StepReplayed { retry_after: 30 }),
+                    "reaching the accepted future step is still a replay"
+                );
 
-                    now.fetch_add(30, Ordering::SeqCst);
-                    assert_eq!(
-                        service.verify_sensitive_totp(
+                now.fetch_add(30, Ordering::SeqCst);
+                assert_eq!(
+                    service
+                        .verify_sensitive_totp(
                             &enrolled.access,
                             test_source(53),
                             Some(&code_for(&enrolled.secret, now.load(Ordering::SeqCst),)),
-                        ),
-                        Ok(ManagerTotpSensitiveVerification::Verified),
-                        "verification resumes only after the persisted watermark"
-                    );
-                    assert_eq!(
-                        ManagerCredential::load()
-                            .unwrap()
-                            .unwrap()
-                            .totp_last_accepted_step,
-                        Some(future_step + 1)
-                    );
-                }
-            })
-            .await;
+                        )
+                        .await,
+                    Ok(ManagerTotpSensitiveVerification::Verified),
+                    "verification resumes only after the persisted watermark"
+                );
+                assert_eq!(
+                    ManagerCredential::load(&test_db_context,)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .totp_last_accepted_step,
+                    Some(future_step + 1)
+                );
+            }
+        })
+        .await;
     }
 
     #[test]
@@ -4579,190 +4943,169 @@ mod tests {
 
     #[tokio::test]
     async fn manager_auth_session_registry_tracks_mutations_and_restart_state() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-session-registry.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-session-registry.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
-                let bootstrapped = service
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should create the first cached session");
-                let bootstrap_access = decode_access_token(&bootstrapped.access_token)
-                    .expect("bootstrap access should decode");
-                assert_eq!(service.session_count(), Ok(1));
-                assert_eq!(
-                    service.validate_session(
-                        bootstrap_access.login_instance_id,
-                        bootstrap_access.manager_id,
-                        SESSION_MANAGER_SUBJECT,
-                        INITIAL_SESSION_VERSION,
-                        &bootstrap_access.access_jti,
-                    ),
-                    Ok(())
-                );
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            let bootstrapped = service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should create the first cached session");
+            let bootstrap_access = decode_access_token(&bootstrapped.access_token)
+                .expect("bootstrap access should decode");
+            assert_eq!(service.session_count(), Ok(1));
+            assert_eq!(
+                service.validate_session(
+                    bootstrap_access.login_instance_id,
+                    bootstrap_access.manager_id,
+                    SESSION_MANAGER_SUBJECT,
+                    INITIAL_SESSION_VERSION,
+                    &bootstrap_access.access_jti,
+                ),
+                Ok(())
+            );
 
-                let login = service
-                    .login(test_source(1), INITIAL_PASSWORD)
-                    .await
-                    .expect("login should create a second cached session");
-                let login_access =
-                    decode_access_token(&login.access_token).expect("login access should decode");
-                assert_eq!(service.session_count(), Ok(2));
+            let login = service
+                .login(test_source(1), INITIAL_PASSWORD)
+                .await
+                .expect("login should create a second cached session");
+            let login_access =
+                decode_access_token(&login.access_token).expect("login access should decode");
+            assert_eq!(service.session_count(), Ok(2));
 
-                let mut conn = get_connection().expect("connection should load");
-                match &mut conn {
-                    DbConnection::Postgres(conn) => {
-                        diesel::sql_query("DELETE FROM manager_auth_instance WHERE id = $1")
-                            .bind::<diesel::sql_types::BigInt, _>(
-                                bootstrap_access.login_instance_id,
-                            )
-                            .execute(conn)
-                            .expect("manual session delete should succeed");
-                    }
-                    DbConnection::Sqlite(conn) => {
-                        diesel::sql_query("DELETE FROM manager_auth_instance WHERE id = ?")
-                            .bind::<diesel::sql_types::BigInt, _>(
-                                bootstrap_access.login_instance_id,
-                            )
-                            .execute(conn)
-                            .expect("manual session delete should succeed");
-                    }
-                }
+            test_db_context
+                .execute_sqlite_batch(format!(
+                    "DELETE FROM manager_auth_instance WHERE id = {}",
+                    bootstrap_access.login_instance_id
+                ))
+                .await
+                .expect("manual session delete should succeed");
 
-                assert_eq!(
-                    service.validate_session(
-                        bootstrap_access.login_instance_id,
-                        bootstrap_access.manager_id,
-                        SESSION_MANAGER_SUBJECT,
-                        INITIAL_SESSION_VERSION,
-                        &bootstrap_access.access_jti,
-                    ),
-                    Ok(()),
-                    "manual database changes require restart before affecting memory"
-                );
-                let restarted = test_auth_service();
-                assert_eq!(restarted.session_count(), Ok(1));
-                assert_eq!(
-                    restarted.validate_session(
-                        bootstrap_access.login_instance_id,
-                        bootstrap_access.manager_id,
-                        SESSION_MANAGER_SUBJECT,
-                        INITIAL_SESSION_VERSION,
-                        &bootstrap_access.access_jti,
-                    ),
-                    Err(super::SessionValidationError::Invalid)
-                );
-                assert_eq!(
-                    restarted.validate_session(
-                        login_access.login_instance_id,
-                        login_access.manager_id,
-                        SESSION_MANAGER_SUBJECT,
-                        INITIAL_SESSION_VERSION,
-                        &login_access.access_jti,
-                    ),
-                    Err(super::SessionValidationError::Invalid),
-                    "restart intentionally clears the access cache"
-                );
-                let rebuilt_access = restarted
-                    .access_for_session(
-                        login_access.login_instance_id,
-                        login_access.credential_epoch,
-                    )
-                    .await
-                    .expect("first access after restart should rebuild the cache");
-                let rebuilt_access =
-                    decode_access_token(&rebuilt_access).expect("rebuilt access should decode");
-                assert_eq!(restarted.validate_access_context(&rebuilt_access), Ok(()));
+            assert_eq!(
+                service.validate_session(
+                    bootstrap_access.login_instance_id,
+                    bootstrap_access.manager_id,
+                    SESSION_MANAGER_SUBJECT,
+                    INITIAL_SESSION_VERSION,
+                    &bootstrap_access.access_jti,
+                ),
+                Ok(()),
+                "manual database changes require restart before affecting memory"
+            );
+            let restarted = test_auth_service(&test_db_context).await;
+            assert_eq!(restarted.session_count(), Ok(1));
+            assert_eq!(
+                restarted.validate_session(
+                    bootstrap_access.login_instance_id,
+                    bootstrap_access.manager_id,
+                    SESSION_MANAGER_SUBJECT,
+                    INITIAL_SESSION_VERSION,
+                    &bootstrap_access.access_jti,
+                ),
+                Err(super::SessionValidationError::Invalid)
+            );
+            assert_eq!(
+                restarted.validate_session(
+                    login_access.login_instance_id,
+                    login_access.manager_id,
+                    SESSION_MANAGER_SUBJECT,
+                    INITIAL_SESSION_VERSION,
+                    &login_access.access_jti,
+                ),
+                Err(super::SessionValidationError::Invalid),
+                "restart intentionally clears the access cache"
+            );
+            let rebuilt_access = restarted
+                .access_for_session(
+                    login_access.login_instance_id,
+                    login_access.credential_epoch,
+                )
+                .await
+                .expect("first access after restart should rebuild the cache");
+            let rebuilt_access =
+                decode_access_token(&rebuilt_access).expect("rebuilt access should decode");
+            assert_eq!(restarted.validate_access_context(&rebuilt_access), Ok(()));
 
-                let rotated = service
-                    .rotate_password(
-                        &bootstrap_access,
-                        test_source(1),
-                        None,
-                        INITIAL_PASSWORD,
-                        ROTATED_PASSWORD,
-                    )
-                    .await
-                    .expect("password rotation should replace cached sessions");
-                let rotated_access = decode_access_token(&rotated.access_token)
-                    .expect("rotated access should decode");
-                assert_eq!(service.session_count(), Ok(1));
-                assert_eq!(
-                    service.validate_session(
-                        rotated_access.login_instance_id,
-                        rotated_access.manager_id,
-                        SESSION_MANAGER_SUBJECT,
-                        INITIAL_SESSION_VERSION,
-                        &rotated_access.access_jti,
-                    ),
-                    Ok(())
-                );
-            })
-            .await;
+            let rotated = service
+                .rotate_password(
+                    &bootstrap_access,
+                    test_source(1),
+                    None,
+                    INITIAL_PASSWORD,
+                    ROTATED_PASSWORD,
+                )
+                .await
+                .expect("password rotation should replace cached sessions");
+            let rotated_access =
+                decode_access_token(&rotated.access_token).expect("rotated access should decode");
+            assert_eq!(service.session_count(), Ok(1));
+            assert_eq!(
+                service.validate_session(
+                    rotated_access.login_instance_id,
+                    rotated_access.manager_id,
+                    SESSION_MANAGER_SUBJECT,
+                    INITIAL_SESSION_VERSION,
+                    &rotated_access.access_jti,
+                ),
+                Ok(())
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_auth_session_registry_failure_degrades_only_manager_auth() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-auth-session-registry-unavailable.sqlite");
+            TestDatabase::new_sqlite_default("manager-auth-session-registry-unavailable.sqlite")
+                .await;
 
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
-                let bootstrapped = service
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should create a valid credential and session");
-                let access = decode_access_token(&bootstrapped.access_token)
-                    .expect("bootstrap access should decode");
-                let mut conn = get_connection().expect("connection should load");
-                match &mut conn {
-                    DbConnection::Postgres(conn) => {
-                        diesel::sql_query("DROP TABLE manager_auth_instance")
-                            .execute(conn)
-                            .expect("session table should drop");
-                    }
-                    DbConnection::Sqlite(conn) => {
-                        diesel::sql_query("DROP TABLE manager_auth_instance")
-                            .execute(conn)
-                            .expect("session table should drop");
-                    }
-                }
-                drop(conn);
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            let bootstrapped = service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should create a valid credential and session");
+            let access = decode_access_token(&bootstrapped.access_token)
+                .expect("bootstrap access should decode");
+            test_db_context
+                .execute_sqlite_batch("DROP TABLE manager_auth_instance")
+                .await
+                .expect("session table should drop");
 
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                assert_eq!(
-                    app_state.admin.auth.session_count(),
-                    Err(super::SessionValidationError::Unavailable)
-                );
-                assert!(matches!(
-                    app_state
-                        .admin
-                        .auth
-                        .login(test_source(1), INITIAL_PASSWORD)
-                        .await,
-                    Err(LoginError::Unavailable)
-                ));
-                assert_eq!(
-                    app_state.admin.auth.validate_access_context(&access),
-                    Err(AccessCredentialError::SessionUnavailable)
-                );
-                assert!(
-                    app_state.max_body_size > 0,
-                    "proxy app state must remain available"
-                );
-            })
-            .await;
+            let app_state = create_test_app_state(test_db_context.clone()).await;
+            assert_eq!(
+                app_state.admin.auth.session_count(),
+                Err(super::SessionValidationError::Unavailable)
+            );
+            assert!(matches!(
+                app_state
+                    .admin
+                    .auth
+                    .login(test_source(1), INITIAL_PASSWORD)
+                    .await,
+                Err(LoginError::Unavailable)
+            ));
+            assert_eq!(
+                app_state.admin.auth.validate_access_context(&access),
+                Err(AccessCredentialError::SessionUnavailable)
+            );
+            assert!(
+                app_state.max_body_size > 0,
+                "proxy app state must remain available"
+            );
+        })
+        .await;
     }
 
-    #[test]
-    fn manager_auth_session_registry_startup_cleans_expired_rows() {
+    #[tokio::test]
+    async fn manager_auth_session_registry_startup_cleans_expired_rows() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-auth-session-registry-cleanup.sqlite");
+            TestDatabase::new_sqlite_default("manager-auth-session-registry-cleanup.sqlite").await;
 
-        test_db_context.run_sync(|| {
+        (async {
             let expired = ManagerAuthInstance::create_instance(
+                &test_db_context,
                 "expired".to_string(),
                 super::manager_jwt_key_id().to_string(),
                 uuid::Uuid::new_v4().to_string(),
@@ -4770,620 +5113,632 @@ mod tests {
                 10,
                 20,
             )
+            .await
             .expect("expired fixture should create");
-            let service = ManagerAuthService::new_for_test(Arc::new(|| 11));
+            let service =
+                ManagerAuthService::new_for_test(test_db_context.runtime(), Arc::new(|| 11)).await;
             assert_eq!(service.session_count(), Ok(0));
             assert!(
-                ManagerAuthInstance::get_instance(expired.id)
+                ManagerAuthInstance::get_instance(&test_db_context, expired.id)
+                    .await
                     .expect("expired lookup should query")
                     .is_none(),
                 "startup cleanup should physically delete expired sessions"
             );
-        });
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_access_context_rejects_wrong_version_and_revoked_session() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-auth-access-session-validation.sqlite");
+            TestDatabase::new_sqlite_default("manager-auth-access-session-validation.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
-                let bootstrapped = service
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-                let access = decode_access_token(&bootstrapped.access_token)
-                    .expect("bootstrap access should decode");
-                assert_eq!(service.validate_access_context(&access), Ok(()));
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            let bootstrapped = service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let access = decode_access_token(&bootstrapped.access_token)
+                .expect("bootstrap access should decode");
+            assert_eq!(service.validate_access_context(&access), Ok(()));
 
-                let mut wrong_version = access.clone();
-                wrong_version.session_version += 1;
-                assert_eq!(
-                    service.validate_access_context(&wrong_version),
-                    Err(AccessCredentialError::SessionInvalid)
-                );
+            let mut wrong_version = access.clone();
+            wrong_version.session_version += 1;
+            assert_eq!(
+                service.validate_access_context(&wrong_version),
+                Err(AccessCredentialError::SessionInvalid)
+            );
 
-                service
-                    .logout_session(access.login_instance_id, access.credential_epoch)
-                    .await
-                    .expect("logout should revoke the current session");
-                assert_eq!(
-                    service.validate_access_context(&access),
-                    Err(AccessCredentialError::SessionInvalid)
-                );
-            })
-            .await;
+            service
+                .logout_session(access.login_instance_id, access.credential_epoch)
+                .await
+                .expect("logout should revoke the current session");
+            assert_eq!(
+                service.validate_access_context(&access),
+                Err(AccessCredentialError::SessionInvalid)
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_auth_refresh_rotation_has_one_winner_and_detects_replay() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-refresh-replay.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-refresh-replay.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = Arc::new(test_auth_service());
+        (async {
+            let service = Arc::new(test_auth_service(&test_db_context).await);
+            let initial = service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let initial_access =
+                decode_access_token(&initial.access_token).expect("initial access should decode");
+            let barrier = Arc::new(Barrier::new(3));
+            let first = {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                let refresh_token = initial.refresh_token.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    service.refresh(&refresh_token).await
+                })
+            };
+            let second = {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                let refresh_token = initial.refresh_token.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    service.refresh(&refresh_token).await
+                })
+            };
+
+            barrier.wait().await;
+            let results = [
+                first.await.expect("first refresh task should join"),
+                second.await.expect("second refresh task should join"),
+            ];
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, Err(RefreshError::Replay)))
+                    .count(),
+                1
+            );
+            let winner = results
+                .iter()
+                .find_map(|result| result.as_ref().ok())
+                .expect("one refresh should win");
+            let winner_access =
+                decode_access_token(&winner.access_token).expect("winner access should decode");
+            assert_eq!(winner_access.session_version, INITIAL_SESSION_VERSION);
+            assert_eq!(
+                service.validate_access_context(&winner_access),
+                Err(AccessCredentialError::SessionInvalid),
+                "a valid stale internal refresh is an integrity fault and revokes the family"
+            );
+            assert_eq!(
+                service.validate_access_context(&initial_access),
+                Err(AccessCredentialError::SessionInvalid)
+            );
+            assert_eq!(service.session_count(), Ok(0));
+            assert!(matches!(
+                service.refresh(&initial.refresh_token).await,
+                Err(RefreshError::Invalid)
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn manager_auth_access_singleflight_returns_one_rotated_access_to_all_waiters() {
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-access-singleflight.sqlite").await;
+        let now = Arc::new(AtomicI64::new(crate::utils::auth::get_current_timestamp()));
+
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service_now = Arc::clone(&now);
+                let service = Arc::new(
+                    ManagerAuthService::new_for_test(
+                        test_db_context.runtime(),
+                        Arc::new(move || service_now.load(Ordering::SeqCst)),
+                    )
+                    .await,
+                );
                 let initial = service
                     .bootstrap(INITIAL_PASSWORD)
                     .await
                     .expect("bootstrap should succeed");
                 let initial_access = decode_access_token(&initial.access_token)
                     .expect("initial access should decode");
-                let barrier = Arc::new(Barrier::new(3));
-                let first = {
-                    let service = Arc::clone(&service);
-                    let barrier = Arc::clone(&barrier);
-                    let refresh_token = initial.refresh_token.clone();
-                    test_db_context.spawn(async move {
-                        barrier.wait().await;
-                        service.refresh(&refresh_token).await
-                    })
-                };
-                let second = {
-                    let service = Arc::clone(&service);
-                    let barrier = Arc::clone(&barrier);
-                    let refresh_token = initial.refresh_token.clone();
-                    test_db_context.spawn(async move {
-                        barrier.wait().await;
-                        service.refresh(&refresh_token).await
-                    })
-                };
+                assert_eq!(
+                    service
+                        .access_for_session(
+                            initial_access.login_instance_id,
+                            initial_access.credential_epoch,
+                        )
+                        .await
+                        .expect("fresh cache should return"),
+                    initial.access_token,
+                    "fresh access must be returned without rotation"
+                );
 
+                now.fetch_add(ACCESS_TOKEN_ISSUE_SEC - 30, Ordering::SeqCst);
+                let barrier = Arc::new(Barrier::new(3));
+                let mut handles = Vec::new();
+                let login_instance_id = initial_access.login_instance_id;
+                let credential_epoch = initial_access.credential_epoch;
+                for _ in 0..2 {
+                    let service = Arc::clone(&service);
+                    let barrier = Arc::clone(&barrier);
+                    handles.push(tokio::spawn(async move {
+                        barrier.wait().await;
+                        service
+                            .access_for_session(login_instance_id, credential_epoch)
+                            .await
+                    }));
+                }
                 barrier.wait().await;
-                let results = [
-                    first.await.expect("first refresh task should join"),
-                    second.await.expect("second refresh task should join"),
-                ];
-                assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-                assert_eq!(
-                    results
-                        .iter()
-                        .filter(|result| matches!(result, Err(RefreshError::Replay)))
-                        .count(),
-                    1
-                );
-                let winner = results
-                    .iter()
-                    .find_map(|result| result.as_ref().ok())
-                    .expect("one refresh should win");
-                let winner_access =
-                    decode_access_token(&winner.access_token).expect("winner access should decode");
-                assert_eq!(winner_access.session_version, INITIAL_SESSION_VERSION);
-                assert_eq!(
-                    service.validate_access_context(&winner_access),
-                    Err(AccessCredentialError::SessionInvalid),
-                    "a valid stale internal refresh is an integrity fault and revokes the family"
-                );
+                let first = handles
+                    .remove(0)
+                    .await
+                    .expect("first access task should join")
+                    .expect("first access should succeed");
+                let second = handles
+                    .remove(0)
+                    .await
+                    .expect("second access task should join")
+                    .expect("second access should succeed");
+                assert_eq!(first, second, "all waiters must receive one cached access");
+                assert_ne!(first, initial.access_token);
+
+                let persisted = ManagerAuthInstance::get_instance(
+                    &test_db_context,
+                    initial_access.login_instance_id,
+                )
+                .await
+                .expect("session lookup should succeed")
+                .expect("session should remain active");
+                assert_eq!(persisted.refresh_generation, 2);
+                assert_eq!(persisted.session_version, INITIAL_SESSION_VERSION);
+                let rotated_access =
+                    decode_access_token(&first).expect("rotated access should decode");
+                assert_eq!(service.validate_access_context(&rotated_access), Ok(()));
                 assert_eq!(
                     service.validate_access_context(&initial_access),
                     Err(AccessCredentialError::SessionInvalid)
                 );
-                assert_eq!(service.session_count(), Ok(0));
-                assert!(matches!(
-                    service.refresh(&initial.refresh_token).await,
-                    Err(RefreshError::Invalid)
-                ));
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn manager_auth_access_singleflight_returns_one_rotated_access_to_all_waiters() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-access-singleflight.sqlite");
-        let now = Arc::new(AtomicI64::new(crate::utils::auth::get_current_timestamp()));
-
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                let spawn_context = test_db_context.clone();
-                async move {
-                    let service_now = Arc::clone(&now);
-                    let service = Arc::new(ManagerAuthService::new_for_test(Arc::new(move || {
-                        service_now.load(Ordering::SeqCst)
-                    })));
-                    let initial = service
-                        .bootstrap(INITIAL_PASSWORD)
-                        .await
-                        .expect("bootstrap should succeed");
-                    let initial_access = decode_access_token(&initial.access_token)
-                        .expect("initial access should decode");
-                    assert_eq!(
-                        service
-                            .access_for_session(
-                                initial_access.login_instance_id,
-                                initial_access.credential_epoch,
-                            )
-                            .await
-                            .expect("fresh cache should return"),
-                        initial.access_token,
-                        "fresh access must be returned without rotation"
-                    );
-
-                    now.fetch_add(ACCESS_TOKEN_ISSUE_SEC - 30, Ordering::SeqCst);
-                    let barrier = Arc::new(Barrier::new(3));
-                    let mut handles = Vec::new();
-                    let login_instance_id = initial_access.login_instance_id;
-                    let credential_epoch = initial_access.credential_epoch;
-                    for _ in 0..2 {
-                        let service = Arc::clone(&service);
-                        let barrier = Arc::clone(&barrier);
-                        handles.push(spawn_context.spawn(async move {
-                            barrier.wait().await;
-                            service
-                                .access_for_session(login_instance_id, credential_epoch)
-                                .await
-                        }));
-                    }
-                    barrier.wait().await;
-                    let first = handles
-                        .remove(0)
-                        .await
-                        .expect("first access task should join")
-                        .expect("first access should succeed");
-                    let second = handles
-                        .remove(0)
-                        .await
-                        .expect("second access task should join")
-                        .expect("second access should succeed");
-                    assert_eq!(first, second, "all waiters must receive one cached access");
-                    assert_ne!(first, initial.access_token);
-
-                    let persisted =
-                        ManagerAuthInstance::get_instance(initial_access.login_instance_id)
-                            .expect("session lookup should succeed")
-                            .expect("session should remain active");
-                    assert_eq!(persisted.refresh_generation, 2);
-                    assert_eq!(persisted.session_version, INITIAL_SESSION_VERSION);
-                    let rotated_access =
-                        decode_access_token(&first).expect("rotated access should decode");
-                    assert_eq!(service.validate_access_context(&rotated_access), Ok(()));
-                    assert_eq!(
-                        service.validate_access_context(&initial_access),
-                        Err(AccessCredentialError::SessionInvalid)
-                    );
-                }
-            })
-            .await;
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_auth_access_cache_degrades_only_until_cached_access_expires() {
         let test_db_context =
-            TestDbContext::new_sqlite("manager-auth-access-cache-storage-failure.sqlite");
+            TestDatabase::new_sqlite_default("manager-auth-access-cache-storage-failure.sqlite")
+                .await;
         let now = Arc::new(AtomicI64::new(crate::utils::auth::get_current_timestamp()));
 
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let service_now = Arc::clone(&now);
-                    let service = ManagerAuthService::new_for_test(Arc::new(move || {
-                        service_now.load(Ordering::SeqCst)
-                    }));
-                    let initial = service
-                        .bootstrap(INITIAL_PASSWORD)
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service_now = Arc::clone(&now);
+                let service = ManagerAuthService::new_for_test(
+                    test_db_context.runtime(),
+                    Arc::new(move || service_now.load(Ordering::SeqCst)),
+                )
+                .await;
+                let initial = service
+                    .bootstrap(INITIAL_PASSWORD)
+                    .await
+                    .expect("bootstrap should succeed");
+                let access = decode_access_token(&initial.access_token)
+                    .expect("initial access should decode");
+
+                test_db_context
+                    .execute_sqlite_batch("DROP TABLE manager_auth_instance")
+                    .await
+                    .expect("session table should drop");
+
+                assert_eq!(
+                    service
+                        .access_for_session(access.login_instance_id, access.credential_epoch)
                         .await
-                        .expect("bootstrap should succeed");
-                    let access = decode_access_token(&initial.access_token)
-                        .expect("initial access should decode");
-
-                    let mut conn = get_connection().expect("connection should load");
-                    match &mut conn {
-                        DbConnection::Postgres(conn) => {
-                            diesel::sql_query("DROP TABLE manager_auth_instance")
-                                .execute(conn)
-                                .expect("session table should drop");
-                        }
-                        DbConnection::Sqlite(conn) => {
-                            diesel::sql_query("DROP TABLE manager_auth_instance")
-                                .execute(conn)
-                                .expect("session table should drop");
-                        }
-                    }
-                    drop(conn);
-
-                    assert_eq!(
-                        service
-                            .access_for_session(access.login_instance_id, access.credential_epoch)
-                            .await
-                            .expect("fresh cache must not need storage"),
-                        initial.access_token
-                    );
-                    now.fetch_add(ACCESS_TOKEN_ISSUE_SEC - 30, Ordering::SeqCst);
-                    assert_eq!(
-                        service
-                            .access_for_session(access.login_instance_id, access.credential_epoch)
-                            .await
-                            .expect("unexpired fallback should survive storage failure"),
-                        initial.access_token
-                    );
-                    now.fetch_add(31, Ordering::SeqCst);
-                    assert_eq!(
-                        service
-                            .access_for_session(access.login_instance_id, access.credential_epoch)
-                            .await,
-                        Err(AccessTokenError::Storage)
-                    );
-                }
-            })
-            .await;
+                        .expect("fresh cache must not need storage"),
+                    initial.access_token
+                );
+                now.fetch_add(ACCESS_TOKEN_ISSUE_SEC - 30, Ordering::SeqCst);
+                assert_eq!(
+                    service
+                        .access_for_session(access.login_instance_id, access.credential_epoch)
+                        .await
+                        .expect("unexpired fallback should survive storage failure"),
+                    initial.access_token
+                );
+                now.fetch_add(31, Ordering::SeqCst);
+                assert_eq!(
+                    service
+                        .access_for_session(access.login_instance_id, access.credential_epoch)
+                        .await,
+                    Err(AccessTokenError::Storage)
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_auth_logout_all_revokes_every_active_session_and_clears_registry() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-logout-all.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-logout-all.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
-                let first = service
-                    .bootstrap(INITIAL_PASSWORD)
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            let first = service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let second = service
+                .login(test_source(1), INITIAL_PASSWORD)
+                .await
+                .expect("login should create another session");
+            let first_access =
+                decode_access_token(&first.access_token).expect("first access should decode");
+            let second_access =
+                decode_access_token(&second.access_token).expect("second access should decode");
+
+            assert_eq!(
+                service
+                    .logout_all(&second_access, test_source(94), INITIAL_PASSWORD, None)
+                    .await,
+                Ok(2)
+            );
+            assert_eq!(service.session_count(), Ok(0));
+            assert_eq!(
+                service.validate_access_context(&first_access),
+                Err(AccessCredentialError::SessionInvalid)
+            );
+            assert_eq!(
+                service.validate_access_context(&second_access),
+                Err(AccessCredentialError::SessionInvalid)
+            );
+
+            for session_id in [
+                first_access.login_instance_id,
+                second_access.login_instance_id,
+            ] {
+                let session = ManagerAuthInstance::get_instance(&test_db_context, session_id)
                     .await
-                    .expect("bootstrap should succeed");
-                let second = service
-                    .login(test_source(1), INITIAL_PASSWORD)
-                    .await
-                    .expect("login should create another session");
-                let first_access =
-                    decode_access_token(&first.access_token).expect("first access should decode");
-                let second_access =
-                    decode_access_token(&second.access_token).expect("second access should decode");
+                    .expect("revoked session lookup should query")
+                    .expect("revoked session should remain until expiry");
+                assert!(session.revoked_at.is_some());
+                assert_eq!(session.revoked_reason.as_deref(), Some("logout_all"));
+            }
+            assert!(matches!(
+                service.refresh(&first.refresh_token).await,
+                Err(RefreshError::Invalid)
+            ));
+        })
+        .await;
+    }
 
-                assert_eq!(
-                    service
-                        .logout_all(&second_access, test_source(94), INITIAL_PASSWORD, None)
-                        .await,
-                    Ok(2)
-                );
-                assert_eq!(service.session_count(), Ok(0));
-                assert_eq!(
-                    service.validate_access_context(&first_access),
-                    Err(AccessCredentialError::SessionInvalid)
-                );
-                assert_eq!(
-                    service.validate_access_context(&second_access),
-                    Err(AccessCredentialError::SessionInvalid)
-                );
+    #[tokio::test]
+    async fn cancelled_bootstrap_still_publishes_the_committed_auth_state() {
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-cancelled-bootstrap.sqlite").await;
+        let service = Arc::new(test_auth_service(&test_db_context).await);
+        let gate = service.pause_before_publication_for_test();
+        let bootstrapping_service = Arc::clone(&service);
+        let caller =
+            tokio::spawn(async move { bootstrapping_service.bootstrap(INITIAL_PASSWORD).await });
 
-                for session_id in [
-                    first_access.login_instance_id,
-                    second_access.login_instance_id,
-                ] {
-                    let session = ManagerAuthInstance::get_instance(session_id)
-                        .expect("revoked session lookup should query")
-                        .expect("revoked session should remain until expiry");
-                    assert!(session.revoked_at.is_some());
-                    assert_eq!(session.revoked_reason.as_deref(), Some("logout_all"));
-                }
-                assert!(matches!(
-                    service.refresh(&first.refresh_token).await,
-                    Err(RefreshError::Invalid)
-                ));
-            })
-            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_reached())
+            .await
+            .expect("bootstrap should commit before publication is released");
+        assert!(
+            ManagerCredential::load(&test_db_context)
+                .await
+                .expect("committed credential should load")
+                .is_some()
+        );
+        assert_eq!(
+            service.bootstrap_status().expect("snapshot should load"),
+            BootstrapStatus::Uninitialized,
+            "the test gate should expose the post-commit publication window"
+        );
+
+        caller.abort();
+        let _ = caller.await;
+        gate.resume();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gate.wait_until_completed(),
+        )
+        .await
+        .expect("detached bootstrap owner should publish auth state");
+
+        assert_eq!(
+            service.bootstrap_status().expect("snapshot should load"),
+            BootstrapStatus::Ready
+        );
+        assert_eq!(service.session_count(), Ok(1));
+        assert!(matches!(
+            service.bootstrap(INITIAL_PASSWORD).await,
+            Err(BootstrapError::AlreadyInitialized)
+        ));
     }
 
     #[tokio::test]
     async fn manager_auth_service_bootstrap_login_rotate_and_epoch_invalidation() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-service-lifecycle.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-service-lifecycle.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
-                assert_eq!(
-                    service.bootstrap_status().expect("status should load"),
-                    BootstrapStatus::Uninitialized
-                );
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            assert_eq!(
+                service.bootstrap_status().expect("status should load"),
+                BootstrapStatus::Uninitialized
+            );
 
-                let bootstrapped = service
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-                assert_eq!(
-                    service.bootstrap_status().expect("status should load"),
-                    BootstrapStatus::Ready
-                );
-                let initial_access = decode_access_token(&bootstrapped.access_token)
-                    .expect("bootstrap access should decode");
-                let initial_refresh = decode_refresh_token(&bootstrapped.refresh_token)
-                    .expect("bootstrap refresh should decode");
-                assert_eq!(
-                    initial_access.credential_epoch,
-                    initial_refresh.credential_epoch
-                );
+            let bootstrapped = service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            assert_eq!(
+                service.bootstrap_status().expect("status should load"),
+                BootstrapStatus::Ready
+            );
+            let initial_access = decode_access_token(&bootstrapped.access_token)
+                .expect("bootstrap access should decode");
+            let initial_refresh = decode_refresh_token(&bootstrapped.refresh_token)
+                .expect("bootstrap refresh should decode");
+            assert_eq!(
+                initial_access.credential_epoch,
+                initial_refresh.credential_epoch
+            );
 
-                let login_tokens = service
-                    .login(test_source(1), INITIAL_PASSWORD)
-                    .await
-                    .expect("initialized password should login");
-                let rotated = service
+            let login_tokens = service
+                .login(test_source(1), INITIAL_PASSWORD)
+                .await
+                .expect("initialized password should login");
+            let rotated = service
+                .rotate_password(
+                    &initial_access,
+                    test_source(1),
+                    None,
+                    INITIAL_PASSWORD,
+                    ROTATED_PASSWORD,
+                )
+                .await
+                .expect("rotation should succeed");
+            let rotated_access =
+                decode_access_token(&rotated.access_token).expect("rotated access should decode");
+            assert_ne!(
+                initial_access.credential_epoch,
+                rotated_access.credential_epoch
+            );
+            assert_eq!(
+                service.validate_access_context(&initial_access),
+                Err(AccessCredentialError::EpochMismatchOrUninitialized)
+            );
+            assert!(matches!(
+                service.refresh(&bootstrapped.refresh_token).await,
+                Err(RefreshError::EpochMismatch)
+            ));
+            assert!(matches!(
+                service.refresh(&login_tokens.refresh_token).await,
+                Err(RefreshError::EpochMismatch)
+            ));
+            assert!(matches!(
+                service.login(test_source(1), INITIAL_PASSWORD).await,
+                Err(LoginError::InvalidPassword)
+            ));
+            service
+                .login(test_source(1), ROTATED_PASSWORD)
+                .await
+                .expect("rotated password should login");
+            assert!(matches!(
+                service
                     .rotate_password(
-                        &initial_access,
+                        &rotated_access,
                         test_source(1),
                         None,
-                        INITIAL_PASSWORD,
+                        ROTATED_PASSWORD,
                         ROTATED_PASSWORD,
                     )
-                    .await
-                    .expect("rotation should succeed");
-                let rotated_access = decode_access_token(&rotated.access_token)
-                    .expect("rotated access should decode");
-                assert_ne!(
+                    .await,
+                Err(RotatePasswordError::SamePassword)
+            ));
+            assert!(matches!(
+                service
+                    .rotate_password(
+                        &rotated_access,
+                        test_source(1),
+                        None,
+                        "wrong horse battery staple",
+                        "another sufficiently long manager password",
+                    )
+                    .await,
+                Err(RotatePasswordError::InvalidCurrentPassword)
+            ));
+            assert!(matches!(
+                service
+                    .rotate_password(
+                        &rotated_access,
+                        test_source(1),
+                        None,
+                        ROTATED_PASSWORD,
+                        "too short",
+                    )
+                    .await,
+                Err(RotatePasswordError::PasswordPolicy(_))
+            ));
+            service
+                .logout_session(
+                    rotated_access.login_instance_id,
+                    rotated_access.credential_epoch,
+                )
+                .await
+                .expect("logout should revoke the current session");
+            assert!(matches!(
+                service.refresh(&rotated.refresh_token).await,
+                Err(RefreshError::Invalid)
+            ));
+            service
+                .logout_session(
+                    initial_access.login_instance_id,
                     initial_access.credential_epoch,
-                    rotated_access.credential_epoch
-                );
-                assert_eq!(
-                    service.validate_access_context(&initial_access),
-                    Err(AccessCredentialError::EpochMismatchOrUninitialized)
-                );
-                assert!(matches!(
-                    service.refresh(&bootstrapped.refresh_token).await,
-                    Err(RefreshError::EpochMismatch)
-                ));
-                assert!(matches!(
-                    service.refresh(&login_tokens.refresh_token).await,
-                    Err(RefreshError::EpochMismatch)
-                ));
-                assert!(matches!(
-                    service.login(test_source(1), INITIAL_PASSWORD).await,
-                    Err(LoginError::InvalidPassword)
-                ));
-                service
-                    .login(test_source(1), ROTATED_PASSWORD)
-                    .await
-                    .expect("rotated password should login");
-                assert!(matches!(
-                    service
-                        .rotate_password(
-                            &rotated_access,
-                            test_source(1),
-                            None,
-                            ROTATED_PASSWORD,
-                            ROTATED_PASSWORD,
-                        )
-                        .await,
-                    Err(RotatePasswordError::SamePassword)
-                ));
-                assert!(matches!(
-                    service
-                        .rotate_password(
-                            &rotated_access,
-                            test_source(1),
-                            None,
-                            "wrong horse battery staple",
-                            "another sufficiently long manager password",
-                        )
-                        .await,
-                    Err(RotatePasswordError::InvalidCurrentPassword)
-                ));
-                assert!(matches!(
-                    service
-                        .rotate_password(
-                            &rotated_access,
-                            test_source(1),
-                            None,
-                            ROTATED_PASSWORD,
-                            "too short",
-                        )
-                        .await,
-                    Err(RotatePasswordError::PasswordPolicy(_))
-                ));
-                service
-                    .logout_session(
-                        rotated_access.login_instance_id,
-                        rotated_access.credential_epoch,
-                    )
-                    .await
-                    .expect("logout should revoke the current session");
-                assert!(matches!(
-                    service.refresh(&rotated.refresh_token).await,
-                    Err(RefreshError::Invalid)
-                ));
-                service
-                    .logout_session(
-                        initial_access.login_instance_id,
-                        initial_access.credential_epoch,
-                    )
-                    .await
-                    .expect("stale current-session logout should be idempotent");
-            })
-            .await;
+                )
+                .await
+                .expect("stale current-session logout should be idempotent");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn concurrent_bootstrap_has_exactly_one_winner_without_timing_assumptions() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-bootstrap-race.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-bootstrap-race.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = Arc::new(test_auth_service());
-                let barrier = Arc::new(Barrier::new(3));
-                let first = {
-                    let service = Arc::clone(&service);
-                    let barrier = Arc::clone(&barrier);
-                    test_db_context.spawn(async move {
-                        barrier.wait().await;
-                        service.bootstrap(INITIAL_PASSWORD).await
-                    })
-                };
-                let second = {
-                    let service = Arc::clone(&service);
-                    let barrier = Arc::clone(&barrier);
-                    test_db_context.spawn(async move {
-                        barrier.wait().await;
-                        service
-                            .bootstrap("a distinct and sufficiently long bootstrap password")
-                            .await
-                    })
-                };
+        (async {
+            let service = Arc::new(test_auth_service(&test_db_context).await);
+            let barrier = Arc::new(Barrier::new(3));
+            let first = {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    service.bootstrap(INITIAL_PASSWORD).await
+                })
+            };
+            let second = {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    service
+                        .bootstrap("a distinct and sufficiently long bootstrap password")
+                        .await
+                })
+            };
 
-                barrier.wait().await;
-                let results = [
-                    first.await.expect("first bootstrap task should join"),
-                    second.await.expect("second bootstrap task should join"),
-                ];
-                assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-                assert!(
-                    results
-                        .iter()
-                        .filter_map(|result| result.as_ref().err())
-                        .all(|error| matches!(
-                            error,
-                            BootstrapError::Busy | BootstrapError::AlreadyInitialized
-                        ))
-                );
-                assert_eq!(
-                    service.bootstrap_status().expect("status should load"),
-                    BootstrapStatus::Ready
-                );
-            })
-            .await;
+            barrier.wait().await;
+            let results = [
+                first.await.expect("first bootstrap task should join"),
+                second.await.expect("second bootstrap task should join"),
+            ];
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            assert!(
+                results
+                    .iter()
+                    .filter_map(|result| result.as_ref().err())
+                    .all(|error| matches!(
+                        error,
+                        BootstrapError::Busy | BootstrapError::AlreadyInitialized
+                    ))
+            );
+            assert_eq!(
+                service.bootstrap_status().expect("status should load"),
+                BootstrapStatus::Ready
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn concurrent_rotation_has_one_new_epoch_and_rejects_the_loser() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-rotation-race.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-rotation-race.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = Arc::new(test_auth_service());
-                let bootstrapped = service
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-                let access = decode_access_token(&bootstrapped.access_token)
-                    .expect("bootstrap access should decode");
-                let barrier = Arc::new(Barrier::new(3));
-                let first = {
-                    let service = Arc::clone(&service);
-                    let barrier = Arc::clone(&barrier);
-                    let access = access.clone();
-                    test_db_context.spawn(async move {
-                        barrier.wait().await;
-                        service
-                            .rotate_password(
-                                &access,
-                                test_source(1),
-                                None,
-                                INITIAL_PASSWORD,
-                                ROTATED_PASSWORD,
-                            )
-                            .await
-                    })
-                };
-                let second = {
-                    let service = Arc::clone(&service);
-                    let barrier = Arc::clone(&barrier);
-                    let access = access.clone();
-                    test_db_context.spawn(async move {
-                        barrier.wait().await;
-                        service
-                            .rotate_password(
-                                &access,
-                                test_source(2),
-                                None,
-                                INITIAL_PASSWORD,
-                                "a second sufficiently long rotated manager password",
-                            )
-                            .await
-                    })
-                };
+        (async {
+            let service = Arc::new(test_auth_service(&test_db_context).await);
+            let bootstrapped = service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+            let access = decode_access_token(&bootstrapped.access_token)
+                .expect("bootstrap access should decode");
+            let barrier = Arc::new(Barrier::new(3));
+            let first = {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                let access = access.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    service
+                        .rotate_password(
+                            &access,
+                            test_source(1),
+                            None,
+                            INITIAL_PASSWORD,
+                            ROTATED_PASSWORD,
+                        )
+                        .await
+                })
+            };
+            let second = {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                let access = access.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    service
+                        .rotate_password(
+                            &access,
+                            test_source(2),
+                            None,
+                            INITIAL_PASSWORD,
+                            "a second sufficiently long rotated manager password",
+                        )
+                        .await
+                })
+            };
 
-                barrier.wait().await;
-                let results = [
-                    first.await.expect("first rotation task should join"),
-                    second.await.expect("second rotation task should join"),
-                ];
-                assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-                assert!(
-                    results
-                        .iter()
-                        .filter_map(|result| result.as_ref().err())
-                        .all(|error| matches!(
-                            error,
-                            RotatePasswordError::Busy | RotatePasswordError::EpochConflict
-                        ))
-                );
-                assert_eq!(
-                    service.validate_access_context(&access),
-                    Err(AccessCredentialError::EpochMismatchOrUninitialized)
-                );
-            })
-            .await;
+            barrier.wait().await;
+            let results = [
+                first.await.expect("first rotation task should join"),
+                second.await.expect("second rotation task should join"),
+            ];
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            assert!(
+                results
+                    .iter()
+                    .filter_map(|result| result.as_ref().err())
+                    .all(|error| matches!(
+                        error,
+                        RotatePasswordError::Busy | RotatePasswordError::EpochConflict
+                    ))
+            );
+            assert_eq!(
+                service.validate_access_context(&access),
+                Err(AccessCredentialError::EpochMismatchOrUninitialized)
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_auth_service_rate_limits_only_invalid_password_attempts() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-service-rate-limit.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-service-rate-limit.sqlite").await;
         let now = Arc::new(AtomicI64::new(crate::utils::auth::get_current_timestamp()));
 
-        test_db_context
-            .run_async({
-                let now = Arc::clone(&now);
-                async move {
-                    let service_now = Arc::clone(&now);
-                    let service = ManagerAuthService::new_for_test(Arc::new(move || {
-                        service_now.load(Ordering::SeqCst)
-                    }));
-                    service
-                        .bootstrap(INITIAL_PASSWORD)
-                        .await
-                        .expect("bootstrap should succeed");
-
-                    for _ in 0..5 {
-                        assert!(matches!(
-                            service
-                                .login(test_source(1), "wrong horse battery staple")
-                                .await,
-                            Err(LoginError::InvalidPassword)
-                        ));
-                    }
-                    assert_eq!(
-                        service.login(test_source(1), INITIAL_PASSWORD).await.err(),
-                        Some(LoginError::SourceRateLimited { retry_after: 60 })
-                    );
-                    service
-                        .login(test_source(2), INITIAL_PASSWORD)
-                        .await
-                        .expect("a different source must remain independent");
-                    now.fetch_add(61, Ordering::SeqCst);
-                    service
-                        .login(test_source(1), INITIAL_PASSWORD)
-                        .await
-                        .expect("login should recover after lock window");
-                }
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn manager_auth_login_success_clears_only_its_source_and_format_errors_do_not_count() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-source-clear.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
+        ({
+            let now = Arc::clone(&now);
+            async move {
+                let service_now = Arc::clone(&now);
+                let service = ManagerAuthService::new_for_test(
+                    test_db_context.runtime(),
+                    Arc::new(move || service_now.load(Ordering::SeqCst)),
+                )
+                .await;
                 service
                     .bootstrap(INITIAL_PASSWORD)
                     .await
@@ -5391,43 +5746,84 @@ mod tests {
 
                 for _ in 0..5 {
                     assert!(matches!(
-                        service.login(test_source(3), "short").await,
-                        Err(LoginError::InvalidPassword)
-                    ));
-                }
-                service
-                    .login(test_source(3), INITIAL_PASSWORD)
-                    .await
-                    .expect("format errors must not lock a source");
-
-                for _ in 0..2 {
-                    assert!(matches!(
                         service
-                            .login(test_source(4), "wrong horse battery staple")
+                            .login(test_source(1), "wrong horse battery staple")
                             .await,
                         Err(LoginError::InvalidPassword)
                     ));
                 }
-                assert_eq!(service.login_protection_counts().0, 1);
+                assert_eq!(
+                    service.login(test_source(1), INITIAL_PASSWORD).await.err(),
+                    Some(LoginError::SourceRateLimited { retry_after: 60 })
+                );
                 service
-                    .login(test_source(4), INITIAL_PASSWORD)
+                    .login(test_source(2), INITIAL_PASSWORD)
                     .await
-                    .expect("successful login should clear its source failures");
-                assert_eq!(service.login_protection_counts().0, 0);
-            })
-            .await;
+                    .expect("a different source must remain independent");
+                now.fetch_add(61, Ordering::SeqCst);
+                service
+                    .login(test_source(1), INITIAL_PASSWORD)
+                    .await
+                    .expect("login should recover after lock window");
+            }
+        })
+        .await;
     }
 
-    #[test]
-    fn manager_auth_global_login_protection_is_bounded_and_recovers_by_window() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-global-protection.sqlite");
+    #[tokio::test]
+    async fn manager_auth_login_success_clears_only_its_source_and_format_errors_do_not_count() {
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-source-clear.sqlite").await;
 
-        test_db_context.run_sync(|| {
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+
+            for _ in 0..5 {
+                assert!(matches!(
+                    service.login(test_source(3), "short").await,
+                    Err(LoginError::InvalidPassword)
+                ));
+            }
+            service
+                .login(test_source(3), INITIAL_PASSWORD)
+                .await
+                .expect("format errors must not lock a source");
+
+            for _ in 0..2 {
+                assert!(matches!(
+                    service
+                        .login(test_source(4), "wrong horse battery staple")
+                        .await,
+                    Err(LoginError::InvalidPassword)
+                ));
+            }
+            assert_eq!(service.login_protection_counts().0, 1);
+            service
+                .login(test_source(4), INITIAL_PASSWORD)
+                .await
+                .expect("successful login should clear its source failures");
+            assert_eq!(service.login_protection_counts().0, 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn manager_auth_global_login_protection_is_bounded_and_recovers_by_window() {
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-global-protection.sqlite").await;
+
+        (async {
             let now = Arc::new(AtomicI64::new(10_000));
             let service_now = Arc::clone(&now);
-            let service = ManagerAuthService::new_for_test(Arc::new(move || {
-                service_now.load(Ordering::SeqCst)
-            }));
+            let service = ManagerAuthService::new_for_test(
+                test_db_context.runtime(),
+                Arc::new(move || service_now.load(Ordering::SeqCst)),
+            )
+            .await;
 
             for _ in 0..GLOBAL_LOGIN_VERIFICATION_LIMIT {
                 service
@@ -5470,122 +5866,107 @@ mod tests {
                 .reserve_global_verification(10_061)
                 .expect("global protection should recover after its window");
             assert_eq!(service.login_protection_counts(), (0, 1));
-        });
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn manager_auth_service_reloads_manual_delete_only_after_restart() {
-        let test_db_context = TestDbContext::new_sqlite("manager-auth-service-recovery.sqlite");
+        let test_db_context =
+            TestDatabase::new_sqlite_default("manager-auth-service-recovery.sqlite").await;
 
-        test_db_context
-            .run_async(async {
-                let service = test_auth_service();
+        (async {
+            let service = test_auth_service(&test_db_context).await;
+            service
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("bootstrap should succeed");
+
+            test_db_context
+                .execute_sqlite_batch("DELETE FROM manager_credential")
+                .await
+                .expect("manual recovery delete should succeed");
+
+            assert_eq!(
                 service
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("bootstrap should succeed");
-
-                let mut conn = get_connection().expect("connection should load");
-                match &mut conn {
-                    DbConnection::Postgres(conn) => {
-                        diesel::sql_query("DELETE FROM manager_credential")
-                            .execute(conn)
-                            .expect("manual recovery delete should succeed");
-                    }
-                    DbConnection::Sqlite(conn) => {
-                        diesel::sql_query("DELETE FROM manager_credential")
-                            .execute(conn)
-                            .expect("manual recovery delete should succeed");
-                    }
-                }
-
-                assert_eq!(
-                    service
-                        .bootstrap_status()
-                        .expect("memory status should remain"),
-                    BootstrapStatus::Ready
-                );
-                let restarted = test_auth_service();
-                assert_eq!(
-                    restarted.bootstrap_status().expect("restart should reload"),
-                    BootstrapStatus::Uninitialized
-                );
-            })
-            .await;
+                    .bootstrap_status()
+                    .expect("memory status should remain"),
+                BootstrapStatus::Ready
+            );
+            let restarted = test_auth_service(&test_db_context).await;
+            assert_eq!(
+                restarted.bootstrap_status().expect("restart should reload"),
+                BootstrapStatus::Uninitialized
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn app_state_builds_when_manager_credential_is_uninitialized_or_corrupt() {
-        let uninitialized_db = TestDbContext::new_sqlite("app-state-auth-uninitialized.sqlite");
-        uninitialized_db
-            .run_async(async {
-                let app_state = create_test_app_state(uninitialized_db.clone()).await;
-                assert_eq!(
-                    app_state
-                        .admin
-                        .auth
-                        .bootstrap_status()
-                        .expect("missing credential should be bootstrap state"),
-                    BootstrapStatus::Uninitialized
-                );
-            })
-            .await;
+        let uninitialized_db =
+            TestDatabase::new_sqlite_default("app-state-auth-uninitialized.sqlite").await;
+        (async {
+            let app_state = create_test_app_state(uninitialized_db.clone()).await;
+            assert_eq!(
+                app_state
+                    .admin
+                    .auth
+                    .bootstrap_status()
+                    .expect("missing credential should be bootstrap state"),
+                BootstrapStatus::Uninitialized
+            );
+        })
+        .await;
 
-        let corrupt_db = TestDbContext::new_sqlite("app-state-auth-corrupt.sqlite");
-        corrupt_db
-            .run_async(async {
-                ManagerCredential::insert_once(NewManagerCredential {
+        let corrupt_db = TestDatabase::new_sqlite_default("app-state-auth-corrupt.sqlite").await;
+        (async {
+            ManagerCredential::insert_once(
+                &corrupt_db,
+                NewManagerCredential {
                     password_verifier: "not-a-phc".to_string(),
                     credential_epoch: uuid::Uuid::new_v4().to_string(),
                     now: 1,
-                })
-                .expect("corrupt fixture should persist");
-                let app_state = create_test_app_state(corrupt_db.clone()).await;
-                assert_eq!(
-                    app_state.admin.auth.bootstrap_status(),
-                    Err(super::BootstrapStatusError::Unavailable)
-                );
-                assert!(
-                    app_state.max_body_size > 0,
-                    "proxy app state should still build"
-                );
-            })
-            .await;
+                },
+            )
+            .await
+            .expect("corrupt fixture should persist");
+            let app_state = create_test_app_state(corrupt_db.clone()).await;
+            assert_eq!(
+                app_state.admin.auth.bootstrap_status(),
+                Err(super::BootstrapStatusError::Unavailable)
+            );
+            assert!(
+                app_state.max_body_size > 0,
+                "proxy app state should still build"
+            );
+        })
+        .await;
 
-        let corrupt_epoch_db = TestDbContext::new_sqlite("app-state-auth-corrupt-epoch.sqlite");
-        corrupt_epoch_db
-            .run_async(async {
-                test_auth_service()
-                    .bootstrap(INITIAL_PASSWORD)
-                    .await
-                    .expect("valid credential fixture should bootstrap");
-                let mut conn = get_connection().expect("connection should load");
-                match &mut conn {
-                    DbConnection::Postgres(conn) => {
-                        diesel::sql_query(
-                            "UPDATE manager_credential SET credential_epoch = 'not-a-uuid'",
-                        )
-                        .execute(conn)
-                        .expect("corrupt epoch fixture should persist");
-                    }
-                    DbConnection::Sqlite(conn) => {
-                        diesel::sql_query(
-                            "UPDATE manager_credential SET credential_epoch = 'not-a-uuid'",
-                        )
-                        .execute(conn)
-                        .expect("corrupt epoch fixture should persist");
-                    }
-                }
-                let app_state = create_test_app_state(corrupt_epoch_db.clone()).await;
-                assert_eq!(
-                    app_state.admin.auth.bootstrap_status(),
-                    Err(super::BootstrapStatusError::Unavailable)
-                );
-                assert!(
-                    app_state.max_body_size > 0,
-                    "proxy app state should still build"
-                );
-            })
-            .await;
+        let corrupt_epoch_db =
+            TestDatabase::new_sqlite_default("app-state-auth-corrupt-epoch.sqlite").await;
+        (async {
+            test_auth_service(&corrupt_epoch_db)
+                .await
+                .bootstrap(INITIAL_PASSWORD)
+                .await
+                .expect("valid credential fixture should bootstrap");
+            corrupt_epoch_db
+                .execute_sqlite_batch(
+                    "UPDATE manager_credential SET credential_epoch = 'not-a-uuid'",
+                )
+                .await
+                .expect("corrupt epoch fixture should persist");
+            let app_state = create_test_app_state(corrupt_epoch_db.clone()).await;
+            assert_eq!(
+                app_state.admin.auth.bootstrap_status(),
+                Err(super::BootstrapStatusError::Unavailable)
+            );
+            assert!(
+                app_state.max_body_size > 0,
+                "proxy app state should still build"
+            );
+        })
+        .await;
     }
 }

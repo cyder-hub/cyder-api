@@ -78,13 +78,20 @@ pub(in crate::service::transform::providers::responses) fn unified_message_to_re
             UnifiedContentPart::ImageUrl { url, detail } => {
                 message_buffer.push(ItemContentPart::InputImage {
                     image_url: Some(url),
+                    file_id: None,
                     detail: detail.unwrap_or_else(|| "auto".to_string()),
                 });
             }
             UnifiedContentPart::ImageData { mime_type, data } => {
                 message_buffer.push(ItemContentPart::InputImage {
                     image_url: Some(build_data_url(&mime_type, &data)),
+                    file_id: None,
                     detail: "auto".to_string(),
+                });
+            }
+            UnifiedContentPart::AudioData { data, format } => {
+                message_buffer.push(ItemContentPart::InputAudio {
+                    input_audio: ResponsesInputAudio { data, format },
                 });
             }
             UnifiedContentPart::FileUrl { url, filename, .. } => {
@@ -105,6 +112,14 @@ pub(in crate::service::transform::providers::responses) fn unified_message_to_re
                     file_url: None,
                     file_id: None,
                     file_data: Some(build_data_url(&mime_type, &data)),
+                });
+            }
+            UnifiedContentPart::FileId { file_id, filename } => {
+                message_buffer.push(ItemContentPart::InputFile {
+                    filename,
+                    file_url: None,
+                    file_id: Some(file_id),
+                    file_data: None,
                 });
             }
             UnifiedContentPart::ExecutableCode { language, code } => {
@@ -149,11 +164,16 @@ pub(in crate::service::transform::providers::responses) fn unified_reasoning_par
         UnifiedContentPart::Refusal { text } => ItemContentPart::Refusal { refusal: text },
         UnifiedContentPart::ImageUrl { url, detail } => ItemContentPart::InputImage {
             image_url: Some(url),
+            file_id: None,
             detail: detail.unwrap_or_else(|| "auto".to_string()),
         },
         UnifiedContentPart::ImageData { mime_type, data } => ItemContentPart::InputImage {
             image_url: Some(build_data_url(&mime_type, &data)),
+            file_id: None,
             detail: "auto".to_string(),
+        },
+        UnifiedContentPart::AudioData { data, format } => ItemContentPart::InputAudio {
+            input_audio: ResponsesInputAudio { data, format },
         },
         UnifiedContentPart::FileUrl { url, filename, .. } => ItemContentPart::InputFile {
             filename,
@@ -170,6 +190,12 @@ pub(in crate::service::transform::providers::responses) fn unified_reasoning_par
             file_url: None,
             file_id: None,
             file_data: Some(build_data_url(&mime_type, &data)),
+        },
+        UnifiedContentPart::FileId { file_id, filename } => ItemContentPart::InputFile {
+            filename,
+            file_url: None,
+            file_id: Some(file_id),
+            file_data: None,
         },
         UnifiedContentPart::ExecutableCode { language, code } => ItemContentPart::Text {
             text: render_executable_code_text(&language, &code),
@@ -270,10 +296,27 @@ pub(in crate::service::transform::providers::responses) fn message_content_parts
             ItemContentPart::Refusal { refusal } => {
                 content.push(UnifiedContentPart::Refusal { text: refusal });
             }
-            ItemContentPart::InputImage { image_url, detail } => {
-                content.push(UnifiedContentPart::ImageUrl {
-                    url: image_url.unwrap_or_default(),
-                    detail: Some(detail),
+            ItemContentPart::InputImage {
+                image_url,
+                file_id,
+                detail,
+            } => {
+                if let Some(image_url) = image_url {
+                    content.push(UnifiedContentPart::ImageUrl {
+                        url: image_url,
+                        detail: Some(detail),
+                    });
+                } else if let Some(file_id) = file_id {
+                    content.push(UnifiedContentPart::FileId {
+                        file_id,
+                        filename: None,
+                    });
+                }
+            }
+            ItemContentPart::InputAudio { input_audio } => {
+                content.push(UnifiedContentPart::AudioData {
+                    data: input_audio.data,
+                    format: input_audio.format,
                 });
             }
             ItemContentPart::InputFile {
@@ -369,13 +412,20 @@ pub(in crate::service::transform::providers::responses) fn push_message_buffer_p
         UnifiedContentPart::ImageData { mime_type, data } => {
             buffer.push(ItemContentPart::InputImage {
                 image_url: Some(build_data_url(&mime_type, &data)),
+                file_id: None,
                 detail: "auto".to_string(),
             });
         }
         UnifiedContentPart::ImageUrl { url, detail } => {
             buffer.push(ItemContentPart::InputImage {
                 image_url: Some(url),
+                file_id: None,
                 detail: detail.unwrap_or_else(|| "auto".to_string()),
+            });
+        }
+        UnifiedContentPart::AudioData { data, format } => {
+            buffer.push(ItemContentPart::InputAudio {
+                input_audio: ResponsesInputAudio { data, format },
             });
         }
         UnifiedContentPart::FileUrl { url, filename, .. } => {
@@ -396,6 +446,14 @@ pub(in crate::service::transform::providers::responses) fn push_message_buffer_p
                 file_url: None,
                 file_id: None,
                 file_data: Some(build_data_url(&mime_type, &data)),
+            });
+        }
+        UnifiedContentPart::FileId { file_id, filename } => {
+            buffer.push(ItemContentPart::InputFile {
+                filename,
+                file_url: None,
+                file_id: Some(file_id),
+                file_data: None,
             });
         }
         UnifiedContentPart::ExecutableCode { language, code } => {
@@ -515,13 +573,20 @@ pub(in crate::service::transform::providers::responses) fn unified_choice_to_res
                 UnifiedContentPart::ImageData { mime_type, data } => {
                     message_buffer.push(ItemContentPart::InputImage {
                         image_url: Some(build_data_url(&mime_type, &data)),
+                        file_id: None,
                         detail: "auto".to_string(),
                     });
                 }
                 UnifiedContentPart::ImageUrl { url, detail } => {
                     message_buffer.push(ItemContentPart::InputImage {
                         image_url: Some(url),
+                        file_id: None,
                         detail: detail.unwrap_or_else(|| "auto".to_string()),
+                    });
+                }
+                UnifiedContentPart::AudioData { data, format } => {
+                    message_buffer.push(ItemContentPart::InputAudio {
+                        input_audio: ResponsesInputAudio { data, format },
                     });
                 }
                 UnifiedContentPart::FileUrl { url, filename, .. } => {
@@ -542,6 +607,14 @@ pub(in crate::service::transform::providers::responses) fn unified_choice_to_res
                         file_url: None,
                         file_id: None,
                         file_data: Some(build_data_url(&mime_type, &data)),
+                    });
+                }
+                UnifiedContentPart::FileId { file_id, filename } => {
+                    message_buffer.push(ItemContentPart::InputFile {
+                        filename,
+                        file_url: None,
+                        file_id: Some(file_id),
+                        file_data: None,
                     });
                 }
                 UnifiedContentPart::Reasoning { text } => {

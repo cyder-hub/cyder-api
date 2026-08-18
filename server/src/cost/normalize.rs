@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::service::transform::unified::UnifiedUsage;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageNormalization {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -13,18 +13,60 @@ pub struct UsageNormalization {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
+    #[serde(default = "output_tokens_are_applicable")]
+    pub output_tokens_applicable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
+const fn output_tokens_are_applicable() -> bool {
+    true
+}
+
+impl Default for UsageNormalization {
+    fn default() -> Self {
+        Self {
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            input_text_tokens: 0,
+            output_text_tokens: 0,
+            input_image_tokens: 0,
+            output_image_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            output_tokens_applicable: true,
+            warnings: Vec::new(),
+        }
+    }
+}
+
 impl UsageNormalization {
+    pub fn input_only(total_input_tokens: i64, warning: impl Into<String>) -> Self {
+        Self {
+            total_input_tokens,
+            input_text_tokens: total_input_tokens,
+            output_tokens_applicable: false,
+            warnings: vec![warning.into()],
+            ..Self::default()
+        }
+    }
+
+    pub const fn normalized_total_tokens(&self) -> i64 {
+        if self.output_tokens_applicable {
+            self.total_input_tokens + self.total_output_tokens
+        } else {
+            self.total_input_tokens
+        }
+    }
+
     pub fn from_unified_usage(usage: &UnifiedUsage) -> Self {
         let total_input_tokens = i64::from(usage.input_tokens);
         let total_output_tokens = i64::from(usage.output_tokens);
         let input_image_tokens = i64::from(usage.input_image_tokens.unwrap_or(0));
         let output_image_tokens = i64::from(usage.output_image_tokens.unwrap_or(0));
         let cache_read_tokens = i64::from(usage.cached_tokens.unwrap_or(0));
-        let cache_write_tokens = 0;
+        let cache_write_tokens = i64::from(usage.cache_write_tokens.unwrap_or(0));
         let reasoning_tokens = i64::from(usage.reasoning_tokens.unwrap_or(0));
 
         let mut warnings = Vec::new();
@@ -68,6 +110,7 @@ impl UsageNormalization {
             cache_read_tokens,
             cache_write_tokens,
             reasoning_tokens,
+            output_tokens_applicable: true,
             warnings,
         }
     }
@@ -162,6 +205,7 @@ mod tests {
             input_image_tokens: Some(30),
             output_image_tokens: Some(25),
             cached_tokens: Some(10),
+            cache_write_tokens: None,
             reasoning_tokens: Some(5),
         };
 
@@ -179,25 +223,29 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_anthropic_usage_as_text_only() {
+    fn normalizes_anthropic_cache_read_and_write_without_double_counting_input() {
         let usage = UnifiedUsage {
-            input_tokens: 21,
-            output_tokens: 13,
-            total_tokens: 34,
+            input_tokens: 16,
+            output_tokens: 7,
+            total_tokens: 23,
+            cached_tokens: Some(3),
+            cache_write_tokens: Some(2),
             ..Default::default()
         };
 
         let normalized = UsageNormalization::from(&usage);
 
-        assert_eq!(normalized.input_text_tokens, 21);
-        assert_eq!(normalized.output_text_tokens, 13);
-        assert_eq!(normalized.cache_read_tokens, 0);
+        assert_eq!(normalized.total_input_tokens, 16);
+        assert_eq!(normalized.input_text_tokens, 11);
+        assert_eq!(normalized.output_text_tokens, 7);
+        assert_eq!(normalized.cache_read_tokens, 3);
+        assert_eq!(normalized.cache_write_tokens, 2);
         assert_eq!(normalized.reasoning_tokens, 0);
         assert!(normalized.warnings.is_empty());
     }
 
     #[test]
-    fn normalizes_ollama_usage_as_text_only() {
+    fn normalizes_usage_as_text_only() {
         let usage = UnifiedUsage {
             input_tokens: 9,
             output_tokens: 4,
@@ -248,5 +296,16 @@ mod tests {
         assert_eq!(normalized.total_output_tokens, 7);
         assert_eq!(normalized.warnings.len(), 1);
         assert!(normalized.warnings[0].contains("reported total_tokens 999"));
+    }
+
+    #[test]
+    fn input_only_normalization_marks_output_as_not_applicable() {
+        let normalized = UsageNormalization::input_only(17, "embedding input usage");
+
+        assert_eq!(normalized.total_input_tokens, 17);
+        assert_eq!(normalized.input_text_tokens, 17);
+        assert!(!normalized.output_tokens_applicable);
+        assert_eq!(normalized.normalized_total_tokens(), 17);
+        assert_eq!(normalized.warnings, vec!["embedding input usage"]);
     }
 }

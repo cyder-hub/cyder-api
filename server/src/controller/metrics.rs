@@ -51,12 +51,13 @@ async fn metrics_ingest_status(
     State(app_state): State<Arc<AppState>>,
     Query(params): Query<MetricsIngestStatusParams>,
 ) -> Result<HttpResult<MetricsIngestStatus>, BaseError> {
-    let mut status = app_state.metrics.ingest_status()?;
+    let mut status = app_state.metrics.ingest_status().await?;
     if let (Some(start_time), Some(end_time)) = (params.start_time, params.end_time) {
         status.pending_reconciliation_count = Some(
             app_state
                 .metrics
-                .count_pending_reconciliation(start_time, end_time)?,
+                .count_pending_reconciliation(start_time, end_time)
+                .await?,
         );
     }
     Ok(HttpResult::new(status))
@@ -67,7 +68,7 @@ async fn preview_metrics_reconciliation(
     Json(payload): Json<MetricsReconciliationRequest>,
 ) -> Result<HttpResult<MetricsReconciliationPreviewResponse>, BaseError> {
     let params = reconciliation_params(payload, true)?;
-    let summary = app_state.metrics.reconcile_request_logs(params)?;
+    let summary = app_state.metrics.reconcile_request_logs(params).await?;
     Ok(HttpResult::new(MetricsReconciliationPreviewResponse {
         summary,
     }))
@@ -80,7 +81,7 @@ async fn run_metrics_reconciliation(
     let dry_run = payload.dry_run.unwrap_or(false);
     let params = reconciliation_params(payload, dry_run)?;
     Ok(HttpResult::new(
-        app_state.metrics.reconcile_request_logs(params)?,
+        app_state.metrics.reconcile_request_logs(params).await?,
     ))
 }
 
@@ -90,7 +91,7 @@ async fn repair_metrics_reconciliation(
 ) -> Result<HttpResult<MetricsRepairSummary>, BaseError> {
     let params = repair_params(payload)?;
     Ok(HttpResult::new(
-        app_state.metrics.repair_request_logs(params)?,
+        app_state.metrics.repair_request_logs(params).await?,
     ))
 }
 

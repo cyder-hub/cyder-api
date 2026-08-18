@@ -25,7 +25,7 @@ fn test_unified_chunk_to_responses_uses_formal_stream_events() {
         ..Default::default()
     };
 
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse =
         transform_unified_chunk_to_responses_events(unified_chunk, &mut state.stream_context())
             .unwrap();
@@ -68,6 +68,7 @@ fn test_responses_chunk_to_unified_stream_events_preserves_response_incomplete()
     let chunk = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ResponseIncomplete {
             response: ResponsesResponse {
                 id: "resp_1".to_string(),
@@ -136,6 +137,7 @@ fn test_responses_chunk_to_unified_stream_events_preserves_response_incomplete()
                     ..Default::default()
                 },
             },
+            UnifiedStreamEvent::MessageStop,
         ]
     );
 }
@@ -145,6 +147,7 @@ fn test_responses_chunk_to_unified_stream_events_maps_function_call_item() {
     let chunk = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::Item(ItemField::FunctionCall(FunctionCall {
             _type: "function_call".to_string(),
             id: "fc_1".to_string(),
@@ -211,6 +214,7 @@ fn test_responses_chunk_to_unified_stream_events_maps_content_part_lifecycle() {
     let added = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ContentPartAdded {
             item_id: "msg_1".to_string(),
             content_index: 2,
@@ -219,6 +223,7 @@ fn test_responses_chunk_to_unified_stream_events_maps_content_part_lifecycle() {
     let done = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ContentPartDone {
             item_id: "msg_1".to_string(),
             content_index: 2,
@@ -249,6 +254,7 @@ fn test_responses_chunk_to_unified_stream_events_maps_reasoning_summary_lifecycl
     let added = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ReasoningSummaryPartAdded {
             item_id: "rs_1".to_string(),
             summary_index: 0,
@@ -257,6 +263,7 @@ fn test_responses_chunk_to_unified_stream_events_maps_reasoning_summary_lifecycl
     let done = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ReasoningSummaryPartDone {
             item_id: "rs_1".to_string(),
             summary_index: 0,
@@ -287,6 +294,7 @@ fn test_responses_chunk_response_serializes_as_standard_event() {
     let chunk = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ContentBlockDelta {
             index: 0,
             item_index: Some(0),
@@ -315,6 +323,7 @@ fn test_responses_chunk_response_serializes_tool_arguments_as_standard_event() {
     let chunk = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ToolCallArgumentsDelta {
             index: 0,
             item_index: Some(0),
@@ -344,6 +353,7 @@ fn test_responses_chunk_response_serializes_tool_arguments_done_as_standard_even
     let chunk = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ToolCallArgumentsDone {
             index: 0,
             item_index: Some(0),
@@ -372,6 +382,7 @@ fn test_responses_chunk_response_serializes_reasoning_delta_as_standard_event() 
     let chunk = ResponsesChunkResponse {
         id: "resp_1".to_string(),
         model: "gpt-4.1".to_string(),
+        sequence_number: None,
         event: ResponsesStreamEvent::ReasoningDelta {
             index: 1,
             item_index: Some(1),
@@ -423,7 +434,7 @@ fn test_responses_chunk_response_deserializes_legacy_wrapped_delta() {
 
 #[test]
 fn test_unified_stream_events_to_responses_events_are_not_stubbed() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let events = vec![
         UnifiedStreamEvent::MessageStart {
             id: Some("resp_1".to_string()),
@@ -492,7 +503,7 @@ fn test_unified_stream_events_to_responses_events_are_not_stubbed() {
             index: 0,
             item_index: Some(_),
             item_id: Some(_),
-            id: Some(_),
+            id: None,
             name: Some(name),
             arguments,
         } if name == "lookup_weather"
@@ -529,7 +540,7 @@ fn test_unified_stream_events_to_responses_events_are_not_stubbed() {
 
 #[test]
 fn test_unified_stream_events_to_responses_completed_includes_all_output_items() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse = transform_unified_stream_events_to_responses_events(
         vec![
             UnifiedStreamEvent::MessageStart {
@@ -620,7 +631,7 @@ fn test_unified_stream_events_to_responses_completed_includes_all_output_items()
 
 #[test]
 fn test_unified_stream_events_to_responses_emit_function_call_arguments_done() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse = transform_unified_stream_events_to_responses_events(
         vec![
             UnifiedStreamEvent::MessageStart {
@@ -666,7 +677,7 @@ fn test_unified_stream_events_to_responses_emit_function_call_arguments_done() {
 
 #[test]
 fn test_unified_stream_events_to_responses_ignores_duplicate_message_start_for_active_item() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse = transform_unified_stream_events_to_responses_events(
         vec![
             UnifiedStreamEvent::MessageStart {
@@ -733,7 +744,7 @@ fn test_unified_stream_events_to_responses_ignores_duplicate_message_start_for_a
 
 #[test]
 fn test_unified_stream_events_to_responses_uses_explicit_content_part_lifecycle_for_text_delta() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse = transform_unified_stream_events_to_responses_events(
         vec![
             UnifiedStreamEvent::MessageStart {
@@ -785,7 +796,7 @@ fn test_unified_stream_events_to_responses_uses_explicit_content_part_lifecycle_
 #[test]
 fn test_unified_stream_events_to_responses_uses_explicit_reasoning_part_lifecycle_without_synthetic_added()
  {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse = transform_unified_stream_events_to_responses_events(
         vec![
             UnifiedStreamEvent::ReasoningStart { index: 2 },
@@ -840,7 +851,7 @@ fn test_unified_stream_events_to_responses_uses_explicit_reasoning_part_lifecycl
 
 #[test]
 fn test_unified_stream_events_to_responses_emits_response_incomplete_for_length_finish_reason() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse = transform_unified_stream_events_to_responses_events(
         vec![
             UnifiedStreamEvent::MessageStart {
@@ -890,7 +901,7 @@ fn test_unified_stream_events_to_responses_emits_response_incomplete_for_length_
 
 #[test]
 fn test_unified_stream_events_to_responses_preserve_explicit_stream_id_and_model() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
     let sse = transform_unified_stream_events_to_responses_events(
         vec![
             UnifiedStreamEvent::MessageStart {

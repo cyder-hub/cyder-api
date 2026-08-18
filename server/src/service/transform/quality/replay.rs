@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::StreamTransformer;
-use crate::service::transform::providers::{anthropic, gemini, ollama, openai, responses};
+use crate::service::transform::providers::{anthropic, gemini, openai, responses};
 use crate::service::transform::unified::{
     UnifiedChunkResponse, UnifiedContentPartDelta, UnifiedStreamEvent,
 };
@@ -33,8 +33,8 @@ pub struct SemanticReplaySnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplayRegressionReport {
     pub fixture_name: String,
-    pub source_api: LlmApiType,
-    pub target_api: LlmApiType,
+    pub upstream_protocol: UpstreamProtocol,
+    pub downstream_protocol: DownstreamProtocol,
     pub source: SemanticReplaySnapshot,
     pub target: SemanticReplaySnapshot,
     pub source_frame_count: usize,
@@ -70,8 +70,8 @@ pub struct ReplayRegressionSummary {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ReplayFixtureCase {
     pub(super) fixture_name: &'static str,
-    pub(super) source_api: LlmApiType,
-    pub(super) target_api: LlmApiType,
+    pub(super) upstream_protocol: UpstreamProtocol,
+    pub(super) downstream_protocol: DownstreamProtocol,
     pub(super) expected_min_transformed_frame_count: usize,
     pub(super) expect_reasoning_preserved: bool,
     pub(super) fixture_json: &'static str,
@@ -80,72 +80,72 @@ pub(super) fn stage2_replay_fixture_cases() -> Vec<ReplayFixtureCase> {
     vec![
         ReplayFixtureCase {
             fixture_name: "anthropic_tool_use_json_delta",
-            source_api: LlmApiType::Anthropic,
-            target_api: LlmApiType::Responses,
+            upstream_protocol: UpstreamProtocol::Anthropic,
+            downstream_protocol: DownstreamProtocol::Responses,
             expected_min_transformed_frame_count: 11,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/anthropic_tool_use_json_delta.json"),
         },
         ReplayFixtureCase {
             fixture_name: "anthropic_text_stream",
-            source_api: LlmApiType::Anthropic,
-            target_api: LlmApiType::Openai,
+            upstream_protocol: UpstreamProtocol::Anthropic,
+            downstream_protocol: DownstreamProtocol::Openai,
             expected_min_transformed_frame_count: 3,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/anthropic_text_stream.json"),
         },
         ReplayFixtureCase {
             fixture_name: "responses_reasoning_function_call",
-            source_api: LlmApiType::Responses,
-            target_api: LlmApiType::Openai,
-            expected_min_transformed_frame_count: 9,
-            expect_reasoning_preserved: false,
+            upstream_protocol: UpstreamProtocol::Responses,
+            downstream_protocol: DownstreamProtocol::Responses,
+            expected_min_transformed_frame_count: 13,
+            expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/responses_reasoning_function_call.json"),
         },
         ReplayFixtureCase {
             fixture_name: "responses_formal_item_lifecycle",
-            source_api: LlmApiType::Responses,
-            target_api: LlmApiType::Openai,
+            upstream_protocol: UpstreamProtocol::Responses,
+            downstream_protocol: DownstreamProtocol::Openai,
             expected_min_transformed_frame_count: 4,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/responses_formal_item_lifecycle.json"),
         },
         ReplayFixtureCase {
             fixture_name: "gemini_function_call_stream",
-            source_api: LlmApiType::Gemini,
-            target_api: LlmApiType::Openai,
+            upstream_protocol: UpstreamProtocol::Gemini,
+            downstream_protocol: DownstreamProtocol::Openai,
             expected_min_transformed_frame_count: 1,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/gemini_function_call_stream.json"),
         },
         ReplayFixtureCase {
             fixture_name: "gemini_text_tool_multiframe_stream",
-            source_api: LlmApiType::Gemini,
-            target_api: LlmApiType::Responses,
+            upstream_protocol: UpstreamProtocol::Gemini,
+            downstream_protocol: DownstreamProtocol::Responses,
             expected_min_transformed_frame_count: 7,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/gemini_text_tool_multiframe_stream.json"),
         },
         ReplayFixtureCase {
             fixture_name: "openai_tool_stream",
-            source_api: LlmApiType::Openai,
-            target_api: LlmApiType::Responses,
+            upstream_protocol: UpstreamProtocol::Openai,
+            downstream_protocol: DownstreamProtocol::Responses,
             expected_min_transformed_frame_count: 7,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/openai_tool_stream.json"),
         },
         ReplayFixtureCase {
             fixture_name: "openai_compatible_deepseek_tool_stream",
-            source_api: LlmApiType::Openai,
-            target_api: LlmApiType::Responses,
+            upstream_protocol: UpstreamProtocol::Openai,
+            downstream_protocol: DownstreamProtocol::Responses,
             expected_min_transformed_frame_count: 7,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/openai_compatible_deepseek_tool_stream.json"),
         },
         ReplayFixtureCase {
             fixture_name: "gemini_multimodal_tool_stream",
-            source_api: LlmApiType::Gemini,
-            target_api: LlmApiType::Responses,
+            upstream_protocol: UpstreamProtocol::Gemini,
+            downstream_protocol: DownstreamProtocol::Responses,
             expected_min_transformed_frame_count: 7,
             expect_reasoning_preserved: true,
             fixture_json: include_str!("../testdata/gemini_multimodal_tool_stream.json"),
@@ -174,6 +174,9 @@ pub(super) fn semantic_snapshot_from_stream_events(
                 }
             }
             UnifiedStreamEvent::ContentBlockDelta { text, .. } => {
+                snapshot.text.push_str(&text);
+            }
+            UnifiedStreamEvent::RefusalDelta { text, .. } => {
                 snapshot.text.push_str(&text);
             }
             UnifiedStreamEvent::ReasoningDelta { text, .. } => {
@@ -255,6 +258,9 @@ pub(super) fn semantic_snapshot_from_unified_chunks(
                     UnifiedContentPartDelta::TextDelta { text, .. } => {
                         snapshot.text.push_str(&text);
                     }
+                    UnifiedContentPartDelta::ReasoningDelta { text, .. } => {
+                        snapshot.reasoning.push_str(&text);
+                    }
                     UnifiedContentPartDelta::ToolCallDelta(tool_call) => {
                         let entry = tool_calls.entry(tool_call.index).or_default();
                         if entry.name.is_none() {
@@ -277,25 +283,25 @@ pub(super) fn semantic_snapshot_from_unified_chunks(
 }
 
 pub(super) fn source_fixture_to_semantics(
-    source_api: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     fixture: &[SseEvent],
 ) -> SemanticReplaySnapshot {
-    match source_api {
-        LlmApiType::Anthropic => {
+    match upstream_protocol {
+        UpstreamProtocol::Anthropic => {
             semantic_snapshot_from_stream_events(fixture.iter().flat_map(|event| {
                 let parsed: anthropic::AnthropicEvent =
                     serde_json::from_str(&event.data).expect("valid anthropic fixture");
                 anthropic::anthropic_event_to_unified_stream_events(parsed)
             }))
         }
-        LlmApiType::Responses => {
+        UpstreamProtocol::Responses => {
             semantic_snapshot_from_stream_events(fixture.iter().flat_map(|event| {
                 let parsed: responses::ResponsesChunkResponse =
                     serde_json::from_str(&event.data).expect("valid responses fixture");
                 responses::responses_chunk_to_unified_stream_events(parsed)
             }))
         }
-        LlmApiType::Gemini => semantic_snapshot_from_unified_chunks(
+        UpstreamProtocol::Gemini => semantic_snapshot_from_unified_chunks(
             fixture
                 .iter()
                 .filter(|event| event.event.is_none())
@@ -305,7 +311,7 @@ pub(super) fn source_fixture_to_semantics(
                     UnifiedChunkResponse::from(parsed)
                 }),
         ),
-        LlmApiType::Openai | LlmApiType::GeminiOpenai => semantic_snapshot_from_unified_chunks(
+        UpstreamProtocol::Openai => semantic_snapshot_from_unified_chunks(
             fixture
                 .iter()
                 .filter(|event| event.event.is_none())
@@ -315,13 +321,45 @@ pub(super) fn source_fixture_to_semantics(
                     UnifiedChunkResponse::from(parsed)
                 }),
         ),
-        LlmApiType::Ollama => semantic_snapshot_from_unified_chunks(
+    }
+}
+
+pub(super) fn downstream_fixture_to_semantics(
+    downstream_protocol: DownstreamProtocol,
+    fixture: &[SseEvent],
+) -> SemanticReplaySnapshot {
+    match downstream_protocol {
+        DownstreamProtocol::Anthropic => {
+            semantic_snapshot_from_stream_events(fixture.iter().flat_map(|event| {
+                let parsed: anthropic::AnthropicEvent =
+                    serde_json::from_str(&event.data).expect("valid anthropic fixture");
+                anthropic::anthropic_event_to_unified_stream_events(parsed)
+            }))
+        }
+        DownstreamProtocol::Responses => {
+            semantic_snapshot_from_stream_events(fixture.iter().flat_map(|event| {
+                let parsed: responses::ResponsesChunkResponse =
+                    serde_json::from_str(&event.data).expect("valid responses fixture");
+                responses::responses_chunk_to_unified_stream_events(parsed)
+            }))
+        }
+        DownstreamProtocol::Gemini => semantic_snapshot_from_unified_chunks(
             fixture
                 .iter()
                 .filter(|event| event.event.is_none())
                 .map(|event| {
-                    let parsed: ollama::OllamaChunkResponse =
-                        serde_json::from_str(&event.data).expect("valid ollama fixture");
+                    let parsed: gemini::GeminiChunkResponse =
+                        serde_json::from_str(&event.data).expect("valid gemini fixture");
+                    UnifiedChunkResponse::from(parsed)
+                }),
+        ),
+        DownstreamProtocol::Openai => semantic_snapshot_from_unified_chunks(
+            fixture
+                .iter()
+                .filter(|event| event.event.is_none() && event.data != "[DONE]")
+                .map(|event| {
+                    let parsed: openai::OpenAiChunkResponse =
+                        serde_json::from_str(&event.data).expect("valid openai fixture");
                     UnifiedChunkResponse::from(parsed)
                 }),
         ),
@@ -329,36 +367,50 @@ pub(super) fn source_fixture_to_semantics(
 }
 
 pub(super) fn replay_fixture_through_transformer(
-    source_api: LlmApiType,
-    target_api: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: DownstreamProtocol,
     fixture: &[SseEvent],
 ) -> Vec<SseEvent> {
-    let mut transformer = StreamTransformer::new(source_api, target_api);
-    fixture
-        .iter()
-        .flat_map(|event| {
+    let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
+    let mut transformed = Vec::new();
+    for event in fixture {
+        transformed.extend(
             transformer
                 .transform_event(event.clone())
-                .unwrap_or_default()
-        })
-        .collect()
+                .expect("quality replay transform must succeed")
+                .value
+                .events,
+        );
+    }
+    if upstream_protocol == UpstreamProtocol::Gemini {
+        transformer
+            .validate_source_termination()
+            .expect("Gemini quality replay source stream must terminate formally");
+        transformed.extend(
+            transformer
+                .finalize_source_eof_events()
+                .expect("Gemini quality replay EOF target terminal must encode")
+                .value,
+        );
+    }
+    transformed
 }
 
 pub(super) fn validate_provider_native_schema(
-    target_api: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
     frames: &[SseEvent],
 ) -> Vec<String> {
     frames
         .iter()
         .enumerate()
         .filter_map(|(index, event)| {
-            let result: Result<(), String> = match target_api {
-                LlmApiType::Anthropic => {
+            let result: Result<(), String> = match downstream_protocol {
+                DownstreamProtocol::Anthropic => {
                     serde_json::from_str::<anthropic::AnthropicEvent>(&event.data)
                         .map(|_| ())
                         .map_err(|err| err.to_string())
                 }
-                LlmApiType::Responses => {
+                DownstreamProtocol::Responses => {
                     match serde_json::from_str::<Value>(&event.data).map_err(|err| err.to_string())
                     {
                         Ok(value) => {
@@ -382,7 +434,7 @@ pub(super) fn validate_provider_native_schema(
                         Err(err) => Err(err),
                     }
                 }
-                LlmApiType::Gemini => {
+                DownstreamProtocol::Gemini => {
                     if event.event.is_some() {
                         Ok(())
                     } else {
@@ -391,20 +443,11 @@ pub(super) fn validate_provider_native_schema(
                             .map_err(|err| err.to_string())
                     }
                 }
-                LlmApiType::Openai | LlmApiType::GeminiOpenai => {
+                DownstreamProtocol::Openai => {
                     if event.event.is_some() || event.data == "[DONE]" {
                         Ok(())
                     } else {
                         serde_json::from_str::<openai::OpenAiChunkResponse>(&event.data)
-                            .map(|_| ())
-                            .map_err(|err| err.to_string())
-                    }
-                }
-                LlmApiType::Ollama => {
-                    if event.event.is_some() {
-                        Ok(())
-                    } else {
-                        serde_json::from_str::<ollama::OllamaChunkResponse>(&event.data)
                             .map(|_| ())
                             .map_err(|err| err.to_string())
                     }
@@ -418,16 +461,19 @@ pub(super) fn validate_provider_native_schema(
 
 pub(super) fn build_replay_regression_report(case: ReplayFixtureCase) -> ReplayRegressionReport {
     let fixture = load_sse_fixture(case.fixture_json);
-    let source = source_fixture_to_semantics(case.source_api, &fixture);
-    let transformed =
-        replay_fixture_through_transformer(case.source_api, case.target_api, &fixture);
-    let target = source_fixture_to_semantics(case.target_api, &transformed);
-    let schema_errors = validate_provider_native_schema(case.target_api, &transformed);
+    let source = source_fixture_to_semantics(case.upstream_protocol, &fixture);
+    let transformed = replay_fixture_through_transformer(
+        case.upstream_protocol,
+        case.downstream_protocol,
+        &fixture,
+    );
+    let target = downstream_fixture_to_semantics(case.downstream_protocol, &transformed);
+    let schema_errors = validate_provider_native_schema(case.downstream_protocol, &transformed);
 
     ReplayRegressionReport {
         fixture_name: case.fixture_name.to_string(),
-        source_api: case.source_api,
-        target_api: case.target_api,
+        upstream_protocol: case.upstream_protocol,
+        downstream_protocol: case.downstream_protocol,
         schema_conformant: schema_errors.is_empty(),
         schema_errors,
         preserved_text: source.text == target.text,

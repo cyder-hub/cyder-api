@@ -19,12 +19,12 @@ function buildOperationsSection(overrides = {}) {
     ...buildEmptyDashboardOperationsSection(),
     operational_signals: {
       ...buildEmptyDashboardOperationsSection().operational_signals,
-      open_providers: [
+      degraded_providers: [
         {
           provider_id: 2,
-          provider_key: "open-two",
-          provider_name: "Open Two",
-          runtime_level: "open",
+          provider_key: "degraded-two",
+          provider_name: "Degraded Two",
+          runtime_level: "degraded",
           request_count: 9,
           error_count: 5,
           success_rate: 0.44,
@@ -32,19 +32,17 @@ function buildOperationsSection(overrides = {}) {
           last_error_at: 1700000000000,
           last_error_summary: "boom",
         },
-      ],
-      half_open_providers: [
         {
           provider_id: 1,
-          provider_key: "recovering-one",
-          provider_name: "Recovering One",
-          runtime_level: "half_open",
+          provider_key: "degraded-one",
+          provider_name: "Degraded One",
+          runtime_level: "degraded",
           request_count: 4,
           error_count: 6,
           success_rate: 0.25,
           avg_total_latency_ms: 600,
           last_error_at: 1700000001000,
-          last_error_summary: "retrying",
+          last_error_summary: "recently degraded",
         },
       ],
       top_cost_providers: [
@@ -113,7 +111,6 @@ function buildDashboardResponse(overrides = {}) {
     runtime: {
       ...empty.runtime,
       healthy_count: 3,
-      open_count: 1,
       degraded_count: 2,
       ...overrides.runtime,
     },
@@ -150,10 +147,10 @@ test("dashboard page state loads all sections and derives operational state", as
   assert.equal(state.operationsSection.value.top_providers.length, 1);
   assert.equal(operations.showCostHotspots.value, true);
   assert.deepEqual(
-    operations.unstableProviders.value.map((item) => [item.provider_id, item.runtime_level]),
+    operations.degradedProviders.value.map((item) => [item.provider_id, item.runtime_level]),
     [
-      [1, "half_open"],
-      [2, "open"],
+      [1, "degraded"],
+      [2, "degraded"],
     ],
   );
   assert.equal(state.isRefreshing.value, false);
@@ -222,7 +219,7 @@ test("dashboard page state preserves stable empty sections without errors", asyn
     [],
   );
   assert.equal(operations.showCostHotspots.value, false);
-  assert.deepEqual(operations.unstableProviders.value, []);
+  assert.deepEqual(operations.degradedProviders.value, []);
 });
 
 test("dashboard page state degrades the failed snapshot as a unit", async () => {
@@ -258,8 +255,7 @@ test("dashboard page state clears stale snapshot errors after a successful refre
         }
         return buildDashboardResponse({
           operational_signals: {
-            open_providers: [],
-            half_open_providers: [],
+            degraded_providers: [],
             top_cost_providers: [],
             top_cost_models: [],
           },
@@ -280,5 +276,5 @@ test("dashboard page state clears stale snapshot errors after a successful refre
   assert.equal(state.operationsError.value, null);
   assert.equal(state.operationsSection.value.top_providers.length, 0);
   assert.equal(operations.showCostHotspots.value, false);
-  assert.deepEqual(operations.unstableProviders.value, []);
+  assert.deepEqual(operations.degradedProviders.value, []);
 });

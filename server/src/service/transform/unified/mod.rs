@@ -1,11 +1,9 @@
-pub mod diagnostic;
 pub mod extensions;
 pub mod request;
 pub mod response;
 pub mod stream;
 pub mod usage;
 
-pub use diagnostic::*;
 pub use extensions::*;
 pub use request::*;
 pub use response::*;
@@ -38,8 +36,11 @@ mod tests {
                     name: "lookup".to_string(),
                     description: Some("Finds weather".to_string()),
                     parameters: json!({"type": "object"}),
+                    strict: None,
                 },
             }]),
+            tool_choice: None,
+            parallel_tool_calls: None,
             stream: true,
             temperature: Some(0.2),
             max_tokens: Some(128),
@@ -48,10 +49,21 @@ mod tests {
             seed: Some(7),
             presence_penalty: Some(0.1),
             frequency_penalty: Some(0.2),
+            reasoning_effort: Some(UnifiedReasoningEffort::High),
+            reasoning_budget_tokens: Some(2048),
+            structured_output: Some(UnifiedStructuredOutput::JsonObject),
             extensions: Some(UnifiedRequestExtensions {
                 openai: Some(UnifiedOpenAiRequestExtension {
                     tool_choice: Some(json!("auto")),
                     ..Default::default()
+                }),
+                gemini: Some(UnifiedGeminiRequestExtension {
+                    tool_associations: vec![UnifiedGeminiToolAssociation {
+                        unified_tool_call_id: "call_1".to_string(),
+                        provider_tool_call_id: Some("provider-call-1".to_string()),
+                        thought_signature: Some("opaque-signature".to_string()),
+                    }],
+                    top_k: Some(32),
                 }),
                 ..Default::default()
             }),
@@ -65,6 +77,12 @@ mod tests {
         assert_eq!(core.messages[0].role, owned_core.messages[0].role);
         assert_eq!(core.messages[0].content, owned_core.messages[0].content);
         assert_eq!(core.items, owned_core.items);
+        assert_eq!(core.reasoning_effort, Some(UnifiedReasoningEffort::High));
+        assert_eq!(core.reasoning_budget_tokens, Some(2048));
+        assert_eq!(
+            core.structured_output,
+            Some(UnifiedStructuredOutput::JsonObject)
+        );
         assert_eq!(core.stream, owned_core.stream);
         assert!(
             extensions
@@ -79,6 +97,17 @@ mod tests {
         assert_eq!(rebuilt.messages[0].role, request.messages[0].role);
         assert_eq!(rebuilt.messages[0].content, request.messages[0].content);
         assert_eq!(rebuilt.items, request.items);
+        assert_eq!(rebuilt.structured_output, request.structured_output);
+        assert_eq!(rebuilt.reasoning_budget_tokens, Some(2048));
+        assert_eq!(
+            rebuilt
+                .gemini_extension()
+                .expect("Gemini request extension")
+                .tool_associations[0]
+                .provider_tool_call_id
+                .as_deref(),
+            Some("provider-call-1")
+        );
         assert_eq!(rebuilt.extensions.is_some(), request.extensions.is_some());
     }
 

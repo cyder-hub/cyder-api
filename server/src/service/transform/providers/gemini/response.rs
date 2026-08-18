@@ -4,22 +4,30 @@ use crate::service::transform::unified::*;
 
 use super::metadata::*;
 use super::payload::*;
+use super::usage::{gemini_usage_to_unified, unified_usage_to_gemini};
 
 impl From<GeminiResponse> for UnifiedResponse {
     fn from(gemini_res: GeminiResponse) -> Self {
         let GeminiResponse {
+            response_id,
             candidates,
             prompt_feedback,
             usage_metadata,
             synthetic_metadata,
         } = gemini_res;
 
-        let provider_response_metadata =
-            build_gemini_response_metadata(prompt_feedback, &candidates);
+        let prompt_blocked = prompt_feedback
+            .as_ref()
+            .and_then(|feedback| feedback.block_reason.as_deref())
+            .is_some_and(is_known_gemini_prompt_block_reason);
 
-        let choices = candidates
+        let provider_response_metadata =
+            build_gemini_response_metadata(prompt_feedback, &candidates, response_id.as_deref());
+
+        let mut choices: Vec<UnifiedChoice> = candidates
             .into_iter()
-            .map(|candidate| {
+            .enumerate()
+            .map(|(candidate_position, candidate)| {
                 let mut content_parts = Vec::new();
                 let mut items = Vec::new();
                 let mut role = UnifiedRole::Assistant;
@@ -32,19 +40,38 @@ impl From<GeminiResponse> for UnifiedResponse {
                         _ => UnifiedRole::Assistant,
                     };
 
-                    let candidate_index = candidate.index.unwrap_or(0);
+                    let candidate_index = candidate
+                        .index
+                        .unwrap_or_else(|| u32::try_from(candidate_position).unwrap_or(u32::MAX));
                     for (part_index, p) in content.parts.into_iter().enumerate() {
                         match p {
-                            GeminiPart::Text { text } => {
-                                if !text.is_empty() {
-                                    content_parts
-                                        .push(UnifiedContentPart::Text { text: text.clone() });
+                            GeminiPart::Thought { text, thought, .. } => {
+                                let part = if thought {
+                                    UnifiedContentPart::Reasoning { text }
+                                } else {
+                                    UnifiedContentPart::Text { text }
+                                };
+                                content_parts.push(part.clone());
+                                if thought {
+                                    items.push(UnifiedItem::Reasoning(UnifiedReasoningItem {
+                                        content: vec![part],
+                                        annotations: Vec::new(),
+                                    }));
+                                } else {
                                     items.push(UnifiedItem::Message(UnifiedMessageItem {
                                         role: role.clone(),
-                                        content: vec![UnifiedContentPart::Text { text }],
+                                        content: vec![part],
                                         annotations: Vec::new(),
                                     }));
                                 }
+                            }
+                            GeminiPart::Text { text } => {
+                                content_parts.push(UnifiedContentPart::Text { text: text.clone() });
+                                items.push(UnifiedItem::Message(UnifiedMessageItem {
+                                    role: role.clone(),
+                                    content: vec![UnifiedContentPart::Text { text }],
+                                    annotations: Vec::new(),
+                                }));
                             }
                             GeminiPart::InlineData { inline_data } => {
                                 let part = gemini_inline_data_to_unified_content(inline_data);
@@ -81,14 +108,21 @@ impl From<GeminiResponse> for UnifiedResponse {
                                     annotations: Vec::new(),
                                 }));
                             }
-                            GeminiPart::FunctionCall { function_call } => {
+                            GeminiPart::FunctionCall {
+                                function_call,
+                                thought_signature: _,
+                            } => {
                                 has_function_call = true;
-                                let id = build_gemini_synthetic_tool_call_id(
-                                    candidate_index,
-                                    0,
-                                    part_index as u32,
-                                    &function_call.name,
-                                );
+                                let id = function_call.id.clone().unwrap_or_else(|| {
+                                    build_gemini_synthetic_tool_call_id(
+                                        response_id.as_deref().expect(
+                                            "source audit requires responseId when Gemini omits functionCall.id",
+                                        ),
+                                        candidate_index,
+                                        part_index as u32,
+                                        &function_call.name,
+                                    )
+                                });
                                 let tool_call = UnifiedToolCall {
                                     id: id.clone(),
                                     name: function_call.name.clone(),
@@ -102,12 +136,16 @@ impl From<GeminiResponse> for UnifiedResponse {
                                 }));
                             }
                             GeminiPart::FunctionResponse { function_response } => {
-                                let tool_call_id = build_gemini_synthetic_tool_call_id(
-                                    candidate_index,
-                                    0,
-                                    part_index as u32,
-                                    &function_response.name,
-                                );
+                                let tool_call_id = function_response.id.clone().unwrap_or_else(|| {
+                                    build_gemini_synthetic_tool_call_id(
+                                        response_id.as_deref().expect(
+                                            "source audit requires responseId when Gemini omits functionResponse.id",
+                                        ),
+                                        candidate_index,
+                                        part_index as u32,
+                                        &function_response.name,
+                                    )
+                                });
                                 let output = gemini_function_response_to_unified_output(
                                     function_response.response,
                                 );
@@ -165,7 +203,9 @@ impl From<GeminiResponse> for UnifiedResponse {
                 });
 
                 UnifiedChoice {
-                    index: candidate.index.unwrap_or(0),
+                    index: candidate
+                        .index
+                        .unwrap_or_else(|| u32::try_from(candidate_position).unwrap_or(u32::MAX)),
                     message,
                     items,
                     finish_reason,
@@ -174,44 +214,31 @@ impl From<GeminiResponse> for UnifiedResponse {
             })
             .collect();
 
-        let usage = usage_metadata.map(|u| {
-            let mut usage = UnifiedUsage {
-                input_tokens: u.prompt_token_count,
-                output_tokens: u.candidates_token_count,
-                total_tokens: u.total_token_count,
-                reasoning_tokens: u.thoughts_token_count,
-                cached_tokens: u.cached_content_token_count,
-                ..Default::default()
-            };
+        if choices.is_empty() && prompt_blocked {
+            choices.push(UnifiedChoice {
+                index: 0,
+                message: UnifiedMessage {
+                    role: UnifiedRole::Assistant,
+                    content: Vec::new(),
+                    ..Default::default()
+                },
+                items: Vec::new(),
+                finish_reason: Some("content_filter".to_string()),
+                logprobs: None,
+            });
+        }
 
-            // Handle image tokens from details
-            let input_image_tokens = u
-                .prompt_tokens_details
-                .iter()
-                .find(|d| d.modality == Modality::Image)
-                .map(|d| d.token_count);
-            if input_image_tokens.is_some() {
-                usage.input_image_tokens = input_image_tokens;
-            }
-
-            let output_image_tokens = u
-                .candidates_tokens_details
-                .iter()
-                .find(|d| d.modality == Modality::Image)
-                .map(|d| d.token_count);
-            if output_image_tokens.is_some() {
-                usage.output_image_tokens = output_image_tokens;
-            }
-
-            usage
+        let usage = usage_metadata.map(|usage| {
+            gemini_usage_to_unified(&usage)
+                .expect("Gemini response usage must pass source audit before conversion")
         });
 
-        let synthetic_id = true;
-        let synthetic_model = false;
+        let synthetic_id = response_id.is_none();
+        let synthetic_model = true;
 
         UnifiedResponse {
-            id: build_gemini_synthetic_response_id("response"),
-            model: None,
+            id: response_id.unwrap_or_else(|| build_gemini_synthetic_response_id("response")),
+            model: Some("gemini".to_string()),
             choices,
             usage,
             created: Some(Utc::now().timestamp()),
@@ -228,6 +255,7 @@ impl From<GeminiResponse> for UnifiedResponse {
 
 impl From<UnifiedResponse> for GeminiResponse {
     fn from(unified_res: UnifiedResponse) -> Self {
+        let response_id = Some(unified_res.id.clone());
         let gemini_metadata = unified_res
             .provider_response_metadata
             .clone()
@@ -251,6 +279,8 @@ impl From<UnifiedResponse> for GeminiResponse {
                             UnifiedItem::Message(message) if !message.annotations.is_empty() => {
                                 Some(UnifiedGeminiCandidateMetadata {
                                     index: choice.index,
+                                    thought_signature_present: false,
+                                    tool_associations: Vec::new(),
                                     safety_ratings: Vec::new(),
                                     citation_metadata: gemini_citation_metadata_to_unified(
                                         unified_annotations_to_gemini_citation_metadata(
@@ -283,13 +313,36 @@ impl From<UnifiedResponse> for GeminiResponse {
                             for part in message.content {
                                 match part {
                                     UnifiedContentPart::Text { text }
-                                    | UnifiedContentPart::Reasoning { text }
                                     | UnifiedContentPart::Refusal { text } => {
                                         parts.push(GeminiPart::Text { text });
                                     }
+                                    UnifiedContentPart::Reasoning { text } => {
+                                        parts.push(GeminiPart::Thought {
+                                            text,
+                                            thought: true,
+                                            thought_signature: None,
+                                        });
+                                    }
                                     UnifiedContentPart::ImageData { mime_type, data } => {
                                         parts.push(GeminiPart::InlineData {
-                                            inline_data: GeminiInlineData { mime_type, data },
+                                            inline_data: GeminiInlineData {
+                                                mime_type,
+                                                data,
+                                                display_name: None,
+                                            },
+                                        });
+                                    }
+                                    UnifiedContentPart::AudioData { data, format } => {
+                                        parts.push(GeminiPart::InlineData {
+                                            inline_data: GeminiInlineData {
+                                                mime_type: if format == "mp3" {
+                                                    "audio/mpeg".to_string()
+                                                } else {
+                                                    "audio/wav".to_string()
+                                                },
+                                                data,
+                                                display_name: None,
+                                            },
                                         });
                                     }
                                     UnifiedContentPart::FileUrl { url, mime_type, .. } => {
@@ -299,6 +352,7 @@ impl From<UnifiedResponse> for GeminiResponse {
                                                     "application/octet-stream".to_string()
                                                 }),
                                                 file_uri: url,
+                                                display_name: None,
                                             },
                                         });
                                     }
@@ -306,9 +360,14 @@ impl From<UnifiedResponse> for GeminiResponse {
                                         data, mime_type, ..
                                     } => {
                                         parts.push(GeminiPart::InlineData {
-                                            inline_data: GeminiInlineData { mime_type, data },
+                                            inline_data: GeminiInlineData {
+                                                mime_type,
+                                                data,
+                                                display_name: None,
+                                            },
                                         });
                                     }
+                                    UnifiedContentPart::FileId { .. } => {}
                                     UnifiedContentPart::ExecutableCode { language, code } => {
                                         parts.push(GeminiPart::ExecutableCode {
                                             executable_code: GeminiExecutableCode {
@@ -320,9 +379,11 @@ impl From<UnifiedResponse> for GeminiResponse {
                                     UnifiedContentPart::ToolCall(call) => {
                                         parts.push(GeminiPart::FunctionCall {
                                             function_call: GeminiFunctionCall {
+                                                id: Some(call.id),
                                                 name: call.name,
                                                 args: call.arguments,
                                             },
+                                            thought_signature: None,
                                         });
                                     }
                                     UnifiedContentPart::ToolResult(result) => {
@@ -331,6 +392,7 @@ impl From<UnifiedResponse> for GeminiResponse {
                                         });
                                         parts.push(GeminiPart::FunctionResponse {
                                             function_response: GeminiFunctionResponse {
+                                                id: Some(result.tool_call_id),
                                                 name,
                                                 response: unified_tool_result_to_gemini_response(
                                                     &result.output,
@@ -355,7 +417,11 @@ impl From<UnifiedResponse> for GeminiResponse {
                                     UnifiedContentPart::Reasoning { text }
                                     | UnifiedContentPart::Text { text }
                                     | UnifiedContentPart::Refusal { text } => {
-                                        parts.push(GeminiPart::Text { text });
+                                        parts.push(GeminiPart::Thought {
+                                            text,
+                                            thought: true,
+                                            thought_signature: None,
+                                        });
                                     }
                                     UnifiedContentPart::ExecutableCode { language, code } => {
                                         parts.push(GeminiPart::ExecutableCode {
@@ -372,9 +438,11 @@ impl From<UnifiedResponse> for GeminiResponse {
                         UnifiedItem::FunctionCall(call) => {
                             parts.push(GeminiPart::FunctionCall {
                                 function_call: GeminiFunctionCall {
+                                    id: Some(call.id),
                                     name: call.name,
                                     args: call.arguments,
                                 },
+                                thought_signature: None,
                             });
                         }
                         UnifiedItem::FunctionCallOutput(output) => {
@@ -383,6 +451,7 @@ impl From<UnifiedResponse> for GeminiResponse {
                             });
                             parts.push(GeminiPart::FunctionResponse {
                                 function_response: GeminiFunctionResponse {
+                                    id: Some(output.tool_call_id),
                                     name,
                                     response: unified_tool_result_to_gemini_response(
                                         &output.output,
@@ -398,6 +467,7 @@ impl From<UnifiedResponse> for GeminiResponse {
                                             "application/octet-stream".to_string()
                                         }),
                                         file_uri,
+                                        display_name: file.filename,
                                     },
                                 });
                             }
@@ -436,60 +506,10 @@ impl From<UnifiedResponse> for GeminiResponse {
             })
             .collect();
 
-        let usage_metadata = unified_res.usage.map(|u| {
-            let mut prompt_tokens_details = vec![];
-            let text_prompt_tokens = u
-                .input_tokens
-                .saturating_sub(u.input_image_tokens.unwrap_or(0));
-            if text_prompt_tokens > 0 {
-                prompt_tokens_details.push(ModalityTokenCount {
-                    modality: Modality::Text,
-                    token_count: text_prompt_tokens,
-                });
-            }
-            if let Some(token_count) = u.input_image_tokens {
-                if token_count > 0 {
-                    prompt_tokens_details.push(ModalityTokenCount {
-                        modality: Modality::Image,
-                        token_count,
-                    });
-                }
-            }
-
-            let mut candidates_tokens_details = vec![];
-            let text_candidates_tokens = u
-                .output_tokens
-                .saturating_sub(u.output_image_tokens.unwrap_or(0));
-            if text_candidates_tokens > 0 {
-                candidates_tokens_details.push(ModalityTokenCount {
-                    modality: Modality::Text,
-                    token_count: text_candidates_tokens,
-                });
-            }
-            if let Some(token_count) = u.output_image_tokens {
-                if token_count > 0 {
-                    candidates_tokens_details.push(ModalityTokenCount {
-                        modality: Modality::Image,
-                        token_count,
-                    });
-                }
-            }
-
-            GeminiUsageMetadata {
-                prompt_token_count: u.input_tokens,
-                candidates_token_count: u.output_tokens,
-                total_token_count: u.total_tokens,
-                thoughts_token_count: u.reasoning_tokens,
-                cached_content_token_count: u.cached_tokens,
-                tool_use_prompt_token_count: None,
-                prompt_tokens_details,
-                candidates_tokens_details,
-                cache_tokens_details: vec![],
-                tool_use_prompt_tokens_details: vec![],
-            }
-        });
+        let usage_metadata = unified_res.usage.map(unified_usage_to_gemini);
 
         GeminiResponse {
+            response_id,
             candidates,
             prompt_feedback: gemini_metadata
                 .and_then(|metadata| unified_prompt_feedback_to_gemini(metadata.prompt_feedback)),

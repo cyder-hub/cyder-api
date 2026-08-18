@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 
@@ -9,6 +9,7 @@ pub(super) use super::response_mapping::*;
 
 impl From<ResponsesResponse> for UnifiedResponse {
     fn from(responses_res: ResponsesResponse) -> Self {
+        let finish_reason = responses_finish_reason(&responses_res);
         let provider_response_metadata = build_responses_response_metadata(
             &responses_res.output,
             responses_res.metadata.clone(),
@@ -39,12 +40,12 @@ impl From<ResponsesResponse> for UnifiedResponse {
                     response_items.push(UnifiedItem::FunctionCall(UnifiedFunctionCallItem {
                         id: call.call_id.clone(),
                         name: call.name.clone(),
-                        arguments: parse_function_arguments(&call.arguments),
+                        arguments: parse_validated_function_arguments(&call.arguments),
                     }));
                     content.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                         id: call.call_id,
                         name: call.name,
-                        arguments: parse_function_arguments(&call.arguments),
+                        arguments: parse_validated_function_arguments(&call.arguments),
                     }));
                 }
                 ItemField::FunctionCallOutput(output) => {
@@ -73,7 +74,7 @@ impl From<ResponsesResponse> for UnifiedResponse {
                 }
                 ItemField::Unknown(_) => {
                     apply_transform_policy(
-                        TransformProtocol::Api(LlmApiType::Responses),
+                        TransformProtocol::Upstream(UpstreamProtocol::Responses),
                         TransformProtocol::Unified,
                         TransformValueKind::ResponsesUnknownItem,
                         "Dropping unknown Responses item from Responses response conversion.",
@@ -82,7 +83,8 @@ impl From<ResponsesResponse> for UnifiedResponse {
             }
         }
 
-        let choices = if content.is_empty() && response_items.is_empty() {
+        let choices = if content.is_empty() && response_items.is_empty() && finish_reason.is_none()
+        {
             Vec::new()
         } else {
             vec![UnifiedChoice {
@@ -92,7 +94,7 @@ impl From<ResponsesResponse> for UnifiedResponse {
                     content,
                 },
                 items: response_items,
-                finish_reason: Some("stop".to_string()),
+                finish_reason,
                 logprobs: None,
             }]
         };
@@ -105,9 +107,10 @@ impl From<ResponsesResponse> for UnifiedResponse {
             created: Some(responses_res.created_at),
             object: Some(
                 serde_json::to_value(responses_res.object)
-                    .ok()
-                    .and_then(|value| value.as_str().map(ToString::to_string))
-                    .unwrap_or_else(|| "response".to_string()),
+                    .expect("Responses object serialization is structurally infallible")
+                    .as_str()
+                    .expect("Responses object enum serializes as a string")
+                    .to_string(),
             ),
             system_fingerprint: None,
             provider_response_metadata,
@@ -118,6 +121,10 @@ impl From<ResponsesResponse> for UnifiedResponse {
 
 impl From<UnifiedResponse> for ResponsesResponse {
     fn from(unified_res: UnifiedResponse) -> Self {
+        let unified_finish_reason = unified_res
+            .choices
+            .first()
+            .and_then(|choice| choice.finish_reason.as_deref());
         let responses_metadata = unified_res
             .provider_response_metadata
             .clone()
@@ -125,7 +132,10 @@ impl From<UnifiedResponse> for ResponsesResponse {
         let reasoning_metadata = responses_metadata
             .as_ref()
             .and_then(|metadata| metadata.reasoning.clone())
-            .and_then(|value| serde_json::from_value(value).ok());
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("Responses reasoning metadata is source-validated")
+            });
         let refusals = responses_metadata
             .as_ref()
             .map(|metadata| metadata.refusals.clone())
@@ -134,8 +144,17 @@ impl From<UnifiedResponse> for ResponsesResponse {
             .as_ref()
             .map(|metadata| metadata.files.clone())
             .unwrap_or_default();
-        let (metadata, safety_identifier, prompt_cache_key, status, incomplete_details) =
+        let (metadata, safety_identifier, prompt_cache_key, mut status, mut incomplete_details) =
             unified_responses_metadata_to_payload(responses_metadata);
+        if unified_res
+            .provider_response_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.responses.as_ref())
+            .is_none()
+        {
+            (status, incomplete_details) =
+                response_status_from_finish_reason(unified_finish_reason);
+        }
         let mut output = Vec::new();
 
         for choice in unified_res.choices {

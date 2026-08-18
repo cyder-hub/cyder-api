@@ -1,271 +1,93 @@
-use std::time::Duration;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use chrono::Utc;
-use cyder_tools::log::{debug, error};
 use futures::StreamExt;
-use serde_json::{Value, json};
 use tokio::{
-    sync::{Mutex as TokioMutex, mpsc},
-    time::timeout,
+    sync::{Mutex as TokioMutex, mpsc, oneshot},
+    time::{Instant, timeout_at},
 };
 
 use super::{
-    ReasoningContinuationCaptureContext, cancellation::ResponseStreamCancellationGuard,
+    body::{
+        BODY_FRAME_CHANNEL_CAPACITY, BodyFrame, FrameDeliveryError, GuardedBodyStream,
+        guarded_body, send_body_frame, send_terminal_body_event,
+    },
+    lifecycle::{
+        ProxyTerminationCause, ProxyTerminationCoordinator, TotalWatchdogResult,
+        await_cleanup_with_total_watchdog,
+    },
     response::build_response_builder,
 };
 use crate::{
+    config::{ProxyTimeoutConfig, SseResponseConfig},
     proxy::{
-        ProxyError,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
+        TimeoutPhase,
         cancellation::ProxyCancellationContext,
-        classify_upstream_status,
-        logging::RequestLogContext,
-        protocol_transform_error,
-        provider_governance::{record_provider_failure, record_provider_success},
+        classify_transform_failure,
+        logging::{
+            RequestLogContext, TransformLogStage, log_transform_failure, log_transform_summary,
+        },
+        proxy_error_category,
+        request_context::RequestId,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
-            log_writer::{
-                finalize_cancelled_log_context, finalize_streaming_log_context,
-                record_streaming_completion,
-            },
-            reasoning_content_repair::continuation_snapshot_from_parts,
+            log_writer::{finalize_streaming_log_context, record_streaming_completion},
         },
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
+    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
-        transform::StreamTransformer,
+        transform::{
+            FatalStreamEncodeError, FatalStreamErrorFact, SourceStreamTermination,
+            StreamTransformer, TransformFailure, encode_fatal_stream_error,
+        },
+        upstream_response::{UpstreamContentEncoding, parse_content_encoding},
     },
-    utils::sse::{SseEvent, SseParser},
+    utils::sse::{SseEvent, SseFrame, SseParser},
 };
 
-#[derive(Clone, Debug)]
-pub(super) struct OpenAiReasoningStreamCapture {
-    scope: Option<ReasoningContinuationScope>,
-    feature_enabled: bool,
-    target_is_openai_compatible_generation: bool,
-    choices: BTreeMap<u32, StreamChoiceCapture>,
-    parse_failed_count: usize,
+struct StreamReadFailure {
+    operator_message: String,
+    response_visibility: ResponseVisibilityTracker,
 }
 
-#[derive(Clone, Debug, Default)]
-struct StreamChoiceCapture {
-    reasoning_content: String,
-    tool_calls: BTreeMap<u32, PartialToolCall>,
-    invalid: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-struct PartialToolCall {
-    id: Option<String>,
-    type_: Option<String>,
-    name: Option<String>,
-    arguments: String,
-}
-
-impl OpenAiReasoningStreamCapture {
-    pub(super) fn new(
-        capture_context: Option<ReasoningContinuationCaptureContext>,
-        target_api_type: LlmApiType,
-    ) -> Self {
-        let (scope, feature_enabled) = match capture_context {
-            Some(context) => (Some(context.scope), context.feature_enabled),
-            None => (None, false),
-        };
-        Self {
-            scope,
-            feature_enabled,
-            target_is_openai_compatible_generation: matches!(
-                target_api_type,
-                LlmApiType::Openai | LlmApiType::GeminiOpenai
-            ),
-            choices: BTreeMap::new(),
-            parse_failed_count: 0,
-        }
-    }
-
-    pub(super) fn observe_events(&mut self, events: &[SseEvent]) {
-        if !self.feature_enabled || !self.target_is_openai_compatible_generation {
-            return;
-        }
-
-        for event in events {
-            let data = event.data.trim();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(data) else {
-                self.parse_failed_count += 1;
-                continue;
-            };
-            self.observe_chunk_value(&value);
-        }
-    }
-
-    pub(super) async fn finish(self, app_state: &Arc<AppState>, observed_at_ms: i64) {
-        if !self.feature_enabled
-            || !self.target_is_openai_compatible_generation
-            || self.parse_failed_count > 0
-        {
-            return;
-        }
-
-        let Some(scope) = self.scope.clone() else {
-            return;
-        };
-        let snapshots = self.snapshots(scope, observed_at_ms);
-        for snapshot in snapshots {
-            if let Err(err) = app_state
-                .reasoning_continuation_store
-                .insert(snapshot, observed_at_ms)
-                .await
-            {
-                debug!("Failed to cache reasoning continuation: {err}");
-            }
-        }
-    }
-
-    fn observe_chunk_value(&mut self, value: &Value) {
-        let Some(choices) = value
-            .as_object()
-            .and_then(|chunk| chunk.get("choices"))
-            .and_then(Value::as_array)
-        else {
-            self.parse_failed_count += 1;
-            return;
-        };
-
-        for choice in choices {
-            let choice_index = choice
-                .get("index")
-                .and_then(Value::as_u64)
-                .and_then(|index| u32::try_from(index).ok())
-                .unwrap_or(0);
-            let Some(delta) = choice.get("delta").and_then(Value::as_object) else {
-                continue;
-            };
-            let choice_capture = self.choices.entry(choice_index).or_default();
-
-            if let Some(reasoning_content) = delta
-                .get("reasoning_content")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-            {
-                choice_capture.reasoning_content.push_str(reasoning_content);
-            }
-
-            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for tool_call in tool_calls {
-                    if !choice_capture.observe_tool_call_delta(tool_call) {
-                        choice_capture.invalid = true;
-                    }
-                }
-            }
-        }
-    }
-
-    fn snapshots(
-        self,
-        scope: ReasoningContinuationScope,
-        observed_at_ms: i64,
-    ) -> Vec<crate::service::runtime::ReasoningContinuationSnapshot> {
-        let mut snapshots = Vec::new();
-        for choice in self.choices.into_values() {
-            if choice.reasoning_content.is_empty() || choice.invalid {
-                continue;
-            }
-            let Some(tool_calls) = choice.tool_calls_value() else {
-                continue;
-            };
-            match continuation_snapshot_from_parts(
-                scope.clone(),
-                &choice.reasoning_content,
-                &tool_calls,
-                observed_at_ms,
-            ) {
-                Ok(Some(snapshot)) => snapshots.push(snapshot),
-                Ok(None) | Err(_) => {}
-            }
-        }
-        snapshots
+fn validate_sse_content_encoding(
+    headers: &HeaderMap,
+    response_visibility: &ResponseVisibilityTracker,
+) -> Result<(), ProxyError> {
+    match parse_content_encoding(headers) {
+        Ok(UpstreamContentEncoding::Identity) => Ok(()),
+        Ok(UpstreamContentEncoding::Gzip) | Err(_) => Err(upstream_stream_error(
+            ProxyErrorCode::UpstreamResponseError,
+            response_visibility,
+            "SSE response Content-Encoding is invalid or unsupported",
+        )),
     }
 }
 
-impl StreamChoiceCapture {
-    fn observe_tool_call_delta(&mut self, tool_call: &Value) -> bool {
-        let Some(index) = tool_call
-            .get("index")
-            .and_then(Value::as_u64)
-            .and_then(|index| u32::try_from(index).ok())
-        else {
-            return false;
-        };
-        let partial = self.tool_calls.entry(index).or_default();
-
-        if let Some(id) = tool_call
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        {
-            if partial.id.as_deref().is_some_and(|existing| existing != id) {
-                return false;
-            }
-            partial.id = Some(id.to_string());
-        }
-        if let Some(type_) = tool_call
-            .get("type")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        {
-            partial.type_ = Some(type_.to_string());
-        }
-        if let Some(function) = tool_call.get("function").and_then(Value::as_object) {
-            if let Some(name_delta) = function
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-            {
-                partial
-                    .name
-                    .get_or_insert_with(String::new)
-                    .push_str(name_delta);
-            }
-            if let Some(arguments_delta) = function.get("arguments").and_then(Value::as_str) {
-                partial.arguments.push_str(arguments_delta);
-            }
-        }
-
-        true
+fn validate_stream_chunk(
+    chunk: bytes::Bytes,
+    buffer_limit_bytes: usize,
+    response_visibility: &ResponseVisibilityTracker,
+) -> Result<bytes::Bytes, StreamReadFailure> {
+    if chunk.len() <= buffer_limit_bytes {
+        return Ok(chunk);
     }
 
-    fn tool_calls_value(&self) -> Option<Value> {
-        if self.tool_calls.is_empty() {
-            return None;
-        }
-
-        let mut tool_calls = Vec::with_capacity(self.tool_calls.len());
-        for partial in self.tool_calls.values() {
-            let id = partial.id.as_deref().filter(|value| !value.is_empty())?;
-            let name = partial.name.as_deref().filter(|value| !value.is_empty())?;
-            tool_calls.push(json!({
-                "id": id,
-                "type": partial.type_.as_deref().unwrap_or("function"),
-                "function": {
-                    "name": name,
-                    "arguments": partial.arguments,
-                }
-            }));
-        }
-
-        Some(Value::Array(tool_calls))
-    }
+    Err(StreamReadFailure {
+        operator_message: format!(
+            "SSE response chunk exceeded {buffer_limit_bytes} bytes (observed at least {})",
+            buffer_limit_bytes.saturating_add(1),
+        ),
+        response_visibility: response_visibility.clone(),
+    })
 }
 
 pub(super) async fn sync_stream_usage_to_log_context(
@@ -283,87 +105,72 @@ pub(super) async fn sync_stream_usage_to_log_context(
     context.usage_normalization = usage_normalization;
 }
 
-pub(super) async fn mark_stream_response_started_to_client(
-    log_context: &Arc<TokioMutex<RequestLogContext>>,
-    transformed_chunk: &Bytes,
-) {
-    if transformed_chunk.is_empty() {
-        return;
-    }
-
-    let mut context = log_context.lock().await;
-    if context.first_chunk_ts.is_none() {
-        context.first_chunk_ts = Some(Utc::now().timestamp_millis());
-    }
-}
-
-pub(super) fn next_stream_chunk_timeout_duration(
-    first_chunk_received_at_proxy: i64,
-    first_byte_timeout: Option<Duration>,
-) -> Option<Duration> {
-    if first_chunk_received_at_proxy == 0 {
-        first_byte_timeout
+fn upstream_stream_error(
+    code: ProxyErrorCode,
+    response_visibility: &ResponseVisibilityTracker,
+    operator_message: impl Into<String>,
+) -> ProxyError {
+    if code == ProxyErrorCode::UpstreamTimeoutError {
+        ProxyError::upstream_timeout(
+            TimeoutPhase::FirstByte,
+            ExecutionStage::UpstreamResponse,
+            response_visibility.current(),
+            operator_message,
+        )
     } else {
-        None
+        ProxyError::gateway(
+            code,
+            ExecutionStage::UpstreamResponse,
+            response_visibility.current(),
+            None,
+            operator_message,
+        )
     }
 }
 
-fn is_downstream_openai_done_event(api_type: LlmApiType, event: &SseEvent) -> bool {
-    api_type == LlmApiType::Openai && event.data.trim() == "[DONE]"
+fn transform_failure_to_proxy_error(
+    failure: &TransformFailure,
+    visibility: ResponseVisibility,
+) -> ProxyError {
+    classify_transform_failure(failure, visibility)
 }
 
-fn append_transformed_event_bytes(
-    target_api_type: LlmApiType,
-    event: &SseEvent,
-    output: &mut Vec<u8>,
-) {
-    if target_api_type == LlmApiType::Ollama {
-        output.extend_from_slice(event.data.as_bytes());
-        output.push(b'\n');
-    } else {
-        output.extend_from_slice(&event.to_bytes());
-    }
+fn encode_guarded_transform_terminal(
+    downstream_protocol: DownstreamProtocol,
+    request_id: &str,
+    proxy_error: &ProxyError,
+) -> Result<Bytes, FatalStreamEncodeError> {
+    encode_fatal_stream_error(
+        downstream_protocol,
+        FatalStreamErrorFact {
+            request_id,
+            code: proxy_error.code().as_str(),
+            category: proxy_error_category(proxy_error.code(), downstream_protocol),
+            public_message: proxy_error.public_message(),
+            http_status: proxy_error.status_code().as_u16(),
+        },
+    )
+    .map(|event| event.to_bytes().freeze())
 }
 
-async fn finalize_openai_done_stream(
-    app_state: &Arc<AppState>,
-    log_context: &Arc<TokioMutex<RequestLogContext>>,
-    mut transformer: StreamTransformer,
-    reasoning_stream_capture: OpenAiReasoningStreamCapture,
-    url: &str,
-    status_code: StatusCode,
-    cost_catalog_version: Option<&CacheCostCatalogVersion>,
-    model_str: &str,
-    completed_at: i64,
-) {
-    reasoning_stream_capture
-        .finish(app_state, completed_at)
-        .await;
-    let usage = transformer.parse_usage_info();
-    let usage_normalization = transformer.parse_usage_normalization();
-
-    let mut context = log_context.lock().await;
-    finalize_streaming_log_context(
-        &mut context,
-        &url,
-        status_code,
-        completed_at,
-        cost_catalog_version,
-        RequestStatus::Success,
+fn downstream_response_build_error(
+    response_visibility: &ResponseVisibilityTracker,
+    operator_message: impl Into<String>,
+) -> ProxyError {
+    ProxyError::gateway(
+        ProxyErrorCode::DownstreamSendError,
+        ExecutionStage::DownstreamSend,
+        response_visibility.current(),
         None,
-    );
-    context.usage = usage;
-    context.usage_normalization = usage_normalization;
-    record_streaming_completion(app_state, &context).await;
+        operator_message,
+    )
+}
 
-    crate::debug_event!(
-        "proxy.request_succeeded_debug",
-        log_id = context.id,
-        model = model_str,
-        status_code = status_code.as_u16(),
-        is_stream = true,
-        latency_ms = completed_at.saturating_sub(context.request_received_at),
-    );
+fn is_downstream_openai_done_event(
+    downstream_protocol: DownstreamProtocol,
+    event: &SseEvent,
+) -> bool {
+    downstream_protocol == DownstreamProtocol::Openai && event.data.trim() == "[DONE]"
 }
 
 async fn finalize_streaming_error(
@@ -384,365 +191,1084 @@ async fn finalize_streaming_error(
         RequestStatus::Error,
         Some(proxy_error),
     );
+    crate::logging::log_proxy_error_event(
+        "proxy.stream_terminal_error",
+        Some(context.request_id.as_str()),
+        Some(context.id),
+        proxy_error,
+    );
     record_streaming_completion(app_state, &context).await;
 }
 
-async fn abort_and_finalize_cancelled_stream(
+async fn finalize_streaming_error_and_release(
     app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     url: &str,
     status_code: StatusCode,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
+    proxy_error: &ProxyError,
 ) {
-    finalize_cancelled_log_context(
+    await_cleanup_with_total_watchdog(cancellation, coordinator, async {
+        finalize_streaming_error(
+            app_state,
+            log_context,
+            url,
+            status_code,
+            cost_catalog_version,
+            proxy_error,
+        )
+        .await;
+        api_key_request_lease.release().await;
+    })
+    .await;
+}
+
+fn stream_io_error(proxy_error: &ProxyError) -> std::io::Error {
+    let kind = if proxy_error.code() == ProxyErrorCode::ClientCancelledError {
+        std::io::ErrorKind::ConnectionAborted
+    } else if proxy_error.code() == ProxyErrorCode::UpstreamTimeoutError {
+        std::io::ErrorKind::TimedOut
+    } else {
+        std::io::ErrorKind::Other
+    };
+    std::io::Error::new(kind, proxy_error.operator_message().to_string())
+}
+
+fn watchdog_timeout_phase(
+    result: TotalWatchdogResult,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+) -> Option<TimeoutPhase> {
+    match result {
+        TotalWatchdogResult::Expired => Some(TimeoutPhase::Total),
+        TotalWatchdogResult::Cancelled => {
+            if cancellation.is_cancelled() {
+                None
+            } else {
+                match coordinator.terminal() {
+                    Some(ProxyTerminationCause::Timeout { phase }) => Some(phase),
+                    Some(ProxyTerminationCause::ClientCancelled) => None,
+                    _ => Some(TimeoutPhase::Total),
+                }
+            }
+        }
+    }
+}
+
+async fn finalize_guarded_stream_failure(
+    app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+    sender: &mpsc::Sender<BodyFrame>,
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    url: &str,
+    status_code: StatusCode,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    response_visibility: &ResponseVisibilityTracker,
+    api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
+    proxy_error: &ProxyError,
+) {
+    finalize_guarded_stream_failure_delivery(
         app_state,
+        cancellation,
+        coordinator,
+        sender,
         log_context,
         url,
-        Some(status_code),
+        status_code,
         cost_catalog_version,
+        response_visibility,
+        api_key_request_lease,
+        proxy_error,
+        None,
     )
     .await;
 }
 
-pub(super) async fn handle_streaming_response(
+#[allow(clippy::too_many_arguments)]
+async fn finalize_guarded_transform_failure(
+    app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+    sender: &mpsc::Sender<BodyFrame>,
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    url: &str,
+    status_code: StatusCode,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    response_visibility: &ResponseVisibilityTracker,
+    api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
+    downstream_protocol: DownstreamProtocol,
+    request_id: &RequestId,
+    proxy_error: &ProxyError,
+) {
+    let terminal_event =
+        encode_guarded_transform_terminal(downstream_protocol, request_id.as_str(), proxy_error);
+    let terminal_bytes = match terminal_event {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            crate::warn_event!(
+                "proxy.stream_terminal_encode_failed",
+                request_id = request_id.as_str(),
+                error_code = proxy_error.code().as_str(),
+                downstream_protocol = format!("{downstream_protocol:?}"),
+                encoder_error = error.to_string(),
+            );
+            None
+        }
+    };
+
+    finalize_guarded_stream_failure_delivery(
+        app_state,
+        cancellation,
+        coordinator,
+        sender,
+        log_context,
+        url,
+        status_code,
+        cost_catalog_version,
+        response_visibility,
+        api_key_request_lease,
+        proxy_error,
+        terminal_bytes,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_guarded_stream_failure_delivery(
+    app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+    sender: &mpsc::Sender<BodyFrame>,
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    url: &str,
+    status_code: StatusCode,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    response_visibility: &ResponseVisibilityTracker,
+    api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
+    proxy_error: &ProxyError,
+    terminal_bytes: Option<Bytes>,
+) {
+    if coordinator.terminal().is_some() {
+        return;
+    }
+
+    let delivery = match terminal_bytes {
+        Some(bytes) => send_terminal_body_event(sender, bytes, cancellation, coordinator).await,
+        None => {
+            send_body_frame(
+                sender,
+                Err(stream_io_error(proxy_error)),
+                cancellation,
+                coordinator,
+            )
+            .await
+        }
+    };
+    match delivery {
+        Ok(()) => {
+            coordinator.try_terminate_error(proxy_error);
+            finalize_streaming_error_and_release(
+                app_state,
+                cancellation,
+                coordinator,
+                log_context,
+                url,
+                status_code,
+                cost_catalog_version,
+                api_key_request_lease,
+                proxy_error,
+            )
+            .await;
+        }
+        Err(FrameDeliveryError::ClientCancelled | FrameDeliveryError::DownstreamDropped) => {
+            cancellation.cancel_now("downstream stopped consuming the guarded response body");
+        }
+        Err(FrameDeliveryError::Timeout { phase }) => {
+            let terminal_error = if proxy_error.timeout_phase() == Some(phase) {
+                proxy_error.clone()
+            } else {
+                ProxyError::upstream_timeout(
+                    phase,
+                    ExecutionStage::DownstreamSend,
+                    response_visibility.current(),
+                    format!("guarded response body exceeded the {phase:?} timeout"),
+                )
+            };
+            coordinator.try_terminate_error(&terminal_error);
+            finalize_streaming_error_and_release(
+                app_state,
+                cancellation,
+                coordinator,
+                log_context,
+                url,
+                status_code,
+                cost_catalog_version,
+                api_key_request_lease,
+                &terminal_error,
+            )
+            .await;
+        }
+    }
+}
+
+async fn log_stream_transform_summary_once(
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    transformer: &StreamTransformer,
+) {
+    let summary = transformer.diagnostics_snapshot();
+    let context = log_context.lock().await;
+    log_transform_summary(TransformLogStage::Stream, &context, &summary);
+}
+
+async fn log_stream_transform_failure_once(
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    transformer: &StreamTransformer,
+    failure: &TransformFailure,
+) {
+    let mut aggregate_failure = failure.clone();
+    aggregate_failure.summary = transformer.diagnostics_snapshot();
+    let context = log_context.lock().await;
+    log_transform_failure(TransformLogStage::Stream, &context, &aggregate_failure);
+}
+
+async fn finalize_guarded_stream_success(
+    app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
+    coordinator: &ProxyTerminationCoordinator,
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    mut transformer: StreamTransformer,
+    url: &str,
+    status_code: StatusCode,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    model_str: &str,
+    api_key_request_lease: &mut ApiKeyRequestLeaseFinalizer,
+) {
+    await_cleanup_with_total_watchdog(cancellation, coordinator, async {
+        let completed_at = Utc::now().timestamp_millis();
+        let usage_is_billable = transformer.usage_is_billable();
+        let usage = transformer.parse_usage_info();
+        let usage_normalization = transformer.parse_usage_normalization();
+        let transform_summary = transformer.diagnostics_snapshot();
+        let context_snapshot = {
+            let mut context = log_context.lock().await;
+            finalize_streaming_log_context(
+                &mut context,
+                url,
+                status_code,
+                completed_at,
+                if usage_is_billable {
+                    cost_catalog_version
+                } else {
+                    None
+                },
+                RequestStatus::Success,
+                None,
+            );
+            context.usage = usage;
+            context.usage_normalization = usage_normalization;
+            log_transform_summary(TransformLogStage::Stream, &context, &transform_summary);
+            crate::proxy::logging::log_usage_normalization_warnings(
+                &context,
+                model_str,
+                status_code,
+            );
+            if context.usage_normalization.is_none() {
+                crate::proxy::logging::log_upstream_usage_missing(&context, model_str, status_code);
+            }
+            crate::debug_event!(
+                "proxy.request_succeeded_debug",
+                request_id = &context.request_id,
+                log_id = context.id,
+                model = model_str,
+                status_code = status_code.as_u16(),
+                is_stream = true,
+                latency_ms = completed_at.saturating_sub(context.request_received_at),
+            );
+            context.clone()
+        };
+        record_streaming_completion(app_state, &context_snapshot).await;
+        api_key_request_lease.release().await;
+    })
+    .await;
+    coordinator.try_terminate(ProxyTerminationCause::Success);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_guarded_stream_worker(
+    app_state: Arc<AppState>,
+    cancellation: ProxyCancellationContext,
+    coordinator: ProxyTerminationCoordinator,
+    log_context: Arc<TokioMutex<RequestLogContext>>,
+    model_str: String,
+    response: reqwest::Response,
+    url: String,
+    status_code: StatusCode,
+    cost_catalog_version: Option<CacheCostCatalogVersion>,
+    mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+    proxy_timeouts: ProxyTimeoutConfig,
+    sse_response_limits: SseResponseConfig,
+    response_visibility: ResponseVisibilityTracker,
+    headers_committed: oneshot::Receiver<()>,
+    sender: mpsc::Sender<BodyFrame>,
+    request_id: RequestId,
+    log_id: i64,
+) {
+    if headers_committed.await.is_err() {
+        api_key_request_lease.release().await;
+        return;
+    }
+    debug_assert!(
+        response_visibility.current() >= ResponseVisibility::HeadersCommitted,
+        "guarded stream worker must not consume upstream bytes before downstream headers commit"
+    );
+
+    let mut stream = response.bytes_stream();
+    let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
+    let mut parser = SseParser::new(sse_response_limits.clone());
+    let mut saw_nonempty_raw_body = false;
+    let mut active_read_deadline = None;
+
+    loop {
+        let wait_started_at = Instant::now();
+        let (read_timeout, read_phase) = if saw_nonempty_raw_body {
+            (proxy_timeouts.response_idle(), TimeoutPhase::ResponseIdle)
+        } else {
+            (proxy_timeouts.first_byte(), TimeoutPhase::FirstByte)
+        };
+        let read_deadline =
+            *active_read_deadline.get_or_insert_with(|| wait_started_at + read_timeout);
+        let watchdog = coordinator.arm_total_watchdog(
+            cancellation
+                .total_deadline()
+                .expect("proxy total deadline must be initialized before guarded Body"),
+        );
+        let read_result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                log_stream_transform_summary_once(&log_context, &transformer).await;
+                return;
+            },
+            result = timeout_at(read_deadline, stream.next()) => match result {
+                Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
+                Ok(Some(Err(error))) => {
+                    if error.is_timeout() {
+                        Err(ProxyError::upstream_timeout(
+                            read_phase,
+                            ExecutionStage::UpstreamResponse,
+                            response_visibility.current(),
+                            format!("LLM stream transport failed during {read_phase:?}"),
+                        ))
+                    } else {
+                        Err(ProxyError::gateway(
+                            ProxyErrorCode::UpstreamResponseError,
+                            ExecutionStage::UpstreamResponse,
+                            response_visibility.current(),
+                            None,
+                            format!("LLM stream transport failed: {error}"),
+                        ))
+                    }
+                }
+                Ok(None) => Ok(None),
+                Err(_) => Err(ProxyError::upstream_timeout(
+                    read_phase,
+                    ExecutionStage::UpstreamResponse,
+                    response_visibility.current(),
+                    format!("LLM stream timed out during the {read_phase:?} phase"),
+                )),
+            },
+            watchdog_result = watchdog.wait() => match watchdog_timeout_phase(
+                watchdog_result,
+                &cancellation,
+                &coordinator,
+            ) {
+                Some(phase) => Err(ProxyError::upstream_timeout(
+                    phase,
+                    ExecutionStage::UpstreamResponse,
+                    response_visibility.current(),
+                    format!("LLM stream exceeded the {phase:?} timeout"),
+                )),
+                None => {
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    return;
+                }
+            },
+        };
+
+        let at_eof = matches!(read_result, Ok(None));
+        let mut next_frame = match read_result {
+            Ok(Some(chunk)) => {
+                let chunk = match validate_stream_chunk(
+                    chunk,
+                    sse_response_limits.buffer_limit_bytes,
+                    &response_visibility,
+                ) {
+                    Ok(chunk) => chunk,
+                    Err(failure) => {
+                        let proxy_error = ProxyError::gateway(
+                            ProxyErrorCode::UpstreamResponseError,
+                            ExecutionStage::UpstreamResponse,
+                            failure.response_visibility.current(),
+                            None,
+                            failure.operator_message,
+                        );
+                        log_stream_transform_summary_once(&log_context, &transformer).await;
+                        finalize_guarded_stream_failure(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &sender,
+                            &log_context,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &response_visibility,
+                            &mut api_key_request_lease,
+                            &proxy_error,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let received_at = Instant::now();
+                cancellation.timing().observe_upstream_raw_chunk(
+                    &chunk,
+                    Utc::now().timestamp_millis(),
+                    wait_started_at,
+                    received_at,
+                );
+                if !chunk.is_empty() {
+                    saw_nonempty_raw_body = true;
+                    active_read_deadline = None;
+                }
+                parser.feed(&chunk)
+            }
+            Ok(None) => parser.finish(),
+            Err(proxy_error) => {
+                log_stream_transform_summary_once(&log_context, &transformer).await;
+                finalize_guarded_stream_failure(
+                    &app_state,
+                    &cancellation,
+                    &coordinator,
+                    &sender,
+                    &log_context,
+                    &url,
+                    status_code,
+                    cost_catalog_version.as_ref(),
+                    &response_visibility,
+                    &mut api_key_request_lease,
+                    &proxy_error,
+                )
+                .await;
+                return;
+            }
+        };
+
+        loop {
+            let frame = match next_frame {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(parse_error) => {
+                    let proxy_error = upstream_stream_error(
+                        ProxyErrorCode::UpstreamResponseError,
+                        &response_visibility,
+                        format!("SSE response parsing failed: {parse_error}"),
+                    );
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    finalize_guarded_stream_failure(
+                        &app_state,
+                        &cancellation,
+                        &coordinator,
+                        &sender,
+                        &log_context,
+                        &url,
+                        status_code,
+                        cost_catalog_version.as_ref(),
+                        &response_visibility,
+                        &mut api_key_request_lease,
+                        &proxy_error,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            if let SseFrame::Event(event) = frame {
+                let transform_output = match transformer.transform_event_with_observation(event) {
+                    Ok(output) => output,
+                    Err(failure) => {
+                        let proxy_error = transform_failure_to_proxy_error(
+                            &failure,
+                            response_visibility.current(),
+                        );
+                        log_stream_transform_failure_once(&log_context, &transformer, &failure)
+                            .await;
+                        finalize_guarded_transform_failure(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &sender,
+                            &log_context,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &response_visibility,
+                            &mut api_key_request_lease,
+                            downstream_protocol,
+                            &request_id,
+                            &proxy_error,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                if transform_output.value.meaningful_output_observed {
+                    cancellation.timing().mark_first_token(
+                        Utc::now().timestamp_millis(),
+                        tokio::time::Instant::now(),
+                    );
+                }
+                let transformed_events = transform_output.value.events;
+                sync_stream_usage_to_log_context(&log_context, &mut transformer).await;
+                let source_termination = transformer.source_termination();
+                let terminal_event_index = source_termination
+                    .is_some()
+                    .then(|| transformed_events.len().checked_sub(1))
+                    .flatten();
+                for (event_index, transformed_event) in transformed_events.into_iter().enumerate() {
+                    let downstream_openai_done =
+                        is_downstream_openai_done_event(downstream_protocol, &transformed_event);
+                    let transformed_chunk = transformed_event.to_bytes().freeze();
+                    let delivery = if terminal_event_index == Some(event_index) {
+                        send_terminal_body_event(
+                            &sender,
+                            transformed_chunk,
+                            &cancellation,
+                            &coordinator,
+                        )
+                        .await
+                    } else {
+                        send_body_frame(&sender, Ok(transformed_chunk), &cancellation, &coordinator)
+                            .await
+                    };
+                    if let Err(delivery_error) = delivery {
+                        let proxy_error = match delivery_error {
+                            FrameDeliveryError::ClientCancelled
+                            | FrameDeliveryError::DownstreamDropped => {
+                                log_stream_transform_summary_once(&log_context, &transformer).await;
+                                cancellation.cancel_now(
+                                    "downstream stopped consuming the guarded stream body",
+                                );
+                                return;
+                            }
+                            FrameDeliveryError::Timeout { phase } => ProxyError::upstream_timeout(
+                                phase,
+                                ExecutionStage::DownstreamSend,
+                                response_visibility.current(),
+                                format!("guarded stream body exceeded the {phase:?} timeout"),
+                            ),
+                        };
+                        log_stream_transform_summary_once(&log_context, &transformer).await;
+                        coordinator.try_terminate_error(&proxy_error);
+                        finalize_streaming_error_and_release(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &log_context,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &mut api_key_request_lease,
+                            &proxy_error,
+                        )
+                        .await;
+                        return;
+                    }
+                    if downstream_openai_done {
+                        finalize_guarded_stream_success(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &log_context,
+                            transformer,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &model_str,
+                            &mut api_key_request_lease,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+                match source_termination {
+                    Some(SourceStreamTermination::Succeeded) => {
+                        finalize_guarded_stream_success(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &log_context,
+                            transformer,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &model_str,
+                            &mut api_key_request_lease,
+                        )
+                        .await;
+                        return;
+                    }
+                    Some(SourceStreamTermination::Failed) => {
+                        let proxy_error = upstream_stream_error(
+                            ProxyErrorCode::UpstreamResponseError,
+                            &response_visibility,
+                            "Upstream stream reported an application failure",
+                        );
+                        log_stream_transform_summary_once(&log_context, &transformer).await;
+                        coordinator.try_terminate_error(&proxy_error);
+                        finalize_streaming_error_and_release(
+                            &app_state,
+                            &cancellation,
+                            &coordinator,
+                            &log_context,
+                            &url,
+                            status_code,
+                            cost_catalog_version.as_ref(),
+                            &mut api_key_request_lease,
+                            &proxy_error,
+                        )
+                        .await;
+                        return;
+                    }
+                    None => {}
+                }
+            }
+
+            next_frame = if at_eof {
+                parser.finish()
+            } else {
+                parser.feed(&[])
+            };
+        }
+        if at_eof {
+            break;
+        }
+    }
+
+    if cancellation.is_cancelled() {
+        log_stream_transform_summary_once(&log_context, &transformer).await;
+        return;
+    }
+    if let Err(failure) = transformer.validate_source_termination() {
+        let proxy_error = transform_failure_to_proxy_error(&failure, response_visibility.current());
+        log_stream_transform_failure_once(&log_context, &transformer, &failure).await;
+        finalize_guarded_transform_failure(
+            &app_state,
+            &cancellation,
+            &coordinator,
+            &sender,
+            &log_context,
+            &url,
+            status_code,
+            cost_catalog_version.as_ref(),
+            &response_visibility,
+            &mut api_key_request_lease,
+            downstream_protocol,
+            &request_id,
+            &proxy_error,
+        )
+        .await;
+        return;
+    }
+    let eof_events = match transformer.finalize_source_eof_events() {
+        Ok(success) => success.value,
+        Err(failure) => {
+            let proxy_error =
+                transform_failure_to_proxy_error(&failure, response_visibility.current());
+            log_stream_transform_failure_once(&log_context, &transformer, &failure).await;
+            finalize_guarded_transform_failure(
+                &app_state,
+                &cancellation,
+                &coordinator,
+                &sender,
+                &log_context,
+                &url,
+                status_code,
+                cost_catalog_version.as_ref(),
+                &response_visibility,
+                &mut api_key_request_lease,
+                downstream_protocol,
+                &request_id,
+                &proxy_error,
+            )
+            .await;
+            return;
+        }
+    };
+    let eof_emitted_openai_done = eof_events
+        .iter()
+        .any(|event| is_downstream_openai_done_event(downstream_protocol, event));
+    for event in eof_events {
+        let delivery = send_body_frame(
+            &sender,
+            Ok(event.to_bytes().freeze()),
+            &cancellation,
+            &coordinator,
+        )
+        .await;
+        if let Err(delivery_error) = delivery {
+            match delivery_error {
+                FrameDeliveryError::ClientCancelled | FrameDeliveryError::DownstreamDropped => {
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    cancellation.cancel_now("downstream stopped consuming the guarded stream body");
+                }
+                FrameDeliveryError::Timeout { phase } => {
+                    let proxy_error = ProxyError::upstream_timeout(
+                        phase,
+                        ExecutionStage::DownstreamSend,
+                        response_visibility.current(),
+                        format!("guarded stream body exceeded the {phase:?} timeout"),
+                    );
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    coordinator.try_terminate_error(&proxy_error);
+                    finalize_streaming_error_and_release(
+                        &app_state,
+                        &cancellation,
+                        &coordinator,
+                        &log_context,
+                        &url,
+                        status_code,
+                        cost_catalog_version.as_ref(),
+                        &mut api_key_request_lease,
+                        &proxy_error,
+                    )
+                    .await;
+                }
+            }
+            return;
+        }
+    }
+    if downstream_protocol == DownstreamProtocol::Openai
+        && upstream_protocol == UpstreamProtocol::Gemini
+        && !eof_emitted_openai_done
+    {
+        crate::debug_event!(
+            "proxy.stream_done_synthesized",
+            request_id = &request_id,
+            log_id = log_id,
+            downstream_protocol = format!("{downstream_protocol:?}"),
+            upstream_protocol = format!("{upstream_protocol:?}"),
+        );
+        let delivery = send_body_frame(
+            &sender,
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+            &cancellation,
+            &coordinator,
+        )
+        .await;
+        if let Err(delivery_error) = delivery {
+            match delivery_error {
+                FrameDeliveryError::ClientCancelled | FrameDeliveryError::DownstreamDropped => {
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    cancellation.cancel_now("downstream stopped consuming the guarded stream body");
+                }
+                FrameDeliveryError::Timeout { phase } => {
+                    let proxy_error = ProxyError::upstream_timeout(
+                        phase,
+                        ExecutionStage::DownstreamSend,
+                        response_visibility.current(),
+                        format!("guarded stream body exceeded the {phase:?} timeout"),
+                    );
+                    log_stream_transform_summary_once(&log_context, &transformer).await;
+                    coordinator.try_terminate_error(&proxy_error);
+                    finalize_streaming_error_and_release(
+                        &app_state,
+                        &cancellation,
+                        &coordinator,
+                        &log_context,
+                        &url,
+                        status_code,
+                        cost_catalog_version.as_ref(),
+                        &mut api_key_request_lease,
+                        &proxy_error,
+                    )
+                    .await;
+                }
+            }
+            return;
+        }
+    }
+    finalize_guarded_stream_success(
+        &app_state,
+        &cancellation,
+        &coordinator,
+        &log_context,
+        transformer,
+        &url,
+        status_code,
+        cost_catalog_version.as_ref(),
+        &model_str,
+        &mut api_key_request_lease,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_streaming_response_guarded(
     app_state: &Arc<AppState>,
     cancellation: ProxyCancellationContext,
-    provider_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
-    first_byte_timeout: Option<Duration>,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+    proxy_timeouts: ProxyTimeoutConfig,
+    sse_response_limits: SseResponseConfig,
+    response_visibility: ResponseVisibilityTracker,
 ) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
-    let log_id = log_context.lock().await.id;
-    let response_builder = build_response_builder(status_code, &response_headers);
-
-    let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
-
-    let url_owned = url.to_string();
-    let cost_catalog_version_clone = cost_catalog_version.clone();
-    let app_state_clone = Arc::clone(app_state);
-
-    let cancellation_for_reader = cancellation.clone();
-    tokio::spawn(async move {
-        let mut stream = response.bytes_stream();
-        loop {
-            tokio::select! {
-                _ = cancellation_for_reader.cancelled() => break,
-                maybe_chunk = stream.next() => {
-                    let Some(chunk_result) = maybe_chunk else {
-                        break;
-                    };
-                    if tx.send(chunk_result).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    let mut transformer = StreamTransformer::new(target_api_type, api_type);
-    let mut parser = SseParser::new();
-    let log_context_clone = log_context.clone();
-
-    let monitored_stream = async_stream::stream! {
-        let mut api_key_request_lease = api_key_request_lease;
-        let provider_circuit_permit = provider_circuit_permit;
-        let mut response_drop_guard = ResponseStreamCancellationGuard::new(
-            Arc::clone(&app_state_clone),
-            cancellation.clone(),
-            log_context_clone.clone(),
-            url_owned.clone(),
-            status_code,
-            cost_catalog_version_clone.clone(),
-            format!("Client disconnected while receiving streaming response for log_id {}.", log_id),
-        );
-        let mut first_chunk_received_at_proxy: i64 = 0;
-        let mut reasoning_stream_capture =
-            OpenAiReasoningStreamCapture::new(reasoning_capture, target_api_type);
-
-        loop {
-            let chunk_result = match next_stream_chunk_timeout_duration(first_chunk_received_at_proxy, first_byte_timeout) {
-                Some(timeout_duration) => match tokio::select! {
-                    _ = cancellation.cancelled() => Err(cancellation.cancellation_error().await),
-                    result = timeout(timeout_duration, rx.recv()) => Ok(result),
-                } {
-                    Err(proxy_error) => {
-                        response_drop_guard.disarm();
-                        abort_and_finalize_cancelled_stream(
-                            &app_state_clone,
-                            &log_context_clone,
-                            &url_owned,
-                            status_code,
-                            cost_catalog_version_clone.as_ref(),
-                        ).await;
-                        api_key_request_lease.release().await;
-                        yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, proxy_error.to_string()));
-                        return;
-                    }
-                    Ok(result) => match result {
-                        Ok(result) => result,
-                        Err(_) => {
-                            response_drop_guard.disarm();
-                            let stream_error_message = format!(
-                                "LLM stream timed out waiting for the first chunk after {:?}",
-                                timeout_duration
-                            );
-                            error!("{}", stream_error_message);
-                            let proxy_error = ProxyError::UpstreamTimeout(stream_error_message.clone());
-                            finalize_streaming_error(
-                                &app_state_clone,
-                                &log_context_clone,
-                                &url_owned,
-                                status_code,
-                                cost_catalog_version_clone.as_ref(),
-                                &proxy_error,
-                            )
-                            .await;
-                            record_provider_failure(
-                                &app_state_clone,
-                                provider_id,
-                                &model_str,
-                                &proxy_error,
-                                provider_circuit_permit.as_ref(),
-                            )
-                            .await;
-
-                            api_key_request_lease.release().await;
-                            yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, stream_error_message));
-                            return;
-                        }
-                    },
-                },
-                None => {
-                    tokio::select! {
-                        _ = cancellation.cancelled() => {
-                            response_drop_guard.disarm();
-                            abort_and_finalize_cancelled_stream(
-                                &app_state_clone,
-                                &log_context_clone,
-                                &url_owned,
-                                status_code,
-                                cost_catalog_version_clone.as_ref(),
-                            ).await;
-                            api_key_request_lease.release().await;
-                            yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, cancellation.cancellation_error().await.to_string()));
-                            return;
-                        }
-                        result = rx.recv() => result,
-                    }
-                }
-            };
-
-            let Some(chunk_result) = chunk_result else {
-                break;
-            };
-
-            match chunk_result {
-                Ok(chunk) => {
-                    if first_chunk_received_at_proxy == 0 {
-                        first_chunk_received_at_proxy = Utc::now().timestamp_millis();
-                    }
-
-                    let events = parser.process(&chunk);
-                    if events.is_empty() {
-                        continue;
-                    }
-
-                    let mut transformed_chunk_bytes: Vec<u8> = Vec::new();
-                    let mut downstream_openai_done = false;
-
-                    for event in events {
-                        reasoning_stream_capture.observe_events(std::slice::from_ref(&event));
-                        let transformed_events =
-                            transformer.transform_event(event).unwrap_or_default();
-                        for transformed_event in transformed_events {
-                            append_transformed_event_bytes(
-                                api_type,
-                                &transformed_event,
-                                &mut transformed_chunk_bytes,
-                            );
-                            if is_downstream_openai_done_event(api_type, &transformed_event) {
-                                downstream_openai_done = true;
-                                break;
-                            }
-                        }
-                        if downstream_openai_done {
-                            break;
-                        }
-                    }
-                    sync_stream_usage_to_log_context(&log_context_clone, &mut transformer).await;
-
-                    let transformed_chunk = Bytes::from(transformed_chunk_bytes);
-                    if !transformed_chunk.is_empty() {
-                        mark_stream_response_started_to_client(
-                            &log_context_clone,
-                            &transformed_chunk,
-                        )
-                        .await;
-                        if downstream_openai_done {
-                            let done_completed_at = Utc::now().timestamp_millis();
-                            response_drop_guard.disarm();
-                            api_key_request_lease.release().await;
-                            record_provider_success(
-                                &app_state_clone,
-                                provider_id,
-                                &model_str,
-                                provider_circuit_permit.as_ref(),
-                            )
-                            .await;
-
-                            let drain_app_state = Arc::clone(&app_state_clone);
-                            let drain_log_context = Arc::clone(&log_context_clone);
-                            let drain_url = url_owned.clone();
-                            let drain_cost_catalog_version = cost_catalog_version_clone.clone();
-                            let drain_model_str = model_str.clone();
-                            let drain_transformer = transformer;
-                            let drain_reasoning_stream_capture = reasoning_stream_capture;
-                            app_state_clone.infra.spawn_background_task(async move {
-                                finalize_openai_done_stream(
-                                    &drain_app_state,
-                                    &drain_log_context,
-                                    drain_transformer,
-                                    drain_reasoning_stream_capture,
-                                    &drain_url,
-                                    status_code,
-                                    drain_cost_catalog_version.as_ref(),
-                                    &drain_model_str,
-                                    done_completed_at,
-                                )
-                                .await;
-                            });
-
-                            yield Ok::<_, std::io::Error>(transformed_chunk);
-                            return;
-                        }
-                        yield Ok::<_, std::io::Error>(transformed_chunk);
-                    }
-                }
-                Err(e) => {
-                    response_drop_guard.disarm();
-                    let stream_error_message = format!("LLM stream error: {}", e);
-                    error!("{}", stream_error_message);
-                    let proxy_error = ProxyError::BadGateway(stream_error_message.clone());
-                    finalize_streaming_error(
-                        &app_state_clone,
-                        &log_context_clone,
-                        &url_owned,
-                        status_code,
-                        cost_catalog_version_clone.as_ref(),
-                        &proxy_error,
-                    )
-                    .await;
-                    record_provider_failure(
-                        &app_state_clone,
-                        provider_id,
-                        &model_str,
-                        &proxy_error,
-                        provider_circuit_permit.as_ref(),
-                    )
-                    .await;
-
-                    api_key_request_lease.release().await;
-                    yield Err(std::io::Error::other(stream_error_message));
-                    return;
-                }
-            }
-        }
-
-        if status_code.is_success() && api_type == LlmApiType::Openai && target_api_type == LlmApiType::Gemini {
-            debug!("[handle_streaming_response] Appending [DONE] chunk for OpenAI client.");
-            let done_chunk = Bytes::from("data: [DONE]\n\n");
-            mark_stream_response_started_to_client(&log_context_clone, &done_chunk).await;
-            yield Ok::<_, std::io::Error>(done_chunk);
-        }
-
-        let llm_response_completed_at = Utc::now().timestamp_millis();
-
-        if status_code.is_success() {
-            reasoning_stream_capture
-                .finish(&app_state_clone, llm_response_completed_at)
-                .await;
-            let mut context = log_context_clone.lock().await;
-            finalize_streaming_log_context(
-                &mut context,
-                &url_owned,
-                status_code,
-                llm_response_completed_at,
-                cost_catalog_version_clone.as_ref(),
-                RequestStatus::Success,
-                None,
-            );
-            context.usage = transformer.parse_usage_info();
-            context.usage_normalization = transformer.parse_usage_normalization();
-            record_streaming_completion(&app_state_clone, &context).await;
-            record_provider_success(
-                &app_state_clone,
-                provider_id,
-                &model_str,
-                provider_circuit_permit.as_ref(),
-            )
-            .await;
-            if context.usage.is_none() {
-                crate::debug_event!(
-                    "proxy.stream_usage_missing_debug",
-                    log_id = context.id,
-                    model = &model_str,
-                    status_code = status_code.as_u16(),
-                );
-            }
-            crate::debug_event!(
-                "proxy.request_succeeded_debug",
-                log_id = context.id,
-                model = &model_str,
-                status_code = status_code.as_u16(),
-                is_stream = true,
-                latency_ms = llm_response_completed_at.saturating_sub(context.request_received_at),
-            );
-            api_key_request_lease.release().await;
-            response_drop_guard.disarm();
-        } else {
-            let proxy_error = classify_upstream_status(status_code, &[]);
-            finalize_streaming_error(
-                &app_state_clone,
-                &log_context_clone,
-                &url_owned,
-                status_code,
-                cost_catalog_version_clone.as_ref(),
-                &proxy_error,
-            )
-            .await;
-            record_provider_failure(
-                &app_state_clone,
-                provider_id,
-                &model_str,
-                &proxy_error,
-                provider_circuit_permit.as_ref(),
-            )
-            .await;
-            api_key_request_lease.release().await;
-            response_drop_guard.disarm();
-        }
+    let (request_id, log_id) = {
+        let context = log_context.lock().await;
+        (context.request_id.clone(), context.id)
     };
+    if let Err(proxy_error) = validate_sse_content_encoding(&response_headers, &response_visibility)
+    {
+        cancellation.try_terminate_error(&proxy_error);
+        crate::logging::log_proxy_error_event(
+            "proxy.stream_header_rejected",
+            Some(request_id.as_str()),
+            Some(log_id),
+            &proxy_error,
+        );
+        let mut context = log_context.lock().await;
+        finalize_streaming_log_context(
+            &mut context,
+            url,
+            status_code,
+            Utc::now().timestamp_millis(),
+            cost_catalog_version.as_ref(),
+            RequestStatus::Error,
+            None,
+        );
+        drop(context);
+        let mut lease = api_key_request_lease;
+        lease.release().await;
+        return Err(proxy_error);
+    }
 
-    match response_builder.body(Body::from_stream(monitored_stream)) {
-        Ok(final_response) => Ok(final_response),
-        Err(e) => {
-            let log_id = log_context.lock().await.id;
-            let proxy_error = protocol_transform_error(
-                &format!("Failed to build client response for log_id {log_id}"),
-                e,
-            );
-            error!("{}", proxy_error);
-            Err(proxy_error)
+    let coordinator = cancellation.coordinator();
+    let (sender, receiver) = mpsc::channel(BODY_FRAME_CHANNEL_CAPACITY);
+    let (headers_committed_sender, headers_committed_receiver) = oneshot::channel();
+    let worker = app_state
+        .infra
+        .spawn_background_task(run_guarded_stream_worker(
+            Arc::clone(app_state),
+            cancellation.clone(),
+            coordinator.clone(),
+            log_context.clone(),
+            model_str,
+            response,
+            url.to_string(),
+            status_code,
+            cost_catalog_version.clone(),
+            api_key_request_lease.with_coordinator(coordinator.clone()),
+            downstream_protocol,
+            upstream_protocol,
+            proxy_timeouts,
+            sse_response_limits,
+            response_visibility.clone(),
+            headers_committed_receiver,
+            sender,
+            request_id,
+            log_id,
+        ));
+    let body = guarded_body(GuardedBodyStream::new(
+        Arc::clone(app_state),
+        cancellation,
+        coordinator,
+        receiver,
+        worker,
+        log_context,
+        url.to_string(),
+        status_code,
+        cost_catalog_version,
+        response_visibility.clone(),
+        format!("Client disconnected while receiving streaming response for log_id {log_id}."),
+    ));
+    match build_response_builder(status_code, &response_headers).body(body) {
+        Ok(response) => {
+            response_visibility.advance_to(ResponseVisibility::HeadersCommitted);
+            let _ = headers_committed_sender.send(());
+            Ok(response)
         }
+        Err(error) => Err(downstream_response_build_error(
+            &response_visibility,
+            format!("Failed to build client response for log_id {log_id}: {error}"),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Bytes;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_ENCODING};
+
+    use super::{
+        downstream_response_build_error, encode_guarded_transform_terminal, upstream_stream_error,
+        validate_sse_content_encoding, validate_stream_chunk,
+    };
+    use crate::proxy::{
+        ExecutionStage, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
+    };
+    use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
+    use crate::service::transform::FatalStreamEncodeError;
+    use crate::service::transform::StreamTransformer;
+    use crate::utils::sse::SseEvent;
+    use tokio::time::Instant;
+
+    #[test]
+    fn terminal_encoder_failure_remains_an_explicit_body_error_fallback_signal() {
+        let error = crate::proxy::ProxyError::gateway(
+            ProxyErrorCode::ProtocolTransformError,
+            ExecutionStage::Transform,
+            ResponseVisibility::HeadersCommitted,
+            None,
+            "private transform detail",
+        );
+        let result = encode_guarded_transform_terminal(
+            DownstreamProtocol::Responses,
+            "invalid\nrequest-id",
+            &error,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            FatalStreamEncodeError::InvalidRequestIdentity
+        );
+    }
+
+    #[test]
+    fn upstream_stream_facts_capture_visibility_before_and_after_first_body_chunk() {
+        let tracker = ResponseVisibilityTracker::new();
+        tracker.advance_to(ResponseVisibility::HeadersCommitted);
+
+        let before_first_chunk = upstream_stream_error(
+            ProxyErrorCode::UpstreamTimeoutError,
+            &tracker,
+            "first chunk timeout",
+        );
+        assert_eq!(before_first_chunk.stage(), ExecutionStage::UpstreamResponse);
+        assert_eq!(
+            before_first_chunk.status_code(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
+            before_first_chunk.response_visibility(),
+            ResponseVisibility::HeadersCommitted
+        );
+
+        tracker.advance_to(ResponseVisibility::BodyStarted);
+        let after_first_chunk = upstream_stream_error(
+            ProxyErrorCode::UpstreamResponseError,
+            &tracker,
+            "stream interrupted",
+        );
+        assert_eq!(after_first_chunk.stage(), ExecutionStage::UpstreamResponse);
+        assert_eq!(after_first_chunk.status_code(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            after_first_chunk.response_visibility(),
+            ResponseVisibility::BodyStarted
+        );
+    }
+
+    #[test]
+    fn response_builder_failure_remains_not_visible() {
+        let tracker = ResponseVisibilityTracker::new();
+        let error = downstream_response_build_error(&tracker, "response builder failed");
+
+        assert_eq!(error.code(), ProxyErrorCode::DownstreamSendError);
+        assert_eq!(error.stage(), ExecutionStage::DownstreamSend);
+        assert_eq!(error.response_visibility(), ResponseVisibility::NotVisible);
+        assert!(error.upstream_error().is_none());
+    }
+
+    #[test]
+    fn source_meaningful_fact_sets_transport_ttft_once_before_downstream_encoding() {
+        let mut transformer =
+            StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
+        let timing = crate::proxy::runtime::transport::timing::TransportTimingState::default();
+        let base = Instant::now();
+        assert!(timing.mark_upstream_request_sent(1_000, base));
+
+        let role = transformer
+            .transform_event_with_observation(SseEvent {
+                data:
+                    "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}"
+                        .to_string(),
+                ..Default::default()
+            })
+            .expect("role observation transform must succeed");
+        assert!(!role.value.meaningful_output_observed);
+        let content = transformer.transform_event_with_observation(SseEvent {
+            data: "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}".to_string(),
+            ..Default::default()
+        }).expect("content observation transform must succeed");
+        assert!(content.value.meaningful_output_observed);
+        assert!(timing.mark_first_token(1_120, base + std::time::Duration::from_millis(120)));
+        assert!(!timing.mark_first_token(1_130, base + std::time::Duration::from_millis(130)));
+        assert_eq!(timing.snapshot().first_token_at, Some(1_120));
+        assert_eq!(timing.time_to_first_token_ms(), Some(120));
+    }
+
+    #[test]
+    fn sse_content_encoding_accepts_only_absent_or_identity_before_commit() {
+        let tracker = ResponseVisibilityTracker::new();
+        let absent = HeaderMap::new();
+        assert!(validate_sse_content_encoding(&absent, &tracker).is_ok());
+
+        let mut identity = HeaderMap::new();
+        identity.insert(CONTENT_ENCODING, HeaderValue::from_static("IDENTITY"));
+        assert!(validate_sse_content_encoding(&identity, &tracker).is_ok());
+
+        for value in ["gzip", "br", "gzip, identity", ""] {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_ENCODING, HeaderValue::from_str(value).unwrap());
+            let error = validate_sse_content_encoding(&headers, &tracker).unwrap_err();
+            assert_eq!(error.code(), ProxyErrorCode::UpstreamResponseError);
+            assert_eq!(error.stage(), ExecutionStage::UpstreamResponse);
+            assert_eq!(error.response_visibility(), ResponseVisibility::NotVisible);
+            assert!(error.upstream_error().is_none());
+        }
+    }
+
+    #[test]
+    fn stream_chunk_limit_is_checked_before_channel_enqueue() {
+        let tracker = ResponseVisibilityTracker::new();
+        tracker.advance_to(ResponseVisibility::HeadersCommitted);
+
+        let Ok(exact) = validate_stream_chunk(Bytes::from(vec![b'x'; 1_024]), 1_024, &tracker)
+        else {
+            panic!("exact chunk limit should pass");
+        };
+        assert_eq!(exact.len(), 1_024);
+
+        let error = validate_stream_chunk(Bytes::from(vec![b'x'; 1_025]), 1_024, &tracker)
+            .expect_err("chunk over the retained-buffer limit should fail before enqueue");
+        assert_eq!(
+            error.operator_message,
+            "SSE response chunk exceeded 1024 bytes (observed at least 1025)"
+        );
+        assert_eq!(
+            error.response_visibility.current(),
+            ResponseVisibility::HeadersCommitted
+        );
     }
 }

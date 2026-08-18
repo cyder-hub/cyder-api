@@ -13,7 +13,8 @@ use crate::service::redis::RedisPool;
 use super::types::{
     ApiKeyBilledAmountSnapshot, ApiKeyCompletionDelta, ApiKeyGovernanceAdmissionError,
     ApiKeyGovernanceSnapshot, ApiKeyRequestLease, ApiKeyRollupBaseline, ApiKeyRuntimeStore,
-    minute_bucket_start, normalize_currency_code,
+    minute_bucket_start, normalize_currency_code, retry_after_to_next_day,
+    retry_after_to_next_minute, retry_after_to_next_month,
 };
 
 const ADMISSION_SCRIPT: &str = r#"
@@ -528,7 +529,7 @@ impl ApiKeyRuntimeStore for RedisApiKeyRuntimeStore {
             .await
             .map_err(|err| Self::redis_admission_error("api key admission script failed", err))?;
 
-        admission_result_to_domain(api_key.id, result)
+        admission_result_to_domain(api_key.id, now_ms, result)
     }
 
     async fn release_request_lease(&self, lease: &ApiKeyRequestLease) -> Result<(), AppStoreError> {
@@ -651,6 +652,7 @@ fn snapshot_is_active(snapshot: &ApiKeyGovernanceSnapshot) -> bool {
 
 fn admission_result_to_domain(
     api_key_id: i64,
+    now_ms: i64,
     result: (i64, String, i64, i64, String),
 ) -> Result<Option<ApiKeyRequestLease>, ApiKeyGovernanceAdmissionError> {
     let (allowed, marker, limit, current, currency) = result;
@@ -667,29 +669,38 @@ fn admission_result_to_domain(
         "rate" => Err(ApiKeyGovernanceAdmissionError::RateLimited {
             limit: i32::try_from(limit).unwrap_or(i32::MAX),
             current: current_u32,
+            retry_after: retry_after_to_next_minute(now_ms),
         }),
         "concurrency" => Err(ApiKeyGovernanceAdmissionError::ConcurrencyLimited {
             limit: i32::try_from(limit).unwrap_or(i32::MAX),
             current: current_u32,
         }),
-        "daily_request" => {
-            Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded { limit, current })
-        }
-        "daily_token" => {
-            Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded { limit, current })
-        }
-        "monthly_token" => {
-            Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded { limit, current })
-        }
+        "daily_request" => Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded {
+            limit,
+            current,
+            retry_after: retry_after_to_next_day(now_ms),
+        }),
+        "daily_token" => Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded {
+            limit,
+            current,
+            retry_after: retry_after_to_next_day(now_ms),
+        }),
+        "monthly_token" => Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded {
+            limit,
+            current,
+            retry_after: retry_after_to_next_month(now_ms),
+        }),
         "daily_budget" => Err(ApiKeyGovernanceAdmissionError::DailyBudgetExceeded {
             currency,
             limit_nanos: limit,
             current_nanos: current,
+            retry_after: retry_after_to_next_day(now_ms),
         }),
         "monthly_budget" => Err(ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded {
             currency,
             limit_nanos: limit,
             current_nanos: current,
+            retry_after: retry_after_to_next_month(now_ms),
         }),
         _ => Err(ApiKeyGovernanceAdmissionError::Internal(format!(
             "api key admission script returned unknown result marker: {marker}"
@@ -706,9 +717,98 @@ mod tests {
     use std::sync::Arc;
 
     use super::super::types::{day_bucket_start, month_bucket_start};
-    use crate::database::TestDbContext;
+    use crate::database::TestDatabase;
     use crate::schema::enum_def::Action;
-    use crate::service::runtime::ApiKeyGovernanceService;
+    use crate::service::runtime::{ApiKeyGovernanceService, FixedApiKeyGovernanceClock};
+
+    #[test]
+    fn redis_admission_result_mapping_preserves_exact_reset_facts_offline() {
+        const NOW_MS: i64 = 1_767_225_599_999;
+        let cases = [
+            (
+                "rate",
+                ApiKeyGovernanceAdmissionError::RateLimited {
+                    limit: 7,
+                    current: 8,
+                    retry_after: Duration::from_millis(1),
+                },
+            ),
+            (
+                "daily_request",
+                ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded {
+                    limit: 7,
+                    current: 8,
+                    retry_after: Duration::from_millis(1),
+                },
+            ),
+            (
+                "daily_token",
+                ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded {
+                    limit: 7,
+                    current: 8,
+                    retry_after: Duration::from_millis(1),
+                },
+            ),
+            (
+                "monthly_token",
+                ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded {
+                    limit: 7,
+                    current: 8,
+                    retry_after: Duration::from_millis(1),
+                },
+            ),
+        ];
+
+        for (marker, expected) in cases {
+            let actual = admission_result_to_domain(
+                42,
+                NOW_MS,
+                (0, marker.to_string(), 7, 8, String::new()),
+            )
+            .expect_err("rejection marker should map to a domain error");
+            assert_eq!(actual, expected, "marker={marker}");
+        }
+
+        for (marker, expected) in [
+            (
+                "daily_budget",
+                ApiKeyGovernanceAdmissionError::DailyBudgetExceeded {
+                    currency: "USD".to_string(),
+                    limit_nanos: 7,
+                    current_nanos: 8,
+                    retry_after: Duration::from_millis(1),
+                },
+            ),
+            (
+                "monthly_budget",
+                ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded {
+                    currency: "USD".to_string(),
+                    limit_nanos: 7,
+                    current_nanos: 8,
+                    retry_after: Duration::from_millis(1),
+                },
+            ),
+        ] {
+            let actual = admission_result_to_domain(
+                42,
+                NOW_MS,
+                (0, marker.to_string(), 7, 8, "USD".to_string()),
+            )
+            .expect_err("budget marker should map to a domain error");
+            assert_eq!(actual, expected, "marker={marker}");
+        }
+
+        assert_eq!(
+            admission_result_to_domain(
+                42,
+                NOW_MS,
+                (0, "concurrency".to_string(), 7, 8, String::new()),
+            )
+            .expect_err("concurrency marker should reject")
+            .retry_after(),
+            None
+        );
+    }
 
     fn cache_api_key(id: i64) -> CacheApiKey {
         CacheApiKey {
@@ -765,46 +865,49 @@ mod tests {
             return;
         };
         let prefix = format!("runtime:test:{}:", Uuid::new_v4());
-        let service_a = ApiKeyGovernanceService::new(Arc::new(redis_store(pool.clone(), &prefix)));
-        let service_b = ApiKeyGovernanceService::new(Arc::new(redis_store(pool.clone(), &prefix)));
+        let test_db_context =
+            TestDatabase::new_sqlite_default("redis-api-key-concurrency-contract.sqlite").await;
+        let database = test_db_context.runtime();
+        let service_a = ApiKeyGovernanceService::new(
+            Arc::clone(&database),
+            Arc::new(redis_store(pool.clone(), &prefix)),
+        );
+        let service_b =
+            ApiKeyGovernanceService::new(database, Arc::new(redis_store(pool.clone(), &prefix)));
         let api_key = CacheApiKey {
             max_concurrent_requests: Some(1),
             ..cache_api_key(710_001)
         };
-        let test_db_context =
-            TestDbContext::new_sqlite("redis-api-key-concurrency-contract.sqlite");
+        (async {
+            let lease = service_a
+                .try_begin_api_key_request(&api_key)
+                .await
+                .expect("first request should be admitted")
+                .expect("concurrency limit should create lease");
 
-        test_db_context
-            .run_async(async {
-                let lease = service_a
-                    .try_begin_api_key_request(&api_key)
-                    .await
-                    .expect("first request should be admitted")
-                    .expect("concurrency limit should create lease");
+            let err = service_b
+                .try_begin_api_key_request(&api_key)
+                .await
+                .expect_err("second service should see shared concurrency");
+            assert_eq!(
+                err,
+                ApiKeyGovernanceAdmissionError::ConcurrencyLimited {
+                    limit: 1,
+                    current: 1,
+                }
+            );
 
-                let err = service_b
-                    .try_begin_api_key_request(&api_key)
-                    .await
-                    .expect_err("second service should see shared concurrency");
-                assert_eq!(
-                    err,
-                    ApiKeyGovernanceAdmissionError::ConcurrencyLimited {
-                        limit: 1,
-                        current: 1,
-                    }
-                );
+            service_a
+                .release_api_key_request_lease(lease)
+                .await
+                .expect("release should succeed");
 
-                service_a
-                    .release_api_key_request_lease(lease)
-                    .await
-                    .expect("release should succeed");
-
-                service_b
-                    .try_begin_api_key_request(&api_key)
-                    .await
-                    .expect("second service should admit after release");
-            })
-            .await;
+            service_b
+                .try_begin_api_key_request(&api_key)
+                .await
+                .expect("second service should admit after release");
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -813,34 +916,44 @@ mod tests {
             return;
         };
         let prefix = format!("runtime:test:{}:", Uuid::new_v4());
-        let service_a = ApiKeyGovernanceService::new(Arc::new(redis_store(pool.clone(), &prefix)));
-        let service_b = ApiKeyGovernanceService::new(Arc::new(redis_store(pool.clone(), &prefix)));
+        let clock = Arc::new(FixedApiKeyGovernanceClock::new(1_785_760_499_999));
+        let test_db_context =
+            TestDatabase::new_sqlite_default("redis-api-key-rpm-contract.sqlite").await;
+        let database = test_db_context.runtime();
+        let service_a = ApiKeyGovernanceService::new_with_clock(
+            Arc::clone(&database),
+            Arc::new(redis_store(pool.clone(), &prefix)),
+            clock.clone(),
+        );
+        let service_b = ApiKeyGovernanceService::new_with_clock(
+            database,
+            Arc::new(redis_store(pool.clone(), &prefix)),
+            clock,
+        );
         let api_key = CacheApiKey {
             rate_limit_rpm: Some(1),
             ..cache_api_key(710_002)
         };
-        let test_db_context = TestDbContext::new_sqlite("redis-api-key-rpm-contract.sqlite");
+        (async {
+            service_a
+                .try_begin_api_key_request(&api_key)
+                .await
+                .expect("first request should be admitted");
 
-        test_db_context
-            .run_async(async {
-                service_a
-                    .try_begin_api_key_request(&api_key)
-                    .await
-                    .expect("first request should be admitted");
-
-                let err = service_b
-                    .try_begin_api_key_request(&api_key)
-                    .await
-                    .expect_err("second service should share rpm bucket");
-                assert_eq!(
-                    err,
-                    ApiKeyGovernanceAdmissionError::RateLimited {
-                        limit: 1,
-                        current: 1,
-                    }
-                );
-            })
-            .await;
+            let err = service_b
+                .try_begin_api_key_request(&api_key)
+                .await
+                .expect_err("second service should share rpm bucket");
+            assert_eq!(
+                err,
+                ApiKeyGovernanceAdmissionError::RateLimited {
+                    limit: 1,
+                    current: 1,
+                    retry_after: Duration::from_millis(1),
+                }
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -849,53 +962,57 @@ mod tests {
             return;
         };
         let prefix = format!("runtime:test:{}:", Uuid::new_v4());
-        let service_a = ApiKeyGovernanceService::new(Arc::new(redis_store(pool.clone(), &prefix)));
-        let service_b = ApiKeyGovernanceService::new(Arc::new(redis_store(pool.clone(), &prefix)));
+        let test_db_context =
+            TestDatabase::new_sqlite_default("redis-api-key-completion-contract.sqlite").await;
+        let database = test_db_context.runtime();
+        let service_a = ApiKeyGovernanceService::new(
+            Arc::clone(&database),
+            Arc::new(redis_store(pool.clone(), &prefix)),
+        );
+        let service_b =
+            ApiKeyGovernanceService::new(database, Arc::new(redis_store(pool.clone(), &prefix)));
         let api_key = cache_api_key(710_003);
-        let test_db_context = TestDbContext::new_sqlite("redis-api-key-completion-contract.sqlite");
+        (async {
+            service_a
+                .try_begin_api_key_request(&api_key)
+                .await
+                .expect("request should be admitted");
+            service_a
+                .record_api_key_completion(&ApiKeyCompletionDelta {
+                    api_key_id: api_key.id,
+                    occurred_at: Utc::now().timestamp_millis(),
+                    total_tokens: 17,
+                    billed_amount_nanos: 23,
+                    billed_currency: Some("usd".to_string()),
+                })
+                .await
+                .expect("completion should be recorded");
 
-        test_db_context
-            .run_async(async {
-                service_a
-                    .try_begin_api_key_request(&api_key)
+            let snapshot = service_b
+                .get_api_key_governance_snapshot(api_key.id)
+                .await
+                .expect("snapshot should load from shared Redis state");
+            assert_eq!(snapshot.daily_request_count, 1);
+            assert_eq!(snapshot.daily_token_count, 17);
+            assert_eq!(snapshot.monthly_token_count, 17);
+            assert_eq!(
+                snapshot
+                    .daily_billed_amounts
+                    .iter()
+                    .find(|amount| amount.currency == "USD")
+                    .map(|amount| amount.amount_nanos),
+                Some(23)
+            );
+            assert_eq!(
+                service_b
+                    .list_api_key_governance_snapshots()
                     .await
-                    .expect("request should be admitted");
-                service_a
-                    .record_api_key_completion(&ApiKeyCompletionDelta {
-                        api_key_id: api_key.id,
-                        occurred_at: Utc::now().timestamp_millis(),
-                        total_tokens: 17,
-                        billed_amount_nanos: 23,
-                        billed_currency: Some("usd".to_string()),
-                    })
-                    .await
-                    .expect("completion should be recorded");
-
-                let snapshot = service_b
-                    .get_api_key_governance_snapshot(api_key.id)
-                    .await
-                    .expect("snapshot should load from shared Redis state");
-                assert_eq!(snapshot.daily_request_count, 1);
-                assert_eq!(snapshot.daily_token_count, 17);
-                assert_eq!(snapshot.monthly_token_count, 17);
-                assert_eq!(
-                    snapshot
-                        .daily_billed_amounts
-                        .iter()
-                        .find(|amount| amount.currency == "USD")
-                        .map(|amount| amount.amount_nanos),
-                    Some(23)
-                );
-                assert_eq!(
-                    service_b
-                        .list_api_key_governance_snapshots()
-                        .await
-                        .expect("active snapshots should load")
-                        .len(),
-                    1
-                );
-            })
-            .await;
+                    .expect("active snapshots should load")
+                    .len(),
+                1
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

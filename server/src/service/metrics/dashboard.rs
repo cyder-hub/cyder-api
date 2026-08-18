@@ -26,8 +26,12 @@ pub struct MetricsDashboardTodayStats {
     pub total_reasoning_tokens: i64,
     pub total_tokens: i64,
     pub total_cost: HashMap<String, i64>,
-    pub avg_first_byte_ms: Option<f64>,
+    pub avg_time_to_first_response_body_ms: Option<f64>,
+    pub time_to_first_response_body_sample_count: i64,
+    pub avg_ttft_ms: Option<f64>,
+    pub ttft_sample_count: i64,
     pub avg_total_latency_ms: Option<f64>,
+    pub total_latency_sample_count: i64,
     pub active_provider_count: i64,
     pub active_model_count: i64,
     pub active_api_key_count: i64,
@@ -53,8 +57,13 @@ impl From<DbDashboardTodayStats> for MetricsDashboardTodayStats {
             total_reasoning_tokens: value.total_reasoning_tokens,
             total_tokens: value.total_tokens,
             total_cost: value.total_cost,
-            avg_first_byte_ms: value.avg_first_byte_ms,
+            avg_time_to_first_response_body_ms: value.avg_time_to_first_response_body_ms,
+            time_to_first_response_body_sample_count: value
+                .time_to_first_response_body_sample_count,
+            avg_ttft_ms: value.avg_ttft_ms,
+            ttft_sample_count: value.ttft_sample_count,
             avg_total_latency_ms: value.avg_total_latency_ms,
+            total_latency_sample_count: value.total_latency_sample_count,
             active_provider_count: value.active_provider_count,
             active_model_count: value.active_model_count,
             active_api_key_count: value.active_api_key_count,
@@ -68,15 +77,13 @@ impl MetricsService {
         app_state: &Arc<AppState>,
         timezone: Option<&str>,
     ) -> Result<MetricsDashboardResourcesReadModel, BaseError> {
-        let overview = get_dashboard_overview_stats()?;
-        let today = self.dashboard_today_stats(timezone)?;
+        let overview = get_dashboard_overview_stats(self.database()).await?;
+        let today = self.dashboard_today_stats(timezone).await?;
         let window = self.default_provider_runtime_window();
-        let runtime_items = self
-            .build_provider_runtime_items(app_state, window, true)
-            .await?;
+        let mut runtime_items = self.build_provider_runtime_items(window, true).await?;
         let runtime = self
-            .provider_runtime_summary_from_items(app_state, window, &runtime_items)
-            .await;
+            .provider_runtime_summary_from_items(app_state, window, &mut runtime_items, true)
+            .await?;
         Ok(MetricsDashboardResourcesReadModel {
             overview,
             today,
@@ -85,35 +92,47 @@ impl MetricsService {
         })
     }
 
-    pub fn dashboard_today_stats(
+    pub async fn dashboard_today_stats(
         &self,
         timezone: Option<&str>,
     ) -> Result<MetricsDashboardTodayStats, BaseError> {
         if !self.config().enabled {
-            return self.dashboard_today_request_log_fallback(timezone, "metrics_disabled");
+            return self
+                .dashboard_today_request_log_fallback(timezone, "metrics_disabled")
+                .await;
         }
 
         let start_time_ms = start_of_today_timestamp_ms(timezone)?;
         let end_time_ms = Utc::now().timestamp_millis();
         let global_aggregates = query_request_window_aggregates(
+            self.database(),
             start_time_ms,
             end_time_ms,
             Some("global"),
             Some("global"),
-        )?;
+        )
+        .await?;
 
         let Some(global) = global_aggregates.into_iter().next() else {
             if self.config().request_log_query_fallback_enabled {
-                return self.dashboard_today_request_log_fallback(timezone, "rollup_empty");
+                return self
+                    .dashboard_today_request_log_fallback(timezone, "rollup_empty")
+                    .await;
             }
             return Ok(MetricsDashboardTodayStats::default());
         };
 
-        let total_cost =
-            query_cost_window_aggregates(start_time_ms, end_time_ms, "global", "global")?
-                .into_iter()
-                .map(|item| (item.currency, item.amount_nanos))
-                .collect::<HashMap<_, _>>();
+        let total_cost = query_cost_window_aggregates(
+            self.database(),
+            start_time_ms,
+            end_time_ms,
+            "global",
+            "global",
+        )
+        .await?
+        .into_iter()
+        .map(|item| (item.currency, item.amount_nanos))
+        .collect::<HashMap<_, _>>();
 
         Ok(MetricsDashboardTodayStats {
             request_count: global.request_count,
@@ -125,21 +144,43 @@ impl MetricsService {
             total_reasoning_tokens: global.reasoning_tokens,
             total_tokens: global.total_tokens,
             total_cost,
-            avg_first_byte_ms: average_or_none(
-                global.first_byte_latency_sum_ms,
-                global.first_byte_latency_count,
+            avg_time_to_first_response_body_ms: average_or_none(
+                global.time_to_first_response_body_sum_ms,
+                global.time_to_first_response_body_count,
             ),
+            time_to_first_response_body_sample_count: global.time_to_first_response_body_count,
+            avg_ttft_ms: average_or_none(global.ttft_sum_ms, global.ttft_count),
+            ttft_sample_count: global.ttft_count,
             avg_total_latency_ms: average_or_none(
                 global.total_latency_sum_ms,
                 global.total_latency_count,
             ),
-            active_provider_count: active_scope_count(start_time_ms, end_time_ms, "provider")?,
-            active_model_count: active_scope_count(start_time_ms, end_time_ms, "model")?,
-            active_api_key_count: active_scope_count(start_time_ms, end_time_ms, "api_key")?,
+            total_latency_sample_count: global.total_latency_count,
+            active_provider_count: active_scope_count(
+                self.database(),
+                start_time_ms,
+                end_time_ms,
+                "provider",
+            )
+            .await?,
+            active_model_count: active_scope_count(
+                self.database(),
+                start_time_ms,
+                end_time_ms,
+                "model",
+            )
+            .await?,
+            active_api_key_count: active_scope_count(
+                self.database(),
+                start_time_ms,
+                end_time_ms,
+                "api_key",
+            )
+            .await?,
         })
     }
 
-    fn dashboard_today_request_log_fallback(
+    async fn dashboard_today_request_log_fallback(
         &self,
         timezone: Option<&str>,
         reason: &'static str,
@@ -148,7 +189,7 @@ impl MetricsService {
             return Ok(MetricsDashboardTodayStats::default());
         }
 
-        let fallback = get_dashboard_today_stats(timezone)?;
+        let fallback = get_dashboard_today_stats(self.database(), timezone).await?;
         if fallback.request_count > 0 {
             crate::warn_event!(
                 "metrics.dashboard_today_request_log_fallback",
@@ -160,16 +201,24 @@ impl MetricsService {
     }
 }
 
-fn active_scope_count(
+async fn active_scope_count(
+    database: &crate::database::runtime::DatabaseRuntime,
     start_time_ms: i64,
     end_time_ms: i64,
     scope_type: &str,
 ) -> Result<i64, BaseError> {
     Ok(
-        query_request_window_aggregates(start_time_ms, end_time_ms, Some(scope_type), None)?
-            .into_iter()
-            .filter(|item| item.request_count > 0)
-            .count() as i64,
+        query_request_window_aggregates(
+            database,
+            start_time_ms,
+            end_time_ms,
+            Some(scope_type),
+            None,
+        )
+        .await?
+        .into_iter()
+        .filter(|item| item.request_count > 0)
+        .count() as i64,
     )
 }
 

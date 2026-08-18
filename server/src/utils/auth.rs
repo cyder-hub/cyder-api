@@ -338,27 +338,6 @@ fn issue_access_token_with_expiration(
     issue_manager_jwt(&KEYS.access, &claims)
 }
 
-#[cfg(test)]
-pub(crate) fn issue_access_token_with_expiration_for_test(
-    manager_id: i64,
-    login_instance_id: i64,
-    access_jti: &str,
-    session_version: i64,
-    credential_epoch: &Uuid,
-    issued_at: i64,
-    expires_at: i64,
-) -> String {
-    issue_access_token_with_expiration(
-        manager_id,
-        login_instance_id,
-        access_jti,
-        session_version,
-        credential_epoch,
-        issued_at,
-        expires_at,
-    )
-}
-
 pub fn decode_access_token(token: &str) -> Result<ManagerAuthContext, JwtError> {
     let result = decode_manager_jwt::<ManagerAccessClaims>(&KEYS.access, token, ACCESS_AUDIENCE)?;
     if result.token_use != ACCESS_TOKEN_USE || result.session_version < 1 {

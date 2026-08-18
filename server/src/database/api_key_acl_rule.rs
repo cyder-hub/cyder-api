@@ -1,12 +1,12 @@
-use chrono::Utc;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::{DbConnection, DbResult, get_connection};
+use super::DbResult;
+use super::runtime::{DatabaseRuntime, DatabaseWorkload, db_execute as async_db_execute};
 use crate::controller::BaseError;
+use crate::db_object;
 use crate::schema::enum_def::{Action, RuleScope};
 use crate::utils::ID_GENERATOR;
-use crate::{db_execute, db_object};
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug, Clone, Serialize)]
@@ -110,90 +110,42 @@ pub(crate) fn map_rule_inputs(
     Ok(mapped)
 }
 
-fn list_by_api_key_id_with_conn(
-    conn: &mut DbConnection,
-    api_key_id_value: i64,
-) -> DbResult<Vec<ApiKeyAclRule>> {
-    db_execute!(conn, {
-        let rows = api_key_acl_rule::table
-            .filter(
-                api_key_acl_rule::dsl::api_key_id
-                    .eq(api_key_id_value)
-                    .and(api_key_acl_rule::dsl::deleted_at.is_null()),
-            )
-            .order((
-                api_key_acl_rule::dsl::priority.asc(),
-                api_key_acl_rule::dsl::created_at.asc(),
-                api_key_acl_rule::dsl::id.asc(),
-            ))
-            .select(ApiKeyAclRuleDb::as_select())
-            .load::<ApiKeyAclRuleDb>(conn)
-            .map_err(|e| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to load api key ACL rules for {}: {}",
-                    api_key_id_value, e
-                )))
-            })?;
-
-        Ok(rows.into_iter().map(ApiKeyAclRuleDb::from_db).collect())
-    })
-}
-
-pub(crate) fn replace_for_api_key_with_conn(
-    conn: &mut DbConnection,
-    api_key_id_value: i64,
-    rules: &[ApiKeyAclRuleInput],
-    now: i64,
-) -> DbResult<Vec<ApiKeyAclRule>> {
-    let mapped_rules = map_rule_inputs(api_key_id_value, rules, now)?;
-
-    db_execute!(conn, {
-        conn.transaction::<(), BaseError, _>(|conn| {
-            diesel::delete(
-                api_key_acl_rule::table
-                    .filter(api_key_acl_rule::dsl::api_key_id.eq(api_key_id_value)),
-            )
-            .execute(conn)
-            .map_err(|e| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to replace ACL rules for api key {}: {}",
-                    api_key_id_value, e
-                )))
-            })?;
-
-            if !mapped_rules.is_empty() {
-                let db_rows: Vec<_> = mapped_rules.iter().map(NewApiKeyAclRuleDb::to_db).collect();
-
-                diesel::insert_into(api_key_acl_rule::table)
-                    .values(&db_rows)
-                    .execute(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to insert ACL rules for api key {}: {}",
-                            api_key_id_value, e
-                        )))
-                    })?;
-            }
-
-            Ok(())
-        })
-    })?;
-
-    list_by_api_key_id_with_conn(conn, api_key_id_value)
-}
-
 impl ApiKeyAclRule {
-    pub fn list_by_api_key_id(api_key_id_value: i64) -> DbResult<Vec<ApiKeyAclRule>> {
-        let conn = &mut get_connection()?;
-        list_by_api_key_id_with_conn(conn, api_key_id_value)
-    }
-
-    pub fn replace_for_api_key(
+    pub async fn list_by_api_key_id(
+        database: &DatabaseRuntime,
         api_key_id_value: i64,
-        rules: &[ApiKeyAclRuleInput],
     ) -> DbResult<Vec<ApiKeyAclRule>> {
-        let conn = &mut get_connection()?;
-        replace_for_api_key_with_conn(conn, api_key_id_value, rules, Utc::now().timestamp_millis())
+        database
+            .run_db(DatabaseWorkload::Foreground, move |connection| {
+                Box::pin(async move {
+                    async_db_execute!(connection as conn, {
+                        let query = api_key_acl_rule::table
+                            .filter(
+                                api_key_acl_rule::dsl::api_key_id
+                                    .eq(api_key_id_value)
+                                    .and(api_key_acl_rule::dsl::deleted_at.is_null()),
+                            )
+                            .order((
+                                api_key_acl_rule::dsl::priority.asc(),
+                                api_key_acl_rule::dsl::created_at.asc(),
+                                api_key_acl_rule::dsl::id.asc(),
+                            ))
+                            .select(ApiKeyAclRuleDb::as_select());
+                        let rows: Vec<ApiKeyAclRuleDb> =
+                            diesel_async::RunQueryDsl::load(query, &mut **conn)
+                                .await
+                                .map_err(|error| {
+                                    BaseError::DatabaseFatal(Some(format!(
+                                        "Failed to load api key ACL rules for {}: {}",
+                                        api_key_id_value, error
+                                    )))
+                                })?;
+
+                        Ok(rows.into_iter().map(ApiKeyAclRuleDb::from_db).collect())
+                    })
+                })
+            })
+            .await
     }
 }
 

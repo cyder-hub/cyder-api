@@ -191,40 +191,15 @@ diesel::table! {
 }
 
 diesel::table! {
-    reasoning_config (id) {
-        id -> BigInt,
-        scope_kind -> Text,
-        provider_id -> Nullable<BigInt>,
-        model_id -> Nullable<BigInt>,
-        mode -> Text,
-        family_key -> Nullable<Text>,
-        deleted_at -> Nullable<BigInt>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-    }
-}
+    use diesel::sql_types::{BigInt, Bool, Nullable, Text};
 
-diesel::table! {
-    reasoning_config_preset (id) {
+    request_patch_variant (id) {
         id -> BigInt,
-        config_id -> BigInt,
-        preset_key -> Text,
-        expose_in_models -> Bool,
-        is_enabled -> Bool,
-        deleted_at -> Nullable<BigInt>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-    }
-}
-
-diesel::table! {
-    runtime_feature_config (id) {
-        id -> BigInt,
-        scope_kind -> Text,
-        provider_id -> Nullable<BigInt>,
+        source_id -> BigInt,
         model_id -> Nullable<BigInt>,
-        feature_key -> Text,
+        suffix -> Nullable<Text>,
         enabled -> Bool,
+        expose_in_models -> Bool,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
         updated_at -> BigInt,
@@ -232,18 +207,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::ModelKindMapping;
+    use diesel::sql_types::{BigInt, Bool, Nullable, Text};
+
     model (id) {
         id -> BigInt,
         provider_id -> BigInt,
         cost_catalog_id -> Nullable<BigInt>,
         model_name -> Text,
         real_model_name -> Nullable<Text>,
-        supports_streaming -> Bool,
-        supports_tools -> Bool,
-        supports_reasoning -> Bool,
-        supports_image_input -> Bool,
-        supports_embeddings -> Bool,
-        supports_rerank -> Bool,
+        model_kind -> ModelKindMapping,
+        source_selection_mode -> Text,
         is_enabled -> Bool,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
@@ -252,7 +226,18 @@ diesel::table! {
 }
 
 diesel::table! {
-    use crate::schema::enum_def::ProviderTypeMapping;
+    use diesel::sql_types::{BigInt, Bool};
+
+    model_source_binding (model_id, source_id) {
+        model_id -> BigInt,
+        source_id -> BigInt,
+        is_default -> Bool,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     use crate::schema::enum_def::ProviderApiKeyModeMapping;
     use diesel::sql_types::{BigInt, Text, Bool, Nullable};
 
@@ -260,14 +245,35 @@ diesel::table! {
         id -> BigInt,
         provider_key -> Text,
         name -> Text,
-        endpoint -> Text,
-        use_proxy -> Bool,
         is_enabled -> Bool,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
         updated_at -> BigInt,
-        provider_type -> ProviderTypeMapping,
         provider_api_key_mode -> ProviderApiKeyModeMapping,
+    }
+}
+
+diesel::table! {
+    use crate::schema::enum_def::UpstreamProfileTypeMapping;
+    use diesel::sql_types::{BigInt, Text, Bool, Nullable};
+
+    upstream_source (id) {
+        id -> BigInt,
+        provider_id -> BigInt,
+        profile_type -> UpstreamProfileTypeMapping,
+        base_url -> Text,
+        use_proxy -> Bool,
+        chat_completions_enabled -> Nullable<Bool>,
+        chat_completions_path_override -> Nullable<Text>,
+        embeddings_enabled -> Nullable<Bool>,
+        embeddings_path_override -> Nullable<Text>,
+        rerank_enabled -> Nullable<Bool>,
+        rerank_path_override -> Nullable<Text>,
+        is_enabled -> Bool,
+        is_default -> Bool,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
     }
 }
 
@@ -293,33 +299,44 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::DownstreamProtocolMapping;
+    use crate::schema::enum_def::ModelKindMapping;
     use crate::schema::enum_def::RequestStatusMapping;
-    use crate::schema::enum_def::LlmApiTypeMapping;
+    use crate::schema::enum_def::UpstreamProfileTypeMapping;
+    use crate::schema::enum_def::UpstreamProtocolMapping;
     use diesel::sql_types::{BigInt, Bool, Integer, Nullable, Text};
 
     request_log (id) {
         id -> BigInt,
+        request_id -> Text,
+        client_request_id -> Nullable<Text>,
         api_key_id -> BigInt,
         requested_model_name -> Nullable<Text>,
         base_requested_model_name -> Nullable<Text>,
-        resolved_reasoning_suffix -> Nullable<Text>,
-        resolved_reasoning_preset -> Nullable<Text>,
+        resolved_patch_suffix -> Nullable<Text>,
         request_received_at -> BigInt,
         upstream_request_sent_at -> Nullable<BigInt>,
-        #[sql_name = "response_started_to_client_at"]
-        llm_response_first_chunk_at -> Nullable<BigInt>,
-        #[sql_name = "completed_at"]
-        llm_response_completed_at -> Nullable<BigInt>,
+        upstream_response_headers_at -> Nullable<BigInt>,
+        upstream_first_body_chunk_at -> Nullable<BigInt>,
+        first_response_body_at -> Nullable<BigInt>,
+        first_token_at -> Nullable<BigInt>,
+        max_upstream_response_idle_ms -> Nullable<BigInt>,
+        completed_at -> Nullable<BigInt>,
         is_stream -> Bool,
         client_ip -> Nullable<Text>,
         provider_id -> Nullable<BigInt>,
         provider_api_key_id -> Nullable<BigInt>,
         model_id -> Nullable<BigInt>,
+        source_id -> Nullable<BigInt>,
+        source_selection_reason -> Nullable<Text>,
         provider_key_snapshot -> Nullable<Text>,
         provider_name_snapshot -> Nullable<Text>,
         model_name_snapshot -> Nullable<Text>,
         real_model_name_snapshot -> Nullable<Text>,
-        llm_api_type -> Nullable<LlmApiTypeMapping>,
+        model_kind_snapshot -> Nullable<ModelKindMapping>,
+        source_profile_type_snapshot -> Nullable<UpstreamProfileTypeMapping>,
+        source_base_url_snapshot -> Nullable<Text>,
+        upstream_protocol -> Nullable<UpstreamProtocolMapping>,
         upstream_http_status -> Nullable<Integer>,
         #[sql_name = "overall_status"]
         status -> RequestStatusMapping,
@@ -342,7 +359,7 @@ diesel::table! {
         cache_write_tokens -> Nullable<Integer>,
         reasoning_tokens -> Nullable<Integer>,
         total_tokens -> Nullable<Integer>,
-        user_api_type -> LlmApiTypeMapping,
+        downstream_protocol -> DownstreamProtocolMapping,
     }
 }
 
@@ -369,8 +386,10 @@ diesel::table! {
         success_count -> BigInt,
         error_count -> BigInt,
         cancelled_count -> BigInt,
-        first_byte_latency_sum_ms -> BigInt,
-        first_byte_latency_count -> BigInt,
+        time_to_first_response_body_sum_ms -> BigInt,
+        time_to_first_response_body_count -> BigInt,
+        ttft_sum_ms -> BigInt,
+        ttft_count -> BigInt,
         total_latency_sum_ms -> BigInt,
         total_latency_count -> BigInt,
         input_tokens -> BigInt,
@@ -417,14 +436,12 @@ diesel::table! {
 
     request_patch_rule (id) {
         id -> BigInt,
-        provider_id -> Nullable<BigInt>,
-        model_id -> Nullable<BigInt>,
+        variant_id -> BigInt,
         placement -> RequestPatchPlacementMapping,
         target -> Text,
         operation -> RequestPatchOperationMapping,
         value_json -> Nullable<Text>,
         description -> Nullable<Text>,
-        is_enabled -> Bool,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
         updated_at -> BigInt,
@@ -440,19 +457,21 @@ diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
+diesel::joinable!(model_source_binding -> model (model_id));
+diesel::joinable!(model_source_binding -> upstream_source (source_id));
 diesel::joinable!(manager_totp_recovery_code -> manager_credential (manager_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
-diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
-diesel::joinable!(runtime_feature_config -> model (model_id));
-diesel::joinable!(runtime_feature_config -> provider (provider_id));
 diesel::joinable!(request_log -> api_key (api_key_id));
 diesel::joinable!(request_log -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
-diesel::joinable!(request_patch_rule -> model (model_id));
-diesel::joinable!(request_patch_rule -> provider (provider_id));
+diesel::joinable!(request_log -> upstream_source (source_id));
+diesel::joinable!(request_patch_rule -> request_patch_variant (variant_id));
+diesel::joinable!(request_patch_variant -> model (model_id));
+diesel::joinable!(request_patch_variant -> upstream_source (source_id));
+diesel::joinable!(upstream_source -> provider (provider_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     api_key,
@@ -470,11 +489,11 @@ diesel::allow_tables_to_appear_in_same_query!(
     metric_ingested_request_log,
     metric_request_rollup_minute,
     model,
+    model_source_binding,
     provider,
     provider_api_key,
-    reasoning_config,
-    reasoning_config_preset,
-    runtime_feature_config,
+    request_patch_variant,
     request_log,
     request_patch_rule,
+    upstream_source,
 );

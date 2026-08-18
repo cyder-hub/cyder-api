@@ -1,14 +1,16 @@
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::stream::StreamTransformContext;
+use crate::service::transform::stream::session::try_append_tool_arguments;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 use crate::utils::sse::SseEvent;
 
 use super::metadata::*;
 use super::payload::*;
+use super::usage::{gemini_usage_to_unified, unified_usage_to_gemini};
 
 impl From<UnifiedChunkResponse> for GeminiChunkResponse {
     fn from(unified_chunk: UnifiedChunkResponse) -> Self {
@@ -17,6 +19,7 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
             .provider_session_metadata
             .clone()
             .and_then(|metadata| metadata.gemini);
+        let response_id = gemini_metadata.as_ref().map(|_| unified_chunk.id.clone());
         let candidates = unified_chunk
             .choices
             .into_iter()
@@ -48,10 +51,17 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
                         UnifiedContentPartDelta::TextDelta { text, .. } => {
                             parts.push(GeminiPart::Text { text });
                         }
+                        UnifiedContentPartDelta::ReasoningDelta { text, .. } => {
+                            parts.push(GeminiPart::Thought {
+                                text,
+                                thought: true,
+                                thought_signature: None,
+                            });
+                        }
                         UnifiedContentPartDelta::ImageDelta { .. } => {
                             apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Gemini),
+                                TransformProtocol::Downstream(DownstreamProtocol::Gemini),
                                 TransformValueKind::ImageDelta,
                                 "Dropping unsupported image delta from Gemini stream conversion.",
                             );
@@ -64,7 +74,12 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
                             if let (Some(name), Some(args_str)) = (tc.name, tc.arguments) {
                                 if let Ok(args) = serde_json::from_str(&args_str) {
                                     parts.push(GeminiPart::FunctionCall {
-                                        function_call: GeminiFunctionCall { name, args },
+                                        function_call: GeminiFunctionCall {
+                                            id: tc.id,
+                                            name,
+                                            args,
+                                        },
+                                        thought_signature: None,
                                     });
                                 }
                             }
@@ -105,13 +120,10 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
             })
             .collect();
 
-        let usage_metadata = unified_chunk.usage.map(|u| GeminiChunkUsageMetadata {
-            prompt_token_count: u.input_tokens,
-            candidates_token_count: Some(u.output_tokens),
-            total_token_count: u.total_tokens,
-        });
+        let usage_metadata = unified_chunk.usage.map(unified_usage_to_gemini);
 
         GeminiChunkResponse {
+            response_id,
             candidates,
             prompt_feedback: gemini_metadata
                 .and_then(|metadata| unified_prompt_feedback_to_gemini(metadata.prompt_feedback)),
@@ -121,51 +133,86 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
     }
 }
 
-pub(crate) fn transform_unified_stream_events_to_gemini_events(
+pub(crate) fn try_transform_unified_stream_events_to_gemini_events(
     stream_events: Vec<UnifiedStreamEvent>,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut transformed = Vec::new();
 
     for event in stream_events {
         let maybe_event = match event {
-            UnifiedStreamEvent::ContentBlockDelta { text, .. } => {
-                serde_json::to_string(&GeminiChunkResponse {
-                    candidates: vec![GeminiCandidate {
-                        index: Some(0),
-                        content: Some(GeminiResponseContent {
-                            role: "model".to_string(),
-                            parts: vec![GeminiPart::Text { text }],
-                        }),
-                        finish_reason: None,
-                        safety_ratings: None,
-                        token_count: None,
-                        citation_metadata: None,
-                    }],
-                    prompt_feedback: None,
-                    usage_metadata: None,
-                    synthetic_metadata: None,
-                })
-                .ok()
-                .map(|data| SseEvent {
-                    data,
-                    ..Default::default()
-                })
+            UnifiedStreamEvent::ContentBlockDelta { text, .. }
+            | UnifiedStreamEvent::RefusalDelta { text, .. } => Some(GeminiChunkResponse {
+                response_id: context.native_gemini_response_id_clone(),
+                candidates: vec![GeminiCandidate {
+                    index: Some(0),
+                    content: Some(GeminiResponseContent {
+                        role: "model".to_string(),
+                        parts: vec![GeminiPart::Text { text }],
+                    }),
+                    finish_reason: None,
+                    safety_ratings: None,
+                    token_count: None,
+                    citation_metadata: None,
+                }],
+                prompt_feedback: None,
+                usage_metadata: None,
+                synthetic_metadata: None,
+            }),
+            UnifiedStreamEvent::ToolCallStart { index, id, name } => {
+                let state = context
+                    .gemini_target_tool_calls_mut()
+                    .entry(index)
+                    .or_default();
+                state.id = Some(id);
+                state.name = Some(name);
+                None
             }
             UnifiedStreamEvent::ToolCallArgumentsDelta {
-                name: Some(name),
+                index,
+                id,
+                name,
                 arguments,
                 ..
-            } => serde_json::from_str::<Value>(&arguments)
-                .ok()
-                .and_then(|args| {
-                    serde_json::to_string(&GeminiChunkResponse {
+            } => {
+                let state = context
+                    .gemini_target_tool_calls_mut()
+                    .entry(index)
+                    .or_default();
+                if state.id.is_none() {
+                    state.id = id;
+                }
+                if state.name.is_none() {
+                    state.name = name;
+                }
+                try_append_tool_arguments(&mut state.arguments, &arguments);
+                None
+            }
+            UnifiedStreamEvent::ToolCallStop { index, .. } => context
+                .gemini_target_tool_calls_mut()
+                .remove(&index)
+                .and_then(|state| {
+                    let name = state.name?;
+                    let args = if state.arguments.trim().is_empty() {
+                        Value::Object(Default::default())
+                    } else {
+                        match serde_json::from_str::<Value>(&state.arguments) {
+                            Ok(args) => args,
+                            Err(_) => return None,
+                        }
+                    };
+                    args.is_object().then_some(GeminiChunkResponse {
                         candidates: vec![GeminiCandidate {
                             index: Some(0),
                             content: Some(GeminiResponseContent {
                                 role: "model".to_string(),
                                 parts: vec![GeminiPart::FunctionCall {
-                                    function_call: GeminiFunctionCall { name, args },
+                                    function_call: GeminiFunctionCall {
+                                        id: state.id,
+                                        name,
+                                        args,
+                                    },
+                                    thought_signature: None,
                                 }],
                             }),
                             finish_reason: None,
@@ -176,37 +223,28 @@ pub(crate) fn transform_unified_stream_events_to_gemini_events(
                         prompt_feedback: None,
                         usage_metadata: None,
                         synthetic_metadata: None,
-                    })
-                    .ok()
-                    .map(|data| SseEvent {
-                        data,
-                        ..Default::default()
+                        response_id: context.native_gemini_response_id_clone(),
                     })
                 }),
-            UnifiedStreamEvent::MessageDelta { finish_reason } => finish_reason
-                .map(|reason| {
-                    let finish_reason = map_openai_finish_reason_to_gemini(&reason);
-                    GeminiChunkResponse {
-                        candidates: vec![GeminiCandidate {
-                            index: Some(0),
-                            content: None,
-                            finish_reason: Some(finish_reason),
-                            safety_ratings: None,
-                            token_count: None,
-                            citation_metadata: None,
-                        }],
-                        prompt_feedback: None,
-                        usage_metadata: None,
-                        synthetic_metadata: None,
-                    }
-                })
-                .and_then(|chunk| {
-                    serde_json::to_string(&chunk).ok().map(|data| SseEvent {
-                        data,
-                        ..Default::default()
-                    })
-                }),
-            UnifiedStreamEvent::Usage { usage } => serde_json::to_string(&GeminiChunkResponse {
+            UnifiedStreamEvent::MessageDelta { finish_reason } => finish_reason.map(|reason| {
+                let finish_reason = map_openai_finish_reason_to_gemini(&reason);
+                GeminiChunkResponse {
+                    response_id: context.native_gemini_response_id_clone(),
+                    candidates: vec![GeminiCandidate {
+                        index: Some(0),
+                        content: None,
+                        finish_reason: Some(finish_reason),
+                        safety_ratings: None,
+                        token_count: None,
+                        citation_metadata: None,
+                    }],
+                    prompt_feedback: None,
+                    usage_metadata: None,
+                    synthetic_metadata: None,
+                }
+            }),
+            UnifiedStreamEvent::Usage { usage } => Some(GeminiChunkResponse {
+                response_id: context.native_gemini_response_id_clone(),
                 candidates: vec![GeminiCandidate {
                     index: Some(0),
                     content: None,
@@ -216,45 +254,36 @@ pub(crate) fn transform_unified_stream_events_to_gemini_events(
                     citation_metadata: None,
                 }],
                 prompt_feedback: None,
-                usage_metadata: Some(GeminiChunkUsageMetadata {
-                    prompt_token_count: usage.input_tokens,
-                    candidates_token_count: Some(usage.output_tokens),
-                    total_token_count: usage.total_tokens,
-                }),
+                usage_metadata: Some(unified_usage_to_gemini(usage)),
                 synthetic_metadata: None,
-            })
-            .ok()
-            .map(|data| SseEvent {
-                data,
-                ..Default::default()
             }),
-            UnifiedStreamEvent::ReasoningStart { index } => Some(build_gemini_stream_diagnostic(
-                context,
-                TransformValueKind::ReasoningDelta,
-                format!(
-                    "Gemini chunk candidates do not expose a native reasoning_start event; index={index} was downgraded to a structured transform diagnostic."
-                ),
-            )),
-            UnifiedStreamEvent::ReasoningDelta { index, text, .. } => {
-                Some(build_gemini_stream_diagnostic(
-                    context,
-                    TransformValueKind::ReasoningDelta,
-                    format!(
-                        "Gemini chunk candidates do not expose a native reasoning delta; index={index}, chars={} was downgraded to a structured transform diagnostic.",
-                        text.chars().count()
-                    ),
-                ))
-            }
-            UnifiedStreamEvent::ReasoningStop { index } => Some(build_gemini_stream_diagnostic(
-                context,
-                TransformValueKind::ReasoningDelta,
-                format!(
-                    "Gemini chunk candidates do not expose a native reasoning_stop event; index={index} was downgraded to a structured transform diagnostic."
-                ),
-            )),
+            UnifiedStreamEvent::ReasoningStart { .. }
+            | UnifiedStreamEvent::ReasoningStop { .. } => None,
+            UnifiedStreamEvent::ReasoningDelta { text, .. } => Some(GeminiChunkResponse {
+                response_id: context.native_gemini_response_id_clone(),
+                candidates: vec![GeminiCandidate {
+                    index: Some(0),
+                    content: Some(GeminiResponseContent {
+                        role: "model".to_string(),
+                        parts: vec![GeminiPart::Thought {
+                            text,
+                            thought: true,
+                            thought_signature: None,
+                        }],
+                    }),
+                    finish_reason: None,
+                    safety_ratings: None,
+                    token_count: None,
+                    citation_metadata: None,
+                }],
+                prompt_feedback: None,
+                usage_metadata: None,
+                synthetic_metadata: None,
+            }),
             UnifiedStreamEvent::BlobDelta { index, data } => {
                 if let Some(inline_data) = gemini_inline_data_from_blob(&data) {
-                    serde_json::to_string(&GeminiChunkResponse {
+                    Some(GeminiChunkResponse {
+                        response_id: context.native_gemini_response_id_clone(),
                         candidates: vec![GeminiCandidate {
                             index: index.or(Some(0)),
                             content: Some(GeminiResponseContent {
@@ -270,19 +299,9 @@ pub(crate) fn transform_unified_stream_events_to_gemini_events(
                         usage_metadata: None,
                         synthetic_metadata: None,
                     })
-                    .ok()
-                    .map(|data| SseEvent {
-                        data,
-                        ..Default::default()
-                    })
                 } else {
-                    Some(build_gemini_stream_diagnostic(
-                        context,
-                        TransformValueKind::BlobDelta,
-                        format!(
-                            "Gemini stream encoding only preserves blob deltas that carry inline data fields; index={index:?} was downgraded to a structured transform diagnostic."
-                        ),
-                    ))
+                    build_gemini_stream_diagnostic(context, TransformValueKind::BlobDelta);
+                    None
                 }
             }
             UnifiedStreamEvent::ItemAdded { .. }
@@ -293,46 +312,38 @@ pub(crate) fn transform_unified_stream_events_to_gemini_events(
             | UnifiedStreamEvent::ContentPartDone { .. }
             | UnifiedStreamEvent::ContentBlockStart { .. }
             | UnifiedStreamEvent::ContentBlockStop { .. }
-            | UnifiedStreamEvent::ToolCallStart { .. }
-            | UnifiedStreamEvent::ToolCallArgumentsDelta { name: None, .. }
-            | UnifiedStreamEvent::ToolCallStop { .. }
             | UnifiedStreamEvent::ReasoningSummaryPartAdded { .. }
             | UnifiedStreamEvent::ReasoningSummaryPartDone { .. }
             | UnifiedStreamEvent::Error { .. } => None,
         };
 
-        if let Some(event) = maybe_event {
-            transformed.push(event);
+        if let Some(chunk) = maybe_event {
+            transformed.push(SseEvent {
+                data: serde_json::to_string(&chunk)?,
+                ..Default::default()
+            });
         }
     }
 
     if transformed.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(transformed)
+        Ok(Some(transformed))
     }
 }
 
-pub(crate) fn transform_unified_chunk_to_gemini_events(
+pub(crate) fn try_transform_unified_chunk_to_gemini_events(
     mut unified_chunk: UnifiedChunkResponse,
     context: &mut StreamTransformContext<'_>,
-) -> Option<Vec<SseEvent>> {
+) -> Result<Option<Vec<SseEvent>>, serde_json::Error> {
     let mut events = Vec::new();
 
     for choice in &mut unified_chunk.choices {
         let mut filtered = Vec::new();
         for part in std::mem::take(&mut choice.delta.content) {
             match part {
-                UnifiedContentPartDelta::ImageDelta { index, url, data } => {
-                    events.push(build_gemini_stream_diagnostic(
-                        context,
-                        TransformValueKind::ImageDelta,
-                        format!(
-                            "Gemini chunk candidates cannot faithfully encode legacy image deltas without inline mime metadata; index={index}, has_url={}, has_data={} was downgraded to a structured transform diagnostic.",
-                            url.as_ref().is_some_and(|value| !value.is_empty()),
-                            data.as_ref().is_some_and(|value| !value.is_empty())
-                        ),
-                    ));
+                UnifiedContentPartDelta::ImageDelta { .. } => {
+                    build_gemini_stream_diagnostic(context, TransformValueKind::ImageDelta);
                 }
                 other => filtered.push(other),
             }
@@ -348,36 +359,63 @@ pub(crate) fn transform_unified_chunk_to_gemini_events(
         });
 
     if has_chunk_payload {
-        let value = serde_json::to_value(GeminiChunkResponse::from(unified_chunk)).ok()?;
+        let value = serde_json::to_value(GeminiChunkResponse::from(unified_chunk))?;
         if value
             .get("candidates")
             .and_then(|c| c.as_array())
             .is_some_and(|candidates| !candidates.is_empty())
         {
             events.push(SseEvent {
-                data: serde_json::to_string(&value).unwrap_or_default(),
+                data: serde_json::to_string(&value)?,
                 ..Default::default()
             });
         }
     }
 
-    (!events.is_empty()).then_some(events)
+    Ok((!events.is_empty()).then_some(events))
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_stream_events_to_gemini_events(
+    stream_events: Vec<UnifiedStreamEvent>,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_stream_events_to_gemini_events(stream_events, context)
+        .expect("Gemini test stream payloads must serialize")
+}
+
+#[cfg(test)]
+pub(crate) fn transform_unified_chunk_to_gemini_events(
+    unified_chunk: UnifiedChunkResponse,
+    context: &mut StreamTransformContext<'_>,
+) -> Option<Vec<SseEvent>> {
+    try_transform_unified_chunk_to_gemini_events(unified_chunk, context)
+        .expect("Gemini test stream payloads must serialize")
 }
 
 impl From<GeminiChunkResponse> for UnifiedChunkResponse {
     fn from(gemini_chunk: GeminiChunkResponse) -> Self {
         let GeminiChunkResponse {
+            response_id,
             candidates,
             prompt_feedback,
             usage_metadata,
             synthetic_metadata,
         } = gemini_chunk;
 
-        let provider_session_metadata = build_gemini_session_metadata(prompt_feedback, &candidates);
+        let prompt_blocked = candidates.is_empty()
+            && prompt_feedback
+                .as_ref()
+                .and_then(|feedback| feedback.block_reason.as_deref())
+                .is_some_and(is_known_gemini_prompt_block_reason);
 
-        let choices = candidates
+        let provider_session_metadata =
+            build_gemini_session_metadata(prompt_feedback, &candidates, response_id.as_deref());
+
+        let mut choices = candidates
             .into_iter()
-            .map(|candidate| {
+            .enumerate()
+            .map(|(candidate_position, candidate)| {
                 let mut delta = UnifiedMessageDelta::default();
                 let mut has_function_call = false;
 
@@ -393,8 +431,23 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
                     let mut tool_call_index = 0;
                     let mut image_index = 0;
 
-                    for part in content.parts {
+                    for (part_index, part) in content.parts.into_iter().enumerate() {
                         match part {
+                            GeminiPart::Thought { text, thought, .. } => {
+                                let part = if thought {
+                                    UnifiedContentPartDelta::ReasoningDelta {
+                                        index: text_index,
+                                        text,
+                                    }
+                                } else {
+                                    UnifiedContentPartDelta::TextDelta {
+                                        index: text_index,
+                                        text,
+                                    }
+                                };
+                                delta.content.push(part);
+                                text_index += 1;
+                            }
                             GeminiPart::Text { text } => {
                                 delta.content.push(UnifiedContentPartDelta::TextDelta {
                                     index: text_index,
@@ -418,7 +471,17 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
                                 delta.content.push(UnifiedContentPartDelta::ToolCallDelta(
                                     UnifiedToolCallDelta {
                                         index: tool_call_index,
-                                        id: None,
+                                        id: response_id.as_deref().map(|response_id| {
+                                            build_gemini_synthetic_tool_call_id(
+                                                response_id,
+                                                candidate.index.unwrap_or_else(|| {
+                                                    u32::try_from(candidate_position)
+                                                        .unwrap_or(u32::MAX)
+                                                }),
+                                                u32::try_from(part_index).unwrap_or(u32::MAX),
+                                                "code_interpreter",
+                                            )
+                                        }),
                                         name: Some("code_interpreter".to_string()),
                                         arguments: Some(
                                             json!({
@@ -431,12 +494,28 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
                                 ));
                                 tool_call_index += 1;
                             }
-                            GeminiPart::FunctionCall { function_call } => {
+                            GeminiPart::FunctionCall {
+                                function_call,
+                                thought_signature: _,
+                            } => {
                                 has_function_call = true;
+                                let candidate_index = candidate.index.unwrap_or_else(|| {
+                                    u32::try_from(candidate_position).unwrap_or(u32::MAX)
+                                });
+                                let id = function_call.id.clone().or_else(|| {
+                                    response_id.as_deref().map(|response_id| {
+                                        build_gemini_synthetic_tool_call_id(
+                                            response_id,
+                                            candidate_index,
+                                            u32::try_from(part_index).unwrap_or(u32::MAX),
+                                            &function_call.name,
+                                        )
+                                    })
+                                });
                                 delta.content.push(UnifiedContentPartDelta::ToolCallDelta(
                                     UnifiedToolCallDelta {
                                         index: tool_call_index,
-                                        id: None,
+                                        id,
                                         name: Some(function_call.name),
                                         arguments: Some(function_call.args.to_string()),
                                     },
@@ -456,27 +535,35 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
                 });
 
                 UnifiedChunkChoice {
-                    index: candidate.index.unwrap_or(0),
+                    index: candidate.index.unwrap_or_else(|| {
+                        u32::try_from(candidate_position)
+                            .expect("Gemini candidate position must fit the stream index contract")
+                    }),
                     delta,
                     finish_reason,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if prompt_blocked {
+            choices.push(UnifiedChunkChoice {
+                index: 0,
+                delta: UnifiedMessageDelta::default(),
+                finish_reason: Some("content_filter".to_string()),
+            });
+        }
 
-        let usage = usage_metadata.map(|u| UnifiedUsage {
-            input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count.unwrap_or(0),
-            total_tokens: u.total_token_count,
-            ..Default::default()
+        let usage = usage_metadata.map(|usage| {
+            gemini_usage_to_unified(&usage)
+                .expect("Gemini stream usage must pass source audit before conversion")
         });
 
-        let synthetic_id = true;
-        let synthetic_model = false;
+        let synthetic_id = response_id.is_none();
+        let synthetic_model = true;
 
         UnifiedChunkResponse {
             // Gemini chunks don't carry top-level id/model fields.
-            id: build_gemini_synthetic_response_id("chunk"),
-            model: None,
+            id: response_id.unwrap_or_else(|| build_gemini_synthetic_response_id("chunk")),
+            model: Some("gemini".to_string()),
             choices,
             usage,
             created: Some(Utc::now().timestamp()),

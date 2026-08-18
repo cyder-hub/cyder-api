@@ -12,6 +12,7 @@ import {
   formatDuration,
   formatPrice,
 } from "./recordFormat.ts";
+import { formatSourceIdentity } from "../../../utils/sourceEvidence.ts";
 import { DEFAULT_RECORD_FILTERS, RECORD_ADVANCED_FILTER_KEYS } from "./useRecordQuery.ts";
 
 export type RecordTpsDurationKind = "stream_tail" | "effective";
@@ -21,7 +22,7 @@ export interface RecordTpsInput {
   output_text_tokens?: number | null;
   reasoning_tokens?: number | null;
   upstream_request_sent_at?: number | null;
-  response_started_to_client_at?: number | null;
+  first_token_at?: number | null;
   completed_at?: number | null;
   is_stream?: boolean | null;
 }
@@ -80,7 +81,7 @@ export const calculateRecordTps = (
 
   let durationMs = totalMs;
   let durationKind: RecordTpsDurationKind = "effective";
-  const firstTokenAt = finiteTimestamp(record.response_started_to_client_at);
+  const firstTokenAt = finiteTimestamp(record.first_token_at);
   const streamTailMs = firstTokenAt == null ? null : completedAt - firstTokenAt;
   const canUseStreamTail =
     record.is_stream === true &&
@@ -113,6 +114,13 @@ type NamedEntity = {
   name: string;
 };
 
+type SourceEntity = {
+  id: number;
+  provider_id: number;
+  profile_type: string;
+  deleted_at?: number | null;
+};
+
 type ModelOption = {
   value: number | string;
   label: string;
@@ -126,7 +134,9 @@ export interface UseRecordListOptions {
   t: RecordListTranslator;
   providerStore: {
     providers: NamedEntity[];
+    sources: SourceEntity[];
     fetchProviders: () => Promise<unknown>;
+    fetchProviderSources: () => Promise<unknown>;
   };
   apiKeyStore: {
     apiKeys: NamedEntity[];
@@ -172,6 +182,35 @@ export function useRecordList(options: UseRecordListOptions) {
     })),
   ]);
 
+  const sourceOptions = computed<FilterOption[]>(() => {
+    const providerNames = new Map(
+      (options.providerStore.providers || []).map((provider) => [provider.id, provider.name]),
+    );
+    const aggregateSources = options.providerStore.sources.filter(
+      (source) => source.deleted_at == null,
+    );
+    const result = [
+      { value: "0", label: options.t("recordPage.filter.allSources") },
+      ...aggregateSources.map((source) => ({
+        value: String(source.id),
+        label: `${providerNames.get(source.provider_id) || source.provider_id} / ${source.profile_type} / #${source.id}`,
+      })),
+    ];
+    const selectedSourceId = options.filters.source_id;
+    if (
+      selectedSourceId > 0 &&
+      !aggregateSources.some((source) => source.id === selectedSourceId)
+    ) {
+      result.push({
+        value: String(selectedSourceId),
+        label: options.t("recordPage.filter.retiredSource", {
+          id: selectedSourceId,
+        }),
+      });
+    }
+    return result;
+  });
+
   const modelOptions = computed<FilterOption[]>(() => [
     { value: "0", label: options.t("recordPage.filter.allModels") },
     ...options.modelStore.modelOptions.map((model) => ({
@@ -188,14 +227,12 @@ export function useRecordList(options: UseRecordListOptions) {
     { value: "CANCELLED", label: options.t("recordPage.filter.status.CANCELLED") },
   ]);
 
-  const userApiTypeOptions = computed<FilterOption[]>(() => [
-    allOption(options.t("recordPage.filter.allApis")),
+  const downstreamProtocolOptions = computed<FilterOption[]>(() => [
+    allOption(options.t("recordPage.filter.allDownstreamProtocols")),
     { value: "OPENAI", label: "OpenAI" },
     { value: "RESPONSES", label: "Responses" },
     { value: "ANTHROPIC", label: "Anthropic" },
     { value: "GEMINI", label: "Gemini" },
-    { value: "OLLAMA", label: "Ollama" },
-    { value: "GEMINI_OPENAI", label: "Gemini OpenAI" },
   ]);
 
   const hasActiveFilters = computed(() =>
@@ -243,27 +280,40 @@ export function useRecordList(options: UseRecordListOptions) {
   const formatTps = (record: RecordListItem) =>
     calculateRecordTps(record)?.value.toFixed(2) ?? emptyValue;
 
+  const formatTtft = (record: RecordListItem) => {
+    if (!record.is_stream) return options.t("recordPage.detailDialog.timeline.notApplicable");
+    if (record.first_token_at == null) {
+      return options.t("recordPage.detailDialog.timeline.notObserved");
+    }
+    return formatDuration(record.upstream_request_sent_at, record.first_token_at);
+  };
+
   const enrichRecord = (record: RecordListItem): EnrichedRecordListItem => {
     const providerName =
       record.provider_name || getProviderName(record.provider_id);
     const apiKeyName = getApiKeyName(record.api_key_id);
-    const firstRespTimeDisplay = formatDuration(
+    const firstResponseBodyTimeDisplay = formatDuration(
       record.upstream_request_sent_at,
-      record.response_started_to_client_at,
+      record.first_response_body_at,
     );
-    const totalRespTimeDisplay = formatDuration(
+    const totalLatencyDisplay = formatDuration(
       record.upstream_request_sent_at,
       record.completed_at,
     );
     return {
       ...record,
       providerName,
+      sourceDisplay: formatSourceIdentity(
+        record,
+        options.t("recordPage.source.unselected"),
+      ),
       apiKeyName,
       displayRequestedModelName:
         record.model_name || record.requested_model_name || emptyValue,
       httpStatusDisplay: record.upstream_http_status?.toString() ?? emptyValue,
-      firstRespTimeDisplay,
-      totalRespTimeDisplay,
+      firstResponseBodyTimeDisplay,
+      ttftDisplay: formatTtft(record),
+      totalLatencyDisplay,
       tpsDisplay: formatTps(record),
       costDisplay: formatPrice(
         record.estimated_cost_nanos,
@@ -293,6 +343,7 @@ export function useRecordList(options: UseRecordListOptions) {
   const loadFilterOptions = async () => {
     await Promise.all([
       options.providerStore.fetchProviders(),
+      options.providerStore.fetchProviderSources(),
       options.apiKeyStore.fetchApiKeys(),
       options.modelStore.fetchModels(),
     ]);
@@ -306,9 +357,10 @@ export function useRecordList(options: UseRecordListOptions) {
     errorMsg,
     apiKeyOptions,
     providerOptions,
+    sourceOptions,
     modelOptions,
     statusOptions,
-    userApiTypeOptions,
+    downstreamProtocolOptions,
     hasActiveFilters,
     activeFilterCount,
     advancedActiveFilterCount,

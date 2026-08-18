@@ -8,15 +8,6 @@
       </template>
       <template #actions>
         <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Button
-            variant="outline"
-            size="sm"
-            :disabled="!editingData.id || editingData.provider_keys.length === 0"
-            @click="emit('checkBatch')"
-          >
-            <Check class="mr-1.5 h-4 w-4" />
-            {{ $t("providerEditPage.alert.buttonCheckAll") }}
-          </Button>
           <Button size="sm" :disabled="!editingData.id" @click="openCreateDialog">
             <Plus class="mr-1.5 h-4 w-4" />
             {{ $t("providerEditPage.buttonAddApiKey") }}
@@ -24,6 +15,10 @@
         </div>
       </template>
     </SectionHeader>
+
+    <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-3.5 py-3 text-xs leading-5 text-gray-600">
+      {{ $t("providerEditPage.credentials.providerOwnership") }}
+    </div>
 
     <div
       v-if="editingData.provider_keys.length === 0"
@@ -46,6 +41,9 @@
             <code class="rounded bg-gray-100 px-2 py-1 text-xs text-gray-800">
               {{ keyMask(keyItem) }}
             </code>
+            <code class="rounded border border-gray-200 bg-white px-2 py-1 font-mono text-[11px] text-gray-500">
+              {{ $t("providerEditPage.credentials.keyId", { id: keyItem.id }) }}
+            </code>
             <Badge :variant="keyItem.is_enabled ? 'secondary' : 'outline'">
               {{
                 $t(
@@ -59,7 +57,11 @@
           <p class="truncate text-sm text-gray-600">
             {{ keyItem.description || $t("providerEditPage.credentials.noDescription") }}
           </p>
-          <p v-if="keyItem.checkMessage" class="text-xs text-red-600">
+          <p
+            v-if="keyItem.checkMessage"
+            class="text-xs"
+            :class="keyItem.checkStatus === 'error' ? 'text-red-600' : 'font-mono text-gray-500'"
+          >
             {{ keyItem.checkMessage }}
           </p>
         </div>
@@ -140,23 +142,12 @@
         <div class="space-y-4">
           <div class="space-y-1.5">
             <Label>{{ $t("providerEditPage.tableHeaderApiKey") }}</Label>
-            <textarea
-              v-if="isVertex"
-              v-model="secretInput"
-              rows="9"
-              class="flex w-full resize-y rounded-md border border-gray-200 bg-white px-3 py-2 font-mono text-sm text-gray-900 outline-none focus:border-gray-400"
-              :placeholder="$t('providerEditPage.credentials.vertexPlaceholder')"
-            />
             <Input
-              v-else
               v-model="secretInput"
               type="password"
               class="font-mono"
               :placeholder="$t('providerEditPage.placeholderApiKey')"
             />
-            <p v-if="isVertex" class="text-xs leading-5 text-gray-500">
-              {{ $t("providerEditPage.credentials.vertexHelp") }}
-            </p>
           </div>
           <div v-if="secretDialogMode === 'create'" class="space-y-1.5">
             <Label>{{ $t("providerEditPage.tableHeaderDescription") }}</Label>
@@ -165,14 +156,6 @@
         </div>
         <DialogFooter class="gap-2 sm:gap-0">
           <Button variant="ghost" @click="closeSecretDialog">{{ $t("common.cancel") }}</Button>
-          <Button
-            v-if="secretDialogMode === 'create'"
-            variant="outline"
-            :disabled="isBusy"
-            @click="handleDraftCheck"
-          >
-            {{ $t("providerEditPage.credentials.checkDraft") }}
-          </Button>
           <Button :disabled="isBusy" @click="handleSecretSubmit">
             <Loader2 v-if="isBusy" class="mr-1.5 h-4 w-4 animate-spin" />
             {{
@@ -256,7 +239,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import SectionHeader from "@/components/SectionHeader.vue";
@@ -301,7 +284,6 @@ const authStore = useAuthStore();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
 const emit = defineEmits<{
   (event: "checkSingle", index: number): void;
-  (event: "checkBatch"): void;
 }>();
 
 const secretDialogOpen = ref(false);
@@ -319,10 +301,6 @@ const isBusy = ref(false);
 const busyKeyId = ref<number | null>(null);
 const revealTargetKey = ref<LocalProviderApiKeyItem | null>(null);
 const isRevealBusy = ref(false);
-
-const isVertex = computed(() =>
-  ["VERTEX", "VERTEX_OPENAI"].includes(editingData.value.provider_type),
-);
 
 const keyMask = (key: LocalProviderApiKeyItem) =>
   `${key.key_prefix}••••${key.key_last4}`;
@@ -363,15 +341,6 @@ const handleRevealDialogOpen = (open: boolean) => {
 const validateSecret = (): boolean => {
   if (!secretInput.value.trim()) {
     toastController.warn($t("providerEditPage.alert.apiKeyRequired"));
-    return false;
-  }
-  if (!isVertex.value) return true;
-  try {
-    const parsed = JSON.parse(secretInput.value) as Record<string, unknown>;
-    const required = ["client_email", "private_key", "private_key_id", "token_uri"];
-    if (required.some((field) => !parsed[field])) throw new Error("missing field");
-  } catch {
-    toastController.warn($t("providerEditPage.credentials.vertexInvalid"));
     return false;
   }
   return true;
@@ -433,31 +402,6 @@ const handleSecretSubmit = async () => {
     await recoverAfterMutationFailure(error);
   } finally {
     secretInput.value = "";
-    isBusy.value = false;
-  }
-};
-
-const handleDraftCheck = async () => {
-  const providerId = editingData.value.id;
-  const model = editingData.value.models.find((item) => item.id !== null);
-  if (!providerId || !model || !validateSecret() || isBusy.value) {
-    if (!model) toastController.warn($t("providerEditPage.alert.noModelForCheck"));
-    return;
-  }
-  isBusy.value = true;
-  try {
-    await providerService.checkProviderConnection(providerId, {
-      model_id: model.id ?? undefined,
-      provider_api_key: secretInput.value,
-    });
-    toastController.success($t("providerEditPage.alert.checkSuccess"));
-  } catch (error) {
-    toastController.error(
-      $t("providerEditPage.alert.checkFailed", {
-        error: (error as Error).message || $t("common.unknownError"),
-      }),
-    );
-  } finally {
     isBusy.value = false;
   }
 };

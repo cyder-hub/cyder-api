@@ -1,37 +1,25 @@
 import type {
-  RequestPatchMutationOutcome,
-  RequestPatchPayload,
-  RequestPatchRule,
-  RequestPatchUpdatePayload,
+  RequestPatchExplainStatus,
+  RequestPatchVariantOrigin,
 } from "@/services/types";
 
-export type RequestPatchOwnerKind = "provider" | "model";
 export type RequestPatchBadgeVariant =
   | "default"
   | "secondary"
   | "destructive"
   | "outline";
 
-export interface RequestPatchRuleState {
+export interface RequestPatchStatusView {
   label: string;
   variant: RequestPatchBadgeVariant;
 }
 
-export interface RequestPatchRuleActions {
-  createRule: (
-    payload: RequestPatchPayload,
-  ) => Promise<RequestPatchMutationOutcome>;
-  updateRule: (
-    ruleId: number,
-    payload: RequestPatchUpdatePayload,
-  ) => Promise<RequestPatchMutationOutcome>;
-  deleteRule: (ruleId: number) => Promise<void>;
+export interface RequestPatchLayerView {
+  origin: RequestPatchVariantOrigin;
+  status: RequestPatchExplainStatus;
+  reason: string | null;
+  variant_id: number | null;
+  enabled: boolean;
+  rule_count: number;
+  expose_in_models: boolean;
 }
-
-export type RequestPatchRuleStateResolver = (
-  rule: RequestPatchRule,
-) => RequestPatchRuleState;
-
-export type RequestPatchRuleTraceResolver = (
-  rule: RequestPatchRule,
-) => string | null;

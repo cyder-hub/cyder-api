@@ -1,0 +1,270 @@
+{
+  "fixture_version": 1,
+  "model": "$UPSTREAM_MODEL",
+  "profiles": [
+    {
+      "profile_type": "GEMINI",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/models",
+      "auth": "x_goog_api_key"
+    },
+    {
+      "profile_type": "VERTEX",
+      "base_url": "https://us-central1-aiplatform.googleapis.com/v1/projects/project-fixture/locations/us-central1/publishers/google/models",
+      "auth": "bearer"
+    }
+  ],
+  "operations": [
+    {"action": "generate_content", "suffix": ":generateContent"},
+    {"action": "stream_generate_content", "suffix": ":streamGenerateContent", "query": "alt=sse"},
+    {"action": "count_tokens", "suffix": ":countTokens"}
+  ],
+  "requests": [
+    {
+      "downstream": "OPENAI",
+      "non_stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}],
+        "generationConfig": {"candidateCount": 1}
+      },
+      "stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}],
+        "generationConfig": {"candidateCount": 1}
+      },
+      "advanced": [
+        {
+          "capability": "tools",
+          "status": "controlled_loss",
+          "downstream_request": {
+            "model": "$REQUESTED_MODEL",
+            "messages": [{"role": "user", "content": "weather in Shanghai"}],
+            "tools": [{"type": "function", "function": {"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}, "strict": true}}],
+            "tool_choice": "auto"
+          },
+          "expected_upstream": {
+            "contents": [{"role": "user", "parts": [{"text": "weather in Shanghai"}]}],
+            "generationConfig": {"candidateCount": 1},
+            "tools": [{"functionDeclarations": [{"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}]}],
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}}
+          },
+          "expected_loss_reason": "tool_strictness_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "messages": [{"role": "user", "content": "search"}], "tools": [{"type": "web_search"}]}
+        },
+        {
+          "capability": "reasoning",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "messages": [{"role": "user", "content": "reason"}], "reasoning_effort": "xhigh"},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "reason"}]}], "generationConfig": {"candidateCount": 1, "thinkingConfig": {"thinkingLevel": "high", "includeThoughts": true}}},
+          "expected_loss_reason": "reasoning_effort_clamped_to_high",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "messages": [{"role": "user", "content": "reason"}], "reasoning_effort": "future"}
+        },
+        {
+          "capability": "multimodal",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "messages": [{"role": "user", "content": [{"type": "text", "text": "inspect"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8=", "detail": "high"}}]}]},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "inspect"}, {"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}}]}], "generationConfig": {"candidateCount": 1}},
+          "expected_loss_reason": "media_detail_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://private.invalid/image.png"}}]}]}
+        },
+        {
+          "capability": "structured_output",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "messages": [{"role": "user", "content": "json"}], "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "description": "answer shape", "strict": true, "schema": {"type": "object", "properties": {"answer": {"type": "string", "x-future": true}}, "required": ["answer"]}}}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "json"}]}], "generationConfig": {"candidateCount": 1, "responseMimeType": "application/json", "responseJsonSchema": {"type": "object", "properties": {"answer": {"type": "string", "x-future": true}}, "required": ["answer"]}}},
+          "expected_loss_reason": "structured_output_outer_metadata_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "messages": [{"role": "user", "content": "grammar"}], "response_format": {"type": "grammar", "grammar": "root ::= object"}}
+        }
+      ]
+    },
+    {
+      "downstream": "RESPONSES",
+      "non_stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}],
+        "generationConfig": {"candidateCount": 1}
+      },
+      "stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}],
+        "generationConfig": {"candidateCount": 1}
+      },
+      "advanced": [
+        {
+          "capability": "tools",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "input": "weather in Shanghai", "tools": [{"type": "function", "name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}, "strict": true}], "tool_choice": "auto", "parallel_tool_calls": false},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "weather in Shanghai"}]}], "generationConfig": {"candidateCount": 1}, "tools": [{"functionDeclarations": [{"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}]}], "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}}},
+          "expected_loss_reason": "tool_strictness_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "input": "search", "tools": [{"type": "web_search_preview"}]}
+        },
+        {
+          "capability": "reasoning",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "input": "reason", "reasoning": {"effort": "xhigh", "summary": "auto"}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "reason"}]}], "generationConfig": {"candidateCount": 1, "thinkingConfig": {"thinkingLevel": "high", "includeThoughts": true}}},
+          "expected_loss_reason": "reasoning_effort_clamped_to_high",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "input": "reason", "reasoning": {"effort": "future"}}
+        },
+        {
+          "capability": "multimodal",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "input": [{"role": "user", "content": [{"type": "input_text", "text": "inspect"}, {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=", "detail": "high"}]}]},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "inspect"}, {"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}}]}], "generationConfig": {"candidateCount": 1}},
+          "expected_loss_reason": "media_detail_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-secret"}]}]}
+        },
+        {
+          "capability": "structured_output",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "input": "json", "text": {"format": {"type": "json_schema", "name": "answer", "description": "answer shape", "strict": true, "schema": {"type": "object", "properties": {"answer": {"type": "string", "x-future": true}}, "required": ["answer"]}}}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "json"}]}], "generationConfig": {"candidateCount": 1, "responseMimeType": "application/json", "responseJsonSchema": {"type": "object", "properties": {"answer": {"type": "string", "x-future": true}}, "required": ["answer"]}}},
+          "expected_loss_reason": "structured_output_outer_metadata_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "input": "grammar", "text": {"format": {"type": "grammar", "grammar": "root ::= object"}}}
+        }
+      ]
+    },
+    {
+      "downstream": "ANTHROPIC",
+      "non_stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}],
+        "generationConfig": {"candidateCount": 1, "maxOutputTokens": 64}
+      },
+      "stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}]}],
+        "generationConfig": {"candidateCount": 1, "maxOutputTokens": 64}
+      },
+      "advanced": [
+        {
+          "capability": "tools",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "max_tokens": 64, "messages": [{"role": "user", "content": "weather in Shanghai"}], "tools": [{"name": "weather", "description": "Get weather", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}], "tool_choice": {"type": "auto", "disable_parallel_tool_use": true}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "weather in Shanghai"}]}], "generationConfig": {"candidateCount": 1, "maxOutputTokens": 64}, "tools": [{"functionDeclarations": [{"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}]}], "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}}},
+          "expected_loss_reason": "parallel_tool_policy_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "max_tokens": 64, "messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "orphan", "content": "result"}]}]}
+        },
+        {
+          "capability": "reasoning",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "max_tokens": 2048, "messages": [{"role": "user", "content": "reason"}], "thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "reason"}]}], "generationConfig": {"candidateCount": 1, "maxOutputTokens": 2048, "thinkingConfig": {"thinkingLevel": "high", "includeThoughts": true}}},
+          "expected_loss_reason": "reasoning_effort_clamped_to_high",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "max_tokens": 64, "messages": [{"role": "user", "content": "reason"}], "thinking": {"type": "enabled", "budget_tokens": -1}}
+        },
+        {
+          "capability": "multimodal",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "max_tokens": 64, "messages": [{"role": "user", "content": [{"type": "text", "text": "inspect"}, {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "aGVsbG8="}, "title": "fixture.pdf"}]}]},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "inspect"}, {"inlineData": {"mimeType": "application/pdf", "data": "aGVsbG8="}}]}], "generationConfig": {"candidateCount": 1, "maxOutputTokens": 64}},
+          "expected_loss_reason": "media_filename_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "max_tokens": 64, "messages": [{"role": "assistant", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}]}]}
+        },
+        {
+          "capability": "structured_output",
+          "status": "controlled_loss",
+          "downstream_request": {"model": "$REQUESTED_MODEL", "max_tokens": 64, "messages": [{"role": "user", "content": "json"}], "output_config": {"format": {"type": "json_schema", "schema": {"type": "object", "properties": {"answer": {"type": "string", "x-future": true}}, "required": ["answer"]}}}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "json"}]}], "generationConfig": {"candidateCount": 1, "maxOutputTokens": 64, "responseMimeType": "application/json", "responseJsonSchema": {"type": "object", "properties": {"answer": {"type": "string", "x-future": true}}, "required": ["answer"]}}},
+          "expected_loss_reason": "structured_output_envelope_not_portable",
+          "rejection_request": {"model": "$REQUESTED_MODEL", "max_tokens": 64, "messages": [{"role": "user", "content": "json"}], "output_config": {"format": {"type": "grammar", "grammar": "root ::= object"}}}
+        }
+      ]
+    },
+    {
+      "downstream": "GEMINI",
+      "non_stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}, {"futurePart": {"mode": "native"}}]}],
+        "generationConfig": {"candidateCount": 2, "futureConfig": true},
+        "cachedContent": "cachedContents/native-fixture",
+        "futureRoot": {"preserve": true}
+      },
+      "stream": {
+        "contents": [{"role": "user", "parts": [{"text": "baseline ping"}, {"futurePart": {"mode": "native"}}]}],
+        "generationConfig": {"candidateCount": 2, "futureConfig": true},
+        "cachedContent": "cachedContents/native-fixture",
+        "futureRoot": {"preserve": true}
+      },
+      "advanced": [
+        {
+          "capability": "tools",
+          "status": "full",
+          "downstream_request": {"contents": [{"role": "model", "parts": [{"functionCall": {"id": "call-native", "name": "weather", "args": {"city": "Shanghai"}}, "thoughtSignature": "signature-native"}]}, {"role": "user", "parts": [{"functionResponse": {"id": "call-native", "name": "weather", "response": {"temperature": 24}}}]}], "tools": [{"functionDeclarations": [{"name": "weather", "parametersJsonSchema": {"type": "object", "properties": {"city": {"type": "string"}}}}]}]},
+          "expected_upstream": {"contents": [{"role": "model", "parts": [{"functionCall": {"id": "call-native", "name": "weather", "args": {"city": "Shanghai"}}, "thoughtSignature": "signature-native"}]}, {"role": "user", "parts": [{"functionResponse": {"id": "call-native", "name": "weather", "response": {"temperature": 24}}}]}], "tools": [{"functionDeclarations": [{"name": "weather", "parametersJsonSchema": {"type": "object", "properties": {"city": {"type": "string"}}}}]}]},
+          "rejection_request": {"contents": []}
+        },
+        {
+          "capability": "reasoning",
+          "status": "full",
+          "downstream_request": {"contents": [{"role": "user", "parts": [{"text": "reason"}]}], "generationConfig": {"thinkingConfig": {"thinkingBudget": -1, "includeThoughts": true, "futureThinking": true}}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "reason"}]}], "generationConfig": {"thinkingConfig": {"thinkingBudget": -1, "includeThoughts": true, "futureThinking": true}}},
+          "rejection_request": {"contents": []}
+        },
+        {
+          "capability": "multimodal",
+          "status": "full",
+          "downstream_request": {"contents": [{"role": "user", "parts": [{"inlineData": {"mimeType": "video/mp4", "data": "aGVsbG8="}}, {"fileData": {"mimeType": "video/mp4", "fileUri": "files/native-fixture"}}, {"futureMedia": {"preserve": true}}]}]},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"inlineData": {"mimeType": "video/mp4", "data": "aGVsbG8="}}, {"fileData": {"mimeType": "video/mp4", "fileUri": "files/native-fixture"}}, {"futureMedia": {"preserve": true}}]}]},
+          "rejection_request": {"contents": []}
+        },
+        {
+          "capability": "structured_output",
+          "status": "full",
+          "downstream_request": {"contents": [{"role": "user", "parts": [{"text": "json"}]}], "generationConfig": {"responseMimeType": "application/json", "responseSchema": {"type": "OBJECT", "properties": {"answer": {"type": "STRING", "futureKeyword": true}}}, "futureStructured": true}},
+          "expected_upstream": {"contents": [{"role": "user", "parts": [{"text": "json"}]}], "generationConfig": {"responseMimeType": "application/json", "responseSchema": {"type": "OBJECT", "properties": {"answer": {"type": "STRING", "futureKeyword": true}}}, "futureStructured": true}},
+          "rejection_request": {"contents": []}
+        }
+      ]
+    }
+  ],
+  "non_stream_response": {
+    "responseId": "gemini-response-fixture",
+    "modelVersion": "gemini-fixture-version",
+    "candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "baseline pong"}]}, "finishReason": "STOP"}],
+    "usageMetadata": {
+      "promptTokenCount": 11,
+      "candidatesTokenCount": 7,
+      "cachedContentTokenCount": 3,
+      "thoughtsTokenCount": 2,
+      "toolUsePromptTokenCount": 1,
+      "totalTokenCount": 21,
+      "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 8}, {"modality": "IMAGE", "tokenCount": 3}],
+      "cacheTokensDetails": [{"modality": "IMAGE", "tokenCount": 3}],
+      "candidatesTokensDetails": [{"modality": "TEXT", "tokenCount": 7}],
+      "toolUsePromptTokensDetails": [{"modality": "TEXT", "tokenCount": 1}]
+    }
+  },
+  "stream_events": [
+    {"data": {"responseId": "gemini-response-fixture", "candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "baseline "}]}}]}},
+    {"data": {"responseId": "gemini-response-fixture", "candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "pong"}]}, "finishReason": "STOP"}]}},
+    {"data": {"responseId": "gemini-response-fixture", "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "cachedContentTokenCount": 3, "thoughtsTokenCount": 2, "toolUsePromptTokenCount": 1, "totalTokenCount": 21}}}
+  ],
+  "count_tokens": {
+    "contents_request": {"contents": [{"role": "user", "parts": [{"text": "count me"}]}]},
+    "generate_content_request": {"generateContentRequest": {"contents": [{"role": "user", "parts": [{"text": "count me"}]}], "generationConfig": {"temperature": 0.2}}},
+    "response": {"totalTokens": 23, "cachedContentTokenCount": 3, "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 20}, {"modality": "IMAGE", "tokenCount": 3}], "futureCountField": true}
+  },
+  "error": {
+    "http_429": {
+      "status": 429,
+      "response": {
+        "error": {
+          "code": 429,
+          "message": "gemini baseline throttled",
+          "status": "RESOURCE_EXHAUSTED",
+          "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED", "domain": "googleapis.com"}]
+        }
+      }
+    }
+  },
+  "cancellation": {
+    "first_upstream_event": {"data": {"responseId": "gemini-cancel-fixture", "candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "baseline "}]}}]}}
+  },
+  "terminal_cases": [
+    {"terminal": "stop", "response": {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "ok"}]}, "finishReason": "STOP"}]}},
+    {"terminal": "max_tokens", "response": {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "partial"}]}, "finishReason": "MAX_TOKENS"}]}},
+    {"terminal": "safety", "response": {"candidates": [{"index": 0, "finishReason": "MODEL_ARMOR"}]}},
+    {"terminal": "prompt_block", "response": {"promptFeedback": {"blockReason": "JAILBREAK"}}},
+    {"terminal": "application_failure", "response": {"candidates": [{"index": 0, "finishReason": "MALFORMED_FUNCTION_CALL"}]}},
+    {"terminal": "observation_degraded", "response": {"candidates": [{"index": 0, "finishReason": "FUTURE_REASON"}], "futureResponseField": true}}
+  ],
+  "official_fields": {
+    "request_part_tags": ["text", "inlineData", "fileData", "functionCall", "functionResponse", "thought", "thoughtSignature"],
+    "finish_reasons": ["STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "NO_IMAGE", "IMAGE_OTHER", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS", "MISSING_THOUGHT_SIGNATURE", "MALFORMED_RESPONSE", "ESCALATION", "MODEL_ARMOR", "OTHER"],
+    "usage_fields": ["promptTokenCount", "candidatesTokenCount", "cachedContentTokenCount", "thoughtsTokenCount", "toolUsePromptTokenCount", "totalTokenCount", "promptTokensDetails", "cacheTokensDetails", "candidatesTokensDetails", "toolUsePromptTokensDetails"],
+    "count_tokens_fields": ["totalTokens", "cachedContentTokenCount", "promptTokensDetails"]
+  }
+}

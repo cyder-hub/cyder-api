@@ -1,0 +1,2 @@
+data: {"error":{"code":"protocol_transform_error","message":"The gateway could not safely transform the provider response.","type":"server_error"},"request_id":"req-terminal-1","type":"response.error"}
+

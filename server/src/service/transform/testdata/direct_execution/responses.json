@@ -1,6 +1,6 @@
 {
   "protocol":"RESPONSES",
-  "provider_type":"OPENAI",
+  "profile_type":"OPENAI",
   "downstream_path":"/responses/v1/responses",
   "downstream_stream_path":"/responses/v1/responses",
   "downstream_auth":"bearer",
@@ -30,6 +30,6 @@
     "expected_text":"baseline pong"
   },
   "usage":{"input":11,"output":7,"total":18},
-  "error":{"downstream_request":{"model":"$REQUESTED_MODEL","input":[{"role":"user","content":[{"type":"input_text","text":"baseline ping"}]}]},"upstream_status":429,"upstream_response":{"error":{"message":"baseline throttled"}},"downstream_status":429,"downstream_code":"upstream_rate_limit_error","downstream_message":"Upstream returned 429: baseline throttled"},
+  "error":{"downstream_request":{"model":"$REQUESTED_MODEL","input":[{"role":"user","content":[{"type":"input_text","text":"baseline ping"}]}]},"upstream_status":429,"upstream_response":{"error":{"message":"baseline throttled"}},"downstream_status":429,"downstream_response":{"error":{"message":"Upstream provider rate limited the request.","type":"rate_limit_error","param":null,"code":"upstream_rate_limit_error"},"upstream_error":{"status":429,"content_type":"application/json","body":{"error":{"message":"baseline throttled"}},"truncated":false,"captured_bytes":42,"limit_bytes":65536}}},
   "cancellation":{"downstream_request":{"model":"$REQUESTED_MODEL","input":[{"role":"user","content":[{"type":"input_text","text":"baseline ping"}]}],"stream":true},"upstream_request":{"model":"$UPSTREAM_MODEL","messages":[{"role":"user","content":"baseline ping"}],"stream":true,"stream_options":{"include_usage":true}},"upstream_path":"/v1/chat/completions","first_upstream_event":{"data":{"id":"chatcmpl-cancel","object":"chat.completion.chunk","created":1700000000,"model":"baseline-upstream-model","choices":[{"index":0,"delta":{"role":"assistant","content":"baseline "},"finish_reason":null}]}},"expected_status":"CANCELLED"}
 }

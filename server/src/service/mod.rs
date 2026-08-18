@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod app_state;
+pub(crate) mod auxiliary_http;
 pub mod cache;
 pub mod catalog;
 pub mod infra;
@@ -10,5 +11,8 @@ pub mod redis;
 pub mod request_patch;
 pub mod runtime;
 pub mod secret_encryption;
+pub mod source_selector;
 pub mod transform;
+pub mod upstream_profile;
+pub(crate) mod upstream_response;
 pub mod vertex;

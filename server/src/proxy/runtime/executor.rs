@@ -1,44 +1,47 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{body::Body, http::HeaderMap, response::Response};
-use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
     proxy::{
-        ProxyError,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
         auth::{admit_api_key_request, check_access_control},
         cancellation::ProxyCancellationContext,
-        provider_governance::{ProviderGovernanceCheckError, ensure_provider_request_allowed},
+        logging::{TransformLogStage, log_transform_failure, log_transform_summary},
+        request_context::ProxyRequestContext,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
-            capability::{validate_generation_capabilities, validate_utility_capabilities},
             log_writer::{
                 RequestLogContextInput, finalize_request_failure_context, new_request_log_context,
                 record_completion,
             },
-            materializer::{materialize_generation_request, materialize_utility_request},
-            request_patch::load_runtime_request_patch_trace,
-            route_resolver::{ExecutionPlan, ExecutionTarget},
-            transport::{ReasoningContinuationCaptureContext, send_materialized_request},
+            materializer::{
+                apply_gateway_request_identity, apply_provider_authentication,
+                materialize_generation_request, materialize_utility_request,
+                preflight_generation_request,
+            },
+            request_patch::resolve_runtime_request_patch_trace,
+            route_resolver::ExecutionPlan,
+            transport::send_materialized_request,
         },
         util::get_cost_catalog_version,
-        utility::{UtilityOperation, validate_utility_target},
+        utility::{UtilityOperation, UtilityResponseKind, validate_utility_target},
     },
-    schema::enum_def::LlmApiType,
+    schema::enum_def::{DownstreamProtocol, ModelKind, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::CacheApiKey,
-        provider_credential::resolve_selected_provider_credential,
-        provider_http::normalize_provider_endpoint,
-        runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
+        provider_credential::{ProviderCredentialError, resolve_selected_provider_credential},
+        provider_http::normalize_provider_base_url,
+        upstream_profile::{SourceOperationError, UpstreamOperation, resolve_source_operation_url},
     },
 };
 
 #[derive(Debug, Clone)]
 pub(in crate::proxy) enum RequestExecutionKind {
     Generation {
-        user_api_type: LlmApiType,
+        downstream_protocol: DownstreamProtocol,
         is_stream: bool,
         data: Value,
     },
@@ -48,14 +51,22 @@ pub(in crate::proxy) enum RequestExecutionKind {
     },
 }
 
+impl RequestExecutionKind {
+    fn required_model_kind(&self) -> ModelKind {
+        match self {
+            Self::Generation { .. } => ModelKind::Chat,
+            Self::Utility { operation, .. } => operation.required_model_kind(),
+        }
+    }
+}
+
 pub(in crate::proxy) struct RequestExecutionInput {
     pub cancellation: ProxyCancellationContext,
     pub api_key: Arc<CacheApiKey>,
     pub execution_plan: ExecutionPlan,
-    pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
     pub kind: RequestExecutionKind,
 }
 
@@ -69,17 +80,81 @@ async fn fail_before_send(
     Err(error)
 }
 
-async fn allow_provider(
-    app_state: &AppState,
-    target: &ExecutionTarget,
-    provider_label: &str,
-) -> Result<Option<ProviderCircuitProbePermit>, ProxyError> {
-    match ensure_provider_request_allowed(app_state, target.provider.id, provider_label).await {
-        Ok(permit) => Ok(permit),
-        Err(ProviderGovernanceCheckError::Rejected(rejection)) => {
-            Err(rejection.to_proxy_error(provider_label))
+fn provider_credential_proxy_error(error: ProviderCredentialError) -> ProxyError {
+    let code = match error {
+        ProviderCredentialError::RuntimeStateUnavailable => ProxyErrorCode::ServerError,
+        ProviderCredentialError::NoEnabledCredential
+        | ProviderCredentialError::CredentialUnavailable
+        | ProviderCredentialError::VertexTokenUnavailable
+        | ProviderCredentialError::ProxyRequiredButNotConfigured
+        | ProviderCredentialError::UnsupportedProtocol
+        | ProviderCredentialError::InvalidAuthHeader => ProxyErrorCode::ProviderConfigurationError,
+    };
+    ProxyError::gateway(
+        code,
+        ExecutionStage::Governance,
+        ResponseVisibility::NotVisible,
+        None,
+        error.to_string(),
+    )
+}
+
+fn source_operation_proxy_error(
+    operation: UpstreamOperation,
+    error: SourceOperationError,
+) -> ProxyError {
+    let (code, stage) = match error {
+        SourceOperationError::UnsupportedProfile
+        | SourceOperationError::SourceDisabled
+        | SourceOperationError::OperationDisabled => (
+            ProxyErrorCode::UnsupportedCapabilityError,
+            ExecutionStage::Capability,
+        ),
+        SourceOperationError::MissingOperationConfiguration
+        | SourceOperationError::InvalidTargetUrl(_) => (
+            ProxyErrorCode::ProviderConfigurationError,
+            ExecutionStage::Materialize,
+        ),
+    };
+    let message = format!(
+        "Source operation '{}' is unavailable: {error}",
+        operation.as_key()
+    );
+    ProxyError::gateway(
+        code,
+        stage,
+        ResponseVisibility::NotVisible,
+        Some(message.clone()),
+        message,
+    )
+}
+
+fn model_kind_proxy_error(actual: ModelKind, required: ModelKind) -> ProxyError {
+    let message = format!(
+        "Model kind {:?} cannot execute an operation that requires {:?}.",
+        actual, required
+    );
+    ProxyError::gateway(
+        ProxyErrorCode::UnsupportedCapabilityError,
+        ExecutionStage::Capability,
+        ResponseVisibility::NotVisible,
+        Some(message.clone()),
+        message,
+    )
+}
+
+fn request_source_operation(
+    kind: &RequestExecutionKind,
+    upstream_protocol: UpstreamProtocol,
+) -> Option<UpstreamOperation> {
+    match kind {
+        RequestExecutionKind::Generation { .. }
+            if upstream_protocol == UpstreamProtocol::Openai =>
+        {
+            Some(UpstreamOperation::ChatCompletions)
         }
-        Err(ProviderGovernanceCheckError::Backend(error)) => Err(error),
+        RequestExecutionKind::Utility { operation, .. } => operation.upstream_operation(),
+        _ => None,
     }
 }
 
@@ -91,55 +166,36 @@ pub(in crate::proxy) async fn execute_request(
         cancellation,
         api_key,
         execution_plan,
-        query_params,
         original_headers,
         client_ip_addr,
-        start_time,
-        kind,
+        request_context,
+        mut kind,
     } = input;
     let mut target = execution_plan.target.clone();
-    let user_api_type = match &kind {
-        RequestExecutionKind::Generation { user_api_type, .. } => *user_api_type,
-        RequestExecutionKind::Utility { operation, .. } => operation.api_type,
+    let downstream_protocol = match &kind {
+        RequestExecutionKind::Generation {
+            downstream_protocol,
+            ..
+        } => {
+            debug_assert_eq!(*downstream_protocol, target.downstream_protocol);
+            target.downstream_protocol
+        }
+        RequestExecutionKind::Utility { operation, .. } => {
+            debug_assert_eq!(operation.downstream_protocol, target.downstream_protocol);
+            target.downstream_protocol
+        }
     };
     let mut log_context = new_request_log_context(RequestLogContextInput {
         api_key: &api_key,
         target: &target,
         requested_model_name: &execution_plan.requested_name,
         base_requested_model_name: &execution_plan.base_requested_name,
-        resolved_reasoning_suffix: execution_plan.resolved_reasoning_suffix.as_deref(),
-        resolved_reasoning_preset: execution_plan
-            .resolved_reasoning_preset
-            .map(|preset| preset.as_key()),
+        resolved_patch_suffix: execution_plan.resolved_patch_suffix.as_deref(),
         client_ip_addr: &client_ip_addr,
-        start_time,
-        user_api_type,
+        request_context: &request_context,
+        downstream_protocol,
+        selection_reason: target.selection_reason,
     });
-
-    let capability_result = match &kind {
-        RequestExecutionKind::Generation {
-            is_stream, data, ..
-        } => validate_generation_capabilities(
-            &target,
-            data,
-            *is_stream,
-            execution_plan.resolved_reasoning_preset,
-        ),
-        RequestExecutionKind::Utility { operation, data } => {
-            if execution_plan.resolved_reasoning_preset.is_some() {
-                Err(ProxyError::BadRequest(format!(
-                    "Reasoning suffixes are only supported for generation requests; '{}' is a utility operation.",
-                    operation.name
-                )))
-            } else {
-                validate_utility_target(operation, target.llm_api_type)
-                    .and_then(|()| validate_utility_capabilities(&target, &operation.name, data))
-            }
-        }
-    };
-    if let Err(error) = capability_result {
-        return fail_before_send(&app_state, log_context, error).await;
-    }
 
     if let Err(error) =
         check_access_control(&api_key, &target.provider, &target.model, &app_state).await
@@ -147,137 +203,272 @@ pub(in crate::proxy) async fn execute_request(
         return fail_before_send(&app_state, log_context, error).await;
     }
 
-    let mut normalized_provider = (*target.provider).clone();
-    normalized_provider.endpoint = match normalize_provider_endpoint(&target.provider.endpoint) {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            return fail_before_send(
-                &app_state,
-                log_context,
-                ProxyError::BadGateway(format!(
-                    "Provider endpoint is invalid and must be repaired before use: {error}"
-                )),
-            )
-            .await;
-        }
-    };
-    target.provider = Arc::new(normalized_provider);
-    if let Err(error) = app_state
-        .infra
-        .provider_client(target.provider.use_proxy)
-        .await
-    {
+    let required_model_kind = kind.required_model_kind();
+    if target.model.model_kind != required_model_kind {
         return fail_before_send(
             &app_state,
             log_context,
-            ProxyError::BadGateway(error.to_string()),
+            model_kind_proxy_error(target.model.model_kind, required_model_kind),
         )
         .await;
     }
 
-    let request_patch_trace = match load_runtime_request_patch_trace(
-        &target.provider,
-        Some(&target.model),
-        Some(&target),
-        &app_state,
-    )
-    .await
-    {
-        Ok(trace) => trace,
-        Err(error) => return fail_before_send(&app_state, log_context, error).await,
-    };
-    if let Some(error) = request_patch_trace.conflict_error(&target.model.model_name) {
-        return fail_before_send(&app_state, log_context, error).await;
+    if let RequestExecutionKind::Utility { operation, .. } = &kind {
+        if operation.response_kind() == UtilityResponseKind::GeminiCountTokens {
+            log_context.cost_catalog_id = None;
+        }
+        if execution_plan.resolved_patch_suffix.is_some() {
+            let message = format!(
+                "Patch suffixes are only supported for generation requests; '{}' is a utility operation.",
+                operation.name
+            );
+            return fail_before_send(
+                &app_state,
+                log_context,
+                ProxyError::gateway(
+                    ProxyErrorCode::UnsupportedCapabilityError,
+                    ExecutionStage::Capability,
+                    ResponseVisibility::NotVisible,
+                    Some(message.clone()),
+                    message,
+                ),
+            )
+            .await;
+        }
+        if let Err(error) = validate_utility_target(
+            operation,
+            target.upstream_protocol,
+            target.upstream_source.profile_type,
+        ) {
+            return fail_before_send(&app_state, log_context, error).await;
+        }
     }
 
-    let cost_catalog_version = get_cost_catalog_version(&target.model, &app_state).await;
-    let request_lease = match admit_api_key_request(&app_state, &api_key).await {
-        Ok(lease) => lease,
-        Err(error) => return fail_before_send(&app_state, log_context, error).await,
-    };
-    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
-
-    let provider_credential =
-        match resolve_selected_provider_credential(&target.provider, &app_state).await {
-            Ok(credential) => credential,
-            Err(error) => {
-                request_lease.release().await;
-                return fail_before_send(
-                    &app_state,
-                    log_context,
-                    ProxyError::InternalError(error.to_string()),
-                )
-                .await;
-            }
-        };
-    log_context.provider_api_key_id = Some(provider_credential.key_id());
-
-    let materialized = match kind {
-        RequestExecutionKind::Generation {
-            user_api_type,
-            is_stream,
-            data,
-        } => {
-            match materialize_generation_request(
-                &target,
-                data,
-                user_api_type,
-                is_stream,
-                &original_headers,
-                &query_params,
-                &request_patch_trace.applied_rules,
-                &provider_credential,
-                api_key.id,
-                app_state.reasoning_continuation_store.as_ref(),
+    let mut normalized_source = (*target.upstream_source).clone();
+    normalized_source.base_url = match normalize_provider_base_url(&target.upstream_source.base_url)
+    {
+        Ok(base_url) => base_url,
+        Err(error) => {
+            return fail_before_send(
+                &app_state,
+                log_context,
+                ProxyError::gateway(
+                    ProxyErrorCode::ProviderConfigurationError,
+                    ExecutionStage::Materialize,
+                    ResponseVisibility::NotVisible,
+                    None,
+                    format!(
+                        "Upstream Source base URL is invalid and must be repaired before use: {error}"
+                    ),
+                ),
             )
-            .await
-            {
-                Ok(request) => request,
+            .await;
+        }
+    };
+    target.upstream_source = Arc::new(normalized_source);
+    log_context.set_source_base_url_snapshot(&target.upstream_source.base_url);
+
+    let operation_url =
+        if let Some(operation) = request_source_operation(&kind, target.upstream_protocol) {
+            match resolve_source_operation_url(&target.upstream_source, operation) {
+                Ok(url) => {
+                    crate::debug_event!(
+                        "proxy.source_operation_resolved",
+                        source_id = target.upstream_source.id,
+                        source_profile_type = format!("{:?}", target.upstream_source.profile_type),
+                        source_base_url = &target.upstream_source.base_url,
+                        operation = operation.as_key(),
+                    );
+                    Some(url)
+                }
                 Err(error) => {
-                    request_lease.release().await;
-                    return fail_before_send(&app_state, log_context, error).await;
+                    return fail_before_send(
+                        &app_state,
+                        log_context,
+                        source_operation_proxy_error(operation, error),
+                    )
+                    .await;
                 }
             }
+        } else {
+            None
+        };
+
+    if let RequestExecutionKind::Generation {
+        downstream_protocol,
+        is_stream,
+        data,
+    } = &mut kind
+    {
+        match preflight_generation_request(
+            &target,
+            std::mem::take(data),
+            *downstream_protocol,
+            *is_stream,
+        ) {
+            Ok(transformed) => {
+                log_transform_summary(
+                    TransformLogStage::Request,
+                    &log_context,
+                    &transformed.summary,
+                );
+                *data = transformed.value;
+            }
+            Err(failure) => {
+                log_transform_failure(
+                    TransformLogStage::Request,
+                    &log_context,
+                    &failure.transform_failure,
+                );
+                return fail_before_send(&app_state, log_context, failure.proxy_error).await;
+            }
         }
+    }
+
+    let request_patches = if matches!(&kind, RequestExecutionKind::Generation { .. }) {
+        let request_patch_trace = resolve_runtime_request_patch_trace(
+            &target.upstream_source,
+            Some(target.model.id),
+            target.requested_patch_suffix.clone(),
+            execution_plan.request_patch_variants.as_slice(),
+        );
+        debug_assert_eq!(request_patch_trace.source_id, target.upstream_source.id);
+        debug_assert_eq!(request_patch_trace.model_id, Some(target.model.id));
+        debug_assert_eq!(
+            request_patch_trace.profile_type,
+            target.upstream_source.profile_type
+        );
+        debug_assert_eq!(
+            request_patch_trace.suffix.as_deref(),
+            target.requested_patch_suffix.as_deref()
+        );
+        debug_assert_eq!(
+            request_patch_trace.layers.len(),
+            if target.requested_patch_suffix.is_some() {
+                4
+            } else {
+                2
+            }
+        );
+        debug_assert!(
+            request_patch_trace.explain.len() >= request_patch_trace.applied_rules.len(),
+            "frozen Request Patch explain snapshot must cover applied Rules"
+        );
+        if let Some(error) = request_patch_trace
+            .execution_error(&target.provider.provider_key, &target.model.model_name)
+        {
+            return fail_before_send(&app_state, log_context, error).await;
+        }
+        request_patch_trace.applied_rules
+    } else {
+        debug_assert!(
+            execution_plan.request_patch_variants.is_empty(),
+            "Utility plans must not carry Request Patch variants"
+        );
+        Vec::new()
+    };
+
+    let skip_cost_catalog = matches!(
+        &kind,
+        RequestExecutionKind::Utility { operation, .. }
+            if operation.response_kind() == UtilityResponseKind::GeminiCountTokens
+    );
+    let mut materialized = match kind {
+        RequestExecutionKind::Generation {
+            is_stream, data, ..
+        } => match materialize_generation_request(
+            &target,
+            data,
+            target.downstream_protocol,
+            is_stream,
+            &original_headers,
+            &request_patches,
+            operation_url.as_deref(),
+        )
+        .await
+        {
+            Ok(request) => request,
+            Err(error) => return fail_before_send(&app_state, log_context, error).await,
+        },
         RequestExecutionKind::Utility { operation, data } => match materialize_utility_request(
             &target,
             &operation,
             data,
             &original_headers,
-            &query_params,
-            &request_patch_trace.applied_rules,
-            &provider_credential,
+            operation_url.as_deref(),
         )
         .await
         {
             Ok(request) => request,
-            Err(error) => {
-                request_lease.release().await;
-                return fail_before_send(&app_state, log_context, error).await;
-            }
+            Err(error) => return fail_before_send(&app_state, log_context, error).await,
         },
     };
 
-    log_context.request_url = Some(materialized.final_url.clone());
-    log_context.llm_request_sent_at = Some(Utc::now().timestamp_millis());
+    if let Err(error) = app_state
+        .infra
+        .provider_client(target.upstream_source.use_proxy)
+        .await
+    {
+        return fail_before_send(
+            &app_state,
+            log_context,
+            ProxyError::gateway(
+                ProxyErrorCode::ProviderConfigurationError,
+                ExecutionStage::Materialize,
+                ResponseVisibility::NotVisible,
+                None,
+                error.to_string(),
+            ),
+        )
+        .await;
+    }
 
-    let provider_permit = match allow_provider(&app_state, &target, &materialized.model_str).await {
-        Ok(permit) => permit,
+    let cost_catalog_version = if skip_cost_catalog {
+        None
+    } else {
+        get_cost_catalog_version(&target.model, &app_state).await
+    };
+    let request_lease = match admit_api_key_request(&app_state, &api_key).await {
+        Ok(lease) => lease,
+        Err(error) => return fail_before_send(&app_state, log_context, error).await,
+    };
+    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(
+        &app_state,
+        request_lease,
+        request_context.request_id.clone(),
+    );
+
+    let provider_credential = match resolve_selected_provider_credential(
+        &target.provider,
+        &target.upstream_source,
+        &app_state,
+    )
+    .await
+    {
+        Ok(credential) => credential,
         Err(error) => {
             request_lease.release().await;
-            return fail_before_send(&app_state, log_context, error).await;
+            return fail_before_send(
+                &app_state,
+                log_context,
+                provider_credential_proxy_error(error),
+            )
+            .await;
         }
     };
-    let reasoning_capture = Some(ReasoningContinuationCaptureContext {
-        scope: ReasoningContinuationScope {
-            api_key_id: api_key.id,
-            provider_id: target.provider.id,
-            model_id: target.model.id,
-        },
-        feature_enabled: target
-            .runtime_features
-            .openai_reasoning_content_repair_enabled,
-    });
+    log_context.provider_api_key_id = Some(provider_credential.key_id());
+    if let Err(error) = apply_provider_authentication(
+        &mut materialized.final_headers,
+        &target.upstream_source,
+        target.upstream_protocol,
+        &provider_credential,
+    ) {
+        request_lease.release().await;
+        return fail_before_send(&app_state, log_context, error).await;
+    }
+    apply_gateway_request_identity(&mut materialized.final_headers, &request_context);
+
+    log_context.request_url = Some(materialized.final_url.clone());
 
     match send_materialized_request(
         Arc::clone(&app_state),
@@ -287,12 +478,11 @@ pub(in crate::proxy) async fn execute_request(
         materialized.final_body,
         materialized.final_headers,
         materialized.model_str,
-        target.provider.use_proxy,
+        target.upstream_source.use_proxy,
         cost_catalog_version,
         request_lease,
-        provider_permit,
         materialized.response_mode,
-        reasoning_capture,
+        request_context.response_visibility.clone(),
     )
     .await
     {
@@ -306,6 +496,40 @@ pub(in crate::proxy) async fn execute_request(
             finalize_request_failure_context(&mut failure.log_context, &failure.error);
             record_completion(&app_state, failure.log_context).await;
             Err(failure.error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_credential_proxy_error;
+    use crate::{
+        proxy::{ExecutionStage, ProxyErrorCode},
+        service::provider_credential::ProviderCredentialError,
+    };
+
+    #[test]
+    fn credential_runtime_state_outage_is_a_server_error() {
+        let error =
+            provider_credential_proxy_error(ProviderCredentialError::RuntimeStateUnavailable);
+
+        assert_eq!(error.code(), ProxyErrorCode::ServerError);
+        assert_eq!(error.stage(), ExecutionStage::Governance);
+    }
+
+    #[test]
+    fn unusable_provider_credentials_remain_configuration_errors() {
+        for credential_error in [
+            ProviderCredentialError::NoEnabledCredential,
+            ProviderCredentialError::CredentialUnavailable,
+            ProviderCredentialError::VertexTokenUnavailable,
+            ProviderCredentialError::ProxyRequiredButNotConfigured,
+            ProviderCredentialError::UnsupportedProtocol,
+            ProviderCredentialError::InvalidAuthHeader,
+        ] {
+            let error = provider_credential_proxy_error(credential_error);
+            assert_eq!(error.code(), ProxyErrorCode::ProviderConfigurationError);
+            assert_eq!(error.stage(), ExecutionStage::Governance);
         }
     }
 }

@@ -1,61 +1,65 @@
 use serde_json::Value;
 
-pub use super::request::RequestTransformOutput;
-pub use super::response::ResponseTransformOutput;
+use super::TransformResult;
+pub use super::response::{ResponseApplicationOutcome, ResponseTransformValue};
 use super::{request, response};
-use crate::cost::UsageNormalization;
-use crate::schema::enum_def::{LlmApiType, ProviderType};
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 use crate::utils::usage::UsageInfo;
 
 pub fn finalize_request_data(
     data: Value,
-    target_api_type: LlmApiType,
-    provider_type: &ProviderType,
+    upstream_protocol: UpstreamProtocol,
+    profile_type: &UpstreamProfileType,
     downstream_path: &str,
 ) -> Value {
-    request::finalize_request_data(data, target_api_type, provider_type, downstream_path)
+    request::finalize_request_data(data, upstream_protocol, profile_type, downstream_path)
 }
 
 pub fn transform_request_data(
     data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
     is_stream: bool,
-) -> Value {
-    request::transform_request_data(data, api_type, target_api_type, is_stream)
+) -> TransformResult<Value> {
+    request::transform_request_data(data, downstream_protocol, upstream_protocol, is_stream)
 }
 
-pub fn transform_request_data_with_diagnostics(
-    data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-    is_stream: bool,
-) -> RequestTransformOutput {
-    request::transform_request_data_with_diagnostics(data, api_type, target_api_type, is_stream)
+pub(crate) fn validate_final_generation_request(
+    data: &Value,
+    upstream_protocol: UpstreamProtocol,
+    profile_type: &UpstreamProfileType,
+) -> Result<(), request::FinalRequestValidationError> {
+    request::validate_final_generation_request(data, upstream_protocol, profile_type)
+}
+
+pub(crate) fn validate_final_generation_request_for_downstream(
+    data: &Value,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+    profile_type: &UpstreamProfileType,
+) -> Result<(), request::FinalRequestValidationError> {
+    request::validate_final_generation_request_for_downstream(
+        data,
+        Some(downstream_protocol),
+        upstream_protocol,
+        profile_type,
+    )
 }
 
 pub fn transform_result(
     data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-) -> (Value, Option<UsageInfo>) {
-    response::transform_result(data, api_type, target_api_type)
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: DownstreamProtocol,
+) -> TransformResult<(Value, Option<UsageInfo>)> {
+    response::transform_result(data, upstream_protocol, downstream_protocol)
 }
 
 pub fn transform_result_with_cost(
     data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-) -> (Value, Option<UsageInfo>, Option<UsageNormalization>) {
-    response::transform_result_with_cost(data, api_type, target_api_type)
-}
-
-pub fn transform_result_with_cost_and_diagnostics(
-    data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-) -> ResponseTransformOutput {
-    response::transform_result_with_cost_and_diagnostics(data, api_type, target_api_type)
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: DownstreamProtocol,
+) -> TransformResult<ResponseTransformValue> {
+    response::transform_result_with_cost(data, upstream_protocol, downstream_protocol)
 }
 
 #[cfg(test)]
